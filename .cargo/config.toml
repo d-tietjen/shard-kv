@@ -1,0 +1,27 @@
+[alias]
+native = [
+    "build",
+    "--release",
+    "--config",
+    "build.rustflags=[\"-C\", \"target-cpu=native\"]",
+]
+native-server = [
+    "build",
+    "--release",
+    "--config",
+    "build.rustflags=[\"-C\", \"target-cpu=native\"]",
+    "-p",
+    "fast-cache",
+    "--features",
+    "server",
+    "--bin",
+    "fast-cache-server",
+]
+native-bench = [
+    "build",
+    "--release",
+    "--config",
+    "build.rustflags=[\"-C\", \"target-cpu=native\"]",
+    "-p",
+    "fast-cache-benchmarks",
+]

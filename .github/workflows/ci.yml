@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: generated artifacts stay out of git
+        run: |
+          set -euo pipefail
+          bad_files="$(
+            git ls-files \
+              | grep -E '(^|/)(\.DS_Store|\.claude|results|target|__pycache__|[^/]+\.egg-info)(/|$)|\.(pyc|aux|fdb_latexmk|fls|log|out|rdb|synctex\.gz)$|(^|/)texput\.log$|\.xlsx$|\.pdf$' \
+              || true
+          )"
+          if [ -n "$bad_files" ]; then
+            echo "$bad_files"
+            exit 1
+          fi
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: test
+        run: cargo test --workspace
+      - name: test unsafe feature
+        run: cargo test -p fast-cache --features unsafe
+      - name: rustdoc
+        run: cargo doc -p fast-cache --no-deps --all-features
+      - name: rustdoc fcnp client
+        run: cargo doc -p fcnp-client-rs --no-deps
+      - name: package fcnp client crate
+        run: cargo package -p fcnp-client-rs --locked
+      - name: package fast-cache crate
+        run: cargo package -p fast-cache --locked

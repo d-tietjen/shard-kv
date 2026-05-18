@@ -1,0 +1,14 @@
+target
+crates/*/target
+tmp
+var
+.git
+.claude
+.DS_Store
+docs
+benchmarks/results
+crates/fast-cache/bench
+crates/fast-cache/src/bin/bench_*.rs
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache

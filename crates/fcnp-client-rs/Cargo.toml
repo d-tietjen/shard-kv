@@ -1,0 +1,19 @@
+[package]
+name = "fcnp-client-rs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Blocking Rust client for fast-cache's native FCNP protocol"
+documentation = "https://docs.rs/fcnp-client-rs"
+readme = "README.md"
+categories = ["caching", "database-implementations", "network-programming"]
+keywords = ["fast-cache", "fcnp", "client", "cache", "kv"]
+
+[dependencies]
+libc = { workspace = true }
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }

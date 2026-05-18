@@ -1,0 +1,18 @@
+services:
+  redis:
+    image: redis:7.4-alpine
+    container_name: bench-redis
+    network_mode: host
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--port", "6379"]
+
+  valkey:
+    image: valkey/valkey:8.0-alpine
+    container_name: bench-valkey
+    network_mode: host
+    command: ["valkey-server", "--save", "", "--appendonly", "no", "--port", "6381"]
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.27.0
+    container_name: bench-dragonfly
+    network_mode: host
+    command: ["--port=6382", "--proactor_threads=4", "--snapshot_cron="]

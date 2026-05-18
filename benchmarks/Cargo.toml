@@ -1,0 +1,63 @@
+[package]
+name = "fast-cache-benchmarks"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Head-to-head benchmarks for fast-cache against embedded Rust caches and networked databases. Not published."
+publish = false
+
+[features]
+default = []
+# Build the fc-embed backend on top of fast-cache's reviewed unsafe hot paths.
+# Run the bench twice (default + --features unsafe) to get both rows.
+unsafe = ["fast-cache/unsafe"]
+# Rebuild fast-cache's shared embedded store with parking_lot::RwLock stripes
+# for cache-level lock A/B runs against the default read-biased lock.
+shared-parking-lot-lock = ["fast-cache/shared-parking-lot-lock"]
+# Rebuild fast-cache's server/direct EmbeddedStore with read-biased shard locks
+# for A/B runs against the default parking_lot lock.
+embedded-read-biased-lock = ["fast-cache/embedded-read-biased-lock"]
+# Build benchmark binaries with fast-cache's Linux-only monoio transport code
+# available. Runtime selection is still controlled by the relevant env vars.
+monoio = ["fast-cache/monoio"]
+
+[dependencies]
+fast-cache = { workspace = true }
+fcnp-client-rs = { workspace = true }
+bytes = "1"
+clap = { workspace = true }
+crossbeam-channel = { workspace = true }
+dashmap = "6.1"
+hdrhistogram = "7.5"
+libc = { workspace = true }
+lru = "0.12"
+moka = { version = "0.12", default-features = false, features = ["sync"] }
+parking_lot = { workspace = true }
+rand = { version = "0.8", features = ["small_rng"] }
+xxhash-rust = { workspace = true }
+
+[[bin]]
+name = "saturation"
+path = "src/bin/saturation.rs"
+
+[[bin]]
+name = "curve"
+path = "src/bin/curve.rs"
+
+[[bin]]
+name = "replication_cost"
+path = "src/bin/replication_cost.rs"
+
+[[bin]]
+name = "replication_tcp_cost"
+path = "src/bin/replication_tcp_cost.rs"
+
+[[bin]]
+name = "wal_tcp_export_cost"
+path = "src/bin/wal_tcp_export_cost.rs"
+
+[[bin]]
+name = "memory_write_cost"
+path = "src/bin/memory_write_cost.rs"

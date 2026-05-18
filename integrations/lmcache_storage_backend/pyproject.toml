@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fast-cache-lmcache-backend"
+version = "0.1.0"
+description = "LMCache storage plugin backed by fast-cache"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Devon Tietjen", email = "devon@eden.dev" }]
+keywords = ["lmcache", "kv-cache", "storage", "fast-cache"]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = [
+  "fast_cache_fcnp_store",
+  "fast_cache_local_embedded_store",
+  "fast_cache_local_store",
+  "fast_cache_owned_store",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
