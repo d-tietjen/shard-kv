@@ -70,3 +70,7 @@ path = "src/bin/memory_write_cost.rs"
 [[bin]]
 name = "redis_command_matrix"
 path = "src/bin/redis_command_matrix.rs"
+
+[[bin]]
+name = "fcnp_scan_matrix"
+path = "src/bin/fcnp_scan_matrix.rs"

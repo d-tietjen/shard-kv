@@ -260,7 +260,29 @@ define_compat_command!(dbsize, DbSize, "DBSIZE", false);
 define_compat_command!(time, Time, "TIME", false);
 define_compat_command!(info, Info, "INFO", false);
 define_compat_command!(keys, Keys, "KEYS", false);
-define_compat_command!(scan, Scan, "SCAN", false);
+pub(crate) mod scan {
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct Scan;
+
+    pub(crate) static COMMAND: Scan = Scan;
+
+    impl crate::commands::CommandSpec for Scan {
+        const NAME: &'static str = "SCAN";
+        const MUTATES_VALUE: bool = false;
+    }
+
+    impl crate::commands::redis_compat::RedisCompatCommand for Scan {
+        #[cfg(feature = "server")]
+        #[inline(always)]
+        fn write_resp(
+            store: &crate::storage::EmbeddedStore,
+            args: &[&[u8]],
+            out: &mut bytes::BytesMut,
+        ) {
+            super::write_scan_resp(store, args, out);
+        }
+    }
+}
 define_compat_command!(redis_type, Type, "TYPE", false);
 define_compat_command!(append, Append, "APPEND", true);
 define_compat_command!(strlen, StrLen, "STRLEN", false);
@@ -578,46 +600,115 @@ fn keys(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
 fn scan(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
     match parse_key_scan_args(args, "SCAN") {
         Ok(options) => {
-            let result = store.scan_redis_keys(options.cursor, options.count, options.scan_type());
-            scan_array_with_cursor(
-                result.cursor,
-                filter_key_pattern(result.keys, options.pattern),
-            )
+            let mut keys = Vec::with_capacity(options.count.min(1024));
+            let result = store.scan_redis_keys_visit(
+                options.cursor,
+                options.count,
+                options.scan_type(),
+                &mut |key| {
+                    if key_pattern_matches(key, options.pattern) {
+                        keys.push(key.to_vec());
+                        true
+                    } else {
+                        false
+                    }
+                },
+            );
+            scan_array_with_cursor(result.cursor, keys)
         }
         Err(frame) => frame,
     }
 }
 
 #[cfg(feature = "server")]
-pub(crate) fn write_fcnp_scan_response(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-    write_frame(out, &scan(store, args));
+fn write_scan_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+    match parse_key_scan_args(args, "SCAN") {
+        Ok(options) => write_scan_resp_from_options(store, options, out),
+        Err(frame) => write_frame(out, &frame),
+    }
 }
 
 #[cfg(feature = "server")]
-pub(crate) fn write_fcnp_scan_shard_response(
+fn write_scan_shard_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+    match parse_fcnp_scan_shard_args(args) {
+        Ok((shard_id, options)) => {
+            let mut items =
+                BytesMut::with_capacity(options.count.saturating_mul(32).min(64 * 1024));
+            let result = store.scan_redis_keys_in_shard_visit(
+                shard_id,
+                options.cursor,
+                options.count,
+                options.scan_type(),
+                &mut |key| {
+                    if key_pattern_matches(key, options.pattern) {
+                        ServerWire::write_resp_blob_string(&mut items, key);
+                        true
+                    } else {
+                        false
+                    }
+                },
+            );
+            match result {
+                Some(result) => write_scan_resp_payload(out, result.cursor, result.keys, &items),
+                None => write_frame(out, &error("ERR invalid shard")),
+            }
+        }
+        Err(frame) => write_frame(out, &frame),
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_scan_resp_from_options(
+    store: &EmbeddedStore,
+    options: KeyScanOptions<'_>,
+    out: &mut BytesMut,
+) {
+    let mut items = BytesMut::with_capacity(options.count.saturating_mul(32).min(64 * 1024));
+    let result = store.scan_redis_keys_visit(
+        options.cursor,
+        options.count,
+        options.scan_type(),
+        &mut |key| {
+            if key_pattern_matches(key, options.pattern) {
+                ServerWire::write_resp_blob_string(&mut items, key);
+                true
+            } else {
+                false
+            }
+        },
+    );
+    write_scan_resp_payload(out, result.cursor, result.keys, &items);
+}
+
+#[cfg(feature = "server")]
+fn write_scan_resp_payload(out: &mut BytesMut, cursor: u64, item_count: usize, items: &[u8]) {
+    write_resp_array_header(out, 2);
+    let mut cursor_buffer = itoa::Buffer::new();
+    ServerWire::write_resp_blob_string(out, cursor_buffer.format(cursor).as_bytes());
+    write_resp_array_header(out, item_count);
+    out.extend_from_slice(items);
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn write_fcnp_scan_fast_response(
     store: &EmbeddedStore,
     args: &[&[u8]],
     out: &mut BytesMut,
 ) {
-    write_frame(out, &fcnp_scan_shard(store, args));
+    let start = ServerWire::begin_fast_value(out);
+    write_scan_resp(store, args, out);
+    ServerWire::finish_fast_value(out, start);
 }
 
-fn fcnp_scan_shard(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-    match parse_fcnp_scan_shard_args(args) {
-        Ok((shard_id, options)) => match store.scan_redis_keys_in_shard(
-            shard_id,
-            options.cursor,
-            options.count,
-            options.scan_type(),
-        ) {
-            Some(result) => scan_array_with_cursor(
-                result.cursor,
-                filter_key_pattern(result.keys, options.pattern),
-            ),
-            None => error("ERR invalid shard"),
-        },
-        Err(frame) => frame,
-    }
+#[cfg(feature = "server")]
+pub(crate) fn write_fcnp_scan_shard_fast_response(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    out: &mut BytesMut,
+) {
+    let start = ServerWire::begin_fast_value(out);
+    write_scan_shard_resp(store, args, out);
+    ServerWire::finish_fast_value(out, start);
 }
 
 struct KeyScanOptions<'a> {
@@ -703,6 +794,10 @@ fn filter_key_pattern(keys: Vec<Vec<u8>>, pattern: &[u8]) -> Vec<Vec<u8>> {
             .filter(|key| glob_matches(pattern, key))
             .collect(),
     }
+}
+
+fn key_pattern_matches(key: &[u8], pattern: &[u8]) -> bool {
+    pattern == b"*" || glob_matches(pattern, key)
 }
 
 fn append(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {

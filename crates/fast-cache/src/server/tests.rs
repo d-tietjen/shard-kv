@@ -233,6 +233,24 @@ fn raw_resp_scan_walks_with_cursor_and_count() {
 
 #[test]
 #[cfg(feature = "redis-compat")]
+fn raw_resp_scan_match_still_bounds_examined_keys() {
+    let store = EmbeddedStore::new(4);
+    for index in 0..16 {
+        store.set(format!("key:{index:02}").into_bytes(), b"v".to_vec(), None);
+    }
+
+    let raw = RespTestHarness::exec_resp(
+        &store,
+        &[b"SCAN", b"0", b"MATCH", b"absent:*", b"COUNT", b"2"],
+    );
+    let (cursor, keys) = decode_scan_response(&raw);
+
+    assert_ne!(cursor, 0);
+    assert!(keys.is_empty());
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
 fn raw_resp_scan_type_string_excludes_object_keys() {
     let store = EmbeddedStore::new(4);
     store.set(b"s".to_vec(), b"v".to_vec(), None);

@@ -27,21 +27,23 @@ pub(crate) enum RedisKeyScanType<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct RedisKeyScanResult {
+pub(crate) struct RedisKeyScanVisitResult {
     pub(crate) cursor: u64,
-    pub(crate) keys: Vec<Bytes>,
+    pub(crate) keys: usize,
 }
 
 impl EmbeddedStore {
-    pub(crate) fn scan_redis_keys(
+    pub(crate) fn scan_redis_keys_visit(
         &self,
         cursor: u64,
         count: usize,
         kind: RedisKeyScanType<'_>,
-    ) -> RedisKeyScanResult {
+        visit: &mut impl FnMut(&[u8]) -> bool,
+    ) -> RedisKeyScanVisitResult {
         let limit = count.max(1);
         let now_ms = now_millis();
-        let mut keys = Vec::with_capacity(limit.min(1024));
+        let mut visited = 0usize;
+        let mut keys = 0usize;
         let mut cursor = self.initial_global_scan_cursor(cursor, kind);
 
         loop {
@@ -52,7 +54,9 @@ impl EmbeddedStore {
                         cursor.offset,
                         limit,
                         now_ms,
+                        &mut visited,
                         &mut keys,
+                        visit,
                     ),
                     KeyScanPhase::Object => self.scan_object_shard(
                         cursor.shard_id,
@@ -60,12 +64,14 @@ impl EmbeddedStore {
                         limit,
                         now_ms,
                         kind,
+                        &mut visited,
                         &mut keys,
+                        visit,
                     ),
                 };
 
                 if let Some(offset) = stopped {
-                    return RedisKeyScanResult {
+                    return RedisKeyScanVisitResult {
                         cursor: encode_global_cursor(cursor.phase, cursor.shard_id, offset),
                         keys,
                     };
@@ -73,12 +79,6 @@ impl EmbeddedStore {
 
                 cursor.shard_id += 1;
                 cursor.offset = 0;
-                if keys.len() >= limit {
-                    return RedisKeyScanResult {
-                        cursor: self.next_global_cursor(kind, cursor.phase, cursor.shard_id),
-                        keys,
-                    };
-                }
             }
 
             if cursor.phase == KeyScanPhase::String
@@ -93,52 +93,57 @@ impl EmbeddedStore {
                 continue;
             }
 
-            return RedisKeyScanResult { cursor: 0, keys };
+            return RedisKeyScanVisitResult { cursor: 0, keys };
         }
     }
 
-    pub(crate) fn scan_redis_keys_in_shard(
+    pub(crate) fn scan_redis_keys_in_shard_visit(
         &self,
         shard_id: usize,
         cursor: u64,
         count: usize,
         kind: RedisKeyScanType<'_>,
-    ) -> Option<RedisKeyScanResult> {
+        visit: &mut impl FnMut(&[u8]) -> bool,
+    ) -> Option<RedisKeyScanVisitResult> {
         if shard_id >= self.shards.len() {
             return None;
         }
 
         let limit = count.max(1);
         let now_ms = now_millis();
-        let mut keys = Vec::with_capacity(limit.min(1024));
+        let mut visited = 0usize;
+        let mut keys = 0usize;
         let mut phase = initial_local_scan_phase(cursor, kind);
         let mut offset = decode_local_cursor(cursor).offset;
 
         loop {
             let stopped = match phase {
-                KeyScanPhase::String => {
-                    self.scan_string_shard(shard_id, offset, limit, now_ms, &mut keys)
-                }
-                KeyScanPhase::Object => {
-                    self.scan_object_shard(shard_id, offset, limit, now_ms, kind, &mut keys)
-                }
+                KeyScanPhase::String => self.scan_string_shard(
+                    shard_id,
+                    offset,
+                    limit,
+                    now_ms,
+                    &mut visited,
+                    &mut keys,
+                    visit,
+                ),
+                KeyScanPhase::Object => self.scan_object_shard(
+                    shard_id,
+                    offset,
+                    limit,
+                    now_ms,
+                    kind,
+                    &mut visited,
+                    &mut keys,
+                    visit,
+                ),
             };
 
             if let Some(offset) = stopped {
-                return Some(RedisKeyScanResult {
+                return Some(RedisKeyScanVisitResult {
                     cursor: encode_local_cursor(phase, offset),
                     keys,
                 });
-            }
-
-            if keys.len() >= limit {
-                let cursor = match phase {
-                    KeyScanPhase::String if matches!(kind, RedisKeyScanType::All) => {
-                        encode_local_cursor(KeyScanPhase::Object, 0)
-                    }
-                    _ => 0,
-                };
-                return Some(RedisKeyScanResult { cursor, keys });
             }
 
             if phase == KeyScanPhase::String
@@ -150,7 +155,7 @@ impl EmbeddedStore {
                 continue;
             }
 
-            return Some(RedisKeyScanResult { cursor: 0, keys });
+            return Some(RedisKeyScanVisitResult { cursor: 0, keys });
         }
     }
 
@@ -179,38 +184,24 @@ impl EmbeddedStore {
         }
     }
 
-    fn next_global_cursor(
-        &self,
-        kind: RedisKeyScanType<'_>,
-        phase: KeyScanPhase,
-        shard_id: usize,
-    ) -> u64 {
-        if shard_id < self.shards.len() {
-            return encode_global_cursor(phase, shard_id, 0);
-        }
-
-        match (phase, kind) {
-            (KeyScanPhase::String, RedisKeyScanType::All) if self.objects.has_objects() => {
-                encode_global_cursor(KeyScanPhase::Object, 0, 0)
-            }
-            _ => 0,
-        }
-    }
-
     fn scan_string_shard(
         &self,
         shard_id: usize,
         offset: usize,
         limit: usize,
         now_ms: u64,
-        out: &mut Vec<Bytes>,
+        visited: &mut usize,
+        emitted: &mut usize,
+        visit: &mut impl FnMut(&[u8]) -> bool,
     ) -> Option<usize> {
         if self.string_key_count_hint(shard_id) == 0 {
             return None;
         }
 
         let shard = self.shards[shard_id].read();
-        shard.map.scan_keys_into(offset, limit, now_ms, out)
+        shard
+            .map
+            .scan_keys_visit(offset, limit, now_ms, visited, emitted, visit)
     }
 
     fn scan_object_shard(
@@ -220,7 +211,9 @@ impl EmbeddedStore {
         limit: usize,
         now_ms: u64,
         kind: RedisKeyScanType<'_>,
-        out: &mut Vec<Bytes>,
+        visited: &mut usize,
+        emitted: &mut usize,
+        visit: &mut impl FnMut(&[u8]) -> bool,
     ) -> Option<usize> {
         if self.objects.shard_object_count_hint(shard_id) == 0 {
             return None;
@@ -240,11 +233,14 @@ impl EmbeddedStore {
         let start = offset.min(keys.len());
         let mut next_offset = start;
         for key in keys.into_iter().skip(start) {
-            if out.len() >= limit {
+            next_offset += 1;
+            *visited = visited.saturating_add(1);
+            if visit(&key) {
+                *emitted = emitted.saturating_add(1);
+            }
+            if *visited >= limit {
                 return Some(next_offset);
             }
-            out.push(key);
-            next_offset += 1;
         }
         None
     }

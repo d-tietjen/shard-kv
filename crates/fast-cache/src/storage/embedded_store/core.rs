@@ -141,6 +141,40 @@ impl EmbeddedStore {
         keys
     }
 
+    /// Visits currently live string keys without allocating a key snapshot.
+    ///
+    /// The visitor runs while each shard read lock is held. Keep callbacks
+    /// lightweight, and return `false` to stop early.
+    pub fn visit_string_keys(&self, mut visitor: impl FnMut(&[u8]) -> bool) {
+        let now_ms = now_millis();
+        for shard_id in 0..self.shards.len() {
+            #[cfg(feature = "redis-compat")]
+            if self.string_key_count_hint(shard_id) == 0 {
+                continue;
+            }
+            let shard = self.shards[shard_id].read();
+            if !shard.map.visit_keys(now_ms, &mut visitor) {
+                return;
+            }
+        }
+    }
+
+    /// Visits currently live string entries without cloning keys or values.
+    ///
+    /// The visitor receives `(key, value, expire_at_ms)` while each shard read
+    /// lock is held. Keep callbacks lightweight, and return `false` to stop
+    /// early. Redis object values are intentionally excluded; this mirrors
+    /// [`entry_snapshot`].
+    pub fn visit_string_entries(&self, mut visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool) {
+        let now_ms = now_millis();
+        for shard in &self.shards {
+            let shard = shard.read();
+            if !shard.map.visit_entries(now_ms, &mut visitor) {
+                return;
+            }
+        }
+    }
+
     /// Returns an unsorted snapshot of currently live Redis-visible keys.
     #[cfg(feature = "redis-compat")]
     pub(crate) fn key_snapshot_unsorted(&self) -> Vec<Bytes> {

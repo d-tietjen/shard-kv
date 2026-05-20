@@ -232,16 +232,20 @@ impl FlatMap {
             .collect()
     }
 
-    pub(crate) fn scan_keys_into(
+    pub(crate) fn scan_keys_visit(
         &self,
         offset: usize,
         limit: usize,
         now_ms: u64,
-        out: &mut Vec<Bytes>,
+        visited: &mut usize,
+        emitted: &mut usize,
+        visit: &mut impl FnMut(&[u8]) -> bool,
     ) -> Option<usize> {
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
-            return self.fast_points.scan_keys_into(offset, limit, out);
+            return self
+                .fast_points
+                .scan_keys_visit(offset, limit, visited, emitted, visit);
         }
 
         for (index, entry) in self.entries.iter().enumerate().skip(offset) {
@@ -249,12 +253,55 @@ impl FlatMap {
             if entry.is_expired(now_ms) {
                 continue;
             }
-            out.push(entry.key.as_ref().to_vec());
-            if out.len() >= limit {
+            *visited = visited.saturating_add(1);
+            if visit(entry.key.as_ref()) {
+                *emitted = emitted.saturating_add(1);
+            }
+            if *visited >= limit {
                 return Some(next_offset);
             }
         }
         None
+    }
+
+    pub(crate) fn visit_keys(&self, now_ms: u64, visit: &mut impl FnMut(&[u8]) -> bool) -> bool {
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
+        if self.fast_points.is_active() {
+            return self.fast_points.visit_keys(visit);
+        }
+
+        for entry in self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_expired(now_ms))
+        {
+            if !visit(entry.key.as_ref()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(crate) fn visit_entries(
+        &self,
+        now_ms: u64,
+        visit: &mut impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
+    ) -> bool {
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
+        if self.fast_points.is_active() {
+            return self.fast_points.visit_entries(visit);
+        }
+
+        for entry in self
+            .entries
+            .iter()
+            .filter(|entry| !entry.is_expired(now_ms))
+        {
+            if !visit(entry.key.as_ref(), entry.value.as_ref(), entry.expire_at_ms) {
+                return false;
+            }
+        }
+        true
     }
 
     pub fn process_maintenance(&mut self, now_ms: u64) -> usize {

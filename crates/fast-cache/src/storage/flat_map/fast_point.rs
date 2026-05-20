@@ -94,6 +94,17 @@ impl FastPointEntry {
                 .to_vec(),
         }
     }
+
+    #[inline(always)]
+    fn key_ref(&self) -> &[u8] {
+        match self.key_len <= Self::INLINE_KEY_CAP {
+            true => &self.key_inline[..self.key_len],
+            false => self
+                .key_heap
+                .as_deref()
+                .expect("large fast point key has heap storage"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -370,19 +381,45 @@ impl FastPointMap {
         self.entries.iter().map(FastPointEntry::to_key).collect()
     }
 
-    pub(super) fn scan_keys_into(
+    pub(super) fn scan_keys_visit(
         &self,
         offset: usize,
         limit: usize,
-        out: &mut Vec<Bytes>,
+        visited: &mut usize,
+        emitted: &mut usize,
+        visit: &mut impl FnMut(&[u8]) -> bool,
     ) -> Option<usize> {
         for (index, entry) in self.entries.iter().enumerate().skip(offset) {
-            out.push(entry.to_key());
-            if out.len() >= limit {
+            *visited = visited.saturating_add(1);
+            if visit(entry.key_ref()) {
+                *emitted = emitted.saturating_add(1);
+            }
+            if *visited >= limit {
                 return Some(index + 1);
             }
         }
         None
+    }
+
+    pub(super) fn visit_keys(&self, visit: &mut impl FnMut(&[u8]) -> bool) -> bool {
+        for entry in &self.entries {
+            if !visit(entry.key_ref()) {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(super) fn visit_entries(
+        &self,
+        visit: &mut impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
+    ) -> bool {
+        for entry in &self.entries {
+            if !visit(entry.key_ref(), entry.value.as_ref(), None) {
+                return false;
+            }
+        }
+        true
     }
 }
 

@@ -273,6 +273,30 @@ impl ServerWire {
         ]
     }
 
+    #[cfg(feature = "embedded")]
+    #[inline(always)]
+    pub(crate) fn begin_fast_value(out: &mut BytesMut) -> usize {
+        let start = out.len();
+        out.extend_from_slice(&[
+            FAST_RESPONSE_MAGIC,
+            FAST_PROTOCOL_VERSION,
+            FAST_STATUS_VALUE,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
+        start
+    }
+
+    #[cfg(feature = "embedded")]
+    #[inline(always)]
+    pub(crate) fn finish_fast_value(out: &mut BytesMut, start: usize) {
+        let payload_len = out.len().saturating_sub(start + 8);
+        out[start + 4..start + 8].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    }
+
     #[inline(always)]
     pub(super) fn resp_blob_header(payload_len: usize) -> ([u8; RESP_HEADER_MAX_LEN], u8) {
         let mut header = [0_u8; RESP_HEADER_MAX_LEN];

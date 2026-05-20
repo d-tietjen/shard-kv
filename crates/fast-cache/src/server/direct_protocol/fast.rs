@@ -46,31 +46,27 @@ impl DirectProtocol {
             Some((command, args)) => {
                 #[cfg(feature = "redis-compat")]
                 if command.eq_ignore_ascii_case(b"FCNP.SCAN") {
-                    let mut resp = BytesMut::new();
-                    crate::commands::redis_compat::write_fcnp_scan_response(store, args, &mut resp);
-                    ServerWire::write_fast_value(out, &resp);
+                    crate::commands::redis_compat::write_fcnp_scan_fast_response(store, args, out);
                     return;
                 }
                 #[cfg(feature = "redis-compat")]
                 if command.eq_ignore_ascii_case(b"FCNP.SCANSHARD")
                     || command.eq_ignore_ascii_case(b"FCNP.SCAN.SHARD")
                 {
-                    let mut resp = BytesMut::new();
-                    crate::commands::redis_compat::write_fcnp_scan_shard_response(
-                        store, args, &mut resp,
+                    crate::commands::redis_compat::write_fcnp_scan_shard_fast_response(
+                        store, args, out,
                     );
-                    ServerWire::write_fast_value(out, &resp);
                     return;
                 }
                 let mut direct_args = RespDirectArgs::new();
                 direct_args.extend(args.iter().copied());
                 match DirectProtocol::parse_resp_direct_command(command, direct_args) {
                     Some(command) => {
-                        let mut resp = BytesMut::new();
+                        let start = ServerWire::begin_fast_value(out);
                         DirectProtocol::shared_execute_resp_direct_cmd_into(
-                            store, command, &mut resp, None, false, started_at,
+                            store, command, out, None, false, started_at,
                         );
-                        ServerWire::write_fast_value(out, &resp);
+                        ServerWire::finish_fast_value(out, start);
                     }
                     None => ServerWire::write_fast_error(out, "ERR unsupported command"),
                 }

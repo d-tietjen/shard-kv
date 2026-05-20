@@ -5,8 +5,42 @@ use crate::storage::CacheTelemetry;
 use crate::storage::hash_key;
 #[cfg(feature = "redis-compat")]
 use crate::storage::{RedisObjectResult, RedisStringLookup};
+use std::collections::BTreeMap;
 #[cfg(feature = "telemetry")]
 use std::sync::Arc;
+
+#[test]
+fn visit_string_keys_and_entries_do_not_require_snapshots() {
+    let store = EmbeddedStore::new(4);
+    store.set(b"a".to_vec(), b"one".to_vec(), None);
+    store.set(b"b".to_vec(), b"two".to_vec(), Some(60_000));
+
+    let mut keys = Vec::new();
+    store.visit_string_keys(|key| {
+        keys.push(key.to_vec());
+        true
+    });
+    keys.sort();
+    assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec()]);
+
+    let mut entries = BTreeMap::new();
+    store.visit_string_entries(|key, value, expire_at_ms| {
+        entries.insert(key.to_vec(), (value.to_vec(), expire_at_ms.is_some()));
+        true
+    });
+    assert_eq!(
+        entries.get(b"a".as_slice()),
+        Some(&(b"one".to_vec(), false))
+    );
+    assert_eq!(entries.get(b"b".as_slice()), Some(&(b"two".to_vec(), true)));
+
+    let mut first_key_only = Vec::new();
+    store.visit_string_keys(|key| {
+        first_key_only.push(key.to_vec());
+        false
+    });
+    assert_eq!(first_key_only.len(), 1);
+}
 
 #[cfg(feature = "redis-compat")]
 #[test]
