@@ -167,6 +167,8 @@ impl EmbeddedStore {
                     // encoding, so stored value buffers are not cloned while SET
                     // mutates them.
                     unsafe { shard.map.set_slice_hashed_no_ttl_hot(key_hash, key, value) };
+                    #[cfg(feature = "redis-compat")]
+                    self.refresh_string_key_count(0, shard);
                     return;
                 }
                 let now_ms = write_now_ms(ttl_ms, shard.memory_limit_bytes);
@@ -179,6 +181,8 @@ impl EmbeddedStore {
                 shard
                     .map
                     .set_slice_hashed(key_hash, key, value, expire_at_ms, now_ms);
+                #[cfg(feature = "redis-compat")]
+                self.refresh_string_key_count(0, shard);
                 return;
             }
 
@@ -195,6 +199,8 @@ impl EmbeddedStore {
             shard
                 .map
                 .set_slice_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
+            #[cfg(feature = "redis-compat")]
+            self.refresh_string_key_count(route.shard_id, shard);
         }
     }
 
@@ -232,6 +238,8 @@ impl EmbeddedStore {
                     .map
                     .set_slice_hashed_tagged_no_ttl_hot(key_hash, key_tag, key, value)
             };
+            #[cfg(feature = "redis-compat")]
+            self.refresh_string_key_count(0, shard);
         }
     }
 
@@ -354,6 +362,7 @@ impl EmbeddedStore {
                 .map
                 .set_slice_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
             shard.enforce_memory_limit(now_ms);
+            self.refresh_string_key_count(route.shard_id, &shard);
             return;
         }
         let mut shard = self.shards[route.shard_id].write();
@@ -368,6 +377,8 @@ impl EmbeddedStore {
             .map
             .set_slice_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
         shard.enforce_memory_limit(now_ms);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
     }
 
     /// Zero-copy `GET` for the multi-direct hot path. Returns the stored
@@ -1154,6 +1165,8 @@ impl EmbeddedStore {
                 shard.set_session_slice_hashed_no_ttl(&session_prefix, key_hash, key, value);
             }
         }
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(shard_id, &shard);
         true
     }
 
@@ -1214,6 +1227,8 @@ impl EmbeddedStore {
                     shard.set_session_slice_hashed_no_ttl(&session_prefix, key_hash, key, value);
                 }
             }
+            #[cfg(feature = "redis-compat")]
+            self.refresh_string_key_count(shard_id, shard);
             true
         }
     }

@@ -74,22 +74,52 @@ impl RedisObjectStore {
             .fetch_sub(1, Ordering::Relaxed);
     }
 
+    #[inline(always)]
+    pub(crate) fn shard_object_count_hint(&self, shard_id: usize) -> usize {
+        self.shards[shard_id]
+            .object_count
+            .load(Ordering::Acquire)
+            .max(0) as usize
+    }
+
+    pub(crate) fn keys_with_type_in_shard(
+        &self,
+        shard_id: usize,
+        now_ms: u64,
+    ) -> Vec<(Bytes, &'static str)> {
+        if self.shard_object_count_hint(shard_id) == 0 {
+            return Vec::new();
+        }
+        let mut keys = Vec::new();
+        for bucket in &self.shards[shard_id].buckets {
+            bucket.read().keys_with_type(&mut keys, now_ms);
+        }
+        keys
+    }
+
+    pub(crate) fn keys_in_shard(&self, shard_id: usize, now_ms: u64) -> Vec<Bytes> {
+        if self.shard_object_count_hint(shard_id) == 0 {
+            return Vec::new();
+        }
+        let mut keys = Vec::new();
+        for bucket in &self.shards[shard_id].buckets {
+            bucket.read().keys(&mut keys, now_ms);
+        }
+        keys
+    }
+
     pub(crate) fn keys_with_type(&self, now_ms: u64) -> Vec<(Bytes, &'static str)> {
         let mut keys = Vec::with_capacity(self.object_count());
-        for shard in &self.shards {
-            for bucket in &shard.buckets {
-                bucket.read().keys_with_type(&mut keys, now_ms);
-            }
+        for shard_id in 0..self.shards.len() {
+            keys.extend(self.keys_with_type_in_shard(shard_id, now_ms));
         }
         keys
     }
 
     pub(crate) fn keys(&self, now_ms: u64) -> Vec<Bytes> {
         let mut keys = Vec::with_capacity(self.object_count());
-        for shard in &self.shards {
-            for bucket in &shard.buckets {
-                bucket.read().keys(&mut keys, now_ms);
-            }
+        for shard_id in 0..self.shards.len() {
+            keys.extend(self.keys_in_shard(shard_id, now_ms));
         }
         keys
     }

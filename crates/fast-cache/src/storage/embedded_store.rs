@@ -5,6 +5,8 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rblock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(feature = "telemetry")]
 use std::sync::Arc;
+#[cfg(feature = "redis-compat")]
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "telemetry")]
 use std::time::Instant;
 
@@ -25,6 +27,8 @@ use crate::storage::{ShardStatsSnapshot, TierStatsSnapshot};
 mod batch;
 mod batch_results;
 mod core;
+#[cfg(feature = "redis-compat")]
+mod key_scan;
 mod lifecycle;
 #[cfg(feature = "redis-compat")]
 mod objects;
@@ -36,6 +40,8 @@ mod shard;
 mod views;
 mod write;
 
+#[cfg(feature = "redis-compat")]
+pub(crate) use key_scan::{DEFAULT_SCAN_COUNT, RedisKeyScanType};
 pub use owned::{
     EmbeddedShardHandle, OwnedEmbeddedShard, OwnedEmbeddedWorkerReadSession,
     OwnedEmbeddedWorkerShards,
@@ -69,6 +75,8 @@ pub use views::{
 #[derive(Debug)]
 pub struct EmbeddedStore {
     shards: Box<[CachePadded<RwLock<EmbeddedShard>>]>,
+    #[cfg(feature = "redis-compat")]
+    string_key_counts: Box<[CachePadded<AtomicUsize>]>,
     shift: u32,
     #[cfg(feature = "redis-compat")]
     objects: RedisObjectStore,

@@ -30,6 +30,7 @@ impl EmbeddedStore {
                 .map
                 .set_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
             shard.enforce_memory_limit(now_ms);
+            self.refresh_string_key_count(route.shard_id, &shard);
             return;
         }
         let mut shard = self.shards[route.shard_id].write();
@@ -42,6 +43,8 @@ impl EmbeddedStore {
             .map
             .set_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
         shard.enforce_memory_limit(now_ms);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
     }
 
     /// Zero-copy `SET` for the multi-direct hot path. Takes `key` as a slice
@@ -99,6 +102,7 @@ impl EmbeddedStore {
                 .map
                 .set_bytes_hashed(route.key_hash, key, value, None, 0);
             shard.enforce_memory_limit(0);
+            self.refresh_string_key_count(route.shard_id, &shard);
             after_write();
             return;
         }
@@ -112,6 +116,8 @@ impl EmbeddedStore {
             .map
             .set_bytes_hashed(route.key_hash, key, value, None, 0);
         shard.enforce_memory_limit(0);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
         after_write();
     }
 
@@ -147,6 +153,7 @@ impl EmbeddedStore {
                 .map
                 .set_bytes_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
             shard.enforce_memory_limit(now_ms);
+            self.refresh_string_key_count(route.shard_id, &shard);
             after_write();
             return;
         }
@@ -160,6 +167,8 @@ impl EmbeddedStore {
             .map
             .set_bytes_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
         shard.enforce_memory_limit(now_ms);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
         after_write();
     }
 
@@ -177,6 +186,8 @@ impl EmbeddedStore {
         }
         shard.map.set_hashed(route.key_hash, key, value, None, 0);
         shard.enforce_memory_limit(0);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
     }
 
     pub fn set_slice_routed_no_ttl(&self, route: EmbeddedKeyRoute, key: &[u8], value: &[u8]) {
@@ -190,6 +201,8 @@ impl EmbeddedStore {
             .map
             .set_slice_hashed(route.key_hash, key, value, None, 0);
         shard.enforce_memory_limit(0);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
     }
 
     pub fn batch_set_session_slices_routed_no_ttl<I, K, V>(
@@ -210,6 +223,8 @@ impl EmbeddedStore {
                 .set_slice_hashed(key_hash, key, value.as_ref(), None, 0);
         }
         shard.enforce_memory_limit(0);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
     }
 
     pub fn batch_set_session_slices_no_ttl<I, K, V>(&self, session_prefix: &[u8], items: I)
@@ -229,6 +244,8 @@ impl EmbeddedStore {
                 .set_slice_hashed(session_prefix, key_hash, key, value.as_ref());
         }
         shard.enforce_memory_limit(0);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
     }
 
     pub fn batch_set_session_owned_no_ttl(
@@ -256,6 +273,8 @@ impl EmbeddedStore {
         }
         shard.session_slots.replace_session_slab(packed);
         shard.enforce_memory_limit(0);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
     }
 
     pub fn set_routed<K, V>(&self, route: EmbeddedKeyRoute, key: K, value: V, ttl_ms: Option<u64>)
@@ -276,6 +295,8 @@ impl EmbeddedStore {
             .map
             .set_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
         shard.enforce_memory_limit(now_ms);
+        #[cfg(feature = "redis-compat")]
+        self.refresh_string_key_count(route.shard_id, &shard);
     }
 
     /// Inserts or replaces multiple byte-string values.
@@ -306,6 +327,7 @@ impl EmbeddedStore {
                     .map
                     .set_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
                 shard.enforce_memory_limit(now_ms);
+                self.refresh_string_key_count(route.shard_id, &shard);
             }
             return;
         }
@@ -332,6 +354,8 @@ impl EmbeddedStore {
                     .set_hashed(key_hash, key, value, expire_at_ms, now_ms);
             }
             shard.enforce_memory_limit(now_ms);
+            #[cfg(feature = "redis-compat")]
+            self.refresh_string_key_count(shard_id, &shard);
         }
     }
 }

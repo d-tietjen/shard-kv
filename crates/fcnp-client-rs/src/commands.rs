@@ -10,6 +10,7 @@ use crate::connection::FcnpConnection;
 use crate::error::Result;
 
 pub(crate) mod get;
+pub(crate) mod resp;
 pub(crate) mod set;
 
 pub(crate) trait FcnpCommand {

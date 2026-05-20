@@ -86,12 +86,46 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_> {
     }
 
     fn reject_unsupported_owned_fcnp(&mut self, slice: &'buf [u8]) -> Result<RequestBufferStep> {
+        if let Some(step) = self.process_owned_scan_fcnp(slice)? {
+            return Ok(step);
+        }
         match DirectProtocol::reject_unsupported_owned_fcnp_frame(slice, self.write_buffer) {
             FcnpDispatch::Complete(consumed) => Ok(RequestBufferStep::Consumed(consumed)),
             FcnpDispatch::Incomplete => Ok(RequestBufferStep::Pending),
             FcnpDispatch::Unsupported => Err(crate::FastCacheError::Protocol(
                 "direct shard ports only accept routed FCNP frames".into(),
             )),
+        }
+    }
+
+    fn process_owned_scan_fcnp(&mut self, slice: &'buf [u8]) -> Result<Option<RequestBufferStep>> {
+        let Some(owned_shard_id) = self.owned_shard_id else {
+            return Ok(None);
+        };
+        if slice.get(2).copied() != Some(200) {
+            return Ok(None);
+        }
+        let Some((request, consumed)) = FastCodec::decode_request(slice)? else {
+            return Ok(Some(RequestBufferStep::Pending));
+        };
+        match &request.command {
+            FastCommand::RespCommand { parts } if is_fcnp_scan_shard(parts) => {
+                match fcnp_scan_shard_matches(parts, owned_shard_id) {
+                    true => DirectProtocol::shared_execute_fast_into(
+                        self.store,
+                        request,
+                        self.write_buffer,
+                        self.single_threaded,
+                        self.started_at,
+                    ),
+                    false => ServerWire::write_fast_error(
+                        self.write_buffer,
+                        "ERR FCNP scan shard mismatch",
+                    ),
+                }
+                Ok(Some(RequestBufferStep::Consumed(consumed)))
+            }
+            _ => Ok(None),
         }
     }
 
@@ -194,6 +228,21 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_> {
         MutationBarrier::from_bool(mutates_value)
             .materialize(self.fast_write_queue.as_deref_mut(), self.write_buffer);
     }
+}
+
+fn is_fcnp_scan_shard(parts: &[&[u8]]) -> bool {
+    parts.first().is_some_and(|command| {
+        command.eq_ignore_ascii_case(b"FCNP.SCANSHARD")
+            || command.eq_ignore_ascii_case(b"FCNP.SCAN.SHARD")
+    })
+}
+
+fn fcnp_scan_shard_matches(parts: &[&[u8]], owned_shard_id: usize) -> bool {
+    parts
+        .get(1)
+        .and_then(|raw| std::str::from_utf8(raw).ok())
+        .and_then(|raw| raw.parse::<usize>().ok())
+        == Some(owned_shard_id)
 }
 
 #[cfg(feature = "embedded")]

@@ -27,8 +27,12 @@ impl EmbeddedStore {
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice();
+            #[cfg(feature = "redis-compat")]
+            let string_key_counts = Self::empty_string_key_counts(shard_count);
             Self {
                 shards,
+                #[cfg(feature = "redis-compat")]
+                string_key_counts,
                 shift,
                 #[cfg(feature = "redis-compat")]
                 objects: RedisObjectStore::new(shard_count),
@@ -69,8 +73,12 @@ impl EmbeddedStore {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        #[cfg(feature = "redis-compat")]
+        let string_key_counts = Self::empty_string_key_counts(shard_count);
         Self {
             shards,
+            #[cfg(feature = "redis-compat")]
+            string_key_counts,
             shift,
             #[cfg(feature = "redis-compat")]
             objects: RedisObjectStore::new(shard_count),
@@ -83,6 +91,26 @@ impl EmbeddedStore {
     #[inline(always)]
     pub fn shard_count(&self) -> usize {
         self.shards.len()
+    }
+
+    #[cfg(feature = "redis-compat")]
+    fn empty_string_key_counts(shard_count: usize) -> Box<[CachePadded<AtomicUsize>]> {
+        (0..shard_count)
+            .map(|_| CachePadded::new(AtomicUsize::new(0)))
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    }
+
+    #[cfg(feature = "redis-compat")]
+    #[inline(always)]
+    pub(crate) fn string_key_count_hint(&self, shard_id: usize) -> usize {
+        self.string_key_counts[shard_id].load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "redis-compat")]
+    #[inline(always)]
+    pub(crate) fn refresh_string_key_count(&self, shard_id: usize, shard: &EmbeddedShard) {
+        self.string_key_counts[shard_id].store(shard.map.len(), Ordering::Release);
     }
 
     /// Returns the number of currently live keys and session entries.
@@ -119,25 +147,6 @@ impl EmbeddedStore {
         self.key_snapshot_unsorted_at(now_millis())
     }
 
-    #[cfg(feature = "redis-compat")]
-    pub(crate) fn key_snapshot_by_redis_type(&self, kind: &[u8]) -> Vec<Bytes> {
-        let now_ms = now_millis();
-        if kind.eq_ignore_ascii_case(b"string") {
-            return self.string_key_snapshot_unsorted_at(now_ms);
-        }
-
-        match self.objects.has_objects() {
-            true => self
-                .objects
-                .keys_with_type(now_ms)
-                .into_iter()
-                .filter(|(_, redis_type)| kind.eq_ignore_ascii_case(redis_type.as_bytes()))
-                .map(|(key, _)| key)
-                .collect(),
-            false => Vec::new(),
-        }
-    }
-
     fn key_snapshot_unsorted_at(&self, now_ms: u64) -> Vec<Bytes> {
         #[cfg(feature = "redis-compat")]
         {
@@ -153,8 +162,12 @@ impl EmbeddedStore {
 
     fn string_key_snapshot_unsorted_at(&self, now_ms: u64) -> Vec<Bytes> {
         let mut keys = Vec::new();
-        for shard in &self.shards {
-            let shard = shard.read();
+        for shard_id in 0..self.shards.len() {
+            #[cfg(feature = "redis-compat")]
+            if self.string_key_count_hint(shard_id) == 0 {
+                continue;
+            }
+            let shard = self.shards[shard_id].read();
             keys.reserve(shard.map.len());
             keys.extend(shard.map.snapshot_keys(now_ms));
         }

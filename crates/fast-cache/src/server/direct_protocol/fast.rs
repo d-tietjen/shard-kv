@@ -44,6 +44,24 @@ impl DirectProtocol {
     ) {
         match parts.split_first() {
             Some((command, args)) => {
+                #[cfg(feature = "redis-compat")]
+                if command.eq_ignore_ascii_case(b"FCNP.SCAN") {
+                    let mut resp = BytesMut::new();
+                    crate::commands::redis_compat::write_fcnp_scan_response(store, args, &mut resp);
+                    ServerWire::write_fast_value(out, &resp);
+                    return;
+                }
+                #[cfg(feature = "redis-compat")]
+                if command.eq_ignore_ascii_case(b"FCNP.SCANSHARD")
+                    || command.eq_ignore_ascii_case(b"FCNP.SCAN.SHARD")
+                {
+                    let mut resp = BytesMut::new();
+                    crate::commands::redis_compat::write_fcnp_scan_shard_response(
+                        store, args, &mut resp,
+                    );
+                    ServerWire::write_fast_value(out, &resp);
+                    return;
+                }
                 let mut direct_args = RespDirectArgs::new();
                 direct_args.extend(args.iter().copied());
                 match DirectProtocol::parse_resp_direct_command(command, direct_args) {

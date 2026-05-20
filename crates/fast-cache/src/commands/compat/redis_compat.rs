@@ -16,8 +16,8 @@ use crate::server::commands::{
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
 use crate::storage::{
-    Command, EmbeddedStore, EngineCommandContext, EngineFrameFuture, RedisObjectError,
-    RedisObjectResult, RedisObjectValue,
+    Command, DEFAULT_SCAN_COUNT, EmbeddedStore, EngineCommandContext, EngineFrameFuture,
+    RedisKeyScanType, RedisObjectError, RedisObjectResult, RedisObjectValue,
 };
 use crate::{FastCacheError, Result};
 
@@ -547,12 +547,99 @@ fn keys(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
 }
 
 fn scan(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-    if args.is_empty() {
-        return wrong_arity("SCAN");
+    match parse_key_scan_args(args, "SCAN") {
+        Ok(options) => {
+            let result = store.scan_redis_keys(options.cursor, options.count, options.scan_type());
+            scan_array_with_cursor(
+                result.cursor,
+                filter_key_pattern(result.keys, options.pattern),
+            )
+        }
+        Err(frame) => frame,
     }
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn write_fcnp_scan_response(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+    write_frame(out, &scan(store, args));
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn write_fcnp_scan_shard_response(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    out: &mut BytesMut,
+) {
+    write_frame(out, &fcnp_scan_shard(store, args));
+}
+
+fn fcnp_scan_shard(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+    match parse_fcnp_scan_shard_args(args) {
+        Ok((shard_id, options)) => match store.scan_redis_keys_in_shard(
+            shard_id,
+            options.cursor,
+            options.count,
+            options.scan_type(),
+        ) {
+            Some(result) => scan_array_with_cursor(
+                result.cursor,
+                filter_key_pattern(result.keys, options.pattern),
+            ),
+            None => error("ERR invalid shard"),
+        },
+        Err(frame) => frame,
+    }
+}
+
+struct KeyScanOptions<'a> {
+    cursor: u64,
+    count: usize,
+    pattern: &'a [u8],
+    type_filter: Option<&'a [u8]>,
+}
+
+impl<'a> KeyScanOptions<'a> {
+    fn scan_type(&self) -> RedisKeyScanType<'a> {
+        match self.type_filter {
+            None => RedisKeyScanType::All,
+            Some(kind) if kind.eq_ignore_ascii_case(b"string") => RedisKeyScanType::String,
+            Some(kind) => RedisKeyScanType::Object(kind),
+        }
+    }
+}
+
+fn parse_key_scan_args<'a>(
+    args: &'a [&'a [u8]],
+    command_name: &str,
+) -> std::result::Result<KeyScanOptions<'a>, Frame> {
+    let Some(cursor) = args.first() else {
+        return Err(wrong_arity(command_name));
+    };
+    let cursor = parse_u64(cursor).map_err(|_| error("ERR invalid cursor"))?;
+    parse_key_scan_options(cursor, &args[1..])
+}
+
+fn parse_fcnp_scan_shard_args<'a>(
+    args: &'a [&'a [u8]],
+) -> std::result::Result<(usize, KeyScanOptions<'a>), Frame> {
+    match args {
+        [shard_id, cursor, rest @ ..] => {
+            let shard_id = parse_usize(shard_id).map_err(|_| error("ERR invalid shard"))?;
+            let cursor = parse_u64(cursor).map_err(|_| error("ERR invalid cursor"))?;
+            parse_key_scan_options(cursor, rest).map(|options| (shard_id, options))
+        }
+        _ => Err(wrong_arity("FCNP.SCANSHARD")),
+    }
+}
+
+fn parse_key_scan_options<'a>(
+    cursor: u64,
+    args: &'a [&'a [u8]],
+) -> std::result::Result<KeyScanOptions<'a>, Frame> {
     let mut pattern: &[u8] = b"*";
-    let mut type_filter: Option<&[u8]> = None;
-    let mut index = 1;
+    let mut type_filter = None;
+    let mut count = DEFAULT_SCAN_COUNT;
+    let mut index = 0;
     while index < args.len() {
         match upper(args[index]).as_slice() {
             b"MATCH" if index + 1 < args.len() => {
@@ -560,20 +647,23 @@ fn scan(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
                 index += 2;
             }
             b"COUNT" if index + 1 < args.len() => {
+                count = parse_usize(args[index + 1])
+                    .map_err(|_| error("ERR value is not an integer or out of range"))?;
                 index += 2;
             }
             b"TYPE" if index + 1 < args.len() => {
                 type_filter = Some(args[index + 1]);
                 index += 2;
             }
-            _ => return error("ERR syntax error"),
+            _ => return Err(error("ERR syntax error")),
         }
     }
-    let keys = match type_filter {
-        Some(kind) => store.key_snapshot_by_redis_type(kind),
-        None => store.key_snapshot_unsorted(),
-    };
-    scan_array(filter_key_pattern(keys, pattern))
+    Ok(KeyScanOptions {
+        cursor,
+        count,
+        pattern,
+        type_filter,
+    })
 }
 
 fn filter_key_pattern(keys: Vec<Vec<u8>>, pattern: &[u8]) -> Vec<Vec<u8>> {
@@ -1745,7 +1835,14 @@ fn scan_from_result(result: RedisObjectResult) -> Frame {
 }
 
 fn scan_array(values: Vec<Vec<u8>>) -> Frame {
-    Frame::Array(vec![bulk(b"0".to_vec()), array_bulk(values)])
+    scan_array_with_cursor(0, values)
+}
+
+fn scan_array_with_cursor(cursor: u64, values: Vec<Vec<u8>>) -> Frame {
+    Frame::Array(vec![
+        bulk(cursor.to_string().into_bytes()),
+        array_bulk(values),
+    ])
 }
 
 fn array_bulk(values: Vec<Vec<u8>>) -> Frame {
@@ -1898,6 +1995,13 @@ fn parse_i64(raw: &[u8]) -> std::result::Result<i64, ()> {
 fn parse_usize(raw: &[u8]) -> std::result::Result<usize, ()> {
     let value = parse_i64(raw)?;
     usize::try_from(value).map_err(|_| ())
+}
+
+fn parse_u64(raw: &[u8]) -> std::result::Result<u64, ()> {
+    std::str::from_utf8(raw)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or(())
 }
 
 fn parse_f64(raw: &[u8]) -> std::result::Result<f64, ()> {

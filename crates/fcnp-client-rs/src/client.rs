@@ -1,6 +1,7 @@
 use std::net::ToSocketAddrs;
 
 use crate::commands::get::{self, Get};
+use crate::commands::resp::RespCommand;
 use crate::commands::set::{self, Set};
 use crate::connection::FcnpConnection;
 use crate::error::{FcnpClientError, Result};
@@ -28,6 +29,48 @@ impl FcnpClient {
     /// Sets `key` to `value`.
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.conn.execute(Set::new(key, value))
+    }
+
+    /// Executes a Redis-compatible command through the generic FCNP wrapper.
+    ///
+    /// The server returns RESP bytes as an FCNP value. `out` receives those raw
+    /// bytes so callers can decode exactly the shape they requested.
+    pub fn resp_command_into(&mut self, parts: &[&[u8]], out: &mut Vec<u8>) -> Result<bool> {
+        self.conn.execute(RespCommand::new(parts, out))
+    }
+
+    /// Runs the global FCNP scan wrapper and returns the RESP scan reply bytes.
+    pub fn scan_resp_into(&mut self, cursor: u64, count: usize, out: &mut Vec<u8>) -> Result<bool> {
+        let cursor = cursor.to_string();
+        let count = count.to_string();
+        self.resp_command_into(
+            &[b"FCNP.SCAN", cursor.as_bytes(), b"COUNT", count.as_bytes()],
+            out,
+        )
+    }
+
+    /// Runs a shard-local FCNP scan. Call this concurrently per shard to avoid
+    /// a server-side fanout scan.
+    pub fn scan_shard_resp_into(
+        &mut self,
+        shard_id: usize,
+        cursor: u64,
+        count: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<bool> {
+        let shard_id = shard_id.to_string();
+        let cursor = cursor.to_string();
+        let count = count.to_string();
+        self.resp_command_into(
+            &[
+                b"FCNP.SCANSHARD",
+                shard_id.as_bytes(),
+                cursor.as_bytes(),
+                b"COUNT",
+                count.as_bytes(),
+            ],
+            out,
+        )
     }
 
     /// Writes a GET request without flushing or reading its response.
@@ -114,6 +157,37 @@ impl FcnpDirectClient {
         let route = self.router.route_key(key);
         self.conns[route.shard_id].execute(Set::routed(route, key, value))
     }
+
+    /// Runs a shard-local FCNP scan on one direct shard connection. Callers can
+    /// invoke this for different shards from different threads for parallel
+    /// scans.
+    pub fn scan_shard_resp_into(
+        &mut self,
+        shard_id: usize,
+        cursor: u64,
+        count: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<bool> {
+        if shard_id >= self.conns.len() {
+            return Err(FcnpClientError::Config(format!(
+                "shard {shard_id} is outside configured shard count {}",
+                self.conns.len()
+            )));
+        }
+        let shard_id_text = shard_id.to_string();
+        let cursor = cursor.to_string();
+        let count = count.to_string();
+        self.conns[shard_id].execute(RespCommand::new(
+            &[
+                b"FCNP.SCANSHARD",
+                shard_id_text.as_bytes(),
+                cursor.as_bytes(),
+                b"COUNT",
+                count.as_bytes(),
+            ],
+            out,
+        ))
+    }
 }
 
 /// Blocking FCNP client pinned to one shard-owned port.
@@ -142,6 +216,23 @@ impl FcnpDirectShardClient {
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let route = self.checked_route(key)?;
         self.conn.execute(Set::routed(route, key, value))
+    }
+
+    /// Runs a shard-local FCNP scan on this shard-owned connection.
+    pub fn scan_resp_into(&mut self, cursor: u64, count: usize, out: &mut Vec<u8>) -> Result<bool> {
+        let shard_id = self.shard_id.to_string();
+        let cursor = cursor.to_string();
+        let count = count.to_string();
+        self.conn.execute(RespCommand::new(
+            &[
+                b"FCNP.SCANSHARD",
+                shard_id.as_bytes(),
+                cursor.as_bytes(),
+                b"COUNT",
+                count.as_bytes(),
+            ],
+            out,
+        ))
     }
 
     /// Writes a routed GET request without flushing or reading its response.

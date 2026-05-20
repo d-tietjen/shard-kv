@@ -295,6 +295,10 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::getex::COMMAND,
     &crate::commands::setex::COMMAND,
     &crate::commands::psetex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::keys::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::scan::COMMAND,
 ];
 
 #[cfg(feature = "embedded")]

@@ -40,6 +40,8 @@ mod telemetry;
 pub use command::{BorrowedCommand, Command};
 #[cfg(feature = "sharded")]
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
+#[cfg(feature = "redis-compat")]
+pub(crate) use embedded_store::{DEFAULT_SCAN_COUNT, RedisKeyScanType};
 pub use embedded_store::{
     EmbeddedBatchReadView, EmbeddedKeyRoute, EmbeddedReadSlice, EmbeddedReadView, EmbeddedRef,
     EmbeddedRefMut, EmbeddedRouteMode, EmbeddedSessionBatchView, EmbeddedSessionRoute,

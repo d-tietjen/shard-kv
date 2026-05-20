@@ -386,6 +386,8 @@ impl EmbeddedStore {
                 now_ms,
             );
             shard.enforce_memory_limit(now_ms);
+            #[cfg(feature = "redis-compat")]
+            self.refresh_string_key_count(route.shard_id, &shard);
         }
     }
 }

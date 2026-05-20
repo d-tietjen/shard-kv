@@ -1,7 +1,11 @@
 use super::direct_protocol::*;
 use super::wire::*;
 use super::*;
+#[cfg(feature = "redis-compat")]
+use crate::storage::RedisObjectResult;
 use crate::storage::{hash_key, hash_key_tag, shift_for, stripe_index};
+#[cfg(feature = "redis-compat")]
+use std::collections::BTreeSet;
 
 struct RespTestHarness;
 
@@ -32,6 +36,51 @@ impl RespTestHarness {
             .parse()
             .expect("integer response value")
     }
+
+    fn exec_fcnp_resp(store: &EmbeddedStore, parts: Vec<&[u8]>) -> FastResponse {
+        let mut out = BytesMut::new();
+        DirectProtocol::shared_execute_fast_into(
+            store,
+            FastRequest {
+                key_hash: None,
+                route_shard: None,
+                key_tag: None,
+                command: FastCommand::RespCommand { parts },
+            },
+            &mut out,
+            false,
+            Instant::now(),
+        );
+        FastCodec::decode_response(&out).unwrap().unwrap().0
+    }
+}
+
+#[cfg(feature = "redis-compat")]
+fn decode_scan_response(raw: &[u8]) -> (u64, Vec<Vec<u8>>) {
+    let (frame, consumed) = RespCodec::decode(raw).unwrap().expect("scan response");
+    assert_eq!(consumed, raw.len());
+    let Frame::Array(items) = frame else {
+        panic!("scan response should be an array");
+    };
+    let [cursor, values]: [Frame; 2] = items.try_into().ok().expect("scan response shape");
+    let Frame::BlobString(cursor) = cursor else {
+        panic!("scan cursor should be a bulk string");
+    };
+    let cursor = std::str::from_utf8(&cursor)
+        .expect("cursor utf8")
+        .parse::<u64>()
+        .expect("cursor value");
+    let Frame::Array(values) = values else {
+        panic!("scan values should be an array");
+    };
+    let values = values
+        .into_iter()
+        .map(|frame| match frame {
+            Frame::BlobString(value) => value,
+            other => panic!("scan value should be bulk string, got {other:?}"),
+        })
+        .collect();
+    (cursor, values)
 }
 
 #[test]
@@ -142,41 +191,138 @@ fn raw_resp_cache_lifecycle_commands_round_trip() {
 #[test]
 fn fcnp_resp_command_wraps_redis_reply_bytes() {
     let store = EmbeddedStore::new(4);
-    let mut out = BytesMut::new();
-    DirectProtocol::shared_execute_fast_into(
+    let response = RespTestHarness::exec_fcnp_resp(
         &store,
-        FastRequest {
-            key_hash: None,
-            route_shard: None,
-            key_tag: None,
-            command: FastCommand::RespCommand {
-                parts: vec![b"SET".as_slice(), b"k".as_slice(), b"v".as_slice()],
-            },
-        },
-        &mut out,
-        false,
-        Instant::now(),
+        vec![b"SET".as_slice(), b"k".as_slice(), b"v".as_slice()],
     );
-    let response = FastCodec::decode_response(&out).unwrap().unwrap().0;
     assert_eq!(response, FastResponse::Value(b"+OK\r\n".to_vec()));
 
-    out.clear();
-    DirectProtocol::shared_execute_fast_into(
+    let response =
+        RespTestHarness::exec_fcnp_resp(&store, vec![b"GET".as_slice(), b"k".as_slice()]);
+    assert_eq!(response, FastResponse::Value(b"$1\r\nv\r\n".to_vec()));
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn raw_resp_scan_walks_with_cursor_and_count() {
+    let store = EmbeddedStore::new(4);
+    for key in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
+        store.set(key.to_vec(), b"v".to_vec(), None);
+    }
+
+    let mut cursor = 0;
+    let mut seen = BTreeSet::new();
+    for _ in 0..16 {
+        let cursor_text = cursor.to_string();
+        let raw =
+            RespTestHarness::exec_resp(&store, &[b"SCAN", cursor_text.as_bytes(), b"COUNT", b"1"]);
+        let (next_cursor, keys) = decode_scan_response(&raw);
+        assert!(keys.len() <= 1);
+        seen.extend(keys);
+        cursor = next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    assert_eq!(
+        seen,
+        BTreeSet::from([b"a".to_vec(), b"b".to_vec(), b"c".to_vec()])
+    );
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn raw_resp_scan_type_string_excludes_object_keys() {
+    let store = EmbeddedStore::new(4);
+    store.set(b"s".to_vec(), b"v".to_vec(), None);
+    assert_eq!(store.hset(b"h", b"f", b"v"), RedisObjectResult::Integer(1));
+
+    let raw = RespTestHarness::exec_resp(
         &store,
-        FastRequest {
+        &[b"SCAN", b"0", b"TYPE", b"string", b"COUNT", b"100"],
+    );
+    let (cursor, keys) = decode_scan_response(&raw);
+
+    assert_eq!(cursor, 0);
+    assert_eq!(BTreeSet::from_iter(keys), BTreeSet::from([b"s".to_vec()]));
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn fcnp_resp_scan_and_shard_scan_return_resp_bytes() {
+    let store = EmbeddedStore::new(4);
+    store.set(b"k".to_vec(), b"v".to_vec(), None);
+
+    let response = RespTestHarness::exec_fcnp_resp(
+        &store,
+        vec![
+            b"SCAN".as_slice(),
+            b"0".as_slice(),
+            b"COUNT".as_slice(),
+            b"10".as_slice(),
+        ],
+    );
+    let FastResponse::Value(raw) = response else {
+        panic!("FCNP SCAN should return RESP bytes");
+    };
+    let (_cursor, keys) = decode_scan_response(&raw);
+    assert_eq!(BTreeSet::from_iter(keys), BTreeSet::from([b"k".to_vec()]));
+
+    let route = store.route_key(b"k");
+    let shard_id = route.shard_id.to_string();
+    let response = RespTestHarness::exec_fcnp_resp(
+        &store,
+        vec![
+            b"FCNP.SCANSHARD".as_slice(),
+            shard_id.as_bytes(),
+            b"0".as_slice(),
+            b"COUNT".as_slice(),
+            b"10".as_slice(),
+        ],
+    );
+    let FastResponse::Value(raw) = response else {
+        panic!("FCNP.SCANSHARD should return RESP bytes");
+    };
+    let (_cursor, keys) = decode_scan_response(&raw);
+    assert_eq!(BTreeSet::from_iter(keys), BTreeSet::from([b"k".to_vec()]));
+
+    let mut frame = Vec::new();
+    FastCodec::encode_request(
+        &FastRequest {
             key_hash: None,
             route_shard: None,
             key_tag: None,
             command: FastCommand::RespCommand {
-                parts: vec![b"GET".as_slice(), b"k".as_slice()],
+                parts: vec![
+                    b"FCNP.SCANSHARD".as_slice(),
+                    shard_id.as_bytes(),
+                    b"0".as_slice(),
+                    b"COUNT".as_slice(),
+                    b"10".as_slice(),
+                ],
             },
         },
-        &mut out,
-        false,
-        Instant::now(),
+        &mut frame,
     );
+    let mut out = BytesMut::new();
+    let consumed = DirectProtocol::process_shared_request_buffer(
+        &frame,
+        &store,
+        &mut out,
+        None,
+        false,
+        Some(route.shard_id),
+        Instant::now(),
+    )
+    .expect("direct shard scan should process");
+    assert_eq!(consumed, frame.len());
     let response = FastCodec::decode_response(&out).unwrap().unwrap().0;
-    assert_eq!(response, FastResponse::Value(b"$1\r\nv\r\n".to_vec()));
+    let FastResponse::Value(raw) = response else {
+        panic!("direct shard FCNP.SCANSHARD should return RESP bytes");
+    };
+    let (_cursor, keys) = decode_scan_response(&raw);
+    assert_eq!(BTreeSet::from_iter(keys), BTreeSet::from([b"k".to_vec()]));
 }
 
 #[test]
