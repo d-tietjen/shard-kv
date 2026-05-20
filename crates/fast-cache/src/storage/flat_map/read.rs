@@ -6,6 +6,36 @@ impl FlatMap {
         self.lookup_ref_hashed_lazy(hash, key)
     }
 
+    #[cfg(feature = "mutable-value-slices")]
+    #[inline(always)]
+    pub(crate) fn value_mut_hashed_no_ttl(&mut self, hash: u64, key: &[u8]) -> Option<&mut [u8]> {
+        self.disable_fast_point_map();
+        let should_touch_access = self.eviction_policy != EvictionPolicy::None;
+        let access_tick = if should_touch_access {
+            self.next_access_tick()
+        } else {
+            0
+        };
+
+        let can_mutate = self
+            .entries
+            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .is_some_and(|entry| entry.expire_at_ms.is_none() && entry.value.is_unique());
+        if !can_mutate {
+            return None;
+        }
+        if should_touch_access {
+            self.record_lru_touch(hash, access_tick);
+        }
+        let entry = self
+            .entries
+            .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))?;
+        if should_touch_access {
+            entry.access.record_access(access_tick);
+        }
+        shared_bytes_as_unique_slice_mut(&mut entry.value)
+    }
+
     /// `&self` read path. Skips entry access tracking (LFU/LRU touch). Safe for
     /// any caller that does not depend on read-touch tracking — including the
     /// shared-store hot path under `RwLock::read`.
@@ -35,6 +65,32 @@ impl FlatMap {
     #[inline(always)]
     pub fn has_no_ttl_entries(&self) -> bool {
         self.ttl_entries == 0
+    }
+
+    #[inline(always)]
+    pub(crate) fn entry_expire_at_hashed(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<Option<u64>> {
+        if self.ttl_entries == 0 {
+            #[cfg(feature = "fast-point-map")]
+            if self.fast_points.get(hash, key).is_some() {
+                return Some(None);
+            }
+            return self
+                .entries
+                .find(hash, |entry| entry.matches_hashed_key(hash, key))
+                .map(|entry| entry.expire_at_ms);
+        }
+        if self.entry_is_expired_hashed(hash, key, now_ms) {
+            let _ = self.delete_hashed_internal(hash, key, now_ms, DeleteReason::Expired);
+            return None;
+        }
+        self.entries
+            .find(hash, |entry| entry.matches(hash, key))
+            .map(|entry| entry.expire_at_ms)
     }
 
     #[inline(always)]

@@ -44,6 +44,10 @@ monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
 cuda = ["sharded"]
 telemetry = ["embedded"]
 fast-point-map = []
+# Exposes `value_mut_no_ttl()` on embedded mutation guards. This gives callers
+# a raw `&mut [u8]` only for uniquely-owned, no-TTL values. TTL entries are
+# intentionally rejected; use `set_slice` when TTL preservation matters.
+mutable-value-slices = []
 # Benchmark-only comparison knob for the shared embedded store lock.
 # Default builds use `rblock`; enabling this swaps those stripes to
 # `parking_lot::RwLock` so cache-level lock behavior can be A/B measured.

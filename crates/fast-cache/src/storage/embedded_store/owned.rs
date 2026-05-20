@@ -33,6 +33,12 @@ impl<'a> EmbeddedShardHandle<'a> {
         self.shard.map.get_ref_hashed_no_ttl(key_hash, key)
     }
 
+    #[cfg(feature = "mutable-value-slices")]
+    #[inline(always)]
+    pub fn value_mut_hashed_no_ttl(&mut self, key_hash: u64, key: &[u8]) -> Option<&mut [u8]> {
+        self.shard.map.value_mut_hashed_no_ttl(key_hash, key)
+    }
+
     #[inline(always)]
     pub fn set_hashed_no_ttl<K, V>(&mut self, key_hash: u64, key: K, value: V)
     where
@@ -87,6 +93,12 @@ impl OwnedEmbeddedShard {
     #[inline(always)]
     pub fn get_ref_no_ttl_hashed(&mut self, key_hash: u64, key: &[u8]) -> Option<&[u8]> {
         self.map.get_ref_hashed_no_ttl(key_hash, key)
+    }
+
+    #[cfg(feature = "mutable-value-slices")]
+    #[inline(always)]
+    pub fn value_mut_hashed_no_ttl(&mut self, key_hash: u64, key: &[u8]) -> Option<&mut [u8]> {
+        self.map.value_mut_hashed_no_ttl(key_hash, key)
     }
 
     #[inline(always)]
@@ -383,6 +395,17 @@ impl OwnedEmbeddedWorkerShards {
             .get_ref_no_ttl_hashed(route.key_hash, key)
     }
 
+    #[cfg(feature = "mutable-value-slices")]
+    #[inline(always)]
+    pub(crate) fn local_value_mut_routed_no_ttl(
+        &mut self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+    ) -> Option<&mut [u8]> {
+        self.shard_for_route_mut(route.shard_id)
+            .value_mut_hashed_no_ttl(route.key_hash, key)
+    }
+
     #[inline(always)]
     pub fn get_prepared_ref_no_ttl(&mut self, prepared: &PreparedPointKey) -> Option<&[u8]> {
         self.shard_for_route_mut(prepared.route().shard_id)
@@ -554,6 +577,25 @@ impl OwnedEmbeddedWorkerShards {
     }
 
     #[cfg(feature = "embedded")]
+    #[inline(always)]
+    pub(crate) fn local_get_ref_routed(
+        &mut self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+    ) -> Option<&[u8]> {
+        let now_ms = now_millis();
+        let shard = self.shard_for_route_mut(route.shard_id);
+        if let Some(session_prefix) = derived_session_storage_prefix(key)
+            && shard.session_slots.has_session(&session_prefix)
+        {
+            return shard
+                .session_slots
+                .get_ref_hashed_local(&session_prefix, route.key_hash, key);
+        }
+        shard.map.get_ref_hashed_local(route.key_hash, key, now_ms)
+    }
+
+    #[cfg(feature = "embedded")]
     pub(crate) fn local_get(&mut self, key: &[u8]) -> Option<Bytes> {
         let route = self.route_key(key);
         let now_ms = now_millis();
@@ -681,6 +723,40 @@ impl OwnedEmbeddedWorkerShards {
         if shard.exceeds_memory_limit() {
             shard.enforce_memory_limit(0);
         }
+    }
+
+    pub(crate) fn local_set_value_bytes_routed_expire_at(
+        &mut self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        value: bytes::Bytes,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) {
+        let shard = self.shard_for_route_mut(route.shard_id);
+        if let Some(session_prefix) = point_write_session_storage_prefix(key) {
+            shard
+                .session_slots
+                .delete_hashed(&session_prefix, route.key_hash, key);
+        }
+        shard
+            .map
+            .set_bytes_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
+        shard.enforce_memory_limit(now_ms);
+    }
+
+    pub(crate) fn local_remove_value_routed(
+        &mut self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<bytes::Bytes> {
+        let shard = self.shard_for_route_mut(route.shard_id);
+        let removed = shard.map.remove_value_hashed(route.key_hash, key, now_ms);
+        if removed.is_some() {
+            shard.enforce_memory_limit(now_ms);
+        }
+        removed
     }
 
     #[cfg(feature = "embedded")]
@@ -1057,6 +1133,61 @@ impl OwnedEmbeddedWorkerShards {
             .map
             .get_ref_hashed(route.key_hash, key, now_ms)
             .map(<[u8]>::to_vec)
+    }
+
+    /// Returns a borrowed value slice for `key` without copying bytes.
+    ///
+    /// The returned slice is tied to this worker's exclusive `&mut self` borrow.
+    /// Use [`Self::get`] when an owned `Vec<u8>` is required.
+    pub fn get_ref(&mut self, key: &[u8]) -> Option<&[u8]> {
+        let route = self.route_key(key);
+        let now_ms = now_millis();
+        let shard = self.shard_for_route_mut(route.shard_id);
+        if let Some(session_prefix) = derived_session_storage_prefix(key)
+            && let Some(value) =
+                shard
+                    .session_slots
+                    .get_ref_hashed(&session_prefix, route.key_hash, key)
+        {
+            return Some(value);
+        }
+        shard.map.get_ref_hashed(route.key_hash, key, now_ms)
+    }
+
+    /// Returns a mutable point-key guard for `key`.
+    ///
+    /// The returned guard is tied to this worker's exclusive `&mut self` borrow.
+    /// Replacements preserve the entry's existing TTL.
+    pub fn get_mut(&mut self, key: &[u8]) -> Option<OwnedEmbeddedRefMut<'_>> {
+        let route = self.route_key(key);
+        self.local_get_mut_routed(route, key)
+    }
+
+    pub(crate) fn local_get_mut_routed(
+        &mut self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+    ) -> Option<OwnedEmbeddedRefMut<'_>> {
+        let now_ms = now_millis();
+        let expire_at_ms = {
+            let shard = self.shard_for_route_mut(route.shard_id);
+            if let Some(session_prefix) = derived_session_storage_prefix(key)
+                && shard.session_slots.has_session(&session_prefix)
+            {
+                return None;
+            }
+            shard
+                .map
+                .entry_expire_at_hashed(route.key_hash, key, now_ms)?
+        };
+
+        Some(OwnedEmbeddedRefMut {
+            worker: self,
+            route,
+            key: bytes::Bytes::copy_from_slice(key),
+            expire_at_ms,
+            _not_send: std::marker::PhantomData,
+        })
     }
 
     pub fn get_view(&mut self, key: &[u8]) -> OwnedEmbeddedReadView {

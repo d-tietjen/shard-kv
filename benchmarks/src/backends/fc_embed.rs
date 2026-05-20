@@ -1,15 +1,17 @@
+use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fast_cache::storage::{EmbeddedKeyRoute, EmbeddedStore, LocalEmbeddedStore, PreparedPointKey};
 
-use crate::backend::{Backend, BackendClass, BoxError, Worker};
+use crate::backend::{Backend, BackendClass, BoxError, ReadMode, Worker};
 
 use super::BenchmarkCacheConfig;
 
 pub struct FcEmbed {
     state: Arc<Mutex<FcEmbedState>>,
     ttl_enabled: AtomicBool,
+    read_mode: ReadMode,
 }
 
 // Unlike shared-reference embedded backends such as DashMap, fast-cache's
@@ -37,6 +39,7 @@ impl FcEmbed {
                 local_worker_count: None,
             })),
             ttl_enabled: AtomicBool::new(false),
+            read_mode: cache_config.read_mode,
         }
     }
 }
@@ -119,6 +122,7 @@ impl Backend for FcEmbed {
             store: Some(store),
             prepared_keys,
             ttl_enabled: self.ttl_enabled.load(Ordering::Relaxed),
+            read_mode: self.read_mode,
         }))
     }
 
@@ -164,6 +168,7 @@ struct FcEmbedWorker {
     store: Option<LocalEmbeddedStore>,
     prepared_keys: Vec<PreparedPointKey>,
     ttl_enabled: bool,
+    read_mode: ReadMode,
 }
 
 impl Drop for FcEmbedWorker {
@@ -181,18 +186,17 @@ impl Drop for FcEmbedWorker {
 }
 
 impl Worker for FcEmbedWorker {
-    fn get(&mut self, key: &[u8], _scratch: &mut Vec<u8>) -> Result<bool, BoxError> {
+    fn get(&mut self, key: &[u8], scratch: &mut Vec<u8>) -> Result<bool, BoxError> {
         let store = self
             .store
             .as_mut()
             .ok_or("fc-embed worker local store was already returned")?;
         let route = store.route_key(key);
-        if self.ttl_enabled {
-            return Ok(store.get_view_routed_local(route, key).is_hit());
-        }
-        Ok(store
-            .get_point_ref_routed_no_ttl_local(route, key)
-            .is_some())
+        let value = match self.ttl_enabled {
+            true => store.get_ref_routed_local(route, key),
+            false => store.get_point_ref_routed_no_ttl_local(route, key),
+        };
+        Ok(record_read(value, scratch, self.read_mode))
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), BoxError> {
@@ -219,7 +223,7 @@ impl Worker for FcEmbedWorker {
         !self.prepared_keys.is_empty()
     }
 
-    fn get_index(&mut self, local_index: usize, _scratch: &mut Vec<u8>) -> Result<bool, BoxError> {
+    fn get_index(&mut self, local_index: usize, scratch: &mut Vec<u8>) -> Result<bool, BoxError> {
         let prepared = self
             .prepared_keys
             .get(local_index)
@@ -228,14 +232,11 @@ impl Worker for FcEmbedWorker {
             .store
             .as_mut()
             .ok_or("fc-embed worker local store was already returned")?;
-        if self.ttl_enabled {
-            return Ok(store
-                .get_view_routed_local(prepared.route(), prepared.key())
-                .is_hit());
-        }
-        Ok(store
-            .get_prepared_point_ref_no_ttl_local(prepared)
-            .is_some())
+        let value = match self.ttl_enabled {
+            true => store.get_ref_routed_local(prepared.route(), prepared.key()),
+            false => store.get_prepared_point_ref_no_ttl_local(prepared),
+        };
+        Ok(record_read(value, scratch, self.read_mode))
     }
 
     fn set_index(&mut self, local_index: usize, value: &[u8]) -> Result<(), BoxError> {
@@ -268,6 +269,23 @@ impl Worker for FcEmbedWorker {
         store.set_slice_routed_local(prepared.route(), prepared.key(), value, Some(ttl_ms));
         Ok(())
     }
+}
+
+#[inline(always)]
+fn record_read(value: Option<&[u8]>, scratch: &mut Vec<u8>, read_mode: ReadMode) -> bool {
+    let Some(value) = value else {
+        return false;
+    };
+    match read_mode {
+        ReadMode::Ref => {
+            black_box(value.len());
+        }
+        ReadMode::Copy => {
+            scratch.clear();
+            scratch.extend_from_slice(value);
+        }
+    }
+    true
 }
 
 fn lock_state(

@@ -1,6 +1,40 @@
 use super::*;
 
 impl WorkerLocalEmbeddedStore {
+    /// Returns a borrowed value slice for `key` without copying bytes.
+    ///
+    /// The slice is tied to this worker-local store's exclusive `&mut self`
+    /// borrow. Use [`Self::get`] when an owned `Vec<u8>` is required.
+    pub fn get_ref<'a>(&'a mut self, key: &[u8]) -> Option<&'a [u8]> {
+        self.get_ref_if_local(key)
+            .expect("worker-local embedded store key does not belong to this thread")
+    }
+
+    pub fn get_ref_if_local<'a>(
+        &'a mut self,
+        key: &[u8],
+    ) -> Result<Option<&'a [u8]>, LocalRouteError> {
+        let route = self.local_key_route(key)?;
+        Ok(self.inner.local_get_ref_routed(route, key))
+    }
+
+    /// Returns a mutable point-key guard for `key`.
+    ///
+    /// The guard is tied to this worker's exclusive `&mut self` borrow, and
+    /// replacements preserve the entry's existing TTL.
+    pub fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<WorkerLocalEmbeddedRefMut<'a>> {
+        self.get_mut_if_local(key)
+            .expect("worker-local embedded store key does not belong to this thread")
+    }
+
+    pub fn get_mut_if_local<'a>(
+        &'a mut self,
+        key: &[u8],
+    ) -> Result<Option<WorkerLocalEmbeddedRefMut<'a>>, LocalRouteError> {
+        let route = self.local_key_route(key)?;
+        Ok(self.inner.local_get_mut_routed(route, key))
+    }
+
     pub fn get(&mut self, key: &[u8]) -> Option<Bytes> {
         self.get_if_local(key)
             .expect("worker-local embedded store key does not belong to this thread")
@@ -47,6 +81,16 @@ impl WorkerLocalEmbeddedStore {
                 .local_get_slice_routed(route, key)
                 .map(WorkerLocalReadSlice::from_embedded),
         }
+    }
+
+    #[inline(always)]
+    pub fn get_ref_routed_local<'a>(
+        &'a mut self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+    ) -> Option<&'a [u8]> {
+        debug_assert!(self.owns_shard(route.shard_id));
+        self.inner.local_get_ref_routed(route, key)
     }
 
     #[inline(always)]

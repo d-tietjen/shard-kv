@@ -20,11 +20,34 @@ use fast_cache::storage::EmbeddedStore;
 let cache = EmbeddedStore::new(16);
 
 cache.set(b"user:42".to_vec(), b"ready".to_vec(), None);
+{
+    let value = cache.get_ref(b"user:42").expect("cache hit");
+    assert_eq!(value.value(), b"ready");
+}
 assert_eq!(cache.get(b"user:42"), Some(b"ready".to_vec()));
 
 cache.delete(b"user:42");
 assert!(!cache.exists(b"user:42"));
 ```
+
+Read APIs are split by ownership:
+
+| API | Meaning |
+| --- | --- |
+| `get_ref` | Borrow/reference the stored value without copying bytes. The returned guard or slice must not outlive the store borrow. |
+| `get_mut` | Borrow the routed point value for replacement or removal while preserving its existing TTL. |
+| `get` | Return an owned, materialized `Vec<u8>` for callers that need to keep the value independently. |
+
+`EmbeddedStore::get_ref` returns a shard guard, `SharedEmbeddedStore::get_ref`
+returns a shared-handle guard, and `LocalEmbeddedStore::get_ref` returns a
+slice tied to the worker-local `&mut` borrow. The corresponding `get_mut`
+guards support `value`, `set`, `set_slice`, and `remove`.
+
+The opt-in `mutable-value-slices` feature adds `value_mut_no_ttl()` to those
+mutation guards. It exposes `&mut [u8]` only when the stored `bytes::Bytes`
+buffer is uniquely owned and the entry has no TTL. TTL-backed values return
+`None` because in-place mutation bypasses TTL-preserving replacement logic; use
+`set_slice` for TTL entries.
 
 Batch APIs group routing work and return results in key order:
 
@@ -58,7 +81,9 @@ split it with `into_local_stores` when workers are pinned.
 
 Use [`storage::SharedEmbeddedStore`] when every worker needs to clone one
 handle and reach every key. It is cache-padded and lock-striped like DashMap,
-while still sharing the same embedded shard implementation. `EmbeddedStore`,
+while still sharing the same embedded shard implementation. For shared-handle
+deployments, prefer a stripe count around `4 * worker_count`; one stripe per
+worker is usually under-striped for read-heavy shared access. `EmbeddedStore`,
 `SharedEmbeddedStore`, and `LocalEmbeddedStore` all require power-of-two shard
 counts so routing can use shift-based striping.
 
@@ -72,6 +97,7 @@ let mut stores = LocalEmbeddedStoreBootstrap::from_embedded(shared, 1).into_stor
 let mut local = stores.pop().expect("one worker store");
 
 local.set(b"local-key".to_vec(), b"value".to_vec(), None);
+assert_eq!(local.get_ref(b"local-key"), Some(b"value".as_slice()));
 assert_eq!(local.get(b"local-key"), Some(b"value".to_vec()));
 ```
 
@@ -120,10 +146,21 @@ stores with no TTL and no eviction:
 
 Capacity-bounded rows stress a different path. With LRU enabled, `64B`,
 read-only, `16` workers, and `25%` resident capacity, `fc-embed` reaches
-`473.7M ops/s`. On large write-heavy LRU workloads, Moka can be faster because
-value materialization and eviction bookkeeping dominate the small-value shard
-hot path; for example, a `64KiB` write-only LRU row measured fast-cache around
-`19.1 GB/s` and Moka around `33.3 GB/s`.
+`473.7M ops/s`. For `64KiB` LRU rows, the write-only case is the
+worst fast-cache shape because value materialization and eviction bookkeeping
+dominate; it measures around `19.1 GB/s` for fast-cache and `33.4 GB/s` for
+Moka. That is not representative of normal LRU usage. On the same 64KiB LRU
+setup, read-only reaches `756.93M ops/s` for fast-cache embedded direct versus
+`3.31M ops/s` for Moka, and the `80/20` row is effectively tied with Moka
+(`1.45M ops/s` versus `1.42M ops/s`). On a smaller `4KiB` LRU row at 16
+workers, fast-cache embedded direct reaches `676.37M ops/s` read-only,
+`26.70M ops/s` on `80/20`, and `5.41M ops/s` write-only.
+
+The large-value embedded GET rows use reference-read mode by default. They
+measure lookup plus borrowed value access, not copying the full value into a
+new buffer. The resulting GB/s is a logical payload rate, not physical data
+throughput. Use `--read-mode copy` in the benchmark harness when comparing
+materialized read bandwidth against caches that copy into a caller buffer.
 
 Treat these as workload-specific reference points, not universal constants.
 The full embedded matrix, LRU/TTL rows, CSV artifact paths, and reproduction
@@ -139,6 +176,8 @@ The most commonly used Rust APIs live in [`storage`]:
   cross-worker shared handles.
 - [`storage::LocalEmbeddedStore`]: worker-local store for thread-per-core
   workers.
+- `get_ref`, `get_mut`, and `get`: borrowed/reference reads, routed mutation
+  guards, and owned materialized reads.
 - [`storage::EmbeddedRouteMode`], [`storage::EmbeddedKeyRoute`], and
   [`storage::PreparedPointKey`]: routing and precomputed lookup helpers.
 - [`storage::PackedBatch`] and [`storage::PackedSessionWrite`]: contiguous

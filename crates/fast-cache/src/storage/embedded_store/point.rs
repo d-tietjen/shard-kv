@@ -1,11 +1,36 @@
 use super::*;
 
 impl EmbeddedStore {
-    /// Returns an owned copy of the value for `key`.
+    /// Returns an owned, materialized copy of the value for `key`.
+    ///
+    /// This is the convenience read path for callers that need to keep the
+    /// bytes after the cache borrow ends. Use [`Self::get_ref`] for a
+    /// zero-copy borrowed read.
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
         let now_ms = now_millis();
         let route = self.route_key(key);
         self.get_with_route(route, key, now_ms)
+    }
+
+    /// Returns a borrowed value guard for `key` without copying value bytes.
+    ///
+    /// The returned guard holds the routed shard lock for as long as the value
+    /// slice is used. This is the preferred embedded read path when the caller
+    /// only needs to inspect the value in place. Use [`Self::get`] when an
+    /// owned `Vec<u8>` is required.
+    pub fn get_ref(&self, key: &[u8]) -> Option<EmbeddedRef<'_>> {
+        let route = self.route_key(key);
+        self.get_ref_routed(route, key, now_millis())
+    }
+
+    /// Returns a mutable point-key guard for `key`.
+    ///
+    /// The guard holds the routed shard write lock, so callers can inspect,
+    /// replace, or remove the value without a second lookup. Replacements keep
+    /// the entry's existing TTL.
+    pub fn get_mut(&self, key: &[u8]) -> Option<EmbeddedRefMut<'_>> {
+        let route = self.route_key(key);
+        self.get_mut_routed(route, key, now_millis())
     }
 
     /// Single-threaded fused GET + RESP encode. Bypasses the per-shard
@@ -1438,6 +1463,74 @@ impl EmbeddedStore {
             .map
             .get_ref_hashed(route.key_hash, key, now_ms)
             .map(<[u8]>::to_vec)
+    }
+
+    fn get_ref_routed(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<EmbeddedRef<'_>> {
+        if uses_flat_key_storage(self.route_mode, key) {
+            let guard = self.shards[route.shard_id].read();
+            let value = if guard.map.has_no_ttl_entries() {
+                guard
+                    .map
+                    .get_ref_hashed_shared_no_ttl(route.key_hash, key)?
+            } else {
+                guard
+                    .map
+                    .get_ref_hashed_shared(route.key_hash, key, now_ms)?
+            } as *const [u8];
+            return Some(EmbeddedRef {
+                guard: views::EmbeddedRefGuard::Read(guard),
+                value,
+                _not_send: std::marker::PhantomData,
+            });
+        }
+
+        let mut guard = self.shards[route.shard_id].write();
+        let value = if let Some(session_prefix) = derived_session_storage_prefix(key)
+            && let Some(value) =
+                guard
+                    .session_slots
+                    .get_ref_hashed(&session_prefix, route.key_hash, key)
+        {
+            value
+        } else {
+            guard.map.get_ref_hashed(route.key_hash, key, now_ms)?
+        } as *const [u8];
+        Some(EmbeddedRef {
+            guard: views::EmbeddedRefGuard::Write(guard),
+            value,
+            _not_send: std::marker::PhantomData,
+        })
+    }
+
+    fn get_mut_routed(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<EmbeddedRefMut<'_>> {
+        let mut guard = self.shards[route.shard_id].write();
+
+        if !uses_flat_key_storage(self.route_mode, key)
+            && let Some(session_prefix) = derived_session_storage_prefix(key)
+            && guard.session_slots.has_session(&session_prefix)
+        {
+            return None;
+        }
+
+        let expire_at_ms = guard.entry_expire_at_hashed(route.key_hash, key, now_ms)?;
+        Some(EmbeddedRefMut {
+            guard,
+            route_mode: self.route_mode,
+            key: bytes::Bytes::copy_from_slice(key),
+            key_hash: route.key_hash,
+            expire_at_ms,
+            _not_send: std::marker::PhantomData,
+        })
     }
 
     /// Returns an owned read view for one key.

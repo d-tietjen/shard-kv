@@ -1,3 +1,238 @@
+use std::marker::PhantomData;
+use std::ops::Deref;
+
+use bytes::Bytes as SharedBytes;
+
+use super::{
+    EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedShard, OwnedEmbeddedWorkerShards, RwLockReadGuard,
+    RwLockWriteGuard, now_millis,
+};
+
+pub(super) enum EmbeddedRefGuard<'a> {
+    Read(RwLockReadGuard<'a, EmbeddedShard>),
+    Write(RwLockWriteGuard<'a, EmbeddedShard>),
+}
+
+impl EmbeddedRefGuard<'_> {
+    #[inline(always)]
+    fn shard_ptr(&self) -> *const EmbeddedShard {
+        match self {
+            Self::Read(guard) => &**guard as *const EmbeddedShard,
+            Self::Write(guard) => &**guard as *const EmbeddedShard,
+        }
+    }
+}
+
+/// Borrowed value guard returned by [`EmbeddedStore::get_ref`](super::EmbeddedStore::get_ref).
+///
+/// The value bytes are not copied. The slice remains valid while this guard is
+/// alive, and the guard is intentionally not `Send`.
+pub struct EmbeddedRef<'a> {
+    pub(super) guard: EmbeddedRefGuard<'a>,
+    pub(super) value: *const [u8],
+    pub(super) _not_send: PhantomData<*const ()>,
+}
+
+impl EmbeddedRef<'_> {
+    /// Returns the borrowed value bytes.
+    #[inline(always)]
+    pub fn value(&self) -> &[u8] {
+        let _guard = self.guard.shard_ptr();
+        // SAFETY: `value` points into the shard protected by `guard`, and the
+        // guard is stored in this `EmbeddedRef` for the full value lifetime.
+        unsafe { &*self.value }
+    }
+}
+
+impl Deref for EmbeddedRef<'_> {
+    type Target = [u8];
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        self.value()
+    }
+}
+
+/// Mutable point-key guard returned by [`EmbeddedStore::get_mut`](super::EmbeddedStore::get_mut).
+///
+/// The guard holds the routed shard write lock. It can inspect, replace, or
+/// remove the value without opening another store operation, and replacements
+/// preserve the entry's existing TTL.
+pub struct EmbeddedRefMut<'a> {
+    pub(super) guard: RwLockWriteGuard<'a, EmbeddedShard>,
+    pub(super) route_mode: EmbeddedRouteMode,
+    pub(super) key: SharedBytes,
+    pub(super) key_hash: u64,
+    pub(super) expire_at_ms: Option<u64>,
+    pub(super) _not_send: PhantomData<*const ()>,
+}
+
+impl EmbeddedRefMut<'_> {
+    #[inline(always)]
+    fn live_expire_at(&self) -> Option<Option<u64>> {
+        match self.expire_at_ms {
+            Some(expire_at_ms) if expire_at_ms <= now_millis() => None,
+            expire_at_ms => Some(expire_at_ms),
+        }
+    }
+
+    /// Returns the current value bytes when the key is still present and live.
+    #[inline(always)]
+    pub fn value(&self) -> Option<&[u8]> {
+        match self.live_expire_at()? {
+            None => self
+                .guard
+                .get_ref_hashed_shared_no_ttl(self.key_hash, self.key.as_ref()),
+            Some(_) => {
+                self.guard
+                    .get_ref_hashed_shared(self.key_hash, self.key.as_ref(), now_millis())
+            }
+        }
+    }
+
+    /// Returns mutable access to the stored value bytes for no-TTL entries.
+    ///
+    /// This API is available only with the `mutable-value-slices` feature. It
+    /// intentionally rejects TTL-backed values because in-place mutation skips
+    /// the TTL-preserving replacement logic. It also returns `None` when the
+    /// stored `bytes::Bytes` buffer is shared with another handle.
+    #[cfg(feature = "mutable-value-slices")]
+    #[inline(always)]
+    pub fn value_mut_no_ttl(&mut self) -> Option<&mut [u8]> {
+        match self.live_expire_at()? {
+            None => self
+                .guard
+                .value_mut_hashed_no_ttl(self.key_hash, self.key.as_ref()),
+            Some(_) => None,
+        }
+    }
+
+    /// Replaces the value while preserving the entry's existing TTL.
+    #[inline(always)]
+    pub fn set(&mut self, value: SharedBytes) {
+        match self.live_expire_at() {
+            Some(None) => self.guard.set_value_bytes_hashed_no_ttl(
+                self.route_mode,
+                self.key_hash,
+                self.key.as_ref(),
+                value,
+            ),
+            Some(expire_at_ms) => {
+                let now_ms = now_millis();
+                self.guard.set_value_bytes_hashed(
+                    self.route_mode,
+                    self.key_hash,
+                    self.key.as_ref(),
+                    value,
+                    expire_at_ms,
+                    now_ms,
+                );
+            }
+            None => {
+                let _ =
+                    self.guard
+                        .remove_value_hashed(self.key_hash, self.key.as_ref(), now_millis());
+            }
+        }
+    }
+
+    /// Replaces the value from a borrowed slice while preserving the existing TTL.
+    #[inline(always)]
+    pub fn set_slice(&mut self, value: &[u8]) {
+        self.set(SharedBytes::copy_from_slice(value));
+    }
+
+    /// Removes the entry and returns the stored bytes when present and live.
+    #[inline(always)]
+    pub fn remove(mut self) -> Option<SharedBytes> {
+        self.guard
+            .remove_value_hashed(self.key_hash, self.key.as_ref(), now_millis())
+    }
+}
+
+/// Mutable point-key guard for the owned-worker embedded path.
+///
+/// This guard is tied to the worker's exclusive `&mut` borrow instead of a
+/// shard lock. Replacements preserve the entry's existing TTL.
+pub struct OwnedEmbeddedRefMut<'a> {
+    pub(super) worker: &'a mut OwnedEmbeddedWorkerShards,
+    pub(super) route: EmbeddedKeyRoute,
+    pub(super) key: SharedBytes,
+    pub(super) expire_at_ms: Option<u64>,
+    pub(super) _not_send: PhantomData<*const ()>,
+}
+
+impl OwnedEmbeddedRefMut<'_> {
+    #[inline(always)]
+    fn live_expire_at(&self) -> Option<Option<u64>> {
+        match self.expire_at_ms {
+            Some(expire_at_ms) if expire_at_ms <= now_millis() => None,
+            expire_at_ms => Some(expire_at_ms),
+        }
+    }
+
+    /// Returns the current value bytes when the key is still present and live.
+    #[inline(always)]
+    pub fn value(&mut self) -> Option<&[u8]> {
+        let _ = self.live_expire_at()?;
+        self.worker
+            .local_get_ref_routed(self.route, self.key.as_ref())
+    }
+
+    /// Returns mutable access to the stored value bytes for no-TTL entries.
+    ///
+    /// This API is available only with the `mutable-value-slices` feature. It
+    /// intentionally rejects TTL-backed values because in-place mutation skips
+    /// the TTL-preserving replacement logic. It also returns `None` when the
+    /// stored `bytes::Bytes` buffer is shared with another handle.
+    #[cfg(feature = "mutable-value-slices")]
+    #[inline(always)]
+    pub fn value_mut_no_ttl(&mut self) -> Option<&mut [u8]> {
+        match self.live_expire_at()? {
+            None => self
+                .worker
+                .local_value_mut_routed_no_ttl(self.route, self.key.as_ref()),
+            Some(_) => None,
+        }
+    }
+
+    /// Replaces the value while preserving the entry's existing TTL.
+    #[inline(always)]
+    pub fn set(&mut self, value: SharedBytes) {
+        match self.live_expire_at() {
+            Some(expire_at_ms) => {
+                self.worker.local_set_value_bytes_routed_expire_at(
+                    self.route,
+                    self.key.as_ref(),
+                    value,
+                    expire_at_ms,
+                    now_millis(),
+                );
+            }
+            None => {
+                let _ = self.worker.local_remove_value_routed(
+                    self.route,
+                    self.key.as_ref(),
+                    now_millis(),
+                );
+            }
+        }
+    }
+
+    /// Replaces the value from a borrowed slice while preserving the existing TTL.
+    #[inline(always)]
+    pub fn set_slice(&mut self, value: &[u8]) {
+        self.set(SharedBytes::copy_from_slice(value));
+    }
+
+    /// Removes the entry and returns the stored bytes when present and live.
+    #[inline(always)]
+    pub fn remove(self) -> Option<SharedBytes> {
+        self.worker
+            .local_remove_value_routed(self.route, self.key.as_ref(), now_millis())
+    }
+}
+
 /// One stable byte slice captured during a batch read.
 ///
 /// The slice owns a `bytes::Bytes` handle. Older versions stored raw pointers

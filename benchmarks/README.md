@@ -9,7 +9,7 @@ Two modes, parallel and independent:
 
 | Mode | Driver | Question |
 | --- | --- | --- |
-| `saturation` | Closed-loop, push as hard as possible | Peak ops/sec, peak GB/s, CPU and p99 at peak |
+| `saturation` | Closed-loop, push as hard as possible | Peak ops/sec, logical payload GB/s, CPU and p99 at peak |
 | `curve` | Open-loop, target rate sweep | How CPU and p99 scale with load up to saturation |
 
 Both drivers share the same backend list, the same workload axes, and
@@ -65,8 +65,9 @@ without native replication is published in
 The crates.io release embedded matrix is orchestrated by
 `scripts/run-embedded-release-matrix.sh`. Run it on Linux. The script
 builds separate native safe and unsafe benchmark binaries, records
-`build_variant`, `ttl_mode`, `routing_mode`, eviction policy, entry capacity,
-and memory capacity in the `saturation` CSV, and defaults to the LRU gate:
+`build_variant`, `ttl_mode`, `routing_mode`, `read_mode`, eviction policy,
+entry capacity, and memory capacity in the `saturation` CSV, and defaults to
+the LRU gate:
 
 ```bash
 PHASE=lru ./scripts/run-embedded-release-matrix.sh
@@ -336,6 +337,30 @@ cargo run --release -p fast-cache-benchmarks --bin saturation -- \
   --duration 10
 ```
 
+`fc-embed` defaults to `--read-mode ref`, matching the embedded API's
+zero-copy `get_ref` path. In that mode GET rows measure lookup plus borrowed
+value access; the reported GB/s is a logical payload rate computed as
+successful operations multiplied by value size. It is not physical data
+throughput. Use `--read-mode copy` to force materialized GET reads into the
+benchmark scratch buffer when comparing copy bandwidth against backends that
+always copy values out.
+
+```bash
+cargo run --release -p fast-cache-benchmarks --bin saturation -- \
+  --backends fc-embed \
+  --value-size 1048576 --mix get \
+  --vcpu-budget 4 --clients 16 --key-count 1024 \
+  --read-mode copy --duration 10
+```
+
+Other reference-read baselines are exposed as explicit backend ids, such as
+`fc-shared-ref` and `dashmap-ref`.
+
+Shared-handle fast-cache backends default to `4 * --vcpu-budget` lock stripes.
+That is the recommended comparison shape for DashMap-style shared access. Use
+the `fc-shared-worker-stripes` family when you specifically need the older
+one-stripe-per-worker baseline.
+
 ### fc-embed-unsafe (reviewed unsafe hot paths)
 
 Build the bench crate with `--features unsafe`. The same `fc-embed`
@@ -529,7 +554,7 @@ python benchmarks/python/fc_lmcache_bench.py --with-local-cpu \
 
 `LMCACHE=1 ./scripts/run-python.sh` runs both Python harnesses.
 
-Use `--latency-sample-rate 0` for bandwidth/GB/s saturation runs where latency
+Use `--latency-sample-rate 0` for logical payload GB/s saturation runs where latency
 percentiles are secondary to raw bytes moved per second.
 
 Use `--op-batch-size N` to issue same-operation batches from each benchmark

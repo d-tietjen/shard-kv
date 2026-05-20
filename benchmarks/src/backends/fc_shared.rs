@@ -262,7 +262,7 @@ struct FcSharedWorker<const SHARDS: usize> {
 
 impl<const SHARDS: usize> Worker for FcSharedWorker<SHARDS> {
     fn get(&mut self, key: &[u8], scratch: &mut Vec<u8>) -> Result<bool, BoxError> {
-        match self.store.get(key) {
+        match self.store.get_ref(key) {
             Some(value) => {
                 if self.copy_reads {
                     scratch.clear();

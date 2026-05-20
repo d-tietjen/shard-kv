@@ -10,7 +10,7 @@ use crate::cuda::{
 };
 use crate::storage::{
     Bytes, EmbeddedKeyRoute, EmbeddedReadSlice, EmbeddedRouteMode, EmbeddedSessionRoute,
-    EmbeddedStore, OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView,
+    EmbeddedStore, OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView, OwnedEmbeddedRefMut,
     OwnedEmbeddedSessionPackedView, OwnedEmbeddedWorkerShards, PackedBatch, PackedSessionWrite,
     PreparedPointKey, TierStatsSnapshot,
 };
@@ -44,6 +44,10 @@ pub struct WorkerLocalEmbeddedStore {
 pub struct WorkerLocalEmbeddedStoreBootstrap {
     stores: Vec<WorkerLocalEmbeddedStore>,
 }
+
+/// Mutable point-key guard tied to a worker-local embedded store borrow.
+pub type WorkerLocalEmbeddedRefMut<'a> = OwnedEmbeddedRefMut<'a>;
+
 mod bootstrap;
 mod core;
 mod errors;

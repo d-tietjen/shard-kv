@@ -93,6 +93,35 @@ fn worker_local_zero_copy_view_is_local_only() {
 }
 
 #[test]
+fn worker_local_get_mut_is_local_only() {
+    let store = EmbeddedStore::with_route_mode(2, EmbeddedRouteMode::FullKey);
+    let bootstrap = WorkerLocalEmbeddedStoreBootstrap::from_embedded(store, 2);
+    let mut stores = bootstrap.into_stores();
+    let mut local = stores.pop().expect("expected one local store");
+
+    let local_key = find_key(&local, true);
+    let remote_key = find_key(&local, false);
+    local
+        .set_if_local(local_key.clone(), b"one".to_vec(), None)
+        .expect("local key should be accepted");
+
+    {
+        let mut entry = local
+            .get_mut_if_local(&local_key)
+            .expect("local get_mut should route")
+            .expect("local key should exist");
+        assert_eq!(entry.value(), Some(b"one".as_slice()));
+        entry.set_slice(b"two");
+    }
+
+    assert_eq!(local.get(&local_key), Some(b"two".to_vec()));
+    assert!(matches!(
+        local.get_mut_if_local(&remote_key),
+        Err(LocalRouteError::KeyNotLocal { .. })
+    ));
+}
+
+#[test]
 fn worker_local_prepared_point_key_is_exact_and_local() {
     let store = EmbeddedStore::with_route_mode(2, EmbeddedRouteMode::FullKey);
     let bootstrap = WorkerLocalEmbeddedStoreBootstrap::from_embedded(store, 2);

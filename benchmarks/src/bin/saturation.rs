@@ -3,7 +3,7 @@
 //! For each requested backend, spawn `--clients` worker threads, run for
 //! `--duration` seconds, and report:
 //!
-//!   peak ops/sec, peak GB/s, CPU at peak (vCPU), p50/p99/p99.9 at peak
+//!   peak ops/sec, logical payload GB/s, CPU at peak (vCPU), p50/p99/p99.9 at peak
 //!
 //! Output goes to stdout as a markdown table and optionally to a CSV.
 
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
 use fast_cache::config::EvictionPolicy;
-use fast_cache_benchmarks::backend::{Backend, BackendClass, Op};
+use fast_cache_benchmarks::backend::{Backend, BackendClass, Op, ReadMode};
 use fast_cache_benchmarks::backends::{BACKEND_IDS, BenchmarkCacheConfig, make};
 use fast_cache_benchmarks::clock::FastClock;
 use fast_cache_benchmarks::cpu::{external_cpu_time, process_cpu_time, vcpu};
@@ -111,6 +111,11 @@ struct Args {
     /// Total byte capacity for backends with memory-budget eviction.
     #[arg(long)]
     cache_memory_bytes: Option<usize>,
+
+    /// GET behavior for backends that can choose between borrowed references
+    /// and materialized copy-out reads.
+    #[arg(long, value_enum, default_value_t = ReadMode::Ref)]
+    read_mode: ReadMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -155,7 +160,7 @@ fn main() -> Result<(), BoxError> {
     let workload = Arc::new(Workload::build(&spec));
 
     println!(
-        "saturation: value_size={}B mix={} key_pattern={} key_distribution={} vcpu_budget={} clients={} pipeline_depth={} keys={} duration={}s ttl={} eviction={} capacity_keys={} memory_bytes={}",
+        "saturation: value_size={}B mix={} key_pattern={} key_distribution={} vcpu_budget={} clients={} pipeline_depth={} keys={} duration={}s ttl={} eviction={} capacity_keys={} memory_bytes={} read_mode={}",
         args.value_size,
         mix.label(),
         key_pattern.label(),
@@ -172,7 +177,8 @@ fn main() -> Result<(), BoxError> {
         args.cache_capacity_keys
             .map_or_else(|| "default".to_string(), |value| value.to_string()),
         args.cache_memory_bytes
-            .map_or_else(|| "none".to_string(), |value| value.to_string())
+            .map_or_else(|| "none".to_string(), |value| value.to_string()),
+        args.read_mode.label()
     );
     println!();
     print_header();
@@ -185,6 +191,7 @@ fn main() -> Result<(), BoxError> {
         "eviction_policy",
         "cache_capacity_keys",
         "cache_memory_bytes",
+        "read_mode",
         "value_size",
         "mix",
         "vcpu_budget",
@@ -193,7 +200,7 @@ fn main() -> Result<(), BoxError> {
         "duration_s",
         "ops_total",
         "ops_per_sec",
-        "gb_per_sec",
+        "logical_payload_gb_per_sec",
         "vcpu_consumed",
         "p50_ns",
         "p99_ns",
@@ -215,6 +222,7 @@ fn main() -> Result<(), BoxError> {
         eviction_policy: args.eviction_policy.into(),
         cache_capacity_keys: args.cache_capacity_keys,
         cache_memory_bytes: args.cache_memory_bytes,
+        read_mode: args.read_mode,
     };
 
     for id in &backend_ids {
@@ -304,6 +312,7 @@ impl RunResult {
                 .map_or_else(String::new, |value| value.to_string()),
             args.cache_memory_bytes
                 .map_or_else(String::new, |value| value.to_string()),
+            args.read_mode.label().to_string(),
             args.value_size.to_string(),
             mix.label(),
             args.vcpu_budget.to_string(),
@@ -644,14 +653,23 @@ fn run_one(
 
 fn print_header() {
     println!(
-        "| {:<20} | {:>14} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>8} |",
-        "backend", "ops/sec", "GB/s", "vCPU", "p50", "p99", "p999", "r-p999", "w-p999", "errors"
+        "| {:<20} | {:>14} | {:>12} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>8} |",
+        "backend",
+        "ops/sec",
+        "logical GB/s",
+        "vCPU",
+        "p50",
+        "p99",
+        "p999",
+        "r-p999",
+        "w-p999",
+        "errors"
     );
     println!(
-        "| {:<20} | {:>14} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>8} |",
+        "| {:<20} | {:>14} | {:>12} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>8} |",
         "-".repeat(20),
         "-".repeat(14),
-        "-".repeat(10),
+        "-".repeat(12),
         "-".repeat(10),
         "-".repeat(10),
         "-".repeat(10),
@@ -664,7 +682,7 @@ fn print_header() {
 
 fn print_row(r: &RunResult) {
     println!(
-        "| {:<20} | {:>14.0} | {:>10.3} | {:>10.3} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>8} |",
+        "| {:<20} | {:>14.0} | {:>12.3} | {:>10.3} | {:>10} | {:>10} | {:>10} | {:>10} | {:>10} | {:>8} |",
         r.backend_id,
         r.ops_per_sec(),
         r.gb_per_sec(),

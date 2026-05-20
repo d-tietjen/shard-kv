@@ -173,6 +173,118 @@ fn ttl_expires_with_lazy_reads() {
 }
 
 #[test]
+fn get_mut_replaces_and_removes_point_values() {
+    let store = EmbeddedStore::new(2);
+    store.set(b"alpha".to_vec(), b"one".to_vec(), None);
+
+    {
+        let mut entry = store.get_mut(b"alpha").expect("alpha exists");
+        assert_eq!(entry.value(), Some(b"one".as_slice()));
+        entry.set_slice(b"two");
+        assert_eq!(entry.value(), Some(b"two".as_slice()));
+    }
+    assert_eq!(store.get(b"alpha"), Some(b"two".to_vec()));
+
+    let removed = store.get_mut(b"alpha").expect("alpha exists").remove();
+    assert_eq!(removed.as_deref(), Some(b"two".as_slice()));
+    assert_eq!(store.get(b"alpha"), None);
+}
+
+#[test]
+fn get_mut_preserves_existing_ttl() {
+    let store = EmbeddedStore::new(2);
+    store.set(b"alpha".to_vec(), b"one".to_vec(), Some(5));
+
+    store
+        .get_mut(b"alpha")
+        .expect("alpha exists")
+        .set_slice(b"two");
+    assert_eq!(store.get(b"alpha"), Some(b"two".to_vec()));
+
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    assert_eq!(store.get(b"alpha"), None);
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn get_mut_value_mut_no_ttl_updates_bytes_in_place() {
+    let store = EmbeddedStore::new(2);
+    store.set(b"alpha".to_vec(), b"one".to_vec(), None);
+
+    {
+        let mut entry = store.get_mut(b"alpha").expect("alpha exists");
+        let value = entry.value_mut_no_ttl().expect("unique no-TTL value");
+        value.copy_from_slice(b"two");
+    }
+
+    assert_eq!(store.get(b"alpha"), Some(b"two".to_vec()));
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn get_mut_value_mut_no_ttl_rejects_ttl_values() {
+    let store = EmbeddedStore::new(2);
+    store.set(b"alpha".to_vec(), b"one".to_vec(), Some(1000));
+
+    let mut entry = store.get_mut(b"alpha").expect("alpha exists");
+    assert!(entry.value_mut_no_ttl().is_none());
+    entry.set_slice(b"two");
+    drop(entry);
+
+    assert_eq!(store.get(b"alpha"), Some(b"two".to_vec()));
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn get_mut_value_mut_no_ttl_rejects_shared_value_bytes() {
+    let store = EmbeddedStore::new(2);
+    let shared_value = bytes::Bytes::copy_from_slice(b"one");
+    store.set_value_bytes(b"alpha", shared_value.clone(), None);
+
+    {
+        let mut entry = store.get_mut(b"alpha").expect("alpha exists");
+        assert!(
+            entry.value_mut_no_ttl().is_none(),
+            "raw mutation must reject aliased bytes buffers"
+        );
+    }
+    assert_eq!(store.get(b"alpha"), Some(b"one".to_vec()));
+
+    drop(shared_value);
+    {
+        let mut entry = store.get_mut(b"alpha").expect("alpha exists");
+        let value = entry.value_mut_no_ttl().expect("buffer is unique again");
+        value.copy_from_slice(b"two");
+    }
+    assert_eq!(store.get(b"alpha"), Some(b"two".to_vec()));
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn get_mut_value_mut_no_ttl_does_not_resurrect_expired_guard() {
+    let store = EmbeddedStore::new(2);
+    store.set(b"alpha".to_vec(), b"one".to_vec(), Some(25));
+
+    let mut entry = store.get_mut(b"alpha").expect("alpha exists before expiry");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    assert_eq!(entry.value(), None);
+    assert!(entry.value_mut_no_ttl().is_none());
+    entry.set_slice(b"two");
+    drop(entry);
+
+    assert_eq!(store.get(b"alpha"), None);
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn get_mut_value_mut_no_ttl_rejects_missing_values() {
+    let store = EmbeddedStore::new(2);
+
+    assert!(store.get_mut(b"missing").is_none());
+}
+
+#[test]
 fn session_prefix_routing_colocates_chunks() {
     let store = EmbeddedStore::with_route_mode(8, EmbeddedRouteMode::SessionPrefix);
 
@@ -358,6 +470,85 @@ fn owned_worker_point_view_reads_from_owned_shard() {
     assert!(view.is_hit());
     assert_eq!(view.slice(), Some(&b"one"[..]));
     assert_eq!(view.len(), 3);
+}
+
+#[test]
+fn owned_worker_get_mut_replaces_point_value() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    store.set(b"alpha".to_vec(), b"one".to_vec(), None);
+
+    let mut workers = store.into_owned_workers(2);
+    let route = workers[0].route_key(b"alpha");
+    let worker = workers
+        .iter_mut()
+        .find(|worker| worker.owns_shard(route.shard_id))
+        .expect("worker should own routed shard");
+
+    {
+        let mut entry = worker.get_mut(b"alpha").expect("alpha exists");
+        assert_eq!(entry.value(), Some(b"one".as_slice()));
+        entry.set_slice(b"two");
+        assert_eq!(entry.value(), Some(b"two".as_slice()));
+    }
+    assert_eq!(worker.get(b"alpha"), Some(b"two".to_vec()));
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn owned_worker_get_mut_value_mut_no_ttl_updates_bytes_in_place() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    store.set(b"alpha".to_vec(), b"one".to_vec(), None);
+
+    let mut workers = store.into_owned_workers(2);
+    let route = workers[0].route_key(b"alpha");
+    let worker = workers
+        .iter_mut()
+        .find(|worker| worker.owns_shard(route.shard_id))
+        .expect("worker should own routed shard");
+
+    {
+        let mut entry = worker.get_mut(b"alpha").expect("alpha exists");
+        let value = entry.value_mut_no_ttl().expect("unique no-TTL value");
+        value.copy_from_slice(b"two");
+    }
+
+    assert_eq!(worker.get(b"alpha"), Some(b"two".to_vec()));
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn owned_worker_get_mut_value_mut_no_ttl_rejects_shared_value_bytes() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    store.set(b"alpha".to_vec(), b"seed".to_vec(), None);
+
+    let mut workers = store.into_owned_workers(2);
+    let route = workers[0].route_key(b"alpha");
+    let worker = workers
+        .iter_mut()
+        .find(|worker| worker.owns_shard(route.shard_id))
+        .expect("worker should own routed shard");
+    let shared_value = bytes::Bytes::copy_from_slice(b"one!");
+
+    {
+        let mut entry = worker.get_mut(b"alpha").expect("alpha exists");
+        entry.set(shared_value.clone());
+    }
+    {
+        let mut entry = worker.get_mut(b"alpha").expect("alpha exists");
+        assert!(
+            entry.value_mut_no_ttl().is_none(),
+            "raw mutation must reject aliased bytes buffers"
+        );
+    }
+    assert_eq!(worker.get(b"alpha"), Some(b"one!".to_vec()));
+
+    drop(shared_value);
+    {
+        let mut entry = worker.get_mut(b"alpha").expect("alpha exists");
+        let value = entry.value_mut_no_ttl().expect("buffer is unique again");
+        value.copy_from_slice(b"two!");
+    }
+    assert_eq!(worker.get(b"alpha"), Some(b"two!".to_vec()));
 }
 
 #[test]

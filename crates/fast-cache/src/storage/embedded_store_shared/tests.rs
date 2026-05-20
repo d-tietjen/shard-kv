@@ -106,6 +106,103 @@ fn ttl_values_are_filtered_from_shared_reads() {
 }
 
 #[test]
+fn shared_get_mut_preserves_existing_ttl() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    store.insert_slice_with_ttl(b"ttl-key", b"value", Some(5));
+
+    store
+        .get_mut(b"ttl-key")
+        .expect("ttl-key exists")
+        .set_slice(b"updated");
+    assert_eq!(store.get(b"ttl-key").unwrap().value(), b"updated");
+
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    assert!(store.get(b"ttl-key").is_none());
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn shared_get_mut_value_mut_no_ttl_updates_bytes_in_place() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    store.insert_slice(b"alpha", b"one");
+
+    {
+        let mut entry = store.get_mut(b"alpha").expect("alpha exists");
+        let value = entry.value_mut_no_ttl().expect("unique no-TTL value");
+        value.copy_from_slice(b"two");
+    }
+
+    assert_eq!(store.get(b"alpha").unwrap().value(), b"two");
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn shared_get_mut_value_mut_no_ttl_rejects_ttl_values() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    store.insert_slice_with_ttl(b"ttl-key", b"value", Some(1000));
+
+    let mut entry = store.get_mut(b"ttl-key").expect("ttl-key exists");
+    assert!(entry.value_mut_no_ttl().is_none());
+    entry.set_slice(b"after");
+    drop(entry);
+
+    assert_eq!(store.get(b"ttl-key").unwrap().value(), b"after");
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn shared_get_mut_value_mut_no_ttl_rejects_shared_value_bytes() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    let key = SharedBytes::from_static(b"alpha");
+    let shared_value = SharedBytes::copy_from_slice(b"one");
+    store.insert(key.clone(), shared_value.clone());
+
+    {
+        let mut entry = store.get_mut(key.as_ref()).expect("alpha exists");
+        assert!(
+            entry.value_mut_no_ttl().is_none(),
+            "raw mutation must reject aliased bytes buffers"
+        );
+    }
+    assert_eq!(store.get(key.as_ref()).unwrap().value(), b"one");
+
+    drop(shared_value);
+    {
+        let mut entry = store.get_mut(key.as_ref()).expect("alpha exists");
+        let value = entry.value_mut_no_ttl().expect("buffer is unique again");
+        value.copy_from_slice(b"two");
+    }
+    assert_eq!(store.get(key.as_ref()).unwrap().value(), b"two");
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn shared_get_mut_value_mut_no_ttl_does_not_resurrect_expired_guard() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    store.insert_slice_with_ttl(b"ttl-key", b"value", Some(25));
+
+    let mut entry = store
+        .get_mut(b"ttl-key")
+        .expect("ttl-key exists before expiry");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    assert_eq!(entry.value(), None);
+    assert!(entry.value_mut_no_ttl().is_none());
+    entry.set_slice(b"after");
+    drop(entry);
+
+    assert!(store.get(b"ttl-key").is_none());
+}
+
+#[cfg(feature = "mutable-value-slices")]
+#[test]
+fn shared_get_mut_value_mut_no_ttl_rejects_missing_values() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+
+    assert!(store.get_mut(b"missing").is_none());
+}
+
+#[test]
 fn session_api_roundtrips() {
     let store = SharedEmbeddedStore::<8>::new(SharedEmbeddedConfig {
         route_mode: EmbeddedRouteMode::SessionPrefix,

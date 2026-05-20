@@ -3,7 +3,7 @@ use std::sync::Arc;
 use fast_cache::config::EvictionPolicy;
 use fast_cache::storage::SharedEmbeddedLockPolicy;
 
-use crate::backend::{Backend, BoxError};
+use crate::backend::{Backend, BoxError, ReadMode};
 
 mod dashmap_bk;
 mod dashmap_ref;
@@ -19,17 +19,15 @@ mod rwlock_hashmap;
 pub const BACKEND_IDS: &[&str] = &[
     "fc-embed",
     "fc-shared",
-    "fc-shared-x4",
+    "fc-shared-worker-stripes",
     "fc-shared-fair",
-    "fc-shared-x4-fair",
+    "fc-shared-fair-worker-stripes",
     "fc-shared-ref",
-    "fc-shared-x4-ref",
+    "fc-shared-worker-stripes-ref",
     "fc-shared-fair-ref",
-    "fc-shared-x4-fair-ref",
+    "fc-shared-fair-worker-stripes-ref",
     "fc-shared-hot-ref",
-    "fc-shared-x4-hot-ref",
     "fc-shared-fair-hot-ref",
-    "fc-shared-x4-fair-hot-ref",
     "dashmap",
     "dashmap-worker-shards",
     "dashmap-ref",
@@ -45,11 +43,14 @@ pub const BACKEND_IDS: &[&str] = &[
     "dragonfly",
 ];
 
+const SHARED_STRIPE_MULTIPLIER: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BenchmarkCacheConfig {
     pub eviction_policy: EvictionPolicy,
     pub cache_capacity_keys: Option<usize>,
     pub cache_memory_bytes: Option<usize>,
+    pub read_mode: ReadMode,
 }
 
 impl Default for BenchmarkCacheConfig {
@@ -58,6 +59,7 @@ impl Default for BenchmarkCacheConfig {
             eviction_policy: EvictionPolicy::None,
             cache_capacity_keys: None,
             cache_memory_bytes: None,
+            read_mode: ReadMode::Ref,
         }
     }
 }
@@ -76,6 +78,17 @@ impl BenchmarkCacheConfig {
         self.total_memory_bytes()
             .map(|limit| limit.div_ceil(shard_count).max(1))
     }
+}
+
+fn worker_stripes(vcpu_budget: usize) -> usize {
+    vcpu_budget.max(1).next_power_of_two()
+}
+
+fn default_shared_stripes(vcpu_budget: usize) -> usize {
+    vcpu_budget
+        .saturating_mul(SHARED_STRIPE_MULTIPLIER)
+        .max(1)
+        .next_power_of_two()
 }
 
 /// Resolve a backend id to an instance. `vcpu_budget` controls the
@@ -97,29 +110,46 @@ pub fn make(
         )) as Arc<dyn Backend>,
         "fc-shared" => fc_shared::new(
             "fc-shared",
-            vcpu_budget.max(1).next_power_of_two(),
+            default_shared_stripes(vcpu_budget),
             key_count,
             true,
             cache_config,
         ),
+        "fc-shared-worker-stripes" => fc_shared::new(
+            "fc-shared-worker-stripes",
+            worker_stripes(vcpu_budget),
+            key_count,
+            true,
+            cache_config,
+        ),
+        // Backward-compatible aliases from when the recommended shared stripe
+        // multiplier was encoded in the backend id. Keep output canonical.
         "fc-shared-x4" => fc_shared::new(
-            "fc-shared-x4",
-            vcpu_budget.saturating_mul(4).max(1).next_power_of_two(),
+            "fc-shared",
+            default_shared_stripes(vcpu_budget),
             key_count,
             true,
             cache_config,
         ),
         "fc-shared-fair" => fc_shared::new_with_policy(
             "fc-shared-fair",
-            vcpu_budget.max(1).next_power_of_two(),
+            default_shared_stripes(vcpu_budget),
+            key_count,
+            true,
+            SharedEmbeddedLockPolicy::Fair,
+            cache_config,
+        ),
+        "fc-shared-fair-worker-stripes" => fc_shared::new_with_policy(
+            "fc-shared-fair-worker-stripes",
+            worker_stripes(vcpu_budget),
             key_count,
             true,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
         ),
         "fc-shared-x4-fair" => fc_shared::new_with_policy(
-            "fc-shared-x4-fair",
-            vcpu_budget.saturating_mul(4).max(1).next_power_of_two(),
+            "fc-shared-fair",
+            default_shared_stripes(vcpu_budget),
             key_count,
             true,
             SharedEmbeddedLockPolicy::Fair,
@@ -127,29 +157,44 @@ pub fn make(
         ),
         "fc-shared-ref" => fc_shared::new(
             "fc-shared-ref",
-            vcpu_budget.max(1).next_power_of_two(),
+            default_shared_stripes(vcpu_budget),
+            key_count,
+            false,
+            cache_config,
+        ),
+        "fc-shared-worker-stripes-ref" => fc_shared::new(
+            "fc-shared-worker-stripes-ref",
+            worker_stripes(vcpu_budget),
             key_count,
             false,
             cache_config,
         ),
         "fc-shared-x4-ref" => fc_shared::new(
-            "fc-shared-x4-ref",
-            vcpu_budget.saturating_mul(4).max(1).next_power_of_two(),
+            "fc-shared-ref",
+            default_shared_stripes(vcpu_budget),
             key_count,
             false,
             cache_config,
         ),
         "fc-shared-fair-ref" => fc_shared::new_with_policy(
             "fc-shared-fair-ref",
-            vcpu_budget.max(1).next_power_of_two(),
+            default_shared_stripes(vcpu_budget),
+            key_count,
+            false,
+            SharedEmbeddedLockPolicy::Fair,
+            cache_config,
+        ),
+        "fc-shared-fair-worker-stripes-ref" => fc_shared::new_with_policy(
+            "fc-shared-fair-worker-stripes-ref",
+            worker_stripes(vcpu_budget),
             key_count,
             false,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
         ),
         "fc-shared-x4-fair-ref" => fc_shared::new_with_policy(
-            "fc-shared-x4-fair-ref",
-            vcpu_budget.saturating_mul(4).max(1).next_power_of_two(),
+            "fc-shared-fair-ref",
+            default_shared_stripes(vcpu_budget),
             key_count,
             false,
             SharedEmbeddedLockPolicy::Fair,
@@ -157,29 +202,29 @@ pub fn make(
         ),
         "fc-shared-hot-ref" => fc_shared::new_hot_shard(
             "fc-shared-hot-ref",
-            vcpu_budget.max(1).next_power_of_two(),
+            default_shared_stripes(vcpu_budget),
             key_count,
             false,
             cache_config,
         ),
         "fc-shared-x4-hot-ref" => fc_shared::new_hot_shard(
-            "fc-shared-x4-hot-ref",
-            vcpu_budget.saturating_mul(4).max(1).next_power_of_two(),
+            "fc-shared-hot-ref",
+            default_shared_stripes(vcpu_budget),
             key_count,
             false,
             cache_config,
         ),
         "fc-shared-fair-hot-ref" => fc_shared::new_hot_shard_with_policy(
             "fc-shared-fair-hot-ref",
-            vcpu_budget.max(1).next_power_of_two(),
+            default_shared_stripes(vcpu_budget),
             key_count,
             false,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
         ),
         "fc-shared-x4-fair-hot-ref" => fc_shared::new_hot_shard_with_policy(
-            "fc-shared-x4-fair-hot-ref",
-            vcpu_budget.saturating_mul(4).max(1).next_power_of_two(),
+            "fc-shared-fair-hot-ref",
+            default_shared_stripes(vcpu_budget),
             key_count,
             false,
             SharedEmbeddedLockPolicy::Fair,

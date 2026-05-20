@@ -1,3 +1,11 @@
+#![cfg(not(all(test, feature = "extension-module")))]
+
+// PyO3's `extension-module` feature intentionally avoids linking libpython on
+// Unix so the cdylib can be loaded by Python. Cargo's Rust test harness is a
+// binary and does need libpython symbols, so `cargo test --all-features` skips
+// this crate's in-crate tests under `extension-module`. The normal
+// `cargo test --workspace` path still runs them.
+
 use dashmap::DashMap;
 extern crate fast_cache as fast_cache_crate;
 use fast_cache_crate::config::{EvictionPolicy, FastCacheConfig};

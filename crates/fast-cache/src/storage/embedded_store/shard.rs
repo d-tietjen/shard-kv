@@ -41,6 +41,12 @@ impl EmbeddedShard {
         self.map.get_ref_hashed_shared_no_ttl(hash, key)
     }
 
+    #[cfg(feature = "mutable-value-slices")]
+    #[inline(always)]
+    pub(crate) fn value_mut_hashed_no_ttl(&mut self, hash: u64, key: &[u8]) -> Option<&mut [u8]> {
+        self.map.value_mut_hashed_no_ttl(hash, key)
+    }
+
     #[inline(always)]
     pub(crate) fn get_ref_hashed_shared(
         &self,
@@ -64,6 +70,16 @@ impl EmbeddedShard {
     #[inline(always)]
     pub(crate) fn contains_key_hashed(&self, hash: u64, key: &[u8], now_ms: u64) -> bool {
         self.get_ref_hashed_shared(hash, key, now_ms).is_some()
+    }
+
+    #[inline(always)]
+    pub(crate) fn entry_expire_at_hashed(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<Option<u64>> {
+        self.map.entry_expire_at_hashed(hash, key, now_ms)
     }
 
     #[inline(always)]
@@ -198,14 +214,15 @@ impl EmbeddedShard {
     }
 
     #[inline(always)]
-    pub(crate) fn remove_value_hashed_no_ttl(
+    pub(crate) fn remove_value_hashed(
         &mut self,
         key_hash: u64,
         key: &[u8],
+        now_ms: u64,
     ) -> Option<bytes::Bytes> {
-        let removed = self.map.remove_value_hashed(key_hash, key, 0);
+        let removed = self.map.remove_value_hashed(key_hash, key, now_ms);
         if removed.is_some() {
-            self.enforce_memory_limit(0);
+            self.enforce_memory_limit(now_ms);
         }
         removed
     }

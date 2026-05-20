@@ -26,8 +26,28 @@ use fast_cache::storage::EmbeddedStore;
 let cache = EmbeddedStore::new(16);
 cache.set(b"user:42".to_vec(), b"ready".to_vec(), None);
 
-assert_eq!(cache.get(b"user:42"), Some(b"ready".to_vec()));
+{
+    let value = cache.get_ref(b"user:42").expect("cache hit");
+    assert_eq!(value.value(), b"ready");
+}
+cache
+    .get_mut(b"user:42")
+    .expect("cache hit")
+    .set_slice(b"updated");
+assert_eq!(cache.get_ref(b"user:42").unwrap().value(), b"updated");
+assert_eq!(cache.get(b"user:42"), Some(b"updated".to_vec()));
 ```
+
+Use `get_ref` for zero-copy embedded reads when the value is only needed while
+the cache borrow is alive. Use `get` when the caller needs an owned
+materialized `Vec<u8>`. Use `get_mut` when an existing point value should be
+replaced or removed while preserving its TTL.
+
+For callers that need raw in-place mutation, the opt-in
+`mutable-value-slices` feature adds `value_mut_no_ttl()` to embedded mutation
+guards. It returns `&mut [u8]` only for uniquely-owned no-TTL values. TTL-backed
+values are rejected because this path intentionally skips the TTL-preserving
+replacement logic; use `set_slice` for TTL entries.
 
 Install the optional server binary:
 
@@ -175,7 +195,20 @@ Linux with `16` workers and `64B` values reaches:
 | 80/20 | 253.88M ops/s |
 
 Capacity-bounded LRU and larger-value rows are documented separately because
-their bottlenecks are different from the small-value hot path. See
+their bottlenecks are different from the small-value hot path. The 64KiB
+write-only LRU row is the current large-value write-pressure outlier, but it is
+not representative of normal LRU behavior: the same no-TTL, 25%
+resident-capacity LRU matrix shows fast-cache embedded direct at
+`756.93M ops/s` on 64KiB read-only and `1.45M ops/s` on 64KiB `80/20`,
+compared with Moka at `3.31M ops/s` and `1.42M ops/s` respectively. On a
+smaller 4KiB LRU row, fast-cache embedded direct reaches `676.37M ops/s`
+read-only and `26.70M ops/s` on `80/20`.
+
+Large-value embedded GET rows are reported in the default reference-read mode:
+they measure lookup plus borrowed value access, not copying 1MiB into a new
+buffer on every hit. The resulting GB/s is a logical payload rate, not physical
+data throughput. Use `--read-mode copy` in the benchmark harness for
+materialized read comparisons. See
 [fast-cache Embedded Release Matrix](benchmarks/FAST_CACHE_EMBEDDED_RELEASE.md)
 and [benchmarks/README.md](benchmarks/README.md) for harness details and
 reproduction commands.

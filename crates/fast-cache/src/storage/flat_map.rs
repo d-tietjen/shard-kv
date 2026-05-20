@@ -101,6 +101,19 @@ fn shared_bytes_from_reusable_pool(
     }
 }
 
+#[cfg(feature = "mutable-value-slices")]
+#[inline(always)]
+fn shared_bytes_as_unique_slice_mut(value: &mut SharedBytes) -> Option<&mut [u8]> {
+    if !value.is_unique() {
+        return None;
+    }
+
+    // SAFETY: `Bytes::is_unique` is checked while holding `&mut Bytes`, so no
+    // other `Bytes` handle aliases this allocation. The slice is tied to the
+    // mutable borrow of the stored value and cannot outlive it.
+    Some(unsafe { std::slice::from_raw_parts_mut(value.as_ptr().cast_mut(), value.len()) })
+}
+
 #[inline(always)]
 fn recycle_value_into_pool(
     value: SharedBytes,

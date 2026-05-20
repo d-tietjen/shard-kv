@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use fast_cache_benchmarks::backend::{Backend, BackendClass, Op};
+use fast_cache_benchmarks::backend::{Backend, BackendClass, Op, ReadMode};
 use fast_cache_benchmarks::backends::{BACKEND_IDS, BenchmarkCacheConfig, make};
 use fast_cache_benchmarks::clock::FastClock;
 use fast_cache_benchmarks::cpu::{external_cpu_time, process_cpu_time, vcpu};
@@ -97,6 +97,11 @@ struct Args {
     /// Optional CSV path to append results.
     #[arg(long)]
     csv: Option<String>,
+
+    /// GET behavior for backends that can choose between borrowed references
+    /// and materialized copy-out reads.
+    #[arg(long, value_enum, default_value_t = ReadMode::Ref)]
+    read_mode: ReadMode,
 }
 
 fn main() -> Result<(), BoxError> {
@@ -123,7 +128,7 @@ fn main() -> Result<(), BoxError> {
     let workload = Arc::new(Workload::build(&spec));
 
     println!(
-        "curve: value_size={}B mix={} key_pattern={} key_distribution={} vcpu_budget={} submitters={} pipeline_depth={} keys={} duration={}s/cell",
+        "curve: value_size={}B mix={} key_pattern={} key_distribution={} vcpu_budget={} submitters={} pipeline_depth={} keys={} duration={}s/cell read_mode={}",
         args.value_size,
         mix.label(),
         key_pattern.label(),
@@ -132,7 +137,8 @@ fn main() -> Result<(), BoxError> {
         args.submitters,
         args.pipeline_depth,
         args.key_count,
-        args.duration
+        args.duration,
+        args.read_mode.label()
     );
 
     let csv_header = vec![
@@ -142,6 +148,7 @@ fn main() -> Result<(), BoxError> {
         "vcpu_budget",
         "submitters",
         "pipeline_depth",
+        "read_mode",
         "target_rate",
         "achieved_rate",
         "achieved_pct",
@@ -164,7 +171,10 @@ fn main() -> Result<(), BoxError> {
             args.submitters,
             args.addr.as_deref(),
             args.key_count,
-            BenchmarkCacheConfig::default(),
+            BenchmarkCacheConfig {
+                read_mode: args.read_mode,
+                ..BenchmarkCacheConfig::default()
+            },
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -291,6 +301,7 @@ impl RunResult {
             args.vcpu_budget.to_string(),
             args.submitters.to_string(),
             args.pipeline_depth.to_string(),
+            args.read_mode.label().to_string(),
             target_rate.to_string(),
             format!("{:.0}", self.achieved_rate()),
             format!("{:.3}", self.achieved_pct()),

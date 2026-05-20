@@ -10,6 +10,16 @@
 //! write methods are milliseconds relative to the current time; expiration
 //! methods that accept `expire_at_ms` use an absolute Unix timestamp in
 //! milliseconds.
+//!
+//! Read APIs are intentionally split by ownership. `get_ref` borrows the stored
+//! value without copying bytes and keeps the returned guard or slice tied to
+//! the store borrow. `get` returns an owned, materialized `Vec<u8>` for callers
+//! that need to keep the value independently. `get_mut` returns a routed guard
+//! for replacing or removing an existing point value while preserving its TTL.
+//! With the `mutable-value-slices` feature, mutation guards also expose
+//! `value_mut_no_ttl` for in-place `&mut [u8]` access to uniquely-owned no-TTL
+//! values. TTL values are rejected by that API; use `set_slice` when expiry
+//! preservation matters.
 
 mod command;
 mod embedded_store;
@@ -28,17 +38,18 @@ pub use command::{BorrowedCommand, Command};
 #[cfg(feature = "sharded")]
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
 pub use embedded_store::{
-    EmbeddedBatchReadView, EmbeddedKeyRoute, EmbeddedReadSlice, EmbeddedReadView,
-    EmbeddedRouteMode, EmbeddedSessionBatchView, EmbeddedSessionRoute, EmbeddedShardHandle,
-    EmbeddedStore, OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView,
-    OwnedEmbeddedSessionBatchView, OwnedEmbeddedSessionPackedView, OwnedEmbeddedShard,
-    OwnedEmbeddedWorkerReadSession, OwnedEmbeddedWorkerShards, PackedSessionWrite, shift_for,
-    stripe_index,
+    EmbeddedBatchReadView, EmbeddedKeyRoute, EmbeddedReadSlice, EmbeddedReadView, EmbeddedRef,
+    EmbeddedRefMut, EmbeddedRouteMode, EmbeddedSessionBatchView, EmbeddedSessionRoute,
+    EmbeddedShardHandle, EmbeddedStore, OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView,
+    OwnedEmbeddedRefMut, OwnedEmbeddedSessionBatchView, OwnedEmbeddedSessionPackedView,
+    OwnedEmbeddedShard, OwnedEmbeddedWorkerReadSession, OwnedEmbeddedWorkerShards,
+    PackedSessionWrite, shift_for, stripe_index,
 };
 #[cfg(feature = "sharded")]
 pub use embedded_store_sharded::{
     LocalRouteError, LocalStoreAccessError, LocalStoreInstallError,
     WorkerLocalBatchReadView as LocalEmbeddedBatchReadView,
+    WorkerLocalEmbeddedRefMut as LocalEmbeddedRefMut,
     WorkerLocalEmbeddedStore as LocalEmbeddedStore,
     WorkerLocalEmbeddedStoreBootstrap as LocalEmbeddedStoreBootstrap,
     WorkerLocalReadSlice as LocalEmbeddedReadSlice, WorkerLocalReadView as LocalEmbeddedReadView,

@@ -1,8 +1,8 @@
 use crossbeam_utils::CachePadded;
 #[cfg(not(feature = "embedded-read-biased-lock"))]
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(feature = "embedded-read-biased-lock")]
-use rblock::RwLock;
+use rblock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(feature = "telemetry")]
 use std::sync::Arc;
 #[cfg(feature = "telemetry")]
@@ -52,9 +52,9 @@ pub use session_slots::PackedSessionWrite;
 pub(crate) use session_slots::SessionSlotMap;
 pub(crate) use shard::EmbeddedShard;
 pub use views::{
-    EmbeddedBatchReadView, EmbeddedReadSlice, EmbeddedReadView, EmbeddedSessionBatchView,
-    OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView, OwnedEmbeddedSessionBatchView,
-    OwnedEmbeddedSessionPackedView,
+    EmbeddedBatchReadView, EmbeddedReadSlice, EmbeddedReadView, EmbeddedRef, EmbeddedRefMut,
+    EmbeddedSessionBatchView, OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView,
+    OwnedEmbeddedRefMut, OwnedEmbeddedSessionBatchView, OwnedEmbeddedSessionPackedView,
 };
 
 /// Shared embedded in-memory database.
