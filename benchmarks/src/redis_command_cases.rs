@@ -26,18 +26,37 @@ impl RedisCommandFamily {
 }
 
 pub type RedisCommandParts = &'static [&'static str];
+pub type RedisCommandSetup = &'static [RedisCommandParts];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RedisCommandProfile {
+    Small,
+    Large,
+}
+
+impl RedisCommandProfile {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Small => "small",
+            Self::Large => "large",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RedisCommandCase {
     pub family: RedisCommandFamily,
     pub command_name: &'static str,
     pub case_name: &'static str,
+    pub profile: RedisCommandProfile,
     pub parts: RedisCommandParts,
+    pub setup: RedisCommandSetup,
 }
 
 impl RedisCommandCase {
     pub fn matches_filter(self, filter: &str) -> bool {
         filter.eq_ignore_ascii_case("all")
+            || filter.eq_ignore_ascii_case(self.profile.label())
             || filter.eq_ignore_ascii_case(self.family.label())
             || filter.eq_ignore_ascii_case(self.command_name)
             || filter.eq_ignore_ascii_case(self.case_name)
@@ -50,7 +69,28 @@ macro_rules! case {
             family: RedisCommandFamily::$family,
             command_name: $command_name,
             case_name: $case_name,
+            profile: RedisCommandProfile::Small,
             parts: &[$($part),+],
+            setup: &[],
+        }
+    };
+}
+
+macro_rules! large_case {
+    (
+        $family:ident,
+        $command_name:literal,
+        $case_name:literal,
+        [$($part:literal),+ $(,)?],
+        [$([$($setup_part:literal),+ $(,)?]),* $(,)?]
+    ) => {
+        RedisCommandCase {
+            family: RedisCommandFamily::$family,
+            command_name: $command_name,
+            case_name: $case_name,
+            profile: RedisCommandProfile::Large,
+            parts: &[$($part),+],
+            setup: &[$(&[$($setup_part),+] as RedisCommandParts),*],
         }
     };
 }
@@ -415,6 +455,296 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
 ];
 
+pub const REDIS_COMMAND_LARGE_CASES: &[RedisCommandCase] = &[
+    large_case!(
+        String,
+        "SET",
+        "SET large 4KiB value",
+        ["SET", "$key:large-s-4k", "$value:4096"],
+        []
+    ),
+    large_case!(
+        String,
+        "GET",
+        "GET large 4KiB value",
+        ["GET", "$key:large-s-4k"],
+        [["SET", "$key:large-s-4k", "$value:4096"]]
+    ),
+    large_case!(
+        String,
+        "SET",
+        "SET large 64KiB value",
+        ["SET", "$key:large-s-64k", "$value:65536"],
+        []
+    ),
+    large_case!(
+        String,
+        "GET",
+        "GET large 64KiB value",
+        ["GET", "$key:large-s-64k"],
+        [["SET", "$key:large-s-64k", "$value:65536"]]
+    ),
+    large_case!(
+        String,
+        "STRLEN",
+        "STRLEN large 64KiB value",
+        ["STRLEN", "$key:large-s-64k"],
+        [["SET", "$key:large-s-64k", "$value:65536"]]
+    ),
+    large_case!(
+        String,
+        "GETRANGE",
+        "GETRANGE large 64KiB full",
+        ["GETRANGE", "$key:large-s-64k", "0", "-1"],
+        [["SET", "$key:large-s-64k", "$value:65536"]]
+    ),
+    large_case!(
+        Key,
+        "KEYS",
+        "KEYS large keyspace",
+        ["KEYS", "ks:*"],
+        [["MSET", "$kvpairs:4096"]]
+    ),
+    large_case!(
+        Key,
+        "SCAN",
+        "SCAN large keyspace",
+        ["SCAN", "0", "MATCH", "ks:*", "COUNT", "1000"],
+        [["MSET", "$kvpairs:4096"]]
+    ),
+    large_case!(
+        Hash,
+        "HGETALL",
+        "HGETALL large 1K fields",
+        ["HGETALL", "$key:large-h"],
+        [
+            ["DEL", "$key:large-h"],
+            ["HSET", "$key:large-h", "$hash-fields:1024"]
+        ]
+    ),
+    large_case!(
+        Hash,
+        "HKEYS",
+        "HKEYS large 1K fields",
+        ["HKEYS", "$key:large-h"],
+        [
+            ["DEL", "$key:large-h"],
+            ["HSET", "$key:large-h", "$hash-fields:1024"]
+        ]
+    ),
+    large_case!(
+        Hash,
+        "HVALS",
+        "HVALS large 1K fields",
+        ["HVALS", "$key:large-h"],
+        [
+            ["DEL", "$key:large-h"],
+            ["HSET", "$key:large-h", "$hash-fields:1024"]
+        ]
+    ),
+    large_case!(
+        Hash,
+        "HSCAN",
+        "HSCAN large 1K fields",
+        ["HSCAN", "$key:large-h", "0", "MATCH", "*", "COUNT", "1000"],
+        [
+            ["DEL", "$key:large-h"],
+            ["HSET", "$key:large-h", "$hash-fields:1024"]
+        ]
+    ),
+    large_case!(
+        Hash,
+        "HLEN",
+        "HLEN large 1K fields",
+        ["HLEN", "$key:large-h"],
+        [
+            ["DEL", "$key:large-h"],
+            ["HSET", "$key:large-h", "$hash-fields:1024"]
+        ]
+    ),
+    large_case!(
+        Hash,
+        "HMGET",
+        "HMGET large selected fields",
+        [
+            "HMGET",
+            "$key:large-h",
+            "f:000000",
+            "f:000511",
+            "missing",
+            "f:001023"
+        ],
+        [
+            ["DEL", "$key:large-h"],
+            ["HSET", "$key:large-h", "$hash-fields:1024"]
+        ]
+    ),
+    large_case!(
+        List,
+        "LRANGE",
+        "LRANGE large 1K full",
+        ["LRANGE", "$key:large-l", "0", "-1"],
+        [
+            ["DEL", "$key:large-l"],
+            ["RPUSH", "$key:large-l", "$list-values:1024"]
+        ]
+    ),
+    large_case!(
+        List,
+        "LLEN",
+        "LLEN large 1K list",
+        ["LLEN", "$key:large-l"],
+        [
+            ["DEL", "$key:large-l"],
+            ["RPUSH", "$key:large-l", "$list-values:1024"]
+        ]
+    ),
+    large_case!(
+        List,
+        "LINDEX",
+        "LINDEX large middle",
+        ["LINDEX", "$key:large-l", "512"],
+        [
+            ["DEL", "$key:large-l"],
+            ["RPUSH", "$key:large-l", "$list-values:1024"]
+        ]
+    ),
+    large_case!(
+        Set,
+        "SCARD",
+        "SCARD large 1K set",
+        ["SCARD", "$key:large-set-a"],
+        [
+            ["DEL", "$key:large-set-a"],
+            ["SADD", "$key:large-set-a", "$members:1024"]
+        ]
+    ),
+    large_case!(
+        Set,
+        "SMEMBERS",
+        "SMEMBERS large 1K set",
+        ["SMEMBERS", "$key:large-set-a"],
+        [
+            ["DEL", "$key:large-set-a"],
+            ["SADD", "$key:large-set-a", "$members:1024"]
+        ]
+    ),
+    large_case!(
+        Set,
+        "SSCAN",
+        "SSCAN large 1K set",
+        [
+            "SSCAN",
+            "$key:large-set-a",
+            "0",
+            "MATCH",
+            "*",
+            "COUNT",
+            "1000"
+        ],
+        [
+            ["DEL", "$key:large-set-a"],
+            ["SADD", "$key:large-set-a", "$members:1024"]
+        ]
+    ),
+    large_case!(
+        Set,
+        "SRANDMEMBER",
+        "SRANDMEMBER large 32",
+        ["SRANDMEMBER", "$key:large-set-a", "32"],
+        [
+            ["DEL", "$key:large-set-a"],
+            ["SADD", "$key:large-set-a", "$members:1024"]
+        ]
+    ),
+    large_case!(
+        Set,
+        "SMISMEMBER",
+        "SMISMEMBER large selected",
+        [
+            "SMISMEMBER",
+            "$key:large-set-a",
+            "m:000000",
+            "missing",
+            "m:001023"
+        ],
+        [
+            ["DEL", "$key:large-set-a"],
+            ["SADD", "$key:large-set-a", "$members:1024"]
+        ]
+    ),
+    large_case!(
+        ZSet,
+        "ZRANGE",
+        "ZRANGE large 1K full",
+        ["ZRANGE", "$key:large-z", "0", "-1"],
+        [
+            ["DEL", "$key:large-z"],
+            ["ZADD", "$key:large-z", "$zitems:1024"]
+        ]
+    ),
+    large_case!(
+        ZSet,
+        "ZRANGE",
+        "ZRANGE large 100 WITHSCORES",
+        ["ZRANGE", "$key:large-z", "0", "99", "WITHSCORES"],
+        [
+            ["DEL", "$key:large-z"],
+            ["ZADD", "$key:large-z", "$zitems:1024"]
+        ]
+    ),
+    large_case!(
+        ZSet,
+        "ZCOUNT",
+        "ZCOUNT large 1K all",
+        ["ZCOUNT", "$key:large-z", "0", "2000"],
+        [
+            ["DEL", "$key:large-z"],
+            ["ZADD", "$key:large-z", "$zitems:1024"]
+        ]
+    ),
+    large_case!(
+        ZSet,
+        "ZRANK",
+        "ZRANK large middle",
+        ["ZRANK", "$key:large-z", "m:000512"],
+        [
+            ["DEL", "$key:large-z"],
+            ["ZADD", "$key:large-z", "$zitems:1024"]
+        ]
+    ),
+    large_case!(
+        ZSet,
+        "ZREVRANK",
+        "ZREVRANK large middle",
+        ["ZREVRANK", "$key:large-z", "m:000512"],
+        [
+            ["DEL", "$key:large-z"],
+            ["ZADD", "$key:large-z", "$zitems:1024"]
+        ]
+    ),
+    large_case!(
+        ZSet,
+        "ZSCORE",
+        "ZSCORE large middle",
+        ["ZSCORE", "$key:large-z", "m:000512"],
+        [
+            ["DEL", "$key:large-z"],
+            ["ZADD", "$key:large-z", "$zitems:1024"]
+        ]
+    ),
+    large_case!(
+        ZSet,
+        "ZSCAN",
+        "ZSCAN large 1K zset",
+        ["ZSCAN", "$key:large-z", "0", "MATCH", "*", "COUNT", "1000"],
+        [
+            ["DEL", "$key:large-z"],
+            ["ZADD", "$key:large-z", "$zitems:1024"]
+        ]
+    ),
+];
+
 pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "APPEND",
     "BLMOVE",
@@ -516,7 +846,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{BENCHMARKED_COMMANDS, REDIS_COMMAND_CASES};
+    use super::{BENCHMARKED_COMMANDS, REDIS_COMMAND_CASES, REDIS_COMMAND_LARGE_CASES};
 
     #[test]
     fn benchmark_cases_cover_declared_commands() {
@@ -544,7 +874,10 @@ mod tests {
     #[test]
     fn benchmark_case_names_are_unique() {
         let mut names = BTreeSet::new();
-        for case in REDIS_COMMAND_CASES {
+        for case in REDIS_COMMAND_CASES
+            .iter()
+            .chain(REDIS_COMMAND_LARGE_CASES.iter())
+        {
             assert!(
                 names.insert(case.case_name),
                 "duplicate Redis command benchmark case: {}",
@@ -553,6 +886,22 @@ mod tests {
             assert!(
                 !case.parts.is_empty(),
                 "{} has no command parts",
+                case.case_name
+            );
+        }
+    }
+
+    #[test]
+    fn large_benchmark_cases_are_in_large_profile() {
+        assert!(
+            !REDIS_COMMAND_LARGE_CASES.is_empty(),
+            "large command benchmark profile is empty"
+        );
+        for case in REDIS_COMMAND_LARGE_CASES {
+            assert!(case.matches_filter("large"));
+            assert!(
+                case.case_name.contains("large"),
+                "large profile case should be clearly labeled: {}",
                 case.case_name
             );
         }

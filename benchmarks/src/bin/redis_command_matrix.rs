@@ -3,7 +3,7 @@
 //! This intentionally lives in the benchmark harness instead of Criterion so
 //! the same executable can compare fast-cache, Redis, and Valkey over TCP.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::TcpStream;
@@ -12,7 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use fast_cache_benchmarks::redis_command_cases::{REDIS_COMMAND_CASES, RedisCommandCase};
+use fast_cache_benchmarks::redis_command_cases::{
+    REDIS_COMMAND_CASES, REDIS_COMMAND_LARGE_CASES, RedisCommandCase,
+};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
@@ -114,7 +116,7 @@ fn main() -> Result<(), BoxError> {
     if let Some(csv) = csv.as_mut() {
         writeln!(
             csv,
-            "target,family,command,case,clients,duration_s,ops,ops_per_sec,avg_us,errors"
+            "target,family,command,case,clients,duration_s,ops,ops_per_sec,avg_us,errors,profile"
         )?;
     }
 
@@ -142,7 +144,7 @@ fn main() -> Result<(), BoxError> {
             if let Some(csv) = csv.as_mut() {
                 writeln!(
                     csv,
-                    "{},{},{},{},{},{},{},{:.3},{:.3},{}",
+                    "{},{},{},{},{},{},{},{:.3},{:.3},{},{}",
                     target.name,
                     case.family.label(),
                     case.command_name,
@@ -152,7 +154,8 @@ fn main() -> Result<(), BoxError> {
                     stats.ops,
                     stats.ops_per_sec(duration),
                     stats.avg_us(),
-                    stats.errors
+                    stats.errors,
+                    case.profile.label()
                 )?;
             }
         }
@@ -211,6 +214,19 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
     if filter.eq_ignore_ascii_case("all") {
         return REDIS_COMMAND_CASES.to_vec();
     }
+    if filter.eq_ignore_ascii_case("large") || filter.eq_ignore_ascii_case("profile:large") {
+        return REDIS_COMMAND_LARGE_CASES.to_vec();
+    }
+    if filter.eq_ignore_ascii_case("small") || filter.eq_ignore_ascii_case("profile:small") {
+        return REDIS_COMMAND_CASES.to_vec();
+    }
+    if filter.eq_ignore_ascii_case("extended") {
+        return REDIS_COMMAND_CASES
+            .iter()
+            .chain(REDIS_COMMAND_LARGE_CASES.iter())
+            .copied()
+            .collect();
+    }
 
     if let Some(family) = filter.strip_prefix("family:") {
         return REDIS_COMMAND_CASES
@@ -242,6 +258,12 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
         .iter()
         .copied()
         .filter(|case| filter.eq_ignore_ascii_case(case.case_name))
+        .chain(
+            REDIS_COMMAND_LARGE_CASES
+                .iter()
+                .copied()
+                .filter(|case| filter.eq_ignore_ascii_case(case.case_name)),
+        )
         .collect()
 }
 
@@ -285,6 +307,7 @@ fn run_worker(
 ) -> Result<Vec<CaseStats>, BoxError> {
     let mut conn = RespConn::connect(addr)?;
     let suffix = format!("worker:{worker_id}");
+    run_setup(&mut conn, cases, &suffix)?;
     if !warmup.is_zero() {
         run_script(&mut conn, cases, &suffix, Instant::now() + warmup, None)?;
     }
@@ -293,6 +316,21 @@ fn run_worker(
     let mut stats = vec![CaseStats::default(); cases.len()];
     run_script(&mut conn, cases, &suffix, deadline, Some(&mut stats))?;
     Ok(stats)
+}
+
+fn run_setup(
+    conn: &mut RespConn,
+    cases: &[RedisCommandCase],
+    suffix: &str,
+) -> Result<(), BoxError> {
+    for case in cases {
+        for parts in case.setup {
+            if conn.execute(parts, suffix)? {
+                return Err(format!("setup for `{}` produced a RESP error", case.case_name).into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_script(
@@ -327,7 +365,13 @@ struct RespConn {
     reader: BufReader<TcpStream>,
     writer: BufWriter<TcpStream>,
     line: Vec<u8>,
-    rewritten_parts: Vec<String>,
+    command_cache: HashMap<CommandCacheKey, Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct CommandCacheKey {
+    ptr: usize,
+    len: usize,
 }
 
 impl RespConn {
@@ -340,7 +384,7 @@ impl RespConn {
             reader,
             writer,
             line: Vec::with_capacity(128),
-            rewritten_parts: Vec::with_capacity(16),
+            command_cache: HashMap::new(),
         })
     }
 
@@ -351,17 +395,19 @@ impl RespConn {
     }
 
     fn write_command(&mut self, parts: &[&str], suffix: &str) -> Result<(), BoxError> {
-        self.rewritten_parts.clear();
-        for part in parts {
-            self.rewritten_parts.push(rewrite_part(part, suffix));
+        let cache_key = CommandCacheKey {
+            ptr: parts.as_ptr() as usize,
+            len: parts.len(),
+        };
+        if !self.command_cache.contains_key(&cache_key) {
+            let encoded = encode_command(parts, suffix)?;
+            self.command_cache.insert(cache_key, encoded);
         }
-
-        write!(self.writer, "*{}\r\n", self.rewritten_parts.len())?;
-        for part in &self.rewritten_parts {
-            write!(self.writer, "${}\r\n", part.len())?;
-            self.writer.write_all(part.as_bytes())?;
-            self.writer.write_all(b"\r\n")?;
-        }
+        let encoded = self
+            .command_cache
+            .get(&cache_key)
+            .expect("encoded command was just cached");
+        self.writer.write_all(encoded)?;
         Ok(())
     }
 
@@ -448,11 +494,103 @@ impl RespConn {
     }
 }
 
+fn encode_command(parts: &[&str], suffix: &str) -> Result<Vec<u8>, BoxError> {
+    let mut rewritten_parts = Vec::with_capacity(parts.len());
+    for part in parts {
+        append_rewritten_parts(part, suffix, &mut rewritten_parts)?;
+    }
+
+    let bytes = rewritten_parts
+        .iter()
+        .map(String::len)
+        .sum::<usize>()
+        .saturating_add(rewritten_parts.len().saturating_mul(16))
+        .saturating_add(32);
+    let mut encoded = Vec::with_capacity(bytes);
+    write!(encoded, "*{}\r\n", rewritten_parts.len())?;
+    for part in &rewritten_parts {
+        write!(encoded, "${}\r\n", part.len())?;
+        encoded.write_all(part.as_bytes())?;
+        encoded.write_all(b"\r\n")?;
+    }
+    Ok(encoded)
+}
+
+fn append_rewritten_parts(part: &str, suffix: &str, out: &mut Vec<String>) -> Result<(), BoxError> {
+    if let Some(key) = part.strip_prefix("$key:") {
+        out.push(rewrite_key(key, suffix));
+        return Ok(());
+    }
+    if let Some(size) = part.strip_prefix("$value:") {
+        out.push(make_value(parse_token_count("$value", size)?));
+        return Ok(());
+    }
+    if let Some(count) = part.strip_prefix("$members:") {
+        for index in 0..parse_token_count("$members", count)? {
+            out.push(format!("m:{index:06}"));
+        }
+        return Ok(());
+    }
+    if let Some(count) = part.strip_prefix("$list-values:") {
+        for index in 0..parse_token_count("$list-values", count)? {
+            out.push(format!("v:{index:06}"));
+        }
+        return Ok(());
+    }
+    if let Some(count) = part.strip_prefix("$hash-fields:") {
+        for index in 0..parse_token_count("$hash-fields", count)? {
+            out.push(format!("f:{index:06}"));
+            out.push(format!("v:{index:06}"));
+        }
+        return Ok(());
+    }
+    if let Some(count) = part.strip_prefix("$zitems:") {
+        for index in 0..parse_token_count("$zitems", count)? {
+            out.push(index.to_string());
+            out.push(format!("m:{index:06}"));
+        }
+        return Ok(());
+    }
+    if let Some(count) = part.strip_prefix("$kvpairs:") {
+        for index in 0..parse_token_count("$kvpairs", count)? {
+            out.push(rewrite_key(&format!("ks:{index:06}"), suffix));
+            out.push(format!("v:{index:06}"));
+        }
+        return Ok(());
+    }
+
+    out.push(rewrite_part(part, suffix));
+    Ok(())
+}
+
+fn parse_token_count(token: &str, raw: &str) -> Result<usize, BoxError> {
+    let count = raw
+        .parse::<usize>()
+        .map_err(|err| format!("{token} count `{raw}` is invalid: {err}"))?;
+    if count == 0 {
+        return Err(format!("{token} count must be greater than zero").into());
+    }
+    Ok(count)
+}
+
+fn make_value(size: usize) -> String {
+    const PATTERN: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ._";
+    let mut value = Vec::with_capacity(size);
+    for index in 0..size {
+        value.push(PATTERN[index % PATTERN.len()]);
+    }
+    String::from_utf8(value).expect("benchmark value pattern is ASCII")
+}
+
 fn rewrite_part(part: &str, suffix: &str) -> String {
     match is_probable_key(part) {
-        true => format!("{part}:{{{suffix}}}"),
+        true => rewrite_key(part, suffix),
         false => part.to_string(),
     }
+}
+
+fn rewrite_key(key: &str, suffix: &str) -> String {
+    format!("{key}:{{{suffix}}}")
 }
 
 fn is_probable_key(part: &str) -> bool {

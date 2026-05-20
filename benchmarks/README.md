@@ -32,8 +32,11 @@ The default script starts Redis and Valkey from
 `benchmarks/docker/compose.yml`, starts `fast-cache-server` with the
 `redis-server` feature, and writes
 `benchmarks/results/redis-command-matrix.csv`. Use `CASES=hash,zset` or
-`CASES=HSET,ZRANGE` for focused runs, and `CLIENTS`, `WARMUP`, and `DURATION`
-to scale the run. Set `FAIL_ON_ERROR=1` when the matrix should fail on any RESP
+`CASES=HSET,ZRANGE` for focused runs. `CASES=large` runs the production-shaped
+profile with larger values, 4K-key keyspace scans, and 1K-element
+hash/list/set/zset objects. `CLIENTS`, `WARMUP`, and `DURATION` scale the run;
+for example, `CASES=large CLIENTS=16 DURATION=10` is a useful higher-pressure
+command pass. Set `FAIL_ON_ERROR=1` when the matrix should fail on any RESP
 error reply instead of recording the error count in the output.
 
 ## Native CPU Builds

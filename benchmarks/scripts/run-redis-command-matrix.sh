@@ -9,6 +9,7 @@
 # Useful overrides:
 #   TARGETS=fast-cache=127.0.0.1:6383,redis=127.0.0.1:6379,valkey=127.0.0.1:6381
 #   CASES=hash,zset
+#   CASES=large
 #   CLIENTS=4
 #   WARMUP=2
 #   DURATION=10
