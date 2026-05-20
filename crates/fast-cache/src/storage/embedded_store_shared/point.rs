@@ -149,6 +149,31 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         }
     }
 
+    /// Inserts a point-key value only when the key is absent or expired.
+    #[inline(always)]
+    pub fn insert_if_absent(&self, key: SharedBytes, value: SharedBytes) -> bool {
+        let route = self.route_key(key.as_ref());
+        let mut guard = self.stripe(route.shard_id).write();
+        #[cfg(feature = "no-ttl")]
+        let exists = guard
+            .entry_expire_at_hashed_no_ttl(route.key_hash, key.as_ref())
+            .is_some();
+        #[cfg(not(feature = "no-ttl"))]
+        let exists = guard
+            .entry_expire_at_hashed(route.key_hash, key.as_ref(), ttl_now_millis())
+            .is_some();
+        if exists {
+            return false;
+        }
+        guard.set_value_bytes_hashed_no_ttl(
+            self.inner.route_mode,
+            route.key_hash,
+            key.as_ref(),
+            value,
+        );
+        true
+    }
+
     /// Inserts or replaces a point-key value from borrowed byte slices.
     #[inline(always)]
     pub fn insert_slice(&self, key: &[u8], value: &[u8]) {
@@ -159,6 +184,26 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             key,
             value,
         );
+    }
+
+    /// Inserts a borrowed point-key value only when the key is absent or expired.
+    #[inline(always)]
+    pub fn insert_slice_if_absent(&self, key: &[u8], value: &[u8]) -> bool {
+        let route = self.route_key(key);
+        let mut guard = self.stripe(route.shard_id).write();
+        #[cfg(feature = "no-ttl")]
+        let exists = guard
+            .entry_expire_at_hashed_no_ttl(route.key_hash, key)
+            .is_some();
+        #[cfg(not(feature = "no-ttl"))]
+        let exists = guard
+            .entry_expire_at_hashed(route.key_hash, key, ttl_now_millis())
+            .is_some();
+        if exists {
+            return false;
+        }
+        guard.set_slice_hashed_no_ttl(self.inner.route_mode, route.key_hash, key, value);
+        true
     }
 
     /// Inserts or replaces a prepared point-key value from borrowed byte slices
@@ -210,6 +255,49 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 expire_at_ms,
                 now_ms,
             );
+        }
+    }
+
+    /// Inserts a borrowed point-key value with an optional TTL only when the
+    /// key is absent or expired.
+    #[inline(always)]
+    pub fn insert_slice_if_absent_with_ttl(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        ttl_ms: Option<u64>,
+    ) -> bool {
+        #[cfg(feature = "no-ttl")]
+        {
+            assert!(
+                ttl_ms.is_none(),
+                "fast-cache/no-ttl builds do not support shared-store TTL writes"
+            );
+            self.insert_slice_if_absent(key, value)
+        }
+        #[cfg(not(feature = "no-ttl"))]
+        {
+            let Some(ttl_ms) = ttl_ms else {
+                return self.insert_slice_if_absent(key, value);
+            };
+            let now_ms = ttl_now_millis();
+            let route = self.route_key(key);
+            let mut guard = self.stripe(route.shard_id).write();
+            if guard
+                .entry_expire_at_hashed(route.key_hash, key, now_ms)
+                .is_some()
+            {
+                return false;
+            }
+            guard.set_slice_hashed(
+                self.inner.route_mode,
+                route.key_hash,
+                key,
+                value,
+                Some(now_ms.saturating_add(ttl_ms)),
+                now_ms,
+            );
+            true
         }
     }
 
@@ -271,6 +359,70 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 key,
                 ttl_now_millis(),
             )
+        }
+    }
+
+    /// Removes a point-key value only when the stored bytes match `expected`.
+    #[inline(always)]
+    pub fn remove_if_value_eq(&self, key: &[u8], expected: &[u8]) -> bool {
+        let route = self.route_key(key);
+        let mut guard = self.stripe(route.shard_id).write();
+        #[cfg(feature = "no-ttl")]
+        let (matches, now_ms) = (
+            guard
+                .get_ref_hashed_shared_no_ttl(route.key_hash, key)
+                .is_some_and(|value| value == expected),
+            0,
+        );
+        #[cfg(not(feature = "no-ttl"))]
+        let (matches, now_ms) = {
+            let now_ms = ttl_now_millis();
+            let matches = guard
+                .entry_expire_at_hashed(route.key_hash, key, now_ms)
+                .is_some()
+                && guard
+                    .get_ref_hashed_shared(route.key_hash, key, now_ms)
+                    .is_some_and(|value| value == expected);
+            (matches, now_ms)
+        };
+        if !matches {
+            return false;
+        }
+        guard.remove_value_hashed(route.key_hash, key, now_ms);
+        true
+    }
+
+    /// Updates a point-key TTL only when the stored bytes match `expected`.
+    #[inline(always)]
+    pub fn update_ttl_if_value_eq(&self, key: &[u8], expected: &[u8], ttl_ms: u64) -> bool {
+        #[cfg(feature = "no-ttl")]
+        {
+            let _ = (key, expected, ttl_ms);
+            panic!("fast-cache/no-ttl builds do not support shared-store TTL writes");
+        }
+        #[cfg(not(feature = "no-ttl"))]
+        {
+            let now_ms = ttl_now_millis();
+            let route = self.route_key(key);
+            let mut guard = self.stripe(route.shard_id).write();
+            let matches = guard
+                .entry_expire_at_hashed(route.key_hash, key, now_ms)
+                .is_some()
+                && guard
+                    .get_ref_hashed_shared(route.key_hash, key, now_ms)
+                    .is_some_and(|value| value == expected);
+            if !matches {
+                return false;
+            }
+            guard.set_slice_hashed(
+                self.inner.route_mode,
+                route.key_hash,
+                key,
+                expected,
+                Some(now_ms.saturating_add(ttl_ms)),
+                now_ms,
+            );
+            true
         }
     }
 

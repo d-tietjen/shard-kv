@@ -1,10 +1,12 @@
 //! Embedded storage APIs, routing helpers, batch payloads, and runtime stats.
 //!
-//! Most applications start with [`EmbeddedStore`], which is a shared, sharded
-//! key-value database handle. Applications that need cheap clones of one
-//! cross-worker handle can use [`SharedEmbeddedStore`]. Applications that pin
-//! work to owner-local worker threads can use [`LocalEmbeddedStore`] for
-//! exclusive `&mut` access to the shards assigned to that worker.
+//! Most applications should start with [`crate::FastMap`], which is a
+//! cloneable DashMap-like facade over [`SharedEmbeddedStore`]. This module
+//! exposes the lower-level storage surfaces behind that facade. Use
+//! [`EmbeddedStore`] for the richer shared sharded engine used by server mode.
+//! Use [`LocalEmbeddedStore`] when work is pinned to owner-local worker threads
+//! and each worker can access its assigned shards through exclusive `&mut`
+//! handles.
 //!
 //! Keys and values are byte vectors (`Vec<u8>`). TTL arguments accepted by
 //! write methods are milliseconds relative to the current time; expiration

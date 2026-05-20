@@ -8,7 +8,7 @@ paths.
 ```bash
 cargo test -p fast-cache
 cargo test -p fast-cache --features unsafe
-cargo clippy -p fast-cache --features unsafe,fast-point-map,telemetry,server --all-targets --no-deps
+cargo clippy -p fast-cache --features unsafe,experimental-no-ttl-point-hot-path,telemetry,server --all-targets --no-deps
 ```
 
 ## Unsafe Inventory

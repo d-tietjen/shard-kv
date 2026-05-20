@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "server"), allow(dead_code, unused_imports))]
 
+#[cfg(feature = "embedded")]
+pub mod cache;
 #[cfg(not(feature = "embedded"))]
 compile_error!(
     "fast-cache currently requires the default `embedded` feature; build with default features enabled"
@@ -11,6 +13,8 @@ pub mod commands;
 pub mod config;
 #[cfg(feature = "embedded")]
 pub mod cuda;
+#[cfg(feature = "embedded")]
+pub mod embedded;
 #[cfg(feature = "embedded")]
 pub mod persistence;
 #[cfg(feature = "embedded")]
@@ -27,6 +31,10 @@ mod error;
 #[cfg(all(target_os = "linux", feature = "monoio"))]
 mod monoio_runtime;
 
+#[cfg(feature = "embedded")]
+pub use cache::{
+    CacheOptions, FastCache, FastCacheWithShards, FastMap, FastMapWithShards, SharedCache,
+};
 #[cfg(feature = "embedded")]
 pub use error::{FastCacheError, Result};
 #[cfg(all(feature = "telemetry", feature = "embedded"))]

@@ -205,7 +205,7 @@ impl FlatMap {
     }
 
     pub fn snapshot_entries(&self, now_ms: u64) -> Vec<StoredEntry> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.snapshot_entries();
         }

@@ -10,33 +10,64 @@ paths are available only when the `unsafe` feature is enabled.
 
 ## Embedded Use
 
-Use [`storage::EmbeddedStore`] when several threads should share one cache
-handle. Keys and values are byte vectors. TTL arguments are milliseconds; pass
-`None` for persistent values.
+Use [`FastMap`] when several threads should share one cloneable map-like cache
+handle.
+Keys and values are byte strings. TTL arguments are milliseconds; pass `None`
+for persistent values.
 
 ```rust
-use fast_cache::storage::EmbeddedStore;
+use fast_cache::FastMap;
 
-let cache = EmbeddedStore::new(16);
+let cache = FastMap::new();
 
-cache.set(b"user:42".to_vec(), b"ready".to_vec(), None);
+cache.insert_slice(b"user:42", b"ready");
 {
-    let value = cache.get_ref(b"user:42").expect("cache hit");
+    let value = cache.get(b"user:42").expect("cache hit");
     assert_eq!(value.value(), b"ready");
 }
-assert_eq!(cache.get(b"user:42"), Some(b"ready".to_vec()));
+assert_eq!(cache.get_owned(b"user:42").unwrap().as_ref(), b"ready");
 
-cache.delete(b"user:42");
+cache.remove(b"user:42");
 assert!(!cache.exists(b"user:42"));
 ```
+
+For lower-level access, [`storage::EmbeddedStore`] is the richer sharded engine
+used by server mode, and [`storage::LocalEmbeddedStore`] is the owner-local
+sharded API for pinned workers.
+
+The crate is intentionally one package with layered APIs:
+
+| Layer | API | Use when |
+| --- | --- | --- |
+| Shared map/cache | `FastMap` / `FastCache` / `embedded::SharedCache` | You want a cloneable DashMap-like map, process-local lock table, or cache. |
+| Sharded engine | `embedded::ShardedEngine` / `storage::EmbeddedStore` | You want the full embedded engine that also backs Redis-compatible server mode. |
+| Owner-local shards | `embedded::LocalEmbeddedStore` | Workers are pinned and each worker should skip shared lock traffic for its shards. |
+| Server | `server` feature / `fast-cache-server` | Other processes or machines should access the same database over RESP or FCNP. |
 
 Read APIs are split by ownership:
 
 | API | Meaning |
 | --- | --- |
-| `get_ref` | Borrow/reference the stored value without copying bytes. The returned guard or slice must not outlive the store borrow. |
+| `get` / `get_ref` | Borrow/reference the stored value without copying bytes. The returned guard or slice must not outlive the store borrow. |
 | `get_mut` | Borrow the routed point value for replacement or removal while preserving its existing TTL. |
-| `get` | Return an owned, materialized `Vec<u8>` for callers that need to keep the value independently. |
+| `get_owned` | Return a refcounted owned value handle for callers that need to keep the value independently. |
+
+`FastMap` also exposes Redis-style token-lock helpers:
+
+```rust,no_run
+use fast_cache::FastMap;
+
+let locks = FastMap::new();
+
+assert!(locks.try_acquire_lock(b"lock:job:7", b"unique-token", 30_000));
+assert!(!locks.try_acquire_lock(b"lock:job:7", b"other-token", 30_000));
+assert!(!locks.release_lock(b"lock:job:7", b"other-token"));
+assert!(locks.renew_lock(b"lock:job:7", b"unique-token", 30_000));
+assert!(locks.release_lock(b"lock:job:7", b"unique-token"));
+```
+
+In embedded mode these locks coordinate threads in one process. Use server mode
+when locks must coordinate multiple processes or machines.
 
 `EmbeddedStore::get_ref` returns a shard guard, `SharedEmbeddedStore::get_ref`
 returns a shared-handle guard, and `LocalEmbeddedStore::get_ref` returns a
@@ -342,7 +373,10 @@ idempotently and catch up from backlog or snapshot-plus-delta.
   portable default runtime.
 - `telemetry`: integrates with `fast-telemetry`.
 - `cuda`: exposes GPU-facing configuration and transfer descriptors.
-- `fast-point-map`: enables the experimental point-map storage path.
+- `experimental-no-ttl-point-hot-path`: experimental benchmark knob for the
+  internal point-key-only hot path. It implies `no-ttl`, is only intended for
+  TTL-free workloads, and falls back to the normal map when richer storage
+  semantics are needed.
 - `no-ttl`: specializes shared embedded point-key hot paths for TTL-free
   deployments.
 - `unsafe`: opts into reviewed unsafe hot paths for lower overhead.

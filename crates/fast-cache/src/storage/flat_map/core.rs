@@ -4,7 +4,7 @@ impl FlatMap {
     pub fn new() -> Self {
         Self {
             entries: HashTable::new(),
-            #[cfg(feature = "fast-point-map")]
+            #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             fast_points: FastPointMap::default(),
             ttl_entries: 0,
             active_readers: AtomicUsize::new(0),
@@ -47,7 +47,7 @@ impl FlatMap {
 
     #[inline(always)]
     pub fn len(&self) -> usize {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.len();
         }
@@ -76,7 +76,7 @@ impl FlatMap {
 
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.is_empty();
         }
@@ -115,7 +115,7 @@ impl FlatMap {
 
     #[inline(always)]
     pub(super) fn lookup_ref_hashed_lazy(&mut self, hash: u64, key: &[u8]) -> Option<&[u8]> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.get(hash, key).map(|value| value.as_ref());
         }
@@ -141,7 +141,7 @@ impl FlatMap {
         key: &[u8],
         key_tag: u64,
     ) -> Option<&[u8]> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.get(hash, key).map(|value| value.as_ref());
         }
@@ -176,7 +176,7 @@ impl FlatMap {
 
     #[inline(always)]
     pub(super) fn disable_fast_point_map(&mut self) {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             debug_assert!(self.entries.is_empty());
             for fast_entry in self.fast_points.take_entries_and_disable() {

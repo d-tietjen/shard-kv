@@ -45,7 +45,7 @@ impl FlatMap {
         // common case for caches that don't use SET ... EX. Saves a branch
         // and removes the `now_ms` dependency from the hot path.
         if self.ttl_entries == 0 {
-            #[cfg(feature = "fast-point-map")]
+            #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             if let Some(value) = self.fast_points.get(hash, key) {
                 return Some(value.as_ref());
             }
@@ -75,7 +75,7 @@ impl FlatMap {
         now_ms: u64,
     ) -> Option<Option<u64>> {
         if self.ttl_entries == 0 {
-            #[cfg(feature = "fast-point-map")]
+            #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             if self.fast_points.get(hash, key).is_some() {
                 return Some(None);
             }
@@ -99,7 +99,7 @@ impl FlatMap {
         hash: u64,
         key: &[u8],
     ) -> Option<Option<u64>> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.get(hash, key).is_some() {
             return Some(None);
         }
@@ -110,7 +110,7 @@ impl FlatMap {
 
     #[inline(always)]
     pub fn get_ref_hashed_shared_no_ttl(&self, hash: u64, key: &[u8]) -> Option<&[u8]> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value.as_ref());
         }
@@ -126,7 +126,7 @@ impl FlatMap {
         key: &[u8],
         key_tag: u64,
     ) -> Option<&[u8]> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value.as_ref());
         }
@@ -145,7 +145,7 @@ impl FlatMap {
     where
         F: FnMut(&SharedBytes),
     {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             write(value);
             return true;
@@ -167,7 +167,7 @@ impl FlatMap {
         hash: u64,
         key: &[u8],
     ) -> Option<&SharedBytes> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value);
         }
@@ -183,7 +183,7 @@ impl FlatMap {
         key: &[u8],
         key_tag: u64,
     ) -> Option<&SharedBytes> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value);
         }
@@ -199,7 +199,7 @@ impl FlatMap {
         key_tag: u64,
         key_len: usize,
     ) -> Option<&SharedBytes> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get_tagged(hash, key_tag, key_len) {
             return Some(value);
         }
@@ -254,7 +254,7 @@ impl FlatMap {
         key: &[u8],
         now_ms: u64,
     ) -> Option<SharedBytes> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value.clone());
         }
@@ -272,7 +272,7 @@ impl FlatMap {
         key_tag: u64,
         now_ms: u64,
     ) -> Option<SharedBytes> {
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value.clone());
         }

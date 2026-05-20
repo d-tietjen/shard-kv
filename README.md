@@ -21,27 +21,35 @@ fast-cache = "0.1"
 ```
 
 ```rust
-use fast_cache::storage::EmbeddedStore;
+use fast_cache::FastMap;
 
-let cache = EmbeddedStore::new(16);
-cache.set(b"user:42".to_vec(), b"ready".to_vec(), None);
+let cache = FastMap::new();
+cache.insert_slice(b"user:42", b"ready");
 
 {
-    let value = cache.get_ref(b"user:42").expect("cache hit");
+    let value = cache.get(b"user:42").expect("cache hit");
     assert_eq!(value.value(), b"ready");
 }
 cache
     .get_mut(b"user:42")
     .expect("cache hit")
     .set_slice(b"updated");
-assert_eq!(cache.get_ref(b"user:42").unwrap().value(), b"updated");
-assert_eq!(cache.get(b"user:42"), Some(b"updated".to_vec()));
+assert_eq!(cache.get(b"user:42").unwrap().value(), b"updated");
+assert_eq!(cache.get_owned(b"user:42").unwrap().as_ref(), b"updated");
 ```
 
-Use `get_ref` for zero-copy embedded reads when the value is only needed while
-the cache borrow is alive. Use `get` when the caller needs an owned
-materialized `Vec<u8>`. Use `get_mut` when an existing point value should be
-replaced or removed while preserving its TTL.
+`FastMap` is the DashMap-like embedded handle: it is cloneable, internally
+sharded, and exposes borrowed reads through `get`. Use `get_owned` when the
+caller needs a value handle that outlives the shard read guard. Use `get_mut`
+when an existing point value should be replaced or removed while preserving its
+TTL.
+
+The crate keeps the core in one package and exposes layered surfaces:
+`FastMap` for cloneable embedded use, `FastCache` as the cache-flavored alias,
+`embedded::ShardedEngine` for the full
+sharded core used by server mode, `embedded::LocalEmbeddedStore` for pinned
+owner-local workers, and the optional `server` feature for RESP/FCNP access
+from other processes.
 
 For callers that need raw in-place mutation, the opt-in
 `mutable-value-slices` feature adds `value_mut_no_ttl()` to embedded mutation
@@ -252,7 +260,10 @@ This repository now contains the open source crate surface:
   independently. Tokio/std remain the portable defaults.
 - `telemetry`: integrates with `fast-telemetry`.
 - `cuda`: exposes GPU-facing configuration and transfer descriptors.
-- `fast-point-map`: enables the experimental point-map storage path.
+- `experimental-no-ttl-point-hot-path`: experimental benchmark knob for the
+  internal point-key-only hot path. It implies `no-ttl`, is only intended for
+  TTL-free workloads, and falls back to the normal map when richer storage
+  semantics are needed.
 - `no-ttl`: specializes shared embedded point-key hot paths for TTL-free
   deployments.
 - `unsafe`: opts into reviewed unsafe hot paths for lower overhead.

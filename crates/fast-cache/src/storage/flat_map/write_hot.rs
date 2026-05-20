@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(feature = "fast-point-map")]
+#[cfg(feature = "experimental-no-ttl-point-hot-path")]
 use super::fast_point::FastPointMutation;
 
 impl FlatMap {
@@ -47,9 +47,9 @@ impl FlatMap {
         let (key_delta, memory_delta): (isize, isize);
 
         let has_active_readers = self.has_active_readers();
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         let allow_in_place_replace = !has_active_readers && cfg!(feature = "unsafe");
-        #[cfg(feature = "fast-point-map")]
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             if let Some(mutation) = unsafe {
                 self.fast_points

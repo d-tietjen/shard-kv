@@ -43,7 +43,10 @@ server = [
 monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
 cuda = ["sharded"]
 telemetry = ["embedded"]
-fast-point-map = []
+# Experimental point-key-only hot path for TTL-free workloads. This implies
+# `no-ttl`; any operation that needs TTL/object/memory-policy semantics drains
+# the experimental point table back into the normal flat map.
+experimental-no-ttl-point-hot-path = ["no-ttl"]
 # Specialize shared embedded point-key hot paths for deployments that never
 # create TTL entries. TTL-oriented shared-store APIs are unsupported in this
 # build, while broader server/Redis TTL code remains unchanged.

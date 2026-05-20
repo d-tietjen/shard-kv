@@ -214,7 +214,7 @@ const MAX_REUSABLE_VALUE_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Default)]
 pub struct FlatMap {
     entries: HashTable<FlatEntry>,
-    #[cfg(feature = "fast-point-map")]
+    #[cfg(feature = "experimental-no-ttl-point-hot-path")]
     fast_points: FastPointMap,
     ttl_entries: usize,
     active_readers: AtomicUsize,
@@ -248,7 +248,7 @@ enum DeleteReason {
     Expired,
     Evicted,
 }
-#[cfg(feature = "fast-point-map")]
+#[cfg(feature = "experimental-no-ttl-point-hot-path")]
 mod fast_point;
 
 mod core;
@@ -258,7 +258,7 @@ mod write;
 mod write_hot;
 mod write_local;
 
-#[cfg(feature = "fast-point-map")]
+#[cfg(feature = "experimental-no-ttl-point-hot-path")]
 use fast_point::FastPointMap;
 
 #[cfg(test)]
