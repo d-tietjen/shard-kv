@@ -354,12 +354,19 @@ cargo run --release -p fast-cache-benchmarks --bin saturation -- \
 ```
 
 Other reference-read baselines are exposed as explicit backend ids, such as
-`fc-shared-ref` and `dashmap-ref`.
+`fc-shared-ref`, `fc-shared-prepared-ref`, and `dashmap-ref`.
 
 Shared-handle fast-cache backends default to `4 * --vcpu-budget` lock stripes.
 That is the recommended comparison shape for DashMap-style shared access. Use
 the `fc-shared-worker-stripes` family when you specifically need the older
 one-stripe-per-worker baseline.
+
+Prepared-key shared baselines are exposed as `fc-shared-prepared` and
+`fc-shared-prepared-ref`; they precompute route/hash metadata for repeated
+point-key workloads. `fc-shared-copy-unlocked` is an explicit A/B backend that
+clones stored `Bytes` under the read lock and copies after unlocking.
+Build the benchmark crate with `--features no-ttl` to remove shared-store TTL
+checks for TTL-free point-key comparisons.
 
 ### fc-embed-unsafe (reviewed unsafe hot paths)
 

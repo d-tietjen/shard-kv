@@ -66,9 +66,14 @@ OUT_DIR=benchmarks/results/lru_buffer_reuse_20260518_0521 \
 - `fc-embed` is the owner-local direct embedded path. This is the deployment
   model where each worker owns its local shard slab.
 - `fc-shared` is the shared-handle comparison path. It uses the recommended
-  shared stripe count of `4 * vcpu_budget` so shared-handle rows are not
-  under-striped. Use `fc-shared-worker-stripes` for the older one-stripe-per
-  worker comparison shape.
+  shared stripe count of `4 * max(vcpu_budget, clients)` so shared-handle rows
+  are not under-striped. Use `fc-shared-worker-stripes` for the older
+  one-stripe-per-worker comparison shape.
+- `fc-shared-prepared` / `fc-shared-prepared-ref` are prepared-key A/B rows for
+  repeated point-key access. `fc-shared-copy-unlocked` keeps copy-after-unlock
+  as an explicit experiment; it is not the default shared copy path.
+- Build the benchmark crate with `--features no-ttl` for TTL-free shared-store
+  point-key runs that remove shared hot-path TTL checks.
 - Large-value fast-cache GET GB/s uses `--read-mode ref` unless noted. That is
   a logical payload rate, computed as successful operations multiplied by value
   size. It is not physical data throughput because `get_ref` does not copy the

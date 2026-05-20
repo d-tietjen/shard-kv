@@ -13,6 +13,9 @@ default = []
 # Build the fc-embed backend on top of fast-cache's reviewed unsafe hot paths.
 # Run the bench twice (default + --features unsafe) to get both rows.
 unsafe = ["fast-cache/unsafe"]
+# Build fast-cache's shared embedded hot path in no-TTL mode for point-key
+# workloads that never create expiring entries.
+no-ttl = ["fast-cache/no-ttl"]
 # Rebuild fast-cache's shared embedded store with parking_lot::RwLock stripes
 # for cache-level lock A/B runs against the default read-biased lock.
 shared-parking-lot-lock = ["fast-cache/shared-parking-lot-lock"]

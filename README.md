@@ -253,6 +253,8 @@ This repository now contains the open source crate surface:
 - `telemetry`: integrates with `fast-telemetry`.
 - `cuda`: exposes GPU-facing configuration and transfer descriptors.
 - `fast-point-map`: enables the experimental point-map storage path.
+- `no-ttl`: specializes shared embedded point-key hot paths for TTL-free
+  deployments.
 - `unsafe`: opts into reviewed unsafe hot paths for lower overhead.
 
 ## Development

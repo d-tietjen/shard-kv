@@ -81,6 +81,52 @@ fn entry_and_mutation_guards_update_values() {
 }
 
 #[test]
+fn value_bytes_clone_outlives_shared_lock_and_updates() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    store.insert_slice(b"alpha", b"first");
+
+    let value = store
+        .get_value_bytes(b"alpha")
+        .expect("stored bytes should clone");
+    store.insert_slice(b"alpha", b"second");
+
+    assert_eq!(value.as_ref(), b"first");
+    assert_eq!(store.get(b"alpha").unwrap().value(), b"second");
+}
+
+#[test]
+fn prepared_point_keys_read_and_write_shared_values() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    let prepared = store.prepare_point_key(b"prepared-key");
+
+    store.insert_prepared_slice(&prepared, b"first");
+    assert_eq!(
+        store
+            .get_prepared_ref(&prepared)
+            .expect("prepared value")
+            .value(),
+        b"first"
+    );
+
+    store.insert_prepared_slice(&prepared, b"second");
+    assert_eq!(
+        store
+            .get_prepared_value_bytes(&prepared)
+            .expect("prepared bytes")
+            .as_ref(),
+        b"second"
+    );
+}
+
+#[cfg(feature = "no-ttl")]
+#[test]
+#[should_panic(expected = "fast-cache/no-ttl builds do not support shared-store TTL writes")]
+fn no_ttl_feature_rejects_shared_ttl_writes() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    store.insert_slice_with_ttl(b"ttl-key", b"value", Some(1000));
+}
+
+#[test]
 fn fair_lock_policy_roundtrips() {
     let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig {
         lock_policy: SharedEmbeddedLockPolicy::Fair,
@@ -92,19 +138,21 @@ fn fair_lock_policy_roundtrips() {
     assert_eq!(store.get(b"fair-key").unwrap().value(), b"updated");
 }
 
+#[cfg(not(feature = "no-ttl"))]
 #[test]
 fn ttl_values_are_filtered_from_shared_reads() {
     let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
-    store.insert_slice_with_ttl(b"ttl-key", b"value", Some(2));
+    store.insert_slice_with_ttl(b"ttl-key", b"value", Some(25));
     assert_eq!(store.get(b"ttl-key").unwrap().value(), b"value");
 
-    std::thread::sleep(std::time::Duration::from_millis(5));
+    std::thread::sleep(std::time::Duration::from_millis(50));
 
     assert!(store.get(b"ttl-key").is_none());
     assert!(!store.contains_key(b"ttl-key"));
     assert!(store.get_mut(b"ttl-key").is_none());
 }
 
+#[cfg(not(feature = "no-ttl"))]
 #[test]
 fn shared_get_mut_preserves_existing_ttl() {
     let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
@@ -135,7 +183,7 @@ fn shared_get_mut_value_mut_no_ttl_updates_bytes_in_place() {
     assert_eq!(store.get(b"alpha").unwrap().value(), b"two");
 }
 
-#[cfg(feature = "mutable-value-slices")]
+#[cfg(all(feature = "mutable-value-slices", not(feature = "no-ttl")))]
 #[test]
 fn shared_get_mut_value_mut_no_ttl_rejects_ttl_values() {
     let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
@@ -175,7 +223,7 @@ fn shared_get_mut_value_mut_no_ttl_rejects_shared_value_bytes() {
     assert_eq!(store.get(key.as_ref()).unwrap().value(), b"two");
 }
 
-#[cfg(feature = "mutable-value-slices")]
+#[cfg(all(feature = "mutable-value-slices", not(feature = "no-ttl")))]
 #[test]
 fn shared_get_mut_value_mut_no_ttl_does_not_resurrect_expired_guard() {
     let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());

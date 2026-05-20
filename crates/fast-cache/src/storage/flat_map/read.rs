@@ -94,6 +94,21 @@ impl FlatMap {
     }
 
     #[inline(always)]
+    pub(crate) fn entry_expire_at_hashed_no_ttl(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+    ) -> Option<Option<u64>> {
+        #[cfg(feature = "fast-point-map")]
+        if self.fast_points.get(hash, key).is_some() {
+            return Some(None);
+        }
+        self.entries
+            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .map(|_| None)
+    }
+
+    #[inline(always)]
     pub fn get_ref_hashed_shared_no_ttl(&self, hash: u64, key: &[u8]) -> Option<&[u8]> {
         #[cfg(feature = "fast-point-map")]
         if let Some(value) = self.fast_points.get(hash, key) {
@@ -101,6 +116,22 @@ impl FlatMap {
         }
         self.entries
             .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .map(|entry| entry.value.as_ref())
+    }
+
+    #[inline(always)]
+    pub fn get_ref_hashed_shared_prepared_no_ttl(
+        &self,
+        hash: u64,
+        key: &[u8],
+        key_tag: u64,
+    ) -> Option<&[u8]> {
+        #[cfg(feature = "fast-point-map")]
+        if let Some(value) = self.fast_points.get(hash, key) {
+            return Some(value.as_ref());
+        }
+        self.entries
+            .find(hash, |entry| entry.matches_prepared(hash, key, key_tag))
             .map(|entry| entry.value.as_ref())
     }
 
@@ -142,6 +173,22 @@ impl FlatMap {
         }
         self.entries
             .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .map(|entry| &entry.value)
+    }
+
+    #[inline(always)]
+    pub fn get_shared_value_bytes_hashed_prepared_no_ttl(
+        &self,
+        hash: u64,
+        key: &[u8],
+        key_tag: u64,
+    ) -> Option<&SharedBytes> {
+        #[cfg(feature = "fast-point-map")]
+        if let Some(value) = self.fast_points.get(hash, key) {
+            return Some(value);
+        }
+        self.entries
+            .find(hash, |entry| entry.matches_prepared(hash, key, key_tag))
             .map(|entry| &entry.value)
     }
 

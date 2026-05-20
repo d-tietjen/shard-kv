@@ -41,6 +41,37 @@ impl EmbeddedShard {
         self.map.get_ref_hashed_shared_no_ttl(hash, key)
     }
 
+    #[inline(always)]
+    pub(crate) fn get_ref_hashed_shared_prepared_no_ttl(
+        &self,
+        hash: u64,
+        key: &[u8],
+        key_tag: u64,
+    ) -> Option<&[u8]> {
+        self.map
+            .get_ref_hashed_shared_prepared_no_ttl(hash, key, key_tag)
+    }
+
+    #[inline(always)]
+    pub(crate) fn get_shared_value_bytes_hashed_no_ttl(
+        &self,
+        hash: u64,
+        key: &[u8],
+    ) -> Option<&bytes::Bytes> {
+        self.map.get_shared_value_bytes_hashed_no_ttl(hash, key)
+    }
+
+    #[inline(always)]
+    pub(crate) fn get_shared_value_bytes_hashed_prepared_no_ttl(
+        &self,
+        hash: u64,
+        key: &[u8],
+        key_tag: u64,
+    ) -> Option<&bytes::Bytes> {
+        self.map
+            .get_shared_value_bytes_hashed_prepared_no_ttl(hash, key, key_tag)
+    }
+
     #[cfg(feature = "mutable-value-slices")]
     #[inline(always)]
     pub(crate) fn value_mut_hashed_no_ttl(&mut self, hash: u64, key: &[u8]) -> Option<&mut [u8]> {
@@ -58,18 +89,20 @@ impl EmbeddedShard {
     }
 
     #[inline(always)]
+    #[cfg_attr(feature = "no-ttl", allow(dead_code))]
+    pub(crate) fn get_shared_value_bytes_hashed(
+        &self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<&bytes::Bytes> {
+        self.map.get_shared_value_bytes_hashed(hash, key, now_ms)
+    }
+
+    #[inline(always)]
+    #[cfg_attr(feature = "no-ttl", allow(dead_code))]
     pub(crate) fn has_no_ttl_entries(&self) -> bool {
         self.map.has_no_ttl_entries()
-    }
-
-    #[inline(always)]
-    pub(crate) fn contains_key_hashed_no_ttl(&self, hash: u64, key: &[u8]) -> bool {
-        self.get_ref_hashed_shared_no_ttl(hash, key).is_some()
-    }
-
-    #[inline(always)]
-    pub(crate) fn contains_key_hashed(&self, hash: u64, key: &[u8], now_ms: u64) -> bool {
-        self.get_ref_hashed_shared(hash, key, now_ms).is_some()
     }
 
     #[inline(always)]
@@ -80,6 +113,15 @@ impl EmbeddedShard {
         now_ms: u64,
     ) -> Option<Option<u64>> {
         self.map.entry_expire_at_hashed(hash, key, now_ms)
+    }
+
+    #[inline(always)]
+    pub(crate) fn entry_expire_at_hashed_no_ttl(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+    ) -> Option<Option<u64>> {
+        self.map.entry_expire_at_hashed_no_ttl(hash, key)
     }
 
     #[inline(always)]
@@ -188,11 +230,12 @@ impl EmbeddedShard {
             self.session_slots
                 .delete_hashed(&session_prefix, key_hash, key);
         }
-        self.map.set_slice_hashed(key_hash, key, value, None, 0);
+        self.map.set_slice_hashed_no_ttl(key_hash, key, value);
         self.enforce_memory_limit(0);
     }
 
     #[inline(always)]
+    #[cfg_attr(feature = "no-ttl", allow(dead_code))]
     pub(crate) fn set_slice_hashed(
         &mut self,
         route_mode: EmbeddedRouteMode,

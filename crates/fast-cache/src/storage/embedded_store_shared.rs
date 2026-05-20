@@ -19,7 +19,7 @@ use crate::storage::embedded_store::{
     EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedSessionRoute, EmbeddedShard,
     assert_valid_shard_count, compute_key_route, compute_session_shard, shift_for,
 };
-use crate::storage::{hash_key, ttl_now_millis};
+use crate::storage::{PreparedPointKey, hash_key, hash_key_tag_from_hash, ttl_now_millis};
 
 /// Lock policy for [`SharedEmbeddedStore`] stripes.
 ///

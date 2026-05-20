@@ -46,11 +46,19 @@ pub struct RefMut<'a> {
     pub(super) route_mode: EmbeddedRouteMode,
     pub(super) key: SharedBytes,
     pub(super) key_hash: u64,
+    #[cfg_attr(feature = "no-ttl", allow(dead_code))]
     pub(super) expire_at_ms: Option<u64>,
     pub(super) _not_send: PhantomData<*const ()>,
 }
 
 impl RefMut<'_> {
+    #[cfg(feature = "no-ttl")]
+    #[inline(always)]
+    fn live_expire_at(&self) -> Option<Option<u64>> {
+        Some(None)
+    }
+
+    #[cfg(not(feature = "no-ttl"))]
     #[inline(always)]
     fn live_expire_at(&self) -> Option<Option<u64>> {
         match self.expire_at_ms {

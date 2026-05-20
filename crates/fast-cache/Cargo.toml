@@ -44,6 +44,10 @@ monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
 cuda = ["sharded"]
 telemetry = ["embedded"]
 fast-point-map = []
+# Specialize shared embedded point-key hot paths for deployments that never
+# create TTL entries. TTL-oriented shared-store APIs are unsupported in this
+# build, while broader server/Redis TTL code remains unchanged.
+no-ttl = []
 # Exposes `value_mut_no_ttl()` on embedded mutation guards. This gives callers
 # a raw `&mut [u8]` only for uniquely-owned, no-TTL values. TTL entries are
 # intentionally rejected; use `set_slice` when TTL preservation matters.

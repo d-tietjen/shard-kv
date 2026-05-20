@@ -290,6 +290,18 @@ mod tests {
     }
 
     #[test]
+    fn no_ttl_slice_write_clears_existing_expiration() {
+        let mut map = FlatMap::new();
+        let hash = hash_key(b"alpha");
+        map.set_slice_hashed(hash, b"alpha", b"one", Some(10), 0);
+
+        map.set_slice_hashed_no_ttl(hash, b"alpha", b"two");
+
+        assert_eq!(map.get(b"alpha", 11), Some(b"two".to_vec()));
+        assert!(map.has_no_ttl_entries());
+    }
+
+    #[test]
     fn maintenance_removes_expired_entries() {
         let mut map = FlatMap::new();
         map.set(b"alpha".to_vec(), b"one".to_vec(), Some(10), 0);

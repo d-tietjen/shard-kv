@@ -19,10 +19,14 @@ mod rwlock_hashmap;
 pub const BACKEND_IDS: &[&str] = &[
     "fc-embed",
     "fc-shared",
+    "fc-shared-copy-locked",
+    "fc-shared-copy-unlocked",
+    "fc-shared-prepared",
     "fc-shared-worker-stripes",
     "fc-shared-fair",
     "fc-shared-fair-worker-stripes",
     "fc-shared-ref",
+    "fc-shared-prepared-ref",
     "fc-shared-worker-stripes-ref",
     "fc-shared-fair-ref",
     "fc-shared-fair-worker-stripes-ref",
@@ -84,8 +88,9 @@ fn worker_stripes(vcpu_budget: usize) -> usize {
     vcpu_budget.max(1).next_power_of_two()
 }
 
-fn default_shared_stripes(vcpu_budget: usize) -> usize {
+fn default_shared_stripes(vcpu_budget: usize, worker_count: usize) -> usize {
     vcpu_budget
+        .max(worker_count)
         .saturating_mul(SHARED_STRIPE_MULTIPLIER)
         .max(1)
         .next_power_of_two()
@@ -110,7 +115,26 @@ pub fn make(
         )) as Arc<dyn Backend>,
         "fc-shared" => fc_shared::new(
             "fc-shared",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            true,
+            cache_config,
+        ),
+        "fc-shared-copy-locked" => fc_shared::new_copy_locked(
+            "fc-shared-copy-locked",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            cache_config,
+        ),
+        "fc-shared-copy-unlocked" => fc_shared::new_copy_unlocked(
+            "fc-shared-copy-unlocked",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            cache_config,
+        ),
+        "fc-shared-prepared" => fc_shared::new_prepared(
+            "fc-shared-prepared",
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             true,
             cache_config,
@@ -126,14 +150,14 @@ pub fn make(
         // multiplier was encoded in the backend id. Keep output canonical.
         "fc-shared-x4" => fc_shared::new(
             "fc-shared",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             true,
             cache_config,
         ),
         "fc-shared-fair" => fc_shared::new_with_policy(
             "fc-shared-fair",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             true,
             SharedEmbeddedLockPolicy::Fair,
@@ -149,7 +173,7 @@ pub fn make(
         ),
         "fc-shared-x4-fair" => fc_shared::new_with_policy(
             "fc-shared-fair",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             true,
             SharedEmbeddedLockPolicy::Fair,
@@ -157,7 +181,14 @@ pub fn make(
         ),
         "fc-shared-ref" => fc_shared::new(
             "fc-shared-ref",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            false,
+            cache_config,
+        ),
+        "fc-shared-prepared-ref" => fc_shared::new_prepared(
+            "fc-shared-prepared-ref",
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             cache_config,
@@ -171,14 +202,14 @@ pub fn make(
         ),
         "fc-shared-x4-ref" => fc_shared::new(
             "fc-shared-ref",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             cache_config,
         ),
         "fc-shared-fair-ref" => fc_shared::new_with_policy(
             "fc-shared-fair-ref",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             SharedEmbeddedLockPolicy::Fair,
@@ -194,7 +225,7 @@ pub fn make(
         ),
         "fc-shared-x4-fair-ref" => fc_shared::new_with_policy(
             "fc-shared-fair-ref",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             SharedEmbeddedLockPolicy::Fair,
@@ -202,21 +233,21 @@ pub fn make(
         ),
         "fc-shared-hot-ref" => fc_shared::new_hot_shard(
             "fc-shared-hot-ref",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             cache_config,
         ),
         "fc-shared-x4-hot-ref" => fc_shared::new_hot_shard(
             "fc-shared-hot-ref",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             cache_config,
         ),
         "fc-shared-fair-hot-ref" => fc_shared::new_hot_shard_with_policy(
             "fc-shared-fair-hot-ref",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             SharedEmbeddedLockPolicy::Fair,
@@ -224,7 +255,7 @@ pub fn make(
         ),
         "fc-shared-x4-fair-hot-ref" => fc_shared::new_hot_shard_with_policy(
             "fc-shared-fair-hot-ref",
-            default_shared_stripes(vcpu_budget),
+            default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             SharedEmbeddedLockPolicy::Fair,

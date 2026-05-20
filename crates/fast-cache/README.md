@@ -49,6 +49,10 @@ buffer is uniquely owned and the entry has no TTL. TTL-backed values return
 `None` because in-place mutation bypasses TTL-preserving replacement logic; use
 `set_slice` for TTL entries.
 
+The opt-in `no-ttl` feature specializes `SharedEmbeddedStore` point-key hot
+paths for workloads that never create expiring entries. In that build,
+shared-store TTL write helpers are unsupported and panic if called with a TTL.
+
 Batch APIs group routing work and return results in key order:
 
 ```rust
@@ -339,6 +343,8 @@ idempotently and catch up from backlog or snapshot-plus-delta.
 - `telemetry`: integrates with `fast-telemetry`.
 - `cuda`: exposes GPU-facing configuration and transfer descriptors.
 - `fast-point-map`: enables the experimental point-map storage path.
+- `no-ttl`: specializes shared embedded point-key hot paths for TTL-free
+  deployments.
 - `unsafe`: opts into reviewed unsafe hot paths for lower overhead.
 
 ## Safety
