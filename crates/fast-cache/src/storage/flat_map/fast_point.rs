@@ -369,6 +369,21 @@ impl FastPointMap {
     pub(super) fn snapshot_keys(&self) -> Vec<Bytes> {
         self.entries.iter().map(FastPointEntry::to_key).collect()
     }
+
+    pub(super) fn scan_keys_into(
+        &self,
+        offset: usize,
+        limit: usize,
+        out: &mut Vec<Bytes>,
+    ) -> Option<usize> {
+        for (index, entry) in self.entries.iter().enumerate().skip(offset) {
+            out.push(entry.to_key());
+            if out.len() >= limit {
+                return Some(index + 1);
+            }
+        }
+        None
+    }
 }
 
 #[inline(always)]

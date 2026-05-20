@@ -232,6 +232,31 @@ impl FlatMap {
             .collect()
     }
 
+    pub(crate) fn scan_keys_into(
+        &self,
+        offset: usize,
+        limit: usize,
+        now_ms: u64,
+        out: &mut Vec<Bytes>,
+    ) -> Option<usize> {
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
+        if self.fast_points.is_active() {
+            return self.fast_points.scan_keys_into(offset, limit, out);
+        }
+
+        for (index, entry) in self.entries.iter().enumerate().skip(offset) {
+            let next_offset = index + 1;
+            if entry.is_expired(now_ms) {
+                continue;
+            }
+            out.push(entry.key.as_ref().to_vec());
+            if out.len() >= limit {
+                return Some(next_offset);
+            }
+        }
+        None
+    }
+
     pub fn process_maintenance(&mut self, now_ms: u64) -> usize {
         self.reclaim_retired_if_quiescent();
         if self.ttl_entries == 0 {

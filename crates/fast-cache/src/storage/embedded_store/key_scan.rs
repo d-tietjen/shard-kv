@@ -210,17 +210,7 @@ impl EmbeddedStore {
         }
 
         let shard = self.shards[shard_id].read();
-        let keys = shard.map.snapshot_keys(now_ms);
-        let start = offset.min(keys.len());
-        let mut next_offset = start;
-        for key in keys.into_iter().skip(start) {
-            if out.len() >= limit {
-                return Some(next_offset);
-            }
-            out.push(key);
-            next_offset += 1;
-        }
-        None
+        shard.map.scan_keys_into(offset, limit, now_ms, out)
     }
 
     fn scan_object_shard(
