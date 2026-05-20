@@ -219,6 +219,33 @@ impl RedisObjectBucket {
         );
     }
 
+    pub(crate) fn keys(&self, out: &mut Vec<Bytes>, now_ms: u64) {
+        out.extend(
+            self.hashes
+                .keys()
+                .filter(|key| !self.object_is_expired(key, now_ms))
+                .cloned(),
+        );
+        out.extend(
+            self.lists
+                .keys()
+                .filter(|key| !self.object_is_expired(key, now_ms))
+                .cloned(),
+        );
+        out.extend(
+            self.sets
+                .keys()
+                .filter(|key| !self.object_is_expired(key, now_ms))
+                .cloned(),
+        );
+        out.extend(
+            self.zsets
+                .keys()
+                .filter(|key| !self.object_is_expired(key, now_ms))
+                .cloned(),
+        );
+    }
+
     #[inline(always)]
     pub(super) fn has_non_hash(&self, key: &[u8]) -> bool {
         self.lists.contains_key(key) || self.sets.contains_key(key) || self.zsets.contains_key(key)

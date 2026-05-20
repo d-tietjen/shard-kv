@@ -220,6 +220,18 @@ impl FlatMap {
             .collect()
     }
 
+    pub fn snapshot_keys(&self, now_ms: u64) -> Vec<Bytes> {
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
+        if self.fast_points.is_active() {
+            return self.fast_points.snapshot_keys();
+        }
+        self.entries
+            .iter()
+            .filter(|entry| !entry.is_expired(now_ms))
+            .map(|entry| entry.key.as_ref().to_vec())
+            .collect()
+    }
+
     pub fn process_maintenance(&mut self, now_ms: u64) -> usize {
         self.reclaim_retired_if_quiescent();
         if self.ttl_entries == 0 {

@@ -3,10 +3,13 @@
 //! DEL-specific behavior starts here. Transport-specific implementations live
 //! in `del/*.rs` submodules.
 
+#[path = "del/engine.rs"]
 mod engine;
 #[cfg(feature = "server")]
+#[path = "del/fcnp.rs"]
 mod fcnp;
 #[cfg(feature = "server")]
+#[path = "del/server.rs"]
 mod server;
 
 use smallvec::SmallVec;

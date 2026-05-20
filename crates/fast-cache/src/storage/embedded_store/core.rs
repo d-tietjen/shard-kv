@@ -30,6 +30,7 @@ impl EmbeddedStore {
             Self {
                 shards,
                 shift,
+                #[cfg(feature = "redis-compat")]
                 objects: RedisObjectStore::new(shard_count),
                 route_mode,
             }
@@ -71,6 +72,7 @@ impl EmbeddedStore {
         Self {
             shards,
             shift,
+            #[cfg(feature = "redis-compat")]
             objects: RedisObjectStore::new(shard_count),
             route_mode,
             metrics,
@@ -85,37 +87,77 @@ impl EmbeddedStore {
 
     /// Returns the number of currently live keys and session entries.
     pub fn len(&self) -> usize {
-        self.shards
+        let len = self
+            .shards
             .iter()
             .map(|shard| {
                 let shard = shard.read();
                 shard.map.len().saturating_add(shard.session_slots.len())
             })
-            .sum::<usize>()
-            + self.objects.object_count()
+            .sum::<usize>();
+        #[cfg(feature = "redis-compat")]
+        {
+            len + self.objects.object_count()
+        }
+        #[cfg(not(feature = "redis-compat"))]
+        {
+            len
+        }
     }
 
     /// Returns a sorted snapshot of currently live keys.
     pub fn key_snapshot(&self) -> Vec<Bytes> {
         let now_ms = now_millis();
-        let mut keys = Vec::with_capacity(self.len());
-        for shard in &self.shards {
-            let shard = shard.read();
-            keys.extend(
-                shard
-                    .map
-                    .snapshot_entries(now_ms)
-                    .into_iter()
-                    .map(|entry| entry.key),
-            );
+        let mut keys = self.key_snapshot_unsorted_at(now_ms);
+        keys.sort();
+        keys
+    }
+
+    /// Returns an unsorted snapshot of currently live Redis-visible keys.
+    #[cfg(feature = "redis-compat")]
+    pub(crate) fn key_snapshot_unsorted(&self) -> Vec<Bytes> {
+        self.key_snapshot_unsorted_at(now_millis())
+    }
+
+    #[cfg(feature = "redis-compat")]
+    pub(crate) fn key_snapshot_by_redis_type(&self, kind: &[u8]) -> Vec<Bytes> {
+        let now_ms = now_millis();
+        if kind.eq_ignore_ascii_case(b"string") {
+            return self.string_key_snapshot_unsorted_at(now_ms);
         }
-        keys.extend(
-            self.objects
+
+        match self.objects.has_objects() {
+            true => self
+                .objects
                 .keys_with_type(now_ms)
                 .into_iter()
-                .map(|(key, _)| key),
-        );
-        keys.sort();
+                .filter(|(_, redis_type)| kind.eq_ignore_ascii_case(redis_type.as_bytes()))
+                .map(|(key, _)| key)
+                .collect(),
+            false => Vec::new(),
+        }
+    }
+
+    fn key_snapshot_unsorted_at(&self, now_ms: u64) -> Vec<Bytes> {
+        #[cfg(feature = "redis-compat")]
+        {
+            let mut keys = self.string_key_snapshot_unsorted_at(now_ms);
+            keys.extend(self.objects.keys(now_ms));
+            keys
+        }
+        #[cfg(not(feature = "redis-compat"))]
+        {
+            self.string_key_snapshot_unsorted_at(now_ms)
+        }
+    }
+
+    fn string_key_snapshot_unsorted_at(&self, now_ms: u64) -> Vec<Bytes> {
+        let mut keys = Vec::new();
+        for shard in &self.shards {
+            let shard = shard.read();
+            keys.reserve(shard.map.len());
+            keys.extend(shard.map.snapshot_keys(now_ms));
+        }
         keys
     }
 
@@ -168,6 +210,13 @@ impl EmbeddedStore {
     #[inline(always)]
     pub fn route_mode(&self) -> EmbeddedRouteMode {
         self.route_mode
+    }
+
+    /// Returns true when Redis/Valkey object storage currently has live keys.
+    #[cfg(not(feature = "redis-compat"))]
+    #[inline(always)]
+    pub fn has_redis_objects(&self) -> bool {
+        false
     }
 
     /// Computes the route for a session prefix.

@@ -10,13 +10,15 @@ use std::time::Instant;
 
 use crate::config::EvictionPolicy;
 use crate::storage::{
-    Bytes, PackedBatch, PreparedPointKey, RedisObjectBucket, RedisObjectError,
-    RedisObjectReadOutcome, RedisObjectResult, RedisObjectStore, RedisObjectValue,
-    RedisObjectWriteAttempt, RedisStringLookup, StoredEntry, hash_key, hash_key_tag_from_hash,
-    now_millis,
+    Bytes, PackedBatch, PreparedPointKey, StoredEntry, hash_key, hash_key_tag_from_hash, now_millis,
 };
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
+#[cfg(feature = "redis-compat")]
+use crate::storage::{
+    RedisObjectBucket, RedisObjectError, RedisObjectReadOutcome, RedisObjectResult,
+    RedisObjectStore, RedisObjectValue, RedisObjectWriteAttempt, RedisStringLookup,
+};
 #[cfg(feature = "embedded")]
 use crate::storage::{ShardStatsSnapshot, TierStatsSnapshot};
 
@@ -24,6 +26,7 @@ mod batch;
 mod batch_results;
 mod core;
 mod lifecycle;
+#[cfg(feature = "redis-compat")]
 mod objects;
 mod owned;
 mod point;
@@ -60,12 +63,14 @@ pub use views::{
 /// Shared embedded in-memory database.
 ///
 /// `EmbeddedStore` is internally sharded and can be shared across threads. It
-/// offers byte-string key/value methods, Redis object helpers, TTL management,
-/// batch reads and writes, and session-oriented packed transfer APIs.
+/// offers byte-string key/value methods, TTL management, batch reads and
+/// writes, and session-oriented packed transfer APIs. Redis/Valkey object
+/// helpers are available with the `redis-compat` feature.
 #[derive(Debug)]
 pub struct EmbeddedStore {
     shards: Box<[CachePadded<RwLock<EmbeddedShard>>]>,
     shift: u32,
+    #[cfg(feature = "redis-compat")]
     objects: RedisObjectStore,
     route_mode: EmbeddedRouteMode,
     #[cfg(feature = "telemetry")]

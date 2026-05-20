@@ -5,7 +5,9 @@ use crate::server::commands::{
     FastDirectCommand, RawCommandContext, RawDirectCommand,
 };
 use crate::server::wire::ServerWire;
-use crate::storage::{RedisStringLookup, WRONGTYPE_MESSAGE, hash_key};
+use crate::storage::hash_key;
+#[cfg(feature = "redis-compat")]
+use crate::storage::{RedisStringLookup, WRONGTYPE_MESSAGE};
 
 use super::Get;
 
@@ -52,30 +54,28 @@ impl Get {
         ctx: &mut BorrowedCommandContext<'_, '_, '_>,
         key: &[u8],
     ) {
-        match ctx.store.has_redis_objects() {
-            true => Self::write_resp_string_lookup(ctx, key),
-            false => {
-                let hit = if let Some(queue) = ctx.fast_write_queue.as_mut() {
-                    let key_hash = hash_key(key);
-                    let out = &mut *ctx.out;
-                    // SAFETY: forwarded from caller's single-worker contract.
-                    unsafe {
-                        ctx.store
-                            .with_shared_value_bytes_route_hashed_single_threaded(
-                                key_hash,
-                                key,
-                                |value| queue.push_resp_value(out, value),
-                            )
-                    }
-                } else {
-                    // SAFETY: forwarded from caller's single-worker contract.
-                    unsafe { ctx.store.get_blob_string_into_single_threaded(key, ctx.out) }
-                };
-                match hit {
-                    true => {}
-                    false => ctx.out.extend_from_slice(b"$-1\r\n"),
-                }
+        #[cfg(feature = "redis-compat")]
+        if ctx.store.has_redis_objects() {
+            Self::write_resp_string_lookup(ctx, key);
+            return;
+        }
+        let hit = if let Some(queue) = ctx.fast_write_queue.as_mut() {
+            let key_hash = hash_key(key);
+            let out = &mut *ctx.out;
+            // SAFETY: forwarded from caller's single-worker contract.
+            unsafe {
+                ctx.store
+                    .with_shared_value_bytes_route_hashed_single_threaded(key_hash, key, |value| {
+                        queue.push_resp_value(out, value)
+                    })
             }
+        } else {
+            // SAFETY: forwarded from caller's single-worker contract.
+            unsafe { ctx.store.get_blob_string_into_single_threaded(key, ctx.out) }
+        };
+        match hit {
+            true => {}
+            false => ctx.out.extend_from_slice(b"$-1\r\n"),
         }
     }
 
@@ -84,27 +84,28 @@ impl Get {
         ctx: &mut BorrowedCommandContext<'_, '_, '_>,
         key: &[u8],
     ) {
-        match ctx.store.has_redis_objects() {
-            true => Self::write_resp_string_lookup(ctx, key),
-            false => {
-                let hit = if let Some(queue) = ctx.fast_write_queue.as_mut() {
-                    let key_hash = hash_key(key);
-                    let out = &mut *ctx.out;
-                    ctx.store
-                        .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
-                            queue.push_resp_value(out, value)
-                        })
-                } else {
-                    ctx.store.get_blob_string_into(key, ctx.out)
-                };
-                match hit {
-                    true => {}
-                    false => ctx.out.extend_from_slice(b"$-1\r\n"),
-                }
-            }
+        #[cfg(feature = "redis-compat")]
+        if ctx.store.has_redis_objects() {
+            Self::write_resp_string_lookup(ctx, key);
+            return;
+        }
+        let hit = if let Some(queue) = ctx.fast_write_queue.as_mut() {
+            let key_hash = hash_key(key);
+            let out = &mut *ctx.out;
+            ctx.store
+                .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+                    queue.push_resp_value(out, value)
+                })
+        } else {
+            ctx.store.get_blob_string_into(key, ctx.out)
+        };
+        match hit {
+            true => {}
+            false => ctx.out.extend_from_slice(b"$-1\r\n"),
         }
     }
 
+    #[cfg(feature = "redis-compat")]
     #[inline(always)]
     fn write_resp_string_lookup(ctx: &mut BorrowedCommandContext<'_, '_, '_>, key: &[u8]) {
         let lookup = if let Some(queue) = ctx.fast_write_queue.as_mut() {
@@ -147,21 +148,25 @@ impl DirectFastCommand for Get {
 impl FastDirectCommand for Get {
     fn execute_fast(&self, mut ctx: FastCommandContext<'_, '_>, command: FastCommand<'_>) {
         match command {
-            FastCommand::Get { key } => match ctx.store.has_redis_objects() {
-                true => match ctx.store.get_string_value_into(key, |value| {
-                    ServerWire::write_fast_value(ctx.out, value)
-                }) {
-                    RedisStringLookup::Hit => {}
-                    RedisStringLookup::Miss => ServerWire::write_fast_null(ctx.out),
-                    RedisStringLookup::WrongType => {
-                        ServerWire::write_fast_error(ctx.out, WRONGTYPE_MESSAGE)
+            FastCommand::Get { key } => {
+                #[cfg(feature = "redis-compat")]
+                if ctx.store.has_redis_objects() {
+                    match ctx.store.get_string_value_into(key, |value| {
+                        ServerWire::write_fast_value(ctx.out, value)
+                    }) {
+                        RedisStringLookup::Hit => {}
+                        RedisStringLookup::Miss => ServerWire::write_fast_null(ctx.out),
+                        RedisStringLookup::WrongType => {
+                            ServerWire::write_fast_error(ctx.out, WRONGTYPE_MESSAGE)
+                        }
                     }
-                },
-                false => match Self::fast_get_decoded_value_into(&mut ctx, key) {
+                    return;
+                }
+                match Self::fast_get_decoded_value_into(&mut ctx, key) {
                     true => {}
                     false => ServerWire::write_fast_null(ctx.out),
-                },
-            },
+                }
+            }
             _ => ServerWire::write_fast_error(ctx.out, "ERR unsupported command"),
         }
     }

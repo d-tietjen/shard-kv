@@ -66,3 +66,7 @@ path = "src/bin/wal_tcp_export_cost.rs"
 [[bin]]
 name = "memory_write_cost"
 path = "src/bin/memory_write_cost.rs"
+
+[[bin]]
+name = "redis_command_matrix"
+path = "src/bin/redis_command_matrix.rs"

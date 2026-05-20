@@ -83,4 +83,14 @@ impl RedisObjectStore {
         }
         keys
     }
+
+    pub(crate) fn keys(&self, now_ms: u64) -> Vec<Bytes> {
+        let mut keys = Vec::with_capacity(self.object_count());
+        for shard in &self.shards {
+            for bucket in &shard.buckets {
+                bucket.read().keys(&mut keys, now_ms);
+            }
+        }
+        keys
+    }
 }

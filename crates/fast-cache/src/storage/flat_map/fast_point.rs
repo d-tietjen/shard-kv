@@ -83,6 +83,17 @@ impl FastPointEntry {
             expire_at_ms: None,
         }
     }
+
+    fn to_key(&self) -> Bytes {
+        match self.key_len <= Self::INLINE_KEY_CAP {
+            true => self.key_inline[..self.key_len].to_vec(),
+            false => self
+                .key_heap
+                .as_deref()
+                .expect("large fast point key has heap storage")
+                .to_vec(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -353,6 +364,10 @@ impl FastPointMap {
             .iter()
             .map(FastPointEntry::to_stored_entry)
             .collect()
+    }
+
+    pub(super) fn snapshot_keys(&self) -> Vec<Bytes> {
+        self.entries.iter().map(FastPointEntry::to_key).collect()
     }
 }
 

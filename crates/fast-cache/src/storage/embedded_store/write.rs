@@ -14,6 +14,7 @@ impl EmbeddedStore {
         let key = key.into();
         let route = self.route_key(&key);
         let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -82,6 +83,7 @@ impl EmbeddedStore {
             true => route,
             false => self.route_key(key),
         };
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -129,6 +131,7 @@ impl EmbeddedStore {
             true => route,
             false => self.route_key(key),
         };
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -285,6 +288,7 @@ impl EmbeddedStore {
 
         let now_ms = now_millis();
         let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             for (key, value) in items {
                 let route = self.route_key(&key);

@@ -94,6 +94,7 @@ impl FlatMap {
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     pub(crate) fn entry_expire_at_hashed_no_ttl(
         &mut self,
         hash: u64,

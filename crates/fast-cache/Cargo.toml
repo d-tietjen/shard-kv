@@ -7,7 +7,7 @@ homepage.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Embedded-first thread-per-core in-memory cache with optional Redis-compatible server"
+description = "Embedded-first thread-per-core in-memory cache with optional RESP/FCNP server"
 documentation = "https://docs.rs/fast-cache"
 keywords = ["cache", "redis", "kv", "storage", "wal"]
 categories = ["caching", "database-implementations"]
@@ -24,11 +24,15 @@ exclude = [
 ]
 
 [features]
-# The crate defaults to the embedded Rust API. The TCP server is available as
-# an explicit feature for deployments that want Redis/FCNP network ingress.
+# The crate defaults to the embedded Rust API. The TCP server and Redis/Valkey
+# compatibility surface are opt-in so embedded cache-only users keep the core
+# string map lean.
 default = ["embedded", "sharded"]
 embedded = []
 sharded = ["embedded"]
+# Embedded Redis/Valkey data-type semantics (hash/list/set/zset helpers and
+# wrong-type behavior) without pulling in network server dependencies.
+redis-compat = ["embedded"]
 server = [
     "sharded",
     "dep:bytes-handoff",
@@ -37,6 +41,8 @@ server = [
     "dep:socket2",
     "dep:tracing-subscriber",
 ]
+# Convenience feature for Redis/Valkey-compatible RESP/FCNP server builds.
+redis-server = ["server", "redis-compat"]
 # Linux-only runtime for the TCP server. It uses bytes-handoff's monoio read
 # adapter while monoio owns the socket driver and shard-local worker runtime.
 # Plain `server` remains the portable tokio implementation.
@@ -49,7 +55,7 @@ telemetry = ["embedded"]
 experimental-no-ttl-point-hot-path = ["no-ttl"]
 # Specialize shared embedded point-key hot paths for deployments that never
 # create TTL entries. TTL-oriented shared-store APIs are unsupported in this
-# build, while broader server/Redis TTL code remains unchanged.
+# build, while broader server and Redis/Valkey-compat TTL code remains unchanged.
 no-ttl = []
 # Exposes `value_mut_no_ttl()` on embedded mutation guards. This gives callers
 # a raw `&mut [u8]` only for uniquely-owned, no-TTL values. TTL entries are
@@ -115,3 +121,12 @@ monoio = { version = "0.2", optional = true }
 [[bin]]
 name = "fast-cache-server"
 required-features = ["server"]
+
+[[test]]
+name = "redis_tier1_coverage_test"
+path = "tests/redis_tier1_coverage_test.rs"
+
+[[test]]
+name = "fuzz_harness_test"
+path = "tests/fuzz_harness_test.rs"
+required-features = ["redis-compat"]

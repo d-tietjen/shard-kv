@@ -3,10 +3,12 @@ use crate::config::EvictionPolicy;
 #[cfg(feature = "telemetry")]
 use crate::storage::CacheTelemetry;
 use crate::storage::hash_key;
+#[cfg(feature = "redis-compat")]
 use crate::storage::{RedisObjectResult, RedisStringLookup};
 #[cfg(feature = "telemetry")]
 use std::sync::Arc;
 
+#[cfg(feature = "redis-compat")]
 #[test]
 fn redis_objects_enforce_wrongtype_and_set_overwrite() {
     let store = EmbeddedStore::new(4);
@@ -36,6 +38,7 @@ fn redis_objects_enforce_wrongtype_and_set_overwrite() {
     assert!(!store.exists(b"user:1"));
 }
 
+#[cfg(feature = "redis-compat")]
 #[test]
 fn redis_list_set_and_zset_semantics() {
     let store = EmbeddedStore::new(4);
@@ -84,6 +87,7 @@ fn redis_list_set_and_zset_semantics() {
     );
 }
 
+#[cfg(feature = "redis-compat")]
 #[test]
 fn redis_segmented_list_semantics_cross_inline_boundary() {
     let store = EmbeddedStore::new(4);

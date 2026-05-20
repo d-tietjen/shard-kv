@@ -31,6 +31,7 @@ mod embedded_store_shared;
 mod engine;
 mod flat_map;
 mod records;
+#[cfg(feature = "redis-compat")]
 mod redis_objects;
 mod stats;
 #[cfg(feature = "telemetry")]
@@ -81,10 +82,12 @@ pub(crate) use engine::{
 };
 pub use flat_map::FlatMap;
 pub use records::{MutationBytes, MutationOp, MutationRecord, StoredEntry};
+#[cfg(feature = "redis-compat")]
 pub(crate) use redis_objects::{
     RedisObjectBucket, RedisObjectReadOutcome, RedisObjectStore, RedisObjectValue,
     RedisObjectWriteAttempt, WRONGTYPE_MESSAGE,
 };
+#[cfg(feature = "redis-compat")]
 pub use redis_objects::{RedisObjectError, RedisObjectResult, RedisStringLookup};
 pub use stats::{GlobalStatsSnapshot, ShardStatsSnapshot, TierStatsSnapshot, WalStatsSnapshot};
 use std::collections::{HashMap, HashSet};

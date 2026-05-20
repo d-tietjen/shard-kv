@@ -206,7 +206,7 @@ impl ServerWire {
         );
     }
 
-    #[cfg(feature = "embedded")]
+    #[cfg(all(feature = "embedded", feature = "redis-compat"))]
     #[inline(always)]
     pub(super) fn finish_fast_object_read(
         out: &mut BytesMut,
@@ -231,7 +231,7 @@ impl ServerWire {
         }
     }
 
-    #[cfg(feature = "embedded")]
+    #[cfg(all(feature = "embedded", feature = "redis-compat"))]
     pub(super) fn write_fast_redis_object_result(out: &mut BytesMut, result: RedisObjectResult) {
         match result {
             RedisObjectResult::Simple("OK") => ServerWire::write_fast_ok(out),
@@ -622,7 +622,7 @@ impl ServerWire {
         ServerWire::write_resp_blob_string(out, micros.format(now.subsec_micros()).as_bytes());
     }
 
-    #[cfg(feature = "embedded")]
+    #[cfg(all(feature = "embedded", feature = "redis-compat"))]
     #[inline(always)]
     pub(super) fn write_redis_object_result(out: &mut BytesMut, result: RedisObjectResult) {
         match result {

@@ -11,10 +11,30 @@ Two modes, parallel and independent:
 | --- | --- | --- |
 | `saturation` | Closed-loop, push as hard as possible | Peak ops/sec, logical payload GB/s, CPU and p99 at peak |
 | `curve` | Open-loop, target rate sweep | How CPU and p99 scale with load up to saturation |
+| `redis_command_matrix` | RESP command script, per command | Head-to-head command throughput for fast-cache vs Redis/Valkey |
 
 Both drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `fc-lmcache`
 emit rows in the same schema.
+
+## Redis Command Matrix
+
+`redis_command_matrix` runs a deterministic RESP command script and reports
+per-command throughput and average request latency. It is intentionally not a
+Criterion benchmark: it talks to real TCP servers so the same command cases can
+run head-to-head against fast-cache, Redis, and Valkey.
+
+```bash
+./benchmarks/scripts/run-redis-command-matrix.sh
+```
+
+The default script starts Redis and Valkey from
+`benchmarks/docker/compose.yml`, starts `fast-cache-server` with the
+`redis-server` feature, and writes
+`benchmarks/results/redis-command-matrix.csv`. Use `CASES=hash,zset` or
+`CASES=HSET,ZRANGE` for focused runs, and `CLIENTS`, `WARMUP`, and `DURATION`
+to scale the run. Set `FAIL_ON_ERROR=1` when the matrix should fail on any RESP
+error reply instead of recording the error count in the output.
 
 ## Native CPU Builds
 

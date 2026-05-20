@@ -21,6 +21,7 @@ impl EmbeddedStore {
             true => route,
             false => self.route_key(key),
         };
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -61,8 +62,9 @@ impl EmbeddedStore {
 
     /// Returns true when `key` currently exists.
     pub fn exists(&self, key: &[u8]) -> bool {
-        let route = self.route_key(key);
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
+            let route = self.route_key(key);
             let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
             if bucket.object_is_expired(key, now_millis()) {
                 drop(bucket);
@@ -83,6 +85,7 @@ impl EmbeddedStore {
     pub fn ttl_seconds(&self, key: &[u8]) -> i64 {
         let route = self.route_key(key);
         let now_ms = now_millis();
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             if bucket.delete_expired(key, now_ms) {
@@ -110,6 +113,7 @@ impl EmbeddedStore {
     pub fn pttl_millis(&self, key: &[u8]) -> i64 {
         let route = self.route_key(key);
         let now_ms = now_millis();
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             if bucket.delete_expired(key, now_ms) {
@@ -137,6 +141,7 @@ impl EmbeddedStore {
     pub fn persist(&self, key: &[u8]) -> bool {
         let route = self.route_key(key);
         let now_ms = now_millis();
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             if bucket.delete_expired(key, now_ms) {
@@ -184,6 +189,7 @@ impl EmbeddedStore {
             true => route,
             false => self.route_key(key),
         };
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             if bucket.delete_expired(key, now_ms) {
@@ -214,54 +220,67 @@ impl EmbeddedStore {
         changed
     }
 
-    /// Returns the Redis type name for a key, or `"none"` when it is missing.
-    pub fn redis_type(&self, key: &[u8]) -> &'static str {
-        let route = self.route_key(key);
-        if self.objects.has_objects() {
-            let now_ms = now_millis();
-            let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-            if bucket.object_is_expired(key, now_ms) {
-                drop(bucket);
-                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-                if bucket.delete_expired(key, now_ms) {
-                    self.objects.note_deleted(route.shard_id);
+    #[cfg(feature = "redis-compat")]
+    fn redis_object_metadata(
+        &self,
+        key: &[u8],
+        lookup: impl FnOnce(&RedisObjectBucket, &[u8]) -> Option<&'static str>,
+    ) -> Option<&'static str> {
+        match self.objects.has_objects() {
+            false => None,
+            true => {
+                let route = self.route_key(key);
+                let now_ms = now_millis();
+                let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
+                match bucket.object_is_expired(key, now_ms) {
+                    true => {
+                        drop(bucket);
+                        let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+                        match bucket.delete_expired(key, now_ms) {
+                            true => {
+                                self.objects.note_deleted(route.shard_id);
+                                Some(())
+                            }
+                            false => None,
+                        };
+                        None
+                    }
+                    false => lookup(&bucket, key),
                 }
-                return if self.get_value_bytes(key).is_some() {
-                    "string"
-                } else {
-                    "none"
-                };
-            }
-            if let Some(kind) = bucket.type_name(key) {
-                return kind;
             }
         }
-        if self.get_value_bytes(key).is_some() {
-            "string"
-        } else {
-            "none"
+    }
+
+    /// Returns the Redis type name for a key, or `"none"` when it is missing.
+    pub fn redis_type(&self, key: &[u8]) -> &'static str {
+        #[cfg(feature = "redis-compat")]
+        let object_type = self.redis_object_metadata(key, RedisObjectBucket::type_name);
+        #[cfg(not(feature = "redis-compat"))]
+        let object_type: Option<&'static str> = None;
+
+        match object_type {
+            Some(kind) => kind,
+            None => match self.get_value_bytes(key).is_some() {
+                true => "string",
+                false => "none",
+            },
         }
     }
 
     /// Returns the Redis object encoding name for a key when it exists.
     pub fn object_encoding(&self, key: &[u8]) -> Option<&'static str> {
-        let route = self.route_key(key);
-        if self.objects.has_objects() {
-            let now_ms = now_millis();
-            let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-            if bucket.object_is_expired(key, now_ms) {
-                drop(bucket);
-                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-                if bucket.delete_expired(key, now_ms) {
-                    self.objects.note_deleted(route.shard_id);
-                }
-                return self.get_value_bytes(key).map(|_| "raw");
-            }
-            if let Some(encoding) = bucket.encoding(key) {
-                return Some(encoding);
-            }
+        #[cfg(feature = "redis-compat")]
+        let object_encoding = self.redis_object_metadata(key, RedisObjectBucket::encoding);
+        #[cfg(not(feature = "redis-compat"))]
+        let object_encoding: Option<&'static str> = None;
+
+        match object_encoding {
+            Some(encoding) => Some(encoding),
+            None => match self.get_value_bytes(key).is_some() {
+                true => Some("raw"),
+                false => None,
+            },
         }
-        self.get_value_bytes(key).map(|_| "raw")
     }
 
     /// Returns per-shard statistics snapshots.

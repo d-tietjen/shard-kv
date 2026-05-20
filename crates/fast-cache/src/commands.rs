@@ -1,16 +1,342 @@
-pub mod del;
-pub mod exists;
-pub mod expire;
-pub mod get;
-pub mod getex;
 pub(crate) mod parsing;
+
+#[cfg(feature = "redis-compat")]
+#[path = "commands/compat/redis_compat.rs"]
+pub(crate) mod redis_compat;
+
+// Key commands.
+#[path = "commands/key/del.rs"]
+pub mod del;
+#[path = "commands/key/exists.rs"]
+pub mod exists;
+#[path = "commands/key/expire.rs"]
+pub mod expire;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/key/keys.rs"]
+pub mod keys;
+#[path = "commands/key/persist.rs"]
 pub mod persist;
+#[path = "commands/key/pexpire.rs"]
 pub mod pexpire;
-pub mod psetex;
+#[path = "commands/key/pttl.rs"]
 pub mod pttl;
-pub mod set;
-pub mod setex;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/key/scan.rs"]
+pub mod scan;
+#[path = "commands/key/ttl.rs"]
 pub mod ttl;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/key/type_cmd.rs"]
+pub mod type_cmd;
+
+// String commands.
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/append.rs"]
+pub mod append;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/decr.rs"]
+pub mod decr;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/decrby.rs"]
+pub mod decrby;
+#[path = "commands/string/get.rs"]
+pub mod get;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/getdel.rs"]
+pub mod getdel;
+#[path = "commands/string/getex.rs"]
+pub mod getex;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/getrange.rs"]
+pub mod getrange;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/getset.rs"]
+pub mod getset;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/incr.rs"]
+pub mod incr;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/incrby.rs"]
+pub mod incrby;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/incrbyfloat.rs"]
+pub mod incrbyfloat;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/mget.rs"]
+pub mod mget;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/mset.rs"]
+pub mod mset;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/msetnx.rs"]
+pub mod msetnx;
+#[path = "commands/string/psetex.rs"]
+pub mod psetex;
+#[path = "commands/string/set.rs"]
+pub mod set;
+#[path = "commands/string/setex.rs"]
+pub mod setex;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/setrange.rs"]
+pub mod setrange;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/string/strlen.rs"]
+pub mod strlen;
+
+// Connection commands.
+#[cfg(feature = "redis-compat")]
+#[path = "commands/connection/auth.rs"]
+pub mod auth;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/connection/echo.rs"]
+pub mod echo;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/connection/hello.rs"]
+pub mod hello;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/connection/ping.rs"]
+pub mod ping;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/connection/quit.rs"]
+pub mod quit;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/connection/select.rs"]
+pub mod select;
+
+// Server commands.
+#[cfg(feature = "redis-compat")]
+#[path = "commands/server/client.rs"]
+pub mod client;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/server/command.rs"]
+pub mod command;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/server/config.rs"]
+pub mod config;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/server/dbsize.rs"]
+pub mod dbsize;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/server/info.rs"]
+pub mod info;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/server/time.rs"]
+pub mod time;
+
+// Hash commands.
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hdel.rs"]
+pub mod hdel;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hexists.rs"]
+pub mod hexists;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hget.rs"]
+pub mod hget;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hgetall.rs"]
+pub mod hgetall;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hincrby.rs"]
+pub mod hincrby;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hincrbyfloat.rs"]
+pub mod hincrbyfloat;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hkeys.rs"]
+pub mod hkeys;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hlen.rs"]
+pub mod hlen;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hmget.rs"]
+pub mod hmget;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hrandfield.rs"]
+pub mod hrandfield;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hscan.rs"]
+pub mod hscan;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hset.rs"]
+pub mod hset;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hsetnx.rs"]
+pub mod hsetnx;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/hash/hvals.rs"]
+pub mod hvals;
+
+// List commands.
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/blmove.rs"]
+pub mod blmove;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/blpop.rs"]
+pub mod blpop;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/brpop.rs"]
+pub mod brpop;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/lindex.rs"]
+pub mod lindex;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/linsert.rs"]
+pub mod linsert;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/llen.rs"]
+pub mod llen;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/lpop.rs"]
+pub mod lpop;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/lpush.rs"]
+pub mod lpush;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/lpushx.rs"]
+pub mod lpushx;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/lrange.rs"]
+pub mod lrange;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/lrem.rs"]
+pub mod lrem;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/lset.rs"]
+pub mod lset;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/ltrim.rs"]
+pub mod ltrim;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/rpop.rs"]
+pub mod rpop;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/rpush.rs"]
+pub mod rpush;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/list/rpushx.rs"]
+pub mod rpushx;
+
+// Set collection commands.
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/sadd.rs"]
+pub mod sadd;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/scard.rs"]
+pub mod scard;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/sdiff.rs"]
+pub mod sdiff;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/sdiffstore.rs"]
+pub mod sdiffstore;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/sinter.rs"]
+pub mod sinter;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/sinterstore.rs"]
+pub mod sinterstore;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/sismember.rs"]
+pub mod sismember;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/smembers.rs"]
+pub mod smembers;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/smismember.rs"]
+pub mod smismember;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/smove.rs"]
+pub mod smove;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/spop.rs"]
+pub mod spop;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/srandmember.rs"]
+pub mod srandmember;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/srem.rs"]
+pub mod srem;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/sscan.rs"]
+pub mod sscan;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/sunion.rs"]
+pub mod sunion;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/sets/sunionstore.rs"]
+pub mod sunionstore;
+
+// Sorted set commands.
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/bzpopmax.rs"]
+pub mod bzpopmax;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/bzpopmin.rs"]
+pub mod bzpopmin;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zadd.rs"]
+pub mod zadd;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zcard.rs"]
+pub mod zcard;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zcount.rs"]
+pub mod zcount;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zdiffstore.rs"]
+pub mod zdiffstore;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zincrby.rs"]
+pub mod zincrby;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zinterstore.rs"]
+pub mod zinterstore;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zlexcount.rs"]
+pub mod zlexcount;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zmscore.rs"]
+pub mod zmscore;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zpopmax.rs"]
+pub mod zpopmax;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zpopmin.rs"]
+pub mod zpopmin;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zrange.rs"]
+pub mod zrange;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zrangebylex.rs"]
+pub mod zrangebylex;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zrangebyscore.rs"]
+pub mod zrangebyscore;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zrangestore.rs"]
+pub mod zrangestore;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zrank.rs"]
+pub mod zrank;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zrem.rs"]
+pub mod zrem;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zrevrangebylex.rs"]
+pub mod zrevrangebylex;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zrevrank.rs"]
+pub mod zrevrank;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zscan.rs"]
+pub mod zscan;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zscore.rs"]
+pub mod zscore;
+#[cfg(feature = "redis-compat")]
+#[path = "commands/zset/zunionstore.rs"]
+pub mod zunionstore;
 
 use bytes::Bytes as SharedBytes;
 
@@ -252,6 +578,202 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     &getex::COMMAND,
     &setex::COMMAND,
     &psetex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &ping::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &auth::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hello::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &select::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &quit::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &echo::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &command::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &config::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &client::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &dbsize::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &time::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &info::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &keys::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &scan::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &type_cmd::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &append::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &strlen::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &getrange::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &setrange::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &getset::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &getdel::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &incr::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &incrby::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &decr::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &decrby::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &incrbyfloat::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &mset::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &mget::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &msetnx::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hset::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hget::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hmget::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hlen::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hexists::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hsetnx::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hincrby::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hincrbyfloat::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hkeys::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hvals::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hgetall::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hscan::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hrandfield::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hdel::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &lpush::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &rpush::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &lrange::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &llen::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &lindex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &lset::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &lrem::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &linsert::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &ltrim::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &lpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &rpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &lpushx::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &rpushx::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &blpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &brpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &blmove::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &sadd::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &sismember::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &smismember::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &scard::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &smembers::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &sunion::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &sinter::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &sdiff::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &sunionstore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &sinterstore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &sdiffstore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &smove::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &srem::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &sscan::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &srandmember::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &spop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zadd::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zscore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zmscore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zcard::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zrange::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zincrby::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zcount::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zrank::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zrevrank::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zpopmin::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zpopmax::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zrem::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zrangebyscore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zscan::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zrangebylex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zrevrangebylex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zlexcount::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zrangestore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zunionstore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zinterstore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zdiffstore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &bzpopmin::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &bzpopmax::COMMAND,
 ];
 
 pub(crate) struct CommandCatalog;

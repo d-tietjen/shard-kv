@@ -336,6 +336,7 @@ impl EmbeddedStore {
             shard_id: self.route_hash(key_hash),
             key_hash,
         };
+        #[cfg(feature = "redis-compat")]
         if self.objects.has_objects() {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -1035,7 +1036,11 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
-        if shard_id >= self.shards.len() || self.objects.has_objects() {
+        if shard_id >= self.shards.len() {
+            return false;
+        }
+        #[cfg(feature = "redis-compat")]
+        if self.objects.has_objects() {
             return false;
         }
 
@@ -1076,7 +1081,11 @@ impl EmbeddedStore {
         }
         #[cfg(feature = "unsafe")]
         {
-            if shard_id >= self.shards.len() || self.objects.has_objects() {
+            if shard_id >= self.shards.len() {
+                return false;
+            }
+            #[cfg(feature = "redis-compat")]
+            if self.objects.has_objects() {
                 return false;
             }
 
@@ -1111,7 +1120,11 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
-        if shard_id >= self.shards.len() || self.objects.has_objects() {
+        if shard_id >= self.shards.len() {
+            return false;
+        }
+        #[cfg(feature = "redis-compat")]
+        if self.objects.has_objects() {
             return false;
         }
 

@@ -3,13 +3,18 @@
 //! SET-specific behavior starts here. Transport-specific implementations,
 //! option parsing, and write-path selection live in `set/*.rs` submodules.
 
+#[path = "set/engine.rs"]
 mod engine;
 #[cfg(feature = "server")]
+#[path = "set/fcnp.rs"]
 mod fcnp;
+#[path = "set/options.rs"]
 mod options;
 #[cfg(feature = "server")]
+#[path = "set/server.rs"]
 mod server;
 #[cfg(feature = "server")]
+#[path = "set/storage.rs"]
 mod storage;
 
 use crate::Result;

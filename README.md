@@ -1,8 +1,9 @@
 # fast-cache
 
 `fast-cache` is an embedded-first, in-memory key-value database written in
-Rust. It provides a direct Rust API by default and an optional Redis-compatible
-TCP server for applications that want network access.
+Rust. It provides a direct Rust API by default, an optional RESP/FCNP TCP
+server for applications that want network access, and Redis/Valkey
+compatibility as an opt-in extension.
 
 The public documentation is centered on rustdoc, the same way users encounter
 open source crates on crates.io:
@@ -46,10 +47,10 @@ TTL.
 
 The crate keeps the core in one package and exposes layered surfaces:
 `FastMap` for cloneable embedded use, `FastCache` as the cache-flavored alias,
-`embedded::ShardedEngine` for the full
-sharded core used by server mode, `embedded::LocalEmbeddedStore` for pinned
-owner-local workers, and the optional `server` feature for RESP/FCNP access
-from other processes.
+`embedded::ShardedEngine` for the full sharded core used by server mode,
+`embedded::LocalEmbeddedStore` for pinned owner-local workers, the optional
+`server` feature for RESP/FCNP access from other processes, and `redis-compat`
+when Redis/Valkey data-type semantics are required.
 
 For callers that need raw in-place mutation, the opt-in
 `mutable-value-slices` feature adds `value_mut_no_ttl()` to embedded mutation
@@ -57,7 +58,7 @@ guards. It returns `&mut [u8]` only for uniquely-owned no-TTL values. TTL-backed
 values are rejected because this path intentionally skips the TTL-preserving
 replacement logic; use `set_slice` for TTL entries.
 
-Install the optional server binary:
+Install the core server binary:
 
 ```bash
 cargo install fast-cache --features server --locked
@@ -68,6 +69,12 @@ From a source checkout:
 
 ```bash
 cargo run -p fast-cache --features server --bin fast-cache-server -- --data-dir ./var/fast-cache
+```
+
+For a Redis/Valkey-compatible deployment, enable the compatibility extension:
+
+```bash
+cargo install fast-cache --features redis-server --locked
 ```
 
 Or run the server with Docker Compose:
@@ -137,8 +144,9 @@ docker compose up --build fast-cache
 `fast-cache` is designed around two deployment shapes:
 
 - Embedded Rust APIs for direct in-process use.
-- TCP server APIs: RESP for Redis-compatible clients and FCNP for Rust clients
-  that can route directly to shard-owned server ports.
+- TCP server APIs: RESP command frames and FCNP for Rust clients that can route
+  directly to shard-owned server ports. Redis/Valkey compatibility is enabled
+  with `redis-compat`.
 
 Current benchmark artifacts are standalone Linux runs. Throughput rows
 disable latency sampling so the harness can measure ceiling throughput; latency
@@ -245,7 +253,11 @@ This repository now contains the open source crate surface:
 
 - `embedded`: default embedded Rust database API.
 - `sharded`: default sharded storage and owner-local embedded API.
-- `server`: builds the Redis-compatible `fast-cache-server` binary.
+- `redis-compat`: enables embedded Redis/Valkey data-type semantics and
+  wrong-type behavior without requiring server networking.
+- `server`: builds the RESP/FCNP `fast-cache-server` binary.
+- `redis-server`: enables both `server` and `redis-compat` for Redis/Valkey
+  compatibility deployments.
 - `monoio`: enables the Linux-only server runtime selected with
   `FAST_CACHE_USE_MONOIO=1`. The server still uses `bytes-handoff` for
   connection read buffering, using its monoio adapter on Linux. With

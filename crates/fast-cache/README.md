@@ -1,9 +1,10 @@
 # fast-cache
 
 `fast-cache` is an embedded-first, in-memory key-value database. The default
-crate build exposes a Rust API for direct in-process use. The optional
-`server` feature builds `fast-cache-server`, a Redis-compatible TCP server with
-WAL and snapshot persistence.
+crate build exposes a Rust API for direct in-process use. The optional `server`
+feature builds `fast-cache-server` as a RESP/FCNP TCP server with WAL and
+snapshot persistence, and `redis-compat` adds Redis/Valkey data-type semantics
+as an extension for embedded or server deployments.
 
 The default build uses conservative safe memory paths. Reviewed lower-overhead
 paths are available only when the `unsafe` feature is enabled.
@@ -40,7 +41,7 @@ The crate is intentionally one package with layered APIs:
 | Layer | API | Use when |
 | --- | --- | --- |
 | Shared map/cache | `FastMap` / `FastCache` / `embedded::SharedCache` | You want a cloneable DashMap-like map, process-local lock table, or cache. |
-| Sharded engine | `embedded::ShardedEngine` / `storage::EmbeddedStore` | You want the full embedded engine that also backs Redis-compatible server mode. |
+| Sharded engine | `embedded::ShardedEngine` / `storage::EmbeddedStore` | You want the full embedded engine that also backs server mode. |
 | Owner-local shards | `embedded::LocalEmbeddedStore` | Workers are pinned and each worker should skip shared lock traffic for its shards. |
 | Server | `server` feature / `fast-cache-server` | Other processes or machines should access the same database over RESP or FCNP. |
 
@@ -123,17 +124,20 @@ worker is usually under-striped for read-heavy shared access. `EmbeddedStore`,
 counts so routing can use shift-based striping.
 
 ```rust
-use fast_cache::storage::{
-    EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap,
-};
+#[cfg(feature = "sharded")]
+{
+    use fast_cache::storage::{
+        EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap,
+    };
 
-let shared = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
-let mut stores = LocalEmbeddedStoreBootstrap::from_embedded(shared, 1).into_stores();
-let mut local = stores.pop().expect("one worker store");
+    let shared = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let mut stores = LocalEmbeddedStoreBootstrap::from_embedded(shared, 1).into_stores();
+    let mut local = stores.pop().expect("one worker store");
 
-local.set(b"local-key".to_vec(), b"value".to_vec(), None);
-assert_eq!(local.get_ref(b"local-key"), Some(b"value".as_slice()));
-assert_eq!(local.get(b"local-key"), Some(b"value".to_vec()));
+    local.set(b"local-key".to_vec(), b"value".to_vec(), None);
+    assert_eq!(local.get_ref(b"local-key"), Some(b"value".as_slice()));
+    assert_eq!(local.get(b"local-key"), Some(b"value".to_vec()));
+}
 ```
 
 Session APIs keep related KV-cache chunks on the same route and can pack values
@@ -231,12 +235,13 @@ Session-oriented methods include `batch_set_session_owned_no_ttl`,
 `batch_get_session_view`, `batch_get_session_packed`,
 `prepare_point_key`, and their routed or prehashed variants.
 
-Redis object helpers are exposed on [`storage::EmbeddedStore`] for hashes,
-lists, sets, and sorted sets. They use Redis-style wrong-type behavior through
-[`storage::RedisObjectResult`]. The public method families are `hset`/`hget`
-and related hash methods, `lpush`/`rpush`/`lrange` and related list methods,
-`sadd`/`srem`/`smembers` and related set methods, and
-`zadd`/`zrange`/`zscore` and related sorted-set methods.
+With `redis-compat`, Redis object helpers are exposed on
+[`storage::EmbeddedStore`] for hashes, lists, sets, and sorted sets. They use
+Redis-style wrong-type behavior through [`storage::RedisObjectResult`]. The
+public method families are `hset`/`hget` and related hash methods,
+`lpush`/`rpush`/`lrange` and related list methods, `sadd`/`srem`/`smembers`
+and related set methods, and `zadd`/`zrange`/`zscore` and related sorted-set
+methods.
 
 Other modules:
 
@@ -249,7 +254,7 @@ Other modules:
 
 ## Server Use
 
-Install and run the optional server binary:
+Install and run the core server binary:
 
 ```bash
 cargo install fast-cache --features server --locked
@@ -260,6 +265,12 @@ From a checkout:
 
 ```bash
 cargo run -p fast-cache --features server --bin fast-cache-server -- --data-dir ./var/fast-cache
+```
+
+For a Redis/Valkey-compatible deployment, enable the compatibility extension:
+
+```bash
+cargo install fast-cache --features redis-server --locked
 ```
 
 The server listens on `127.0.0.1:6380` by default and accepts RESP clients:
@@ -361,7 +372,11 @@ idempotently and catch up from backlog or snapshot-plus-delta.
 
 - `embedded`: default embedded Rust database API.
 - `sharded`: default sharded storage and owner-local embedded API.
-- `server`: builds the Redis-compatible `fast-cache-server` binary.
+- `redis-compat`: enables embedded Redis/Valkey data-type semantics and
+  wrong-type behavior without requiring server networking.
+- `server`: builds the RESP/FCNP `fast-cache-server` binary.
+- `redis-server`: enables both `server` and `redis-compat` for Redis/Valkey
+  compatibility deployments.
 - `monoio`: enables the Linux-only server runtime selected with
   `FAST_CACHE_USE_MONOIO=1`. The server still uses `bytes-handoff` for
   connection read buffering, using its monoio adapter on Linux. With

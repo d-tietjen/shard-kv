@@ -1,9 +1,11 @@
 # Command Modules
 
 Each Redis command owns its command-specific parsing, routing metadata, storage
-execution, and direct-server execution. The root command file is
-`commands/<name>.rs`; larger commands may use named submodules under
-`commands/<name>/`, declared from the root file. Do not add `mod.rs` files.
+execution, and direct-server execution. Command files live under family folders,
+for example `commands/string/get.rs`, `commands/key/ttl.rs`, and
+`commands/hash/hset.rs`. Larger commands may use named submodules under their
+command file stem, for example `commands/string/get/server.rs`. Do not add
+`mod.rs` files.
 
 Server, protocol, and storage modules should decode envelopes, route to a
 command object, and write generic wire responses. They should not contain
@@ -12,20 +14,20 @@ checks.
 
 ## Adding A Command
 
-1. Add `commands/<name>.rs`.
-2. Export the module from `src/commands.rs`.
+1. Add `commands/<family>/<name>.rs`.
+2. Export the module from `src/commands.rs` with an explicit `#[path]`.
 3. Define a zero-sized command spec and one static `COMMAND`.
 4. Define owned and borrowed payload types.
 5. Implement `OwnedCommandData` and `BorrowedCommandData`.
 6. Implement `CommandSpec`, `OwnedCommandParse`, and `BorrowedCommandParse`.
-7. Put async engine behavior in `commands/<name>/engine.rs` when it grows past a
-   tiny helper.
+7. Put async engine behavior in `commands/<family>/<name>/engine.rs` when it
+   grows past a tiny helper.
 8. Under `#[cfg(feature = "server")]`, put direct RESP and fast-protocol
-   behavior in `commands/<name>/server.rs`.
-9. Put native FCNP behavior in `commands/<name>/fcnp.rs`.
-10. Put command-local option parsing in `commands/<name>/options.rs`.
+    behavior in `commands/<family>/<name>/server.rs`.
+9. Put native FCNP behavior in `commands/<family>/<name>/fcnp.rs`.
+10. Put command-local option parsing in `commands/<family>/<name>/options.rs`.
 11. Put reusable command traits in command-owned submodules, for example
-    `commands/set/storage.rs`.
+    `commands/string/set/storage.rs`.
 12. Add `&commands::<name>::COMMAND` to only the catalogs that can execute it:
     `commands.rs::CATALOG`, `commands.rs::EngineCommandCatalog`, and the
     `server/commands.rs` catalogs.
@@ -43,10 +45,13 @@ floating helper methods.
 ## Root Template
 
 ```rust
+#[path = "example/engine.rs"]
 mod engine;
 #[cfg(feature = "server")]
+#[path = "example/fcnp.rs"]
 mod fcnp;
 #[cfg(feature = "server")]
+#[path = "example/server.rs"]
 mod server;
 
 use crate::protocol::{FastCommand, Frame};

@@ -3,10 +3,13 @@
 //! All GET-specific behavior starts here. Transport-specific implementations
 //! live in `get/*.rs` submodules.
 
+#[path = "get/engine.rs"]
 mod engine;
 #[cfg(feature = "server")]
+#[path = "get/fcnp.rs"]
 mod fcnp;
 #[cfg(feature = "server")]
+#[path = "get/server.rs"]
 mod server;
 
 use crate::Result;

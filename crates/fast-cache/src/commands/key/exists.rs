@@ -1,5 +1,7 @@
 //! EXISTS command parsing and execution.
 
+use smallvec::SmallVec;
+
 use crate::Result;
 #[cfg(feature = "server")]
 use crate::protocol::FastCodec;
@@ -19,17 +21,19 @@ use crate::{FastCacheError, commands::EngineCommandDispatch};
 use super::DecodedFastCommand;
 use super::parsing::CommandArity;
 
+type BorrowedKeys<'a> = SmallVec<[&'a [u8]; 8]>;
+
 pub(crate) struct Exists;
 pub(crate) static COMMAND: Exists = Exists;
 
 #[derive(Debug, Clone)]
 pub(crate) struct OwnedExists {
-    key: Vec<u8>,
+    keys: Vec<Vec<u8>>,
 }
 
 impl OwnedExists {
-    fn new(key: Vec<u8>) -> Self {
-        Self { key }
+    fn new(keys: Vec<Vec<u8>>) -> Self {
+        Self { keys }
     }
 }
 
@@ -37,22 +41,28 @@ impl super::OwnedCommandData for OwnedExists {
     type Spec = Exists;
 
     fn route_key(&self) -> Option<&[u8]> {
-        Some(&self.key)
+        self.keys.first().map(Vec::as_slice)
     }
 
     fn to_borrowed_command(&self) -> super::BorrowedCommandBox<'_> {
-        Box::new(BorrowedExists::new(&self.key))
+        Box::new(BorrowedExists::from_owned(&self.keys))
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct BorrowedExists<'a> {
-    key: &'a [u8],
+    keys: BorrowedKeys<'a>,
 }
 
 impl<'a> BorrowedExists<'a> {
-    fn new(key: &'a [u8]) -> Self {
-        Self { key }
+    fn new(keys: impl IntoIterator<Item = &'a [u8]>) -> Self {
+        Self {
+            keys: keys.into_iter().collect(),
+        }
+    }
+
+    fn from_owned(keys: &'a [Vec<u8>]) -> Self {
+        Self::new(keys.iter().map(Vec::as_slice))
     }
 }
 
@@ -60,34 +70,39 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedExists<'a> {
     type Spec = Exists;
 
     fn route_key(&self) -> Option<&'a [u8]> {
-        Some(self.key)
+        self.keys.first().copied()
     }
 
     fn to_owned_command(&self) -> Command {
-        Command::new(Box::new(OwnedExists::new(self.key.to_vec())))
+        Command::new(Box::new(OwnedExists::new(
+            self.keys.iter().map(|key| key.to_vec()).collect(),
+        )))
     }
 
     fn execute_engine<'b>(&'b self, ctx: EngineCommandContext<'b>) -> EngineFrameFuture<'b>
     where
         'a: 'b,
     {
-        let key = self.key;
-        Box::pin(async move { Exists::execute_engine_frame(ctx, key).await })
+        let keys = self.keys.clone();
+        Box::pin(async move { Exists::execute_engine_frame(ctx, keys.as_slice()).await })
     }
 
     #[cfg(feature = "server")]
     fn execute_borrowed_frame(&self, store: &crate::storage::EmbeddedStore, _now_ms: u64) -> Frame {
-        Frame::Integer(store.exists(self.key) as i64)
+        Frame::Integer(Exists::count_embedded_keys(store, self.keys.as_slice()))
     }
 
     #[cfg(feature = "server")]
     fn execute_borrowed(&self, ctx: BorrowedCommandContext<'_, '_, '_>) {
-        ServerWire::write_resp_integer(ctx.out, ctx.store.exists(self.key) as i64);
+        ServerWire::write_resp_integer(
+            ctx.out,
+            Exists::count_embedded_keys(ctx.store, self.keys.as_slice()),
+        );
     }
 
     #[cfg(feature = "server")]
     fn execute_direct_borrowed(&self, ctx: DirectCommandContext) -> Frame {
-        Frame::Integer(ctx.exists(self.key) as i64)
+        Frame::Integer(Exists::count_direct_keys(ctx, self.keys.as_slice()))
     }
 }
 
@@ -98,15 +113,17 @@ impl super::CommandSpec for Exists {
 
 impl super::OwnedCommandParse for Exists {
     fn parse_owned(parts: &[Vec<u8>]) -> Result<Command> {
-        CommandArity::<Self>::exact(parts.len(), 2)?;
-        Ok(Command::new(Box::new(OwnedExists::new(parts[1].clone()))))
+        CommandArity::<Self>::at_least(parts.len(), 2, "key")?;
+        Ok(Command::new(Box::new(OwnedExists::new(
+            parts[1..].to_vec(),
+        ))))
     }
 }
 
 impl<'a> super::BorrowedCommandParse<'a> for Exists {
     fn parse_borrowed(parts: &[&'a [u8]]) -> Result<super::BorrowedCommandBox<'a>> {
-        CommandArity::<Self>::exact(parts.len(), 2)?;
-        Ok(Box::new(BorrowedExists::new(parts[1])))
+        CommandArity::<Self>::at_least(parts.len(), 2, "key")?;
+        Ok(Box::new(BorrowedExists::new(parts[1..].iter().copied())))
     }
 }
 
@@ -134,10 +151,12 @@ impl EngineCommandDispatch for Exists {
 }
 
 impl Exists {
-    async fn execute_engine_frame(ctx: EngineCommandContext<'_>, key: &[u8]) -> Result<Frame> {
-        Self::execute_engine_integer(ctx, key)
-            .await
-            .map(Frame::Integer)
+    async fn execute_engine_frame(ctx: EngineCommandContext<'_>, keys: &[&[u8]]) -> Result<Frame> {
+        let mut total = 0i64;
+        for key in keys {
+            total += Self::execute_engine_integer(ctx, key).await?;
+        }
+        Ok(Frame::Integer(total))
     }
 
     async fn execute_engine_integer(ctx: EngineCommandContext<'_>, key: &[u8]) -> Result<i64> {
@@ -152,16 +171,29 @@ impl Exists {
             )),
         }
     }
+
+    #[cfg(feature = "server")]
+    fn count_embedded_keys(store: &crate::storage::EmbeddedStore, keys: &[&[u8]]) -> i64 {
+        keys.iter().filter(|key| store.exists(key)).count() as i64
+    }
+
+    #[cfg(feature = "server")]
+    fn count_direct_keys(ctx: DirectCommandContext, keys: &[&[u8]]) -> i64 {
+        keys.iter().filter(|key| ctx.exists(key)).count() as i64
+    }
 }
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Exists {
     fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
         match ctx.args.as_slice() {
-            [key] => ServerWire::write_resp_integer(ctx.out, ctx.store.exists(key) as i64),
-            _ => ServerWire::write_resp_error(
+            [] => ServerWire::write_resp_error(
                 ctx.out,
                 "ERR wrong number of arguments for 'EXISTS' command",
+            ),
+            keys => ServerWire::write_resp_integer(
+                ctx.out,
+                Exists::count_embedded_keys(ctx.store, keys),
             ),
         }
     }
