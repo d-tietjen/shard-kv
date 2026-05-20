@@ -131,6 +131,36 @@ impl ZSetObject {
         }
     }
 
+    pub(super) fn rank(&self, member: &[u8], rev: bool) -> Option<usize> {
+        match self {
+            Self::Small(entries) => {
+                if rev {
+                    entries
+                        .iter()
+                        .rev()
+                        .position(|(existing, _)| existing.as_slice() == member)
+                } else {
+                    entries
+                        .iter()
+                        .position(|(existing, _)| existing.as_slice() == member)
+                }
+            }
+            Self::Map { scores, ordered } => {
+                scores.get(member)?;
+                if rev {
+                    ordered
+                        .iter()
+                        .rev()
+                        .position(|item| item.member.as_slice() == member)
+                } else {
+                    ordered
+                        .iter()
+                        .position(|item| item.member.as_slice() == member)
+                }
+            }
+        }
+    }
+
     pub(super) fn range(&self, start: i64, stop: i64) -> Vec<Option<Bytes>> {
         match self {
             Self::Small(entries) => {
@@ -185,6 +215,63 @@ impl ZSetObject {
                 emit(RedisObjectArrayItem::Begin(count));
                 for item in ordered.iter().skip(start).take(count) {
                     emit(RedisObjectArrayItem::Bulk(Some(&item.member)));
+                }
+            }
+        }
+    }
+
+    pub(super) fn range_entries_visit(
+        &self,
+        start: i64,
+        stop: i64,
+        rev: bool,
+        mut emit: impl FnMut(RedisObjectZSetRangeItem<'_>),
+    ) {
+        match self {
+            Self::Small(entries) => {
+                let Some((start, stop)) = normalize_range(start, stop, entries.len()) else {
+                    emit(RedisObjectZSetRangeItem::Begin(0));
+                    return;
+                };
+                let count = stop - start + 1;
+                emit(RedisObjectZSetRangeItem::Begin(count));
+                if rev {
+                    for (member, score) in entries.iter().rev().skip(start).take(count) {
+                        emit(RedisObjectZSetRangeItem::Entry {
+                            member: member.as_slice(),
+                            score: *score,
+                        });
+                    }
+                } else {
+                    for (member, score) in entries.iter().skip(start).take(count) {
+                        emit(RedisObjectZSetRangeItem::Entry {
+                            member: member.as_slice(),
+                            score: *score,
+                        });
+                    }
+                }
+            }
+            Self::Map { ordered, .. } => {
+                let Some((start, stop)) = normalize_range(start, stop, ordered.len()) else {
+                    emit(RedisObjectZSetRangeItem::Begin(0));
+                    return;
+                };
+                let count = stop - start + 1;
+                emit(RedisObjectZSetRangeItem::Begin(count));
+                if rev {
+                    for item in ordered.iter().rev().skip(start).take(count) {
+                        emit(RedisObjectZSetRangeItem::Entry {
+                            member: item.member.as_slice(),
+                            score: item.score,
+                        });
+                    }
+                } else {
+                    for item in ordered.iter().skip(start).take(count) {
+                        emit(RedisObjectZSetRangeItem::Entry {
+                            member: item.member.as_slice(),
+                            score: item.score,
+                        });
+                    }
                 }
             }
         }

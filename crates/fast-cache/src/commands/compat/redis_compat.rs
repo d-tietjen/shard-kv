@@ -17,7 +17,8 @@ use crate::server::commands::{
 use crate::server::wire::ServerWire;
 use crate::storage::{
     Command, DEFAULT_SCAN_COUNT, EmbeddedStore, EngineCommandContext, EngineFrameFuture,
-    RedisKeyScanType, RedisObjectError, RedisObjectResult, RedisObjectValue,
+    RedisKeyScanType, RedisObjectError, RedisObjectReadOutcome, RedisObjectResult,
+    RedisObjectValue, RedisObjectZSetRangeItem,
 };
 use crate::{FastCacheError, Result};
 
@@ -89,6 +90,12 @@ pub(crate) trait RedisCompatCommand: CommandSpec + Send + Sync + 'static {
         dispatch(Self::NAME, store, args)
     }
 
+    #[cfg(feature = "server")]
+    #[inline(always)]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_frame(out, &Self::execute(store, args));
+    }
+
     #[inline(always)]
     fn matches_fast(_command: &FastCommand<'_>) -> bool {
         false
@@ -156,7 +163,7 @@ where
 
     #[cfg(feature = "server")]
     fn execute_borrowed(&self, ctx: BorrowedCommandContext<'_, '_, '_>) {
-        write_frame(ctx.out, &C::execute(ctx.store, &self.args));
+        C::write_resp(ctx.store, &self.args, ctx.out);
     }
 
     #[cfg(feature = "server")]
@@ -205,7 +212,7 @@ where
     C: RedisCompatCommand,
 {
     fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
-        write_frame(ctx.out, &C::execute(ctx.store, &ctx.args));
+        C::write_resp(ctx.store, &ctx.args, ctx.out);
     }
 }
 
@@ -319,7 +326,29 @@ define_compat_command!(zadd, ZAdd, "ZADD", true);
 define_compat_command!(zscore, ZScore, "ZSCORE", false);
 define_compat_command!(zmscore, ZMScore, "ZMSCORE", false);
 define_compat_command!(zcard, ZCard, "ZCARD", false);
-define_compat_command!(zrange, ZRange, "ZRANGE", false);
+pub(crate) mod zrange {
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct ZRange;
+
+    pub(crate) static COMMAND: ZRange = ZRange;
+
+    impl crate::commands::CommandSpec for ZRange {
+        const NAME: &'static str = "ZRANGE";
+        const MUTATES_VALUE: bool = false;
+    }
+
+    impl crate::commands::redis_compat::RedisCompatCommand for ZRange {
+        #[cfg(feature = "server")]
+        #[inline(always)]
+        fn write_resp(
+            store: &crate::storage::EmbeddedStore,
+            args: &[&[u8]],
+            out: &mut bytes::BytesMut,
+        ) {
+            super::write_zrange_resp(store, args, out);
+        }
+    }
+}
 define_compat_command!(zincrby, ZIncrBy, "ZINCRBY", true);
 define_compat_command!(zcount, ZCount, "ZCOUNT", false);
 define_compat_command!(zrank, ZRank, "ZRANK", false);
@@ -1338,6 +1367,57 @@ fn zrangebyscore(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
     zrange_by_score_impl(store, args[0], args[1], args[2], false, with_scores, limit)
 }
 
+#[cfg(feature = "server")]
+fn write_zrange_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+    if args.len() < 3 {
+        write_frame(out, &wrong_arity("ZRANGE"));
+        return;
+    }
+
+    let mut rev = false;
+    let mut with_scores = false;
+    let mut index = 3;
+    while index < args.len() {
+        if eq_ignore_ascii_case(args[index], b"REV") {
+            rev = true;
+            index += 1;
+        } else if eq_ignore_ascii_case(args[index], b"WITHSCORES") {
+            with_scores = true;
+            index += 1;
+        } else {
+            write_frame(out, &zrange(store, args));
+            return;
+        }
+    }
+
+    let (Ok(start), Ok(stop)) = (parse_i64(args[1]), parse_i64(args[2])) else {
+        write_frame(out, &error("ERR value is not an integer or out of range"));
+        return;
+    };
+
+    match store.zrange_entries_visit(args[0], start, stop, rev, |item| match item {
+        RedisObjectZSetRangeItem::Begin(count) => {
+            let len = if with_scores {
+                count.saturating_mul(2)
+            } else {
+                count
+            };
+            write_resp_array_header(out, len);
+        }
+        RedisObjectZSetRangeItem::Entry { member, score } => {
+            ServerWire::write_resp_blob_string(out, member);
+            if with_scores {
+                let score = format_score(score);
+                ServerWire::write_resp_blob_string(out, &score);
+            }
+        }
+    }) {
+        RedisObjectReadOutcome::Written => {}
+        RedisObjectReadOutcome::Missing => write_resp_array_header(out, 0),
+        RedisObjectReadOutcome::WrongType => write_frame(out, &wrongtype()),
+    }
+}
+
 fn zrange_by_rank_impl(
     store: &EmbeddedStore,
     key: &[u8],
@@ -1423,21 +1503,11 @@ fn zcount(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
 
 fn zrank(store: &EmbeddedStore, args: &[&[u8]], rev: bool) -> Frame {
     match args {
-        [key, member] => {
-            let mut entries = match store.zentries(key) {
-                Ok(entries) => entries,
-                Err(RedisObjectError::WrongType) => return wrongtype(),
-                Err(RedisObjectError::MissingKey) => return Frame::Null,
-            };
-            if rev {
-                entries.reverse();
-            }
-            entries
-                .iter()
-                .position(|(existing, _)| existing.as_slice() == *member)
-                .map(|rank| int(rank as i64))
-                .unwrap_or(Frame::Null)
-        }
+        [key, member] => match store.zrank_value(key, member, rev) {
+            Ok(Some(rank)) => int(rank as i64),
+            Ok(None) | Err(RedisObjectError::MissingKey) => Frame::Null,
+            Err(RedisObjectError::WrongType) => wrongtype(),
+        },
         _ => wrong_arity(if rev { "ZREVRANK" } else { "ZRANK" }),
     }
 }

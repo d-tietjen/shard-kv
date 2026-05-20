@@ -19,7 +19,8 @@ use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
 #[cfg(feature = "redis-compat")]
 use crate::storage::{
     RedisObjectBucket, RedisObjectError, RedisObjectReadOutcome, RedisObjectResult,
-    RedisObjectStore, RedisObjectValue, RedisObjectWriteAttempt, RedisStringLookup,
+    RedisObjectStore, RedisObjectValue, RedisObjectWriteAttempt, RedisObjectZSetRangeItem,
+    RedisStringLookup,
 };
 #[cfg(feature = "embedded")]
 use crate::storage::{ShardStatsSnapshot, TierStatsSnapshot};

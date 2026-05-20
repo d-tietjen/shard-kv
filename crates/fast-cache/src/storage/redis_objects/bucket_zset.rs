@@ -285,25 +285,33 @@ impl RedisObjectBucket {
 
     pub(crate) fn zrank(&self, key: &[u8], member: &[u8], rev: bool) -> RedisObjectResult {
         match self.zsets.get(key).copied() {
-            Some(slot) => {
-                let mut entries = self
-                    .zset_slab
+            Some(slot) => RedisObjectResult::Integer(
+                self.zset_slab
                     .get(slot)
                     .expect("zset slab slot missing")
-                    .entries();
-                if rev {
-                    entries.reverse();
-                }
-                RedisObjectResult::Integer(
-                    entries
-                        .iter()
-                        .position(|(existing, _)| existing.as_slice() == member)
-                        .map(|rank| rank as i64)
-                        .unwrap_or(-1),
-                )
-            }
+                    .rank(member, rev)
+                    .map(|rank| rank as i64)
+                    .unwrap_or(-1),
+            ),
             None if self.has_non_zset(key) => RedisObjectResult::WrongType,
             None => RedisObjectResult::Integer(-1),
+        }
+    }
+
+    pub(crate) fn zrank_value(
+        &self,
+        key: &[u8],
+        member: &[u8],
+        rev: bool,
+    ) -> Result<Option<usize>, ()> {
+        match self.zsets.get(key).copied() {
+            Some(slot) => Ok(self
+                .zset_slab
+                .get(slot)
+                .expect("zset slab slot missing")
+                .rank(member, rev)),
+            None if self.has_non_zset(key) => Err(()),
+            None => Ok(None),
         }
     }
 
@@ -374,6 +382,27 @@ impl RedisObjectBucket {
                     .get(slot)
                     .expect("zset slab slot missing")
                     .range_visit(start, stop, emit);
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_zset(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
+        }
+    }
+
+    pub(crate) fn zrange_entries_visit(
+        &self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        rev: bool,
+        emit: impl FnMut(RedisObjectZSetRangeItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        match self.zsets.get(key).copied() {
+            Some(slot) => {
+                self.zset_slab
+                    .get(slot)
+                    .expect("zset slab slot missing")
+                    .range_entries_visit(start, stop, rev, emit);
                 RedisObjectReadOutcome::Written
             }
             None if self.has_non_zset(key) => RedisObjectReadOutcome::WrongType,

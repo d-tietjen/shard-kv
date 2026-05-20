@@ -273,6 +273,19 @@ impl EmbeddedStore {
         self.object_read(key, |bucket| bucket.zrange(key, start, stop))
     }
 
+    pub(crate) fn zrange_entries_visit(
+        &self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        rev: bool,
+        emit: impl FnMut(RedisObjectZSetRangeItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.zrange_entries_visit(key, start, stop, rev, emit)
+        })
+    }
+
     pub fn zentries(&self, key: &[u8]) -> Result<Vec<(Bytes, f64)>, RedisObjectError> {
         let route = self.route_key(key);
         let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
@@ -292,6 +305,28 @@ impl EmbeddedStore {
 
     pub fn zrank(&self, key: &[u8], member: &[u8], rev: bool) -> RedisObjectResult {
         self.object_read(key, |bucket| bucket.zrank(key, member, rev))
+    }
+
+    pub(crate) fn zrank_value(
+        &self,
+        key: &[u8],
+        member: &[u8],
+        rev: bool,
+    ) -> Result<Option<usize>, RedisObjectError> {
+        let route = self.route_key(key);
+        let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
+        let result = bucket
+            .zrank_value(key, member, rev)
+            .map_err(|()| RedisObjectError::WrongType);
+        if result.is_err() || bucket.contains_object(key) {
+            return result;
+        }
+        drop(bucket);
+        if self.string_exists_routed(route, key) {
+            Err(RedisObjectError::WrongType)
+        } else {
+            result
+        }
     }
 
     pub fn zcount(&self, key: &[u8], min: f64, max: f64) -> RedisObjectResult {

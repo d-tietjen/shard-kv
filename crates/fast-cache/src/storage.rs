@@ -87,7 +87,7 @@ pub use records::{MutationBytes, MutationOp, MutationRecord, StoredEntry};
 #[cfg(feature = "redis-compat")]
 pub(crate) use redis_objects::{
     RedisObjectBucket, RedisObjectReadOutcome, RedisObjectStore, RedisObjectValue,
-    RedisObjectWriteAttempt, WRONGTYPE_MESSAGE,
+    RedisObjectWriteAttempt, RedisObjectZSetRangeItem, WRONGTYPE_MESSAGE,
 };
 #[cfg(feature = "redis-compat")]
 pub use redis_objects::{RedisObjectError, RedisObjectResult, RedisStringLookup};

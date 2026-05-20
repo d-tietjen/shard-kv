@@ -64,6 +64,11 @@ pub(crate) enum RedisObjectArrayItem<'a> {
     Bulk(Option<&'a [u8]>),
 }
 
+pub(crate) enum RedisObjectZSetRangeItem<'a> {
+    Begin(usize),
+    Entry { member: &'a [u8], score: f64 },
+}
+
 #[derive(Debug)]
 struct SlotEntry {
     hash: u64,
