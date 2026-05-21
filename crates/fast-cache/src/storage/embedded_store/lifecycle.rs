@@ -22,7 +22,7 @@ impl EmbeddedStore {
             false => self.route_key(key),
         };
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
             let deleted_object = bucket.delete_any(key);
@@ -63,19 +63,24 @@ impl EmbeddedStore {
     /// Returns true when `key` currently exists.
     pub fn exists(&self, key: &[u8]) -> bool {
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        {
             let route = self.route_key(key);
-            let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-            if bucket.object_is_expired(key, now_millis()) {
-                drop(bucket);
-                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-                if bucket.delete_expired(key, now_millis()) {
-                    self.objects.note_deleted(route.shard_id);
+            if self.objects.shard_has_objects(route.shard_id) {
+                let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
+                if bucket.has_expirations() {
+                    let now_ms = now_millis();
+                    if bucket.object_is_expired(key, now_ms) {
+                        drop(bucket);
+                        let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+                        if bucket.delete_expired(key, now_ms) {
+                            self.objects.note_deleted(route.shard_id);
+                        }
+                        return self.get(key).is_some();
+                    }
                 }
-                return self.get(key).is_some();
-            }
-            if bucket.contains_object(key) {
-                return true;
+                if bucket.contains_object(key) {
+                    return true;
+                }
             }
         }
         self.get(key).is_some()
@@ -86,7 +91,7 @@ impl EmbeddedStore {
         let route = self.route_key(key);
         let now_ms = now_millis();
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             if bucket.delete_expired(key, now_ms) {
                 self.objects.note_deleted(route.shard_id);
@@ -114,7 +119,7 @@ impl EmbeddedStore {
         let route = self.route_key(key);
         let now_ms = now_millis();
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             if bucket.delete_expired(key, now_ms) {
                 self.objects.note_deleted(route.shard_id);
@@ -142,7 +147,7 @@ impl EmbeddedStore {
         let route = self.route_key(key);
         let now_ms = now_millis();
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             if bucket.delete_expired(key, now_ms) {
                 self.objects.note_deleted(route.shard_id);
@@ -190,7 +195,7 @@ impl EmbeddedStore {
             false => self.route_key(key),
         };
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             if bucket.delete_expired(key, now_ms) {
                 self.objects.note_deleted(route.shard_id);
@@ -226,16 +231,23 @@ impl EmbeddedStore {
         key: &[u8],
         lookup: impl FnOnce(&RedisObjectBucket, &[u8]) -> Option<&'static str>,
     ) -> Option<&'static str> {
-        match self.objects.has_objects() {
+        let route = self.route_key(key);
+        match self.objects.shard_has_objects(route.shard_id) {
             false => None,
             true => {
-                let route = self.route_key(key);
-                let now_ms = now_millis();
                 let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-                match bucket.object_is_expired(key, now_ms) {
+                let expired = match bucket.has_expirations() {
+                    true => {
+                        let now_ms = now_millis();
+                        bucket.object_is_expired(key, now_ms)
+                    }
+                    false => false,
+                };
+                match expired {
                     true => {
                         drop(bucket);
                         let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+                        let now_ms = now_millis();
                         match bucket.delete_expired(key, now_ms) {
                             true => {
                                 self.objects.note_deleted(route.shard_id);

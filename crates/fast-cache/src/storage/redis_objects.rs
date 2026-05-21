@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicIsize};
 
 use hashbrown::HashTable;
+use indextreemap::IndexTreeSet;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 
@@ -181,7 +182,7 @@ enum ZSetObject {
     Small(SmallZSetEntries),
     Map {
         scores: FastHashMap<Bytes, f64>,
-        ordered: BTreeSet<ZSetOrderKey>,
+        ordered: IndexTreeSet<ZSetOrderKey>,
     },
 }
 

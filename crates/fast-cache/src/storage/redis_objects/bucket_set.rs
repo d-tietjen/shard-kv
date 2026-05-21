@@ -166,6 +166,23 @@ impl RedisObjectBucket {
         }
     }
 
+    pub(crate) fn smembers_visit(
+        &self,
+        key: &[u8],
+        emit: &mut impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        match self.sets.get(key).copied() {
+            Some(slot) => {
+                let set = self.set_slab.get(slot).expect("set slab slot missing");
+                emit(RedisObjectArrayItem::Begin(set.len()));
+                set.visit_members(|member| emit(RedisObjectArrayItem::Bulk(Some(member))));
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_set(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
+        }
+    }
+
     pub(crate) fn set_members(&self, key: &[u8]) -> Result<Vec<Bytes>, ()> {
         match self.sets.get(key).copied() {
             Some(slot) => {
@@ -205,12 +222,10 @@ impl RedisObjectBucket {
             };
             return (result, empty);
         }
-        if self.has_non_set(key) {
-            (RedisObjectResult::WrongType, false)
-        } else if count.is_some() {
-            (RedisObjectResult::Array(Vec::new()), false)
-        } else {
-            (RedisObjectResult::Bulk(None), false)
+        match (self.has_non_set(key), count) {
+            (true, _) => (RedisObjectResult::WrongType, false),
+            (false, Some(_)) => (RedisObjectResult::Array(Vec::new()), false),
+            (false, None) => (RedisObjectResult::Bulk(None), false),
         }
     }
 
@@ -244,6 +259,27 @@ impl RedisObjectBucket {
                     RedisObjectResult::Bulk(None)
                 }
             }
+        }
+    }
+
+    pub(crate) fn srandmember_positive_visit(
+        &self,
+        key: &[u8],
+        requested: usize,
+        emit: &mut impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        match self.sets.get(key).copied() {
+            Some(slot) => {
+                let set = self.set_slab.get(slot).expect("set slab slot missing");
+                let count = requested.min(set.len());
+                emit(RedisObjectArrayItem::Begin(count));
+                set.visit_members_limited(count, |member| {
+                    emit(RedisObjectArrayItem::Bulk(Some(member)))
+                });
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_set(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
         }
     }
 }

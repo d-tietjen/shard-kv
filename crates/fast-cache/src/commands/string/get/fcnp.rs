@@ -228,38 +228,44 @@ impl Get {
             return FcnpDispatch::Unsupported;
         }
         let key = &ctx.frame.buf[KEY_OFFSET..KEY_OFFSET + key_len];
-        if ctx.store.route_mode() == EmbeddedRouteMode::SessionPrefix && key.starts_with(b"s:") {
-            let session_prefix = ctx.store.session_route_prefix_for_key(key);
-            let session_hash = hash_key(session_prefix);
-            if !ctx.request_matches_owned_session_hash(route_shard, session_hash) {
+        match ctx.store.route_mode() == EmbeddedRouteMode::SessionPrefix && key.starts_with(b"s:") {
+            true => {
+                let session_prefix = ctx.store.session_route_prefix_for_key(key);
+                let session_hash = hash_key(session_prefix);
+                if !ctx.request_matches_owned_session_hash(route_shard, session_hash) {
+                    ServerWire::write_fast_error(ctx.out, "ERR FCNP route shard mismatch");
+                    return FcnpDispatch::Complete(ctx.frame.frame_len);
+                }
+                let outcome = {
+                    let out = &mut *ctx.out;
+                    // SAFETY: direct-shard workers bind one worker to one shard-owned port,
+                    // and the route check above proves this key belongs to that shard.
+                    unsafe {
+                        ctx.store
+                            .with_session_value_slice_owned_shard_no_ttl_prevalidated(
+                                route_shard,
+                                session_hash,
+                                key_hash,
+                                session_prefix,
+                                key,
+                                |value| ServerWire::write_fast_value(out, value),
+                            )
+                    }
+                };
+                match outcome {
+                    Some(false) => {
+                        ServerWire::write_fast_null(ctx.out);
+                        return FcnpDispatch::Complete(ctx.frame.frame_len);
+                    }
+                    Some(true) => return FcnpDispatch::Complete(ctx.frame.frame_len),
+                    None => {}
+                }
+            }
+            false if !ctx.request_matches_owned_shard_for_key(route_shard, key_hash, key) => {
                 ServerWire::write_fast_error(ctx.out, "ERR FCNP route shard mismatch");
                 return FcnpDispatch::Complete(ctx.frame.frame_len);
             }
-            let outcome = {
-                let out = &mut *ctx.out;
-                // SAFETY: direct-shard workers bind one worker to one shard-owned port,
-                // and the route check above proves this key belongs to that shard.
-                unsafe {
-                    ctx.store
-                        .with_session_value_slice_owned_shard_no_ttl_prevalidated(
-                            route_shard,
-                            session_hash,
-                            key_hash,
-                            session_prefix,
-                            key,
-                            |value| ServerWire::write_fast_value(out, value),
-                        )
-                }
-            };
-            if let Some(found) = outcome {
-                if !found {
-                    ServerWire::write_fast_null(ctx.out);
-                }
-                return FcnpDispatch::Complete(ctx.frame.frame_len);
-            }
-        } else if !ctx.request_matches_owned_shard_for_key(route_shard, key_hash, key) {
-            ServerWire::write_fast_error(ctx.out, "ERR FCNP route shard mismatch");
-            return FcnpDispatch::Complete(ctx.frame.frame_len);
+            false => {}
         }
 
         #[cfg(not(feature = "unsafe"))]

@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::thread;
@@ -25,7 +25,9 @@ struct Args {
     #[arg(long)]
     targets: String,
 
-    /// Command, case, family, or comma-separated filters. Use `all` for every case.
+    /// Command, case, family, or comma-separated filters.
+    ///
+    /// Use `all` for every small case or `extended` for small plus large cases.
     #[arg(long, default_value = "all")]
     cases: String,
 
@@ -346,7 +348,7 @@ fn run_script(
                 break;
             }
             let started = Instant::now();
-            let error = conn.execute(case.parts, suffix)?;
+            let error = conn.execute_case(case, suffix)?;
             let elapsed = started.elapsed();
             if let Some(stats) = stats.as_deref_mut() {
                 let case_stats = &mut stats[index];
@@ -363,7 +365,6 @@ fn run_script(
 
 struct RespConn {
     reader: BufReader<TcpStream>,
-    writer: BufWriter<TcpStream>,
     line: Vec<u8>,
     command_cache: HashMap<CommandCacheKey, Vec<u8>>,
 }
@@ -377,12 +378,10 @@ struct CommandCacheKey {
 impl RespConn {
     fn connect(addr: &str) -> Result<Self, BoxError> {
         let stream = TcpStream::connect(addr)?;
-        stream.set_nodelay(true)?;
-        let reader = BufReader::with_capacity(64 * 1024, stream.try_clone()?);
-        let writer = BufWriter::with_capacity(64 * 1024, stream);
+        let _ = stream.set_nodelay(true);
+        let reader = BufReader::with_capacity(64 * 1024, stream);
         Ok(Self {
             reader,
-            writer,
             line: Vec::with_capacity(128),
             command_cache: HashMap::new(),
         })
@@ -390,8 +389,25 @@ impl RespConn {
 
     fn execute(&mut self, parts: &[&str], suffix: &str) -> Result<bool, BoxError> {
         self.write_command(parts, suffix)?;
-        self.writer.flush()?;
+        self.reader.get_mut().flush()?;
         self.read_frame()
+    }
+
+    fn execute_case(&mut self, case: &RedisCommandCase, suffix: &str) -> Result<bool, BoxError> {
+        if case.script.is_empty() {
+            return self.execute(case.parts, suffix);
+        }
+
+        for parts in case.script {
+            self.write_command(parts, suffix)?;
+        }
+        self.reader.get_mut().flush()?;
+
+        let mut saw_error = false;
+        for _ in case.script {
+            saw_error |= self.read_frame()?;
+        }
+        Ok(saw_error)
     }
 
     fn write_command(&mut self, parts: &[&str], suffix: &str) -> Result<(), BoxError> {
@@ -399,15 +415,13 @@ impl RespConn {
             ptr: parts.as_ptr() as usize,
             len: parts.len(),
         };
-        if !self.command_cache.contains_key(&cache_key) {
-            let encoded = encode_command(parts, suffix)?;
-            self.command_cache.insert(cache_key, encoded);
-        }
-        let encoded = self
-            .command_cache
-            .get(&cache_key)
-            .expect("encoded command was just cached");
-        self.writer.write_all(encoded)?;
+        let encoded = match self.command_cache.entry(cache_key) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(encode_command(parts, suffix)?)
+            }
+        };
+        self.reader.get_mut().write_all(encoded)?;
         Ok(())
     }
 
@@ -466,20 +480,15 @@ impl RespConn {
 
     fn read_line(&mut self) -> Result<(), BoxError> {
         self.line.clear();
-        loop {
-            let mut byte = [0_u8; 1];
-            self.reader.read_exact(&mut byte)?;
-            match byte[0] {
-                b'\r' => {
-                    self.reader.read_exact(&mut byte)?;
-                    if byte[0] != b'\n' {
-                        return Err("RESP line ended with CR without LF".into());
-                    }
-                    return Ok(());
-                }
-                other => self.line.push(other),
-            }
+        if self.reader.read_until(b'\n', &mut self.line)? == 0 {
+            return Err("RESP stream closed while reading line".into());
         }
+        if !self.line.ends_with(b"\r\n") {
+            return Err("RESP line ended without CRLF".into());
+        }
+        let len = self.line.len();
+        self.line.truncate(len - 2);
+        Ok(())
     }
 
     fn skip_exact(&mut self, len: usize) -> Result<(), BoxError> {
@@ -599,13 +608,34 @@ fn is_probable_key(part: &str) -> bool {
         "s" | "s-nx"
             | "s-del"
             | "exp"
+            | "expireat-bench"
+            | "pexpireat-bench"
+            | "object-bench"
+            | "touch-a"
+            | "touch-b"
+            | "randomkey-bench"
+            | "copy-src"
+            | "copy-dst"
+            | "setnx-bench"
+            | "bitstr"
+            | "bit-a"
+            | "bit-b"
+            | "bit-out"
             | "n"
             | "nf"
+            | "rename-a"
+            | "rename-b"
+            | "renamenx-src"
+            | "renamenx-dst"
+            | "txn"
+            | "txn-discard"
             | "ma"
             | "mb"
             | "mc"
             | "h"
+            | "hm"
             | "l"
+            | "lmove-bench"
             | "bl"
             | "br"
             | "bm"

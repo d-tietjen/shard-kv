@@ -1,8 +1,10 @@
 use super::connection::{ConnectionRejector, HandoffConfig};
 #[cfg(feature = "embedded")]
-use super::direct_protocol::DirectProtocol;
+use super::direct_protocol::{DirectProtocol, SharedRequestBufferContext};
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
 use super::fast_write::{FastWriteBatchIoVec, FastWriteItem, FastWriteQueue};
+#[cfg(feature = "embedded")]
+use super::transactions::{TransactionCoordinator, TransactionState};
 use super::*;
 
 pub(super) struct MultiDirectAddress;
@@ -66,19 +68,34 @@ pub(super) struct TokioHybridWorkerConfig {
     pub(super) single_threaded: bool,
     pub(super) owned_shard_id: usize,
     pub(super) started_at: Instant,
+    pub(super) transaction_coordinator: Option<Arc<TransactionCoordinator>>,
+}
+
+#[cfg(feature = "embedded")]
+pub(super) struct TokioWorkerConfig {
+    pub(super) worker_id: usize,
+    pub(super) core_id: Option<core_affinity::CoreId>,
+    pub(super) single_threaded: bool,
+    pub(super) started_at: Instant,
+    pub(super) transaction_coordinator: Option<Arc<TransactionCoordinator>>,
 }
 
 #[cfg(feature = "embedded")]
 impl MultiDirectWorker {
     pub(super) fn run(
-        worker_id: usize,
+        config: TokioWorkerConfig,
         store: Arc<EmbeddedStore>,
         limiter: Arc<Semaphore>,
         rx: flume::Receiver<std::net::TcpStream>,
-        core_id: Option<core_affinity::CoreId>,
-        single_threaded: bool,
-        started_at: Instant,
     ) {
+        let TokioWorkerConfig {
+            worker_id,
+            core_id,
+            single_threaded,
+            started_at,
+            transaction_coordinator,
+        } = config;
+
         if let Some(core) = core_id
             && !core_affinity::set_for_current(core)
         {
@@ -117,6 +134,7 @@ impl MultiDirectWorker {
                     }
                 };
                 let store = store.clone();
+                let transaction_coordinator = transaction_coordinator.clone();
                 spawn_local(async move {
                     if let Err(error) = MultiDirectConnection::handle(
                         stream,
@@ -125,6 +143,7 @@ impl MultiDirectWorker {
                         single_threaded,
                         None,
                         started_at,
+                        transaction_coordinator,
                     )
                     .await
                     {
@@ -148,6 +167,7 @@ impl MultiDirectWorker {
             single_threaded,
             owned_shard_id,
             started_at,
+            transaction_coordinator,
         } = config;
 
         if let Some(core) = core_id
@@ -183,6 +203,7 @@ impl MultiDirectWorker {
 
             let direct_store = store.clone();
             let direct_limiter = limiter.clone();
+            let direct_transaction_coordinator = transaction_coordinator.clone();
             spawn_local(async move {
                 loop {
                     let (stream, _addr) = match direct_listener.accept().await {
@@ -201,6 +222,7 @@ impl MultiDirectWorker {
                         }
                     };
                     let store = direct_store.clone();
+                    let transaction_coordinator = direct_transaction_coordinator.clone();
                     spawn_local(async move {
                         if let Err(error) = MultiDirectConnection::handle(
                             stream,
@@ -209,6 +231,7 @@ impl MultiDirectWorker {
                             single_threaded,
                             Some(owned_shard_id),
                             started_at,
+                            transaction_coordinator,
                         )
                         .await
                         {
@@ -237,6 +260,7 @@ impl MultiDirectWorker {
                     }
                 };
                 let store = store.clone();
+                let transaction_coordinator = transaction_coordinator.clone();
                 spawn_local(async move {
                     if let Err(error) = MultiDirectConnection::handle(
                         stream,
@@ -245,6 +269,7 @@ impl MultiDirectWorker {
                         single_threaded,
                         None,
                         started_at,
+                        transaction_coordinator,
                     )
                     .await
                     {
@@ -259,13 +284,10 @@ impl MultiDirectWorker {
 #[cfg(not(feature = "embedded"))]
 impl MultiDirectWorker {
     pub(super) fn run(
-        _worker_id: usize,
+        _config: (),
         _store: Arc<()>,
         _limiter: Arc<Semaphore>,
         _rx: flume::Receiver<std::net::TcpStream>,
-        _core_id: Option<core_affinity::CoreId>,
-        _single_threaded: bool,
-        _started_at: Instant,
     ) {
         panic!("multi-direct requires the `embedded` feature");
     }
@@ -327,6 +349,7 @@ impl MultiDirectConnection {
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     ) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + 'static,
@@ -348,6 +371,7 @@ impl MultiDirectConnection {
         // the encoded bytes to the writer while leaving the underlying buffer's
         // remaining capacity for the next batch (zero-realloc steady state).
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
+        let mut transaction_state = TransactionState::default();
 
         let read_loop = async {
             loop {
@@ -361,14 +385,18 @@ impl MultiDirectConnection {
                     return Ok::<(), crate::FastCacheError>(());
                 }
 
-                let consumed_total = DirectProtocol::process_shared_request_buffer(
+                let consumed_total = DirectProtocol::process_shared_request_buffer_with_context(
                     frame_buffer.peek(),
                     &store,
                     &mut write_buffer,
                     None,
-                    single_threaded,
-                    owned_shard_id,
-                    started_at,
+                    SharedRequestBufferContext {
+                        single_threaded,
+                        owned_shard_id,
+                        started_at,
+                        transaction_coordinator: transaction_coordinator.as_deref(),
+                        transaction_state: &mut transaction_state,
+                    },
                 )?;
 
                 if !write_buffer.is_empty() {
@@ -404,6 +432,7 @@ impl MultiDirectConnection {
         _single_threaded: bool,
         _owned_shard_id: Option<usize>,
         _started_at: Instant,
+        _transaction_coordinator: Option<Arc<()>>,
     ) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + 'static,
@@ -429,6 +458,7 @@ pub(super) struct MonoioWorkerConfig {
     pub(super) core_id: Option<core_affinity::CoreId>,
     pub(super) single_threaded: bool,
     pub(super) started_at: Instant,
+    pub(super) transaction_coordinator: Option<Arc<TransactionCoordinator>>,
 }
 
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
@@ -445,6 +475,7 @@ impl MonoioMultiDirectWorker {
             core_id,
             single_threaded,
             started_at,
+            transaction_coordinator,
         } = config;
 
         if let Some(core) = core_id
@@ -459,6 +490,7 @@ impl MonoioMultiDirectWorker {
             direct_bind_addr,
             single_threaded,
             started_at,
+            transaction_coordinator,
         };
 
         match MonoioDriverMode::configured() {
@@ -509,6 +541,7 @@ impl MonoioMultiDirectWorker {
             direct_bind_addr,
             single_threaded,
             started_at,
+            transaction_coordinator,
         } = config;
 
         runtime.block_on(async move {
@@ -530,6 +563,7 @@ impl MonoioMultiDirectWorker {
                     single_threaded,
                     owned_shard_id: Some(worker_id),
                     started_at,
+                    transaction_coordinator: transaction_coordinator.clone(),
                     label: "shard-owned FCNP",
                 };
                 monoio::spawn(MonoioListener::accept_loop(
@@ -546,6 +580,7 @@ impl MonoioMultiDirectWorker {
                 single_threaded,
                 owned_shard_id: None,
                 started_at,
+                transaction_coordinator,
                 label: "shared FCNP/RESP",
             };
             MonoioListener::accept_loop(fanout_listener, fanout_config, store, limiter).await;
@@ -554,23 +589,25 @@ impl MonoioMultiDirectWorker {
 }
 
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct MonoioAcceptLoopConfig {
     worker_id: usize,
     fanout_bind_addr: SocketAddr,
     direct_bind_addr: Option<SocketAddr>,
     single_threaded: bool,
     started_at: Instant,
+    transaction_coordinator: Option<Arc<TransactionCoordinator>>,
 }
 
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct MonoioListenerConfig {
     worker_id: usize,
     bind_addr: SocketAddr,
     single_threaded: bool,
     owned_shard_id: Option<usize>,
     started_at: Instant,
+    transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     label: &'static str,
 }
 
@@ -699,6 +736,7 @@ impl MonoioListener {
             single_threaded,
             owned_shard_id,
             started_at,
+            transaction_coordinator,
             label,
         } = config;
 
@@ -718,6 +756,7 @@ impl MonoioListener {
                 Err(_) => continue,
             };
             let store = store.clone();
+            let transaction_coordinator = transaction_coordinator.clone();
             monoio::spawn(MonoioMultiDirectConnection::handle(
                 stream,
                 store,
@@ -725,6 +764,7 @@ impl MonoioListener {
                 single_threaded,
                 owned_shard_id,
                 started_at,
+                transaction_coordinator,
             ));
         }
     }
@@ -836,15 +876,21 @@ impl MonoioRequestDrain {
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
+        transaction_coordinator: Option<&TransactionCoordinator>,
+        transaction_state: &mut TransactionState,
     ) -> std::result::Result<usize, MonoioDrainError> {
-        let consumed = DirectProtocol::process_shared_request_buffer(
+        let consumed = DirectProtocol::process_shared_request_buffer_with_context(
             cursor.remaining(),
             store,
             write_buffer,
             fast_write_queue,
-            single_threaded,
-            owned_shard_id,
-            started_at,
+            SharedRequestBufferContext {
+                single_threaded,
+                owned_shard_id,
+                started_at,
+                transaction_coordinator,
+                transaction_state,
+            },
         )
         .map_err(MonoioDrainError::protocol)?;
         cursor.consume(consumed)?;
@@ -861,6 +907,7 @@ impl MonoioMultiDirectConnection {
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     ) {
         #[cfg(feature = "unsafe")]
         {
@@ -871,6 +918,7 @@ impl MonoioMultiDirectConnection {
                 single_threaded,
                 owned_shard_id,
                 started_at,
+                transaction_coordinator,
             )
             .await;
         }
@@ -886,6 +934,7 @@ impl MonoioMultiDirectConnection {
                         single_threaded,
                         owned_shard_id,
                         started_at,
+                        transaction_coordinator,
                     )
                     .await;
                 }
@@ -897,6 +946,7 @@ impl MonoioMultiDirectConnection {
                         single_threaded,
                         owned_shard_id,
                         started_at,
+                        transaction_coordinator,
                     )
                     .await;
                 }
@@ -908,6 +958,7 @@ impl MonoioMultiDirectConnection {
                         single_threaded,
                         owned_shard_id,
                         started_at,
+                        transaction_coordinator,
                     )
                     .await;
                 }
@@ -923,9 +974,11 @@ impl MonoioMultiDirectConnection {
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     ) {
         let mut frame_buffer = HandoffBuffer::with_config(HandoffConfig::buffer());
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
+        let mut transaction_state = TransactionState::default();
 
         loop {
             match frame_buffer
@@ -938,6 +991,8 @@ impl MonoioMultiDirectConnection {
                         single_threaded,
                         owned_shard_id,
                         started_at,
+                        transaction_coordinator.as_deref(),
+                        &mut transaction_state,
                     )
                 })
                 .await
@@ -961,6 +1016,7 @@ impl MonoioMultiDirectConnection {
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     ) {
         use monoio::io::Splitable;
 
@@ -977,6 +1033,7 @@ impl MonoioMultiDirectConnection {
 
         let mut frame_buffer = HandoffBuffer::with_config(HandoffConfig::buffer());
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
+        let mut transaction_state = TransactionState::default();
 
         loop {
             match frame_buffer
@@ -989,6 +1046,8 @@ impl MonoioMultiDirectConnection {
                         single_threaded,
                         owned_shard_id,
                         started_at,
+                        transaction_coordinator.as_deref(),
+                        &mut transaction_state,
                     )
                 })
                 .await
@@ -1018,10 +1077,12 @@ impl MonoioMultiDirectConnection {
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     ) {
         let mut frame_buffer = HandoffBuffer::with_config(HandoffConfig::buffer());
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
         let mut fast_write_queue = FastWriteQueue::default();
+        let mut transaction_state = TransactionState::default();
 
         loop {
             match frame_buffer
@@ -1034,6 +1095,8 @@ impl MonoioMultiDirectConnection {
                         single_threaded,
                         owned_shard_id,
                         started_at,
+                        transaction_coordinator.as_deref(),
+                        &mut transaction_state,
                     )
                 })
                 .await

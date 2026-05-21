@@ -46,6 +46,8 @@ pub struct FastCacheConfig {
     pub persistence: PersistenceConfig,
     /// Native mutation-stream replication configuration.
     pub replication: ReplicationConfig,
+    /// Redis transaction execution mode.
+    pub transaction_mode: TransactionMode,
 }
 
 /// Memory-limit eviction policy.
@@ -59,6 +61,19 @@ pub enum EvictionPolicy {
     Lru,
     /// Evict least-frequently-used entries first.
     Lfu,
+}
+
+/// Redis-compatible transaction execution policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TransactionMode {
+    /// Reject MULTI/EXEC/DISCARD.
+    Disabled,
+    /// Allow transactions only when all queued keys route to one shard.
+    #[default]
+    ShardLocal,
+    /// Coordinate transactions across all affected shards using router-level gates.
+    CoordinatedCrossShard,
 }
 
 /// Capacity settings for the hot, warm, and cold in-memory tiers.
@@ -265,6 +280,7 @@ impl Default for FastCacheConfig {
             cuda: CudaConfig::default(),
             persistence: PersistenceConfig::default(),
             replication: ReplicationConfig::default(),
+            transaction_mode: TransactionMode::default(),
         }
     }
 }

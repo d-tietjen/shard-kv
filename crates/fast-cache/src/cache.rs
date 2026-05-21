@@ -1,7 +1,7 @@
 //! DashMap-like embedded cache facade.
 //!
 //! [`FastMap`] is the ergonomic cloneable embedded API. It wraps
-//! [`SharedEmbeddedStore`](crate::storage::SharedEmbeddedStore), so callers get
+//! [`SharedEmbeddedStore`], so callers get
 //! a cheap handle they can move into many workers while still using the same
 //! sharded storage core as server and owner-local embedded modes.
 

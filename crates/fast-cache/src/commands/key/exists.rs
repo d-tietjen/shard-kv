@@ -243,15 +243,11 @@ impl FcnpDirectCommand for Exists {
         let Some(key_hash) = request.key_hash else {
             return FcnpDispatch::Unsupported;
         };
-        if let Some(owned_shard_id) = ctx.owned_shard_id {
-            match request.route_shard.map(|shard| shard as usize) {
-                Some(route_shard)
-                    if route_shard == owned_shard_id
-                        && ctx.request_matches_owned_shard_for_key(route_shard, key_hash, key) => {}
-                _ => {
-                    ServerWire::write_fast_error(ctx.out, "ERR FCNP route shard mismatch");
-                    return FcnpDispatch::Complete(consumed);
-                }
+        match ctx.fcnp_route_matches_owned_shard_for_key(request.route_shard, key_hash, key) {
+            true => {}
+            false => {
+                ServerWire::write_fast_error(ctx.out, "ERR FCNP route shard mismatch");
+                return FcnpDispatch::Complete(consumed);
             }
         }
         ServerWire::write_fast_integer(ctx.out, ctx.store.exists(key) as i64);

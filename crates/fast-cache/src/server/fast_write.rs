@@ -32,16 +32,16 @@ impl FastWriteQueue {
 
     #[inline(always)]
     pub(crate) fn push_fast_value(&mut self, out: &mut BytesMut, payload: &bytes::Bytes) {
-        if payload.len() == 64 {
-            ServerWire::write_fast_value_64(out, payload.as_ref());
-        } else if payload.len() >= FCNP_ZERO_COPY_VALUE_THRESHOLD {
-            self.flush_bytes(out);
-            self.items.push(FastWriteItem::FastValue {
-                header: ServerWire::fast_value_header(payload.len()),
-                payload: payload.clone(),
-            });
-        } else {
-            ServerWire::write_fast_value(out, payload.as_ref());
+        match payload.len() {
+            64 => ServerWire::write_fast_value_64(out, payload.as_ref()),
+            len if len >= FCNP_ZERO_COPY_VALUE_THRESHOLD => {
+                self.flush_bytes(out);
+                self.items.push(FastWriteItem::FastValue {
+                    header: ServerWire::fast_value_header(len),
+                    payload: payload.clone(),
+                });
+            }
+            _ => ServerWire::write_fast_value(out, payload.as_ref()),
         }
     }
 

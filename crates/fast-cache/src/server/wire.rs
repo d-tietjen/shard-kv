@@ -519,12 +519,10 @@ impl ServerWire {
         }
         #[cfg(feature = "unsafe")]
         {
-            let total = if value < 100 {
-                5
-            } else if value < 1_000 {
-                6
-            } else {
-                7
+            let total = match value {
+                0..=99 => 5,
+                100..=999 => 6,
+                _ => 7,
             };
             out.reserve(total);
             // SAFETY: reserve(total) guarantees the exact spare capacity needed
@@ -543,27 +541,31 @@ impl ServerWire {
     #[inline(always)]
     fn encode_resp_small_positive_integer(value: u32, out: &mut [u8; 7]) -> usize {
         out[0] = b':';
-        if value < 100 {
-            out[1] = b'0' + (value / 10) as u8;
-            out[2] = b'0' + (value % 10) as u8;
-            out[3] = b'\r';
-            out[4] = b'\n';
-            5
-        } else if value < 1_000 {
-            out[1] = b'0' + (value / 100) as u8;
-            out[2] = b'0' + ((value / 10) % 10) as u8;
-            out[3] = b'0' + (value % 10) as u8;
-            out[4] = b'\r';
-            out[5] = b'\n';
-            6
-        } else {
-            out[1] = b'0' + (value / 1_000) as u8;
-            out[2] = b'0' + ((value / 100) % 10) as u8;
-            out[3] = b'0' + ((value / 10) % 10) as u8;
-            out[4] = b'0' + (value % 10) as u8;
-            out[5] = b'\r';
-            out[6] = b'\n';
-            7
+        match value {
+            0..=99 => {
+                out[1] = b'0' + (value / 10) as u8;
+                out[2] = b'0' + (value % 10) as u8;
+                out[3] = b'\r';
+                out[4] = b'\n';
+                5
+            }
+            100..=999 => {
+                out[1] = b'0' + (value / 100) as u8;
+                out[2] = b'0' + ((value / 10) % 10) as u8;
+                out[3] = b'0' + (value % 10) as u8;
+                out[4] = b'\r';
+                out[5] = b'\n';
+                6
+            }
+            _ => {
+                out[1] = b'0' + (value / 1_000) as u8;
+                out[2] = b'0' + ((value / 100) % 10) as u8;
+                out[3] = b'0' + ((value / 10) % 10) as u8;
+                out[4] = b'0' + (value % 10) as u8;
+                out[5] = b'\r';
+                out[6] = b'\n';
+                7
+            }
         }
     }
 
@@ -574,24 +576,28 @@ impl ServerWire {
         // buffer capacity for the selected value range.
         unsafe {
             *dst = b':';
-            if value < 100 {
-                *dst.add(1) = b'0' + (value / 10) as u8;
-                *dst.add(2) = b'0' + (value % 10) as u8;
-                *dst.add(3) = b'\r';
-                *dst.add(4) = b'\n';
-            } else if value < 1_000 {
-                *dst.add(1) = b'0' + (value / 100) as u8;
-                *dst.add(2) = b'0' + ((value / 10) % 10) as u8;
-                *dst.add(3) = b'0' + (value % 10) as u8;
-                *dst.add(4) = b'\r';
-                *dst.add(5) = b'\n';
-            } else {
-                *dst.add(1) = b'0' + (value / 1_000) as u8;
-                *dst.add(2) = b'0' + ((value / 100) % 10) as u8;
-                *dst.add(3) = b'0' + ((value / 10) % 10) as u8;
-                *dst.add(4) = b'0' + (value % 10) as u8;
-                *dst.add(5) = b'\r';
-                *dst.add(6) = b'\n';
+            match value {
+                0..=99 => {
+                    *dst.add(1) = b'0' + (value / 10) as u8;
+                    *dst.add(2) = b'0' + (value % 10) as u8;
+                    *dst.add(3) = b'\r';
+                    *dst.add(4) = b'\n';
+                }
+                100..=999 => {
+                    *dst.add(1) = b'0' + (value / 100) as u8;
+                    *dst.add(2) = b'0' + ((value / 10) % 10) as u8;
+                    *dst.add(3) = b'0' + (value % 10) as u8;
+                    *dst.add(4) = b'\r';
+                    *dst.add(5) = b'\n';
+                }
+                _ => {
+                    *dst.add(1) = b'0' + (value / 1_000) as u8;
+                    *dst.add(2) = b'0' + ((value / 100) % 10) as u8;
+                    *dst.add(3) = b'0' + ((value / 10) % 10) as u8;
+                    *dst.add(4) = b'0' + (value % 10) as u8;
+                    *dst.add(5) = b'\r';
+                    *dst.add(6) = b'\n';
+                }
             }
         }
     }

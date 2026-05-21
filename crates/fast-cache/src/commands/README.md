@@ -42,6 +42,70 @@ writing command names by hand. Use shared helpers such as `CommandArity`,
 `StorageInteger`, `DecodedFastCommand`, and command-local traits before adding
 floating helper methods.
 
+## Compatibility Staging
+
+Redis/Valkey compatibility is documented by upstream server version and by claim
+strength. The current implementation should be described as a Redis-compatible
+cache-command profile, not full Redis server parity. It implements strings,
+generic key commands, hashes, lists, sets, sorted sets, connection handshake
+helpers, and lightweight server metadata.
+
+The current command surface is closest to a Redis 6.2+ cache profile because it
+includes post-Redis-5 commands and command forms such as `GETDEL`, `BLMOVE`,
+`HRANDFIELD`, `SMISMEMBER`, `ZRANGESTORE`, `ZDIFFSTORE`, unified `ZRANGE
+BYSCORE`, and `ZADD GT`. As new commands land, prefer moving the documented
+compatibility target up the Redis/Valkey version tree while preserving behavior
+for older commands.
+
+Do not call a profile "full" until all commands in that upstream version either
+pass differential tests or are explicitly documented as intentionally
+unsupported. Major gaps before a full Redis 5 claim:
+
+- Streams: `XADD`, `XREAD`, consumer groups, pending entry management, trimming,
+  and stream range commands.
+- Pub/Sub: `PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE`, unsubscribe commands, and
+  `PUBSUB` introspection.
+- Optimistic locking: `WATCH` and `UNWATCH`. `MULTI`, `EXEC`, and `DISCARD`
+  are implemented for the direct Redis-compatible ingress; shard-local
+  transactions are the default and coordinated cross-shard transactions are an
+  explicit server configuration mode.
+- Scripting: `EVAL`, `EVALSHA`, `SCRIPT *`, deterministic write behavior, and
+  script cache semantics.
+- String bitfield subcommands: `BITFIELD`.
+- HyperLogLog and geospatial families: `PF*` and `GEO*`.
+- Additional generic key commands: `SORT`, `DUMP`, `RESTORE`, `MIGRATE`, and
+  database movement.
+- Server and connection compatibility beyond lightweight stubs: `COMMAND` /
+  `CONFIG` shapes, `CLIENT` subcommands, `MONITOR`, `SLOWLOG`, `ROLE`,
+  `REPLICAOF`, persistence/admin commands, and accurate `INFO` sections.
+- Real blocking semantics for commands currently handled as immediate
+  best-effort operations, especially list and sorted-set blocking pops.
+- RESP compatibility details: RESP2/RESP3 edge cases, inline request behavior,
+  exact error strings, command metadata, and differential tests against the
+  target upstream version.
+
+## Formal Semantics
+
+Pure command laws live under `commands/formal/`. Keep these modules free of
+storage locks, protocol I/O, heap-heavy object implementations, and async
+runtime types so they can be checked both by normal Rust tests and by Creusot.
+When command behavior needs range, bound, rank, or set-algebra logic, prefer
+moving the pure rule into the relevant formal module and calling it from the
+command path.
+
+The proof-shaped functions are normal boolean checks under `cargo test`, and
+carry `cfg(creusot)` contracts for `cargo creusot` runs. To verify them with
+Creusot, use the small verification crate rather than pointing Creusot at the
+full server/storage crate:
+
+```sh
+cargo creusot -p fast-cache-formal prove
+```
+
+The intent is not to verify sockets, shard locks, or Redis itself here. This
+layer proves small deterministic command laws; differential tests remain the
+compatibility oracle for Redis/Valkey wire behavior.
+
 ## Root Template
 
 ```rust

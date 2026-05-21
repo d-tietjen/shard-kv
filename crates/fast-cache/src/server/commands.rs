@@ -249,6 +249,25 @@ impl FcnpCommandContext<'_, '_, '_, '_> {
     }
 
     #[inline(always)]
+    pub(crate) fn fcnp_route_matches_owned_shard_for_key(
+        &self,
+        route_shard: Option<impl TryInto<usize>>,
+        key_hash: u64,
+        key: &[u8],
+    ) -> bool {
+        let route_shard = route_shard.and_then(|route_shard| route_shard.try_into().ok());
+        match self.owned_shard_id {
+            None => true,
+            Some(owned_shard_id) => matches!(
+                route_shard,
+                Some(route_shard)
+                    if route_shard == owned_shard_id
+                        && self.request_matches_owned_shard_for_key(route_shard, key_hash, key)
+            ),
+        }
+    }
+
+    #[inline(always)]
     pub(crate) fn request_matches_owned_session_hash(
         &self,
         route_shard: usize,
@@ -291,6 +310,10 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::pttl::COMMAND,
     &crate::commands::expire::COMMAND,
     &crate::commands::pexpire::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::expireat::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::pexpireat::COMMAND,
     &crate::commands::persist::COMMAND,
     &crate::commands::getex::COMMAND,
     &crate::commands::setex::COMMAND,
@@ -299,6 +322,104 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::keys::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::scan::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::object::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::touch::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::randomkey::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::copy::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::rename::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::renamenx::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::unlink::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::strlen::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::getrange::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::getbit::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::setbit::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::bitcount::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::bitpos::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::bitop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::setnx::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hstrlen::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hget::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hlen::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hmset::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hmget::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hkeys::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hvals::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hgetall::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hscan::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::lrange::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::llen::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::lindex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::rpoplpush::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::lmove::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::blmove::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::scard::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::smembers::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::sscan::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::srandmember::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::smismember::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zrange::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zrevrange::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zscore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zcount::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zrevrangebyscore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zrangebylex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zrevrangebylex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zlexcount::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zremrangebyrank::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zremrangebyscore::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zremrangebylex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zrank::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zrevrank::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zscan::COMMAND,
 ];
 
 #[cfg(feature = "embedded")]

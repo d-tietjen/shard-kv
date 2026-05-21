@@ -23,6 +23,9 @@ exclude = [
     ".DS_Store",
 ]
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(creusot)"] }
+
 [features]
 # The crate defaults to the embedded Rust API. The TCP server and Redis/Valkey
 # compatibility surface are opt-in so embedded cache-only users keep the core
@@ -84,6 +87,7 @@ crossbeam-channel = { workspace = true }
 crossbeam-utils = { workspace = true }
 fast-telemetry = { workspace = true }
 hashbrown = { workspace = true }
+indextreemap = { workspace = true }
 itoa = "1"
 log = { workspace = true }
 libc = { workspace = true }
@@ -118,6 +122,9 @@ optional = true
 [target.'cfg(target_os = "linux")'.dependencies]
 monoio = { version = "0.2", optional = true }
 
+[target.'cfg(creusot)'.dependencies]
+creusot-std = "0.11.0"
+
 [[bin]]
 name = "fast-cache-server"
 required-features = ["server"]
@@ -130,3 +137,8 @@ path = "tests/redis_tier1_coverage_test.rs"
 name = "fuzz_harness_test"
 path = "tests/fuzz_harness_test.rs"
 required-features = ["redis-compat"]
+
+[[test]]
+name = "redis_compat_differential_test"
+path = "tests/redis_compat_differential_test.rs"
+required-features = ["redis-server"]

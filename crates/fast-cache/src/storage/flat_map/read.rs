@@ -36,6 +36,52 @@ impl FlatMap {
         shared_bytes_as_unique_slice_mut(&mut entry.value)
     }
 
+    #[inline(always)]
+    pub(crate) fn update_value_hashed_no_ttl<R>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        update: impl FnOnce(&mut [u8]) -> R,
+    ) -> Option<R> {
+        self.disable_fast_point_map();
+        let should_touch_access = self.eviction_policy != EvictionPolicy::None;
+        let access_tick = if should_touch_access {
+            self.next_access_tick()
+        } else {
+            0
+        };
+
+        let can_mutate = self
+            .entries
+            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .is_some_and(|entry| entry.expire_at_ms.is_none() && entry.value.is_unique());
+        if !can_mutate {
+            return None;
+        }
+        if should_touch_access {
+            self.record_lru_touch(hash, access_tick);
+        }
+        let entry = self
+            .entries
+            .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))?;
+        if should_touch_access {
+            entry.access.record_access(access_tick);
+        }
+
+        let value = mem::take(&mut entry.value);
+        match value.try_into_mut() {
+            Ok(mut writable) => {
+                let result = update(&mut writable[..]);
+                entry.value = writable.freeze();
+                Some(result)
+            }
+            Err(value) => {
+                entry.value = value;
+                None
+            }
+        }
+    }
+
     /// `&self` read path. Skips entry access tracking (LFU/LRU touch). Safe for
     /// any caller that does not depend on read-touch tracking — including the
     /// shared-store hot path under `RwLock::read`.
@@ -371,13 +417,13 @@ impl FlatMap {
         #[cfg(feature = "telemetry")]
         let telemetry = self.telemetry.clone();
 
-        let value = if self.ttl_entries == 0 {
-            self.lookup_ref_hashed_lazy(hash, key)
-        } else if self.entry_is_expired_hashed(hash, key, now_ms) {
-            let _ = self.delete_hashed_internal(hash, key, now_ms, DeleteReason::Expired);
-            None
-        } else {
-            self.lookup_ref_hashed_lazy(hash, key)
+        let value = match self.ttl_entries {
+            0 => self.lookup_ref_hashed_lazy(hash, key),
+            _ if self.entry_is_expired_hashed(hash, key, now_ms) => {
+                let _ = self.delete_hashed_internal(hash, key, now_ms, DeleteReason::Expired);
+                None
+            }
+            _ => self.lookup_ref_hashed_lazy(hash, key),
         };
 
         #[cfg(feature = "telemetry")]
@@ -401,13 +447,13 @@ impl FlatMap {
         #[cfg(feature = "telemetry")]
         let telemetry = self.telemetry.clone();
 
-        let value = if self.ttl_entries == 0 {
-            self.lookup_ref_hashed_lazy(hash, key)
-        } else if self.entry_is_expired_hashed(hash, key, now_ms) {
-            let _ = self.delete_hashed_local_internal(hash, key, now_ms, DeleteReason::Expired);
-            None
-        } else {
-            self.lookup_ref_hashed_lazy(hash, key)
+        let value = match self.ttl_entries {
+            0 => self.lookup_ref_hashed_lazy(hash, key),
+            _ if self.entry_is_expired_hashed(hash, key, now_ms) => {
+                let _ = self.delete_hashed_local_internal(hash, key, now_ms, DeleteReason::Expired);
+                None
+            }
+            _ => self.lookup_ref_hashed_lazy(hash, key),
         };
 
         #[cfg(feature = "telemetry")]

@@ -112,4 +112,34 @@ impl SetObject {
             Self::Map(set) => SetIter::Map(set.iter()),
         }
     }
+
+    pub(super) fn visit_members(&self, mut visit: impl FnMut(&[u8])) {
+        match self {
+            Self::Small(entries) => {
+                for member in entries {
+                    visit(member);
+                }
+            }
+            Self::Map(set) => {
+                for member in set {
+                    visit(member);
+                }
+            }
+        }
+    }
+
+    pub(super) fn visit_members_limited(&self, limit: usize, mut visit: impl FnMut(&[u8])) {
+        match self {
+            Self::Small(entries) => {
+                for member in entries.iter().take(limit) {
+                    visit(member);
+                }
+            }
+            Self::Map(set) => {
+                for member in set.iter().take(limit) {
+                    visit(member);
+                }
+            }
+        }
+    }
 }

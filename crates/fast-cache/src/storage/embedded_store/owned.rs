@@ -74,13 +74,12 @@ pub struct OwnedEmbeddedShard {
 impl OwnedEmbeddedShard {
     #[inline(always)]
     fn update_lazy_read_sampling(&mut self) {
-        let enabled = if self.eviction_policy == EvictionPolicy::None {
-            false
-        } else if let Some(limit) = self.memory_limit_bytes {
-            let watermark = limit.saturating_mul(3) / 4;
-            self.stored_bytes() >= watermark.max(1)
-        } else {
-            false
+        let enabled = match (self.eviction_policy, self.memory_limit_bytes) {
+            (EvictionPolicy::None, _) | (_, None) => false,
+            (_, Some(limit)) => {
+                let watermark = limit.saturating_mul(3) / 4;
+                self.stored_bytes() >= watermark.max(1)
+            }
         };
         self.session_slots.configure_read_sampling(enabled);
     }

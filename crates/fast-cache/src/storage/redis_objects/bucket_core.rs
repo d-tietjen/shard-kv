@@ -161,30 +161,31 @@ impl RedisObjectBucket {
     }
 
     pub(crate) fn type_name(&self, key: &[u8]) -> Option<&'static str> {
-        if self.hashes.contains_key(key) {
-            Some("hash")
-        } else if self.lists.contains_key(key) {
-            Some("list")
-        } else if self.sets.contains_key(key) {
-            Some("set")
-        } else if self.zsets.contains_key(key) {
-            Some("zset")
-        } else {
-            None
+        match (
+            self.hashes.contains_key(key),
+            self.lists.contains_key(key),
+            self.sets.contains_key(key),
+            self.zsets.contains_key(key),
+        ) {
+            (true, _, _, _) => Some("hash"),
+            (false, true, _, _) => Some("list"),
+            (false, false, true, _) => Some("set"),
+            (false, false, false, true) => Some("zset"),
+            (false, false, false, false) => None,
         }
     }
 
     pub(crate) fn encoding(&self, key: &[u8]) -> Option<&'static str> {
-        if self.hashes.contains_key(key) {
-            Some("hashtable")
-        } else if self.lists.contains_key(key) {
-            Some("quicklist")
-        } else if self.sets.contains_key(key) {
-            Some("hashtable")
-        } else if self.zsets.contains_key(key) {
-            Some("skiplist")
-        } else {
-            None
+        match (
+            self.hashes.contains_key(key),
+            self.lists.contains_key(key),
+            self.sets.contains_key(key),
+            self.zsets.contains_key(key),
+        ) {
+            (true, _, _, _) | (false, false, true, _) => Some("hashtable"),
+            (false, true, _, _) => Some("quicklist"),
+            (false, false, false, true) => Some("skiplist"),
+            (false, false, false, false) => None,
         }
     }
 
@@ -254,6 +255,13 @@ impl RedisObjectBucket {
     #[inline(always)]
     pub(super) fn has_non_list(&self, key: &[u8]) -> bool {
         self.hashes.contains_key(key) || self.sets.contains_key(key) || self.zsets.contains_key(key)
+    }
+
+    #[inline(always)]
+    pub(super) fn has_non_list_hashed(&self, hash: u64, key: &[u8]) -> bool {
+        self.hashes.contains_key_hashed(hash, key)
+            || self.sets.contains_key_hashed(hash, key)
+            || self.zsets.contains_key_hashed(hash, key)
     }
 
     #[inline(always)]

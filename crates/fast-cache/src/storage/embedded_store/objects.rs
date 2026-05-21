@@ -12,35 +12,115 @@ impl EmbeddedStore {
         F: FnMut(&bytes::Bytes),
     {
         let route = self.route_key(key);
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-            if bucket.has_expirations() && bucket.object_is_expired(key, now_millis()) {
-                drop(bucket);
-                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-                if bucket.delete_expired(key, now_millis()) {
-                    self.objects.note_deleted(route.shard_id);
+            if bucket.has_expirations() {
+                let now_ms = now_millis();
+                if bucket.object_is_expired(key, now_ms) {
+                    drop(bucket);
+                    let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+                    if bucket.delete_expired(key, now_ms) {
+                        self.objects.note_deleted(route.shard_id);
+                    }
+                    drop(bucket);
+                    return if self.with_shared_value_bytes_routed(route, key, &mut write) {
+                        RedisStringLookup::Hit
+                    } else {
+                        RedisStringLookup::Miss
+                    };
                 }
-                drop(bucket);
-                return if self.with_shared_value_bytes_routed(route, key, &mut write) {
-                    RedisStringLookup::Hit
-                } else {
-                    RedisStringLookup::Miss
-                };
             }
             if bucket.contains_object(key) {
                 return RedisStringLookup::WrongType;
             }
             drop(bucket);
-            if self.with_shared_value_bytes_routed(route, key, &mut write) {
-                RedisStringLookup::Hit
-            } else {
-                RedisStringLookup::Miss
-            }
-        } else if self.with_shared_value_bytes_routed(route, key, &mut write) {
-            RedisStringLookup::Hit
-        } else {
-            RedisStringLookup::Miss
+            return match self.with_shared_value_bytes_routed(route, key, &mut write) {
+                true => RedisStringLookup::Hit,
+                false => RedisStringLookup::Miss,
+            };
         }
+        match self.with_shared_value_bytes_routed(route, key, &mut write) {
+            true => RedisStringLookup::Hit,
+            false => RedisStringLookup::Miss,
+        }
+    }
+
+    pub(crate) fn mutate_string_value_no_ttl_in_place<F>(
+        &self,
+        key: &[u8],
+        mut mutate: F,
+    ) -> RedisStringLookup
+    where
+        F: FnMut(&mut [u8]),
+    {
+        let route = self.route_key(key);
+        if self.objects.shard_has_objects(route.shard_id) {
+            let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
+            match bucket.has_expirations() {
+                true => {
+                    let now_ms = now_millis();
+                    match bucket.object_is_expired(key, now_ms) {
+                        true => {
+                            drop(bucket);
+                            let mut bucket =
+                                self.objects.write_bucket(route.shard_id, route.key_hash);
+                            if bucket.delete_expired(key, now_ms) {
+                                self.objects.note_deleted(route.shard_id);
+                            }
+                        }
+                        false if bucket.contains_object(key) => {
+                            return RedisStringLookup::WrongType;
+                        }
+                        false => {}
+                    }
+                }
+                false if bucket.contains_object(key) => return RedisStringLookup::WrongType,
+                false => {}
+            }
+        }
+
+        let mut shard = self.shards[route.shard_id].write();
+        match shard.update_value_hashed_no_ttl(route.key_hash, key, |value| mutate(value)) {
+            Some(()) => RedisStringLookup::Hit,
+            None => RedisStringLookup::Miss,
+        }
+    }
+
+    pub(crate) fn transform_string_value_no_ttl<R, E>(
+        &self,
+        key: &[u8],
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
+        wrong_type: impl FnOnce() -> E,
+    ) -> std::result::Result<R, E> {
+        let route = self.route_key(key);
+        if self.objects.shard_has_objects(route.shard_id) {
+            let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
+            match bucket.has_expirations() {
+                true => {
+                    let now_ms = now_millis();
+                    match bucket.object_is_expired(key, now_ms) {
+                        true => {
+                            drop(bucket);
+                            let mut bucket =
+                                self.objects.write_bucket(route.shard_id, route.key_hash);
+                            if bucket.delete_expired(key, now_ms) {
+                                self.objects.note_deleted(route.shard_id);
+                            }
+                        }
+                        false if bucket.contains_object(key) => return Err(wrong_type()),
+                        false => {}
+                    }
+                }
+                false if bucket.contains_object(key) => return Err(wrong_type()),
+                false => {}
+            }
+        }
+
+        let now_ms = now_millis();
+        let mut shard = self.shards[route.shard_id].write();
+        let result = shard.transform_value_hashed_no_ttl(route.key_hash, key, now_ms, transform)?;
+        self.refresh_string_key_count(route.shard_id, &shard);
+        Ok(result)
     }
 
     pub fn hset(&self, key: &[u8], field: &[u8], value: &[u8]) -> RedisObjectResult {
@@ -83,8 +163,38 @@ impl EmbeddedStore {
         self.object_read(key, |bucket| bucket.hvals(key))
     }
 
+    pub(crate) fn hkeys_visit(
+        &self,
+        key: &[u8],
+        mut emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.hkeys_visit(key, &mut emit)
+        })
+    }
+
+    pub(crate) fn hvals_visit(
+        &self,
+        key: &[u8],
+        mut emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.hvals_visit(key, &mut emit)
+        })
+    }
+
     pub fn hgetall(&self, key: &[u8]) -> RedisObjectResult {
         self.object_read(key, |bucket| bucket.hgetall(key))
+    }
+
+    pub(crate) fn hgetall_visit(
+        &self,
+        key: &[u8],
+        mut emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.hgetall_visit(key, &mut emit)
+        })
     }
 
     pub fn hsetnx(&self, key: &[u8], field: &[u8], value: &[u8]) -> RedisObjectResult {
@@ -117,11 +227,11 @@ impl EmbeddedStore {
     }
 
     pub fn lpushx(&self, key: &[u8], values: &[&[u8]]) -> RedisObjectResult {
-        self.object_write(key, |bucket| bucket.push_list_existing(key, values, true))
+        self.push_list_existing_hashed(hash_key(key), key, values, true)
     }
 
     pub fn rpushx(&self, key: &[u8], values: &[&[u8]]) -> RedisObjectResult {
-        self.object_write(key, |bucket| bucket.push_list_existing(key, values, false))
+        self.push_list_existing_hashed(hash_key(key), key, values, false)
     }
 
     pub fn lpop(&self, key: &[u8]) -> RedisObjectResult {
@@ -198,6 +308,16 @@ impl EmbeddedStore {
         self.object_read(key, |bucket| bucket.smembers(key))
     }
 
+    pub(crate) fn smembers_visit(
+        &self,
+        key: &[u8],
+        mut emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.smembers_visit(key, &mut emit)
+        })
+    }
+
     pub fn set_members(&self, key: &[u8]) -> Result<Vec<Bytes>, RedisObjectError> {
         let route = self.route_key(key);
         let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
@@ -221,6 +341,17 @@ impl EmbeddedStore {
 
     pub fn srandmember(&self, key: &[u8], count: Option<i64>) -> RedisObjectResult {
         self.object_read(key, |bucket| bucket.srandmember(key, count))
+    }
+
+    pub(crate) fn srandmember_positive_visit(
+        &self,
+        key: &[u8],
+        requested: usize,
+        mut emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.srandmember_positive_visit(key, requested, &mut emit)
+        })
     }
 
     pub fn zadd(&self, key: &[u8], score: f64, member: &[u8]) -> RedisObjectResult {
@@ -255,6 +386,21 @@ impl EmbeddedStore {
 
     pub fn zscore(&self, key: &[u8], member: &[u8]) -> RedisObjectResult {
         self.object_read(key, |bucket| bucket.zscore(key, member))
+    }
+
+    pub(crate) fn zscore_value(
+        &self,
+        key: &[u8],
+        member: &[u8],
+    ) -> Result<Option<f64>, RedisObjectError> {
+        let mut score = None;
+        match self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.zscore_visit(key, member, |value| score = value)
+        }) {
+            RedisObjectReadOutcome::Written => Ok(score),
+            RedisObjectReadOutcome::Missing => Ok(None),
+            RedisObjectReadOutcome::WrongType => Err(RedisObjectError::WrongType),
+        }
     }
 
     pub fn zmscore(&self, key: &[u8], members: &[&[u8]]) -> RedisObjectResult {
@@ -313,24 +459,38 @@ impl EmbeddedStore {
         member: &[u8],
         rev: bool,
     ) -> Result<Option<usize>, RedisObjectError> {
-        let route = self.route_key(key);
-        let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-        let result = bucket
-            .zrank_value(key, member, rev)
-            .map_err(|()| RedisObjectError::WrongType);
-        if result.is_err() || bucket.contains_object(key) {
-            return result;
-        }
-        drop(bucket);
-        if self.string_exists_routed(route, key) {
-            Err(RedisObjectError::WrongType)
-        } else {
-            result
+        let mut rank = None;
+        match self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.zrank_visit(key, member, rev, |value| rank = value)
+        }) {
+            RedisObjectReadOutcome::Written => Ok(rank),
+            RedisObjectReadOutcome::Missing => Ok(None),
+            RedisObjectReadOutcome::WrongType => Err(RedisObjectError::WrongType),
         }
     }
 
     pub fn zcount(&self, key: &[u8], min: f64, max: f64) -> RedisObjectResult {
         self.object_read(key, |bucket| bucket.zcount(key, min, max))
+    }
+
+    pub(crate) fn zcount_range(
+        &self,
+        key: &[u8],
+        min: f64,
+        min_inclusive: bool,
+        max: f64,
+        max_inclusive: bool,
+    ) -> Result<i64, RedisObjectError> {
+        let mut count = 0;
+        match self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.zcount_range_visit(key, min, min_inclusive, max, max_inclusive, |value| {
+                count = value;
+            })
+        }) {
+            RedisObjectReadOutcome::Written => Ok(count),
+            RedisObjectReadOutcome::Missing => Ok(0),
+            RedisObjectReadOutcome::WrongType => Err(RedisObjectError::WrongType),
+        }
     }
 
     pub fn zpop(&self, key: &[u8], count: usize, max: bool) -> RedisObjectResult {
@@ -369,6 +529,60 @@ impl EmbeddedStore {
             },
             |bucket, key_hash| bucket.push_list_new_unchecked_hashed(key_hash, key, values, front),
         )
+    }
+
+    pub(crate) fn push_list_existing_hashed(
+        &self,
+        key_hash: u64,
+        key: &[u8],
+        values: &[&[u8]],
+        front: bool,
+    ) -> RedisObjectResult {
+        if values.is_empty() {
+            return RedisObjectResult::Integer(0);
+        }
+        let route = self.route_key_prehashed(key_hash, key);
+        if !self.objects.shard_has_objects(route.shard_id) {
+            return if self.string_exists_routed(route, key) {
+                RedisObjectResult::WrongType
+            } else {
+                RedisObjectResult::Integer(0)
+            };
+        }
+        let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
+        if bucket.has_expirations() {
+            let now_ms = now_millis();
+            if bucket.object_is_expired(key, now_ms) {
+                drop(bucket);
+                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+                if bucket.delete_expired(key, now_ms) {
+                    self.objects.note_deleted(route.shard_id);
+                }
+                drop(bucket);
+                return if self.string_exists_routed(route, key) {
+                    RedisObjectResult::WrongType
+                } else {
+                    RedisObjectResult::Integer(0)
+                };
+            }
+        }
+        match bucket.list_presence_hashed(route.key_hash, key) {
+            RedisObjectReadOutcome::Missing => {
+                drop(bucket);
+                if self.string_exists_routed(route, key) {
+                    RedisObjectResult::WrongType
+                } else {
+                    RedisObjectResult::Integer(0)
+                }
+            }
+            RedisObjectReadOutcome::WrongType => RedisObjectResult::WrongType,
+            RedisObjectReadOutcome::Written => {
+                drop(bucket);
+                self.object_write_hashed(key_hash, key, |bucket| {
+                    bucket.push_list_existing_hashed(key_hash, key, values, front)
+                })
+            }
+        }
     }
 
     pub(crate) fn sadd_hashed(
@@ -428,19 +642,29 @@ impl EmbeddedStore {
         op: impl FnOnce(&RedisObjectBucket) -> RedisObjectReadOutcome,
     ) -> RedisObjectReadOutcome {
         let route = self.route_key_prehashed(key_hash, key);
-        let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-        if bucket.has_expirations() && bucket.object_is_expired(key, now_millis()) {
-            drop(bucket);
-            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-            if bucket.delete_expired(key, now_millis()) {
-                self.objects.note_deleted(route.shard_id);
-            }
-            drop(bucket);
+        if !self.objects.shard_has_objects(route.shard_id) {
             return if self.string_exists_routed(route, key) {
                 RedisObjectReadOutcome::WrongType
             } else {
                 RedisObjectReadOutcome::Missing
             };
+        }
+        let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
+        if bucket.has_expirations() {
+            let now_ms = now_millis();
+            if bucket.object_is_expired(key, now_ms) {
+                drop(bucket);
+                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+                if bucket.delete_expired(key, now_ms) {
+                    self.objects.note_deleted(route.shard_id);
+                }
+                drop(bucket);
+                return if self.string_exists_routed(route, key) {
+                    RedisObjectReadOutcome::WrongType
+                } else {
+                    RedisObjectReadOutcome::Missing
+                };
+            }
         }
         let outcome = op(&bucket);
         if !matches!(outcome, RedisObjectReadOutcome::Missing) {
@@ -461,18 +685,21 @@ impl EmbeddedStore {
         op: impl FnOnce(&RedisObjectBucket) -> RedisObjectResult,
     ) -> RedisObjectResult {
         let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-        if bucket.has_expirations() && bucket.object_is_expired(key, now_millis()) {
-            drop(bucket);
-            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-            if bucket.delete_expired(key, now_millis()) {
-                self.objects.note_deleted(route.shard_id);
+        if bucket.has_expirations() {
+            let now_ms = now_millis();
+            if bucket.object_is_expired(key, now_ms) {
+                drop(bucket);
+                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+                if bucket.delete_expired(key, now_ms) {
+                    self.objects.note_deleted(route.shard_id);
+                }
+                drop(bucket);
+                return if self.string_exists_routed(route, key) {
+                    RedisObjectResult::WrongType
+                } else {
+                    op(&self.objects.read_bucket(route.shard_id, route.key_hash))
+                };
             }
-            drop(bucket);
-            return if self.string_exists_routed(route, key) {
-                RedisObjectResult::WrongType
-            } else {
-                op(&self.objects.read_bucket(route.shard_id, route.key_hash))
-            };
         }
         let result = op(&bucket);
         if matches!(result, RedisObjectResult::WrongType) || bucket.contains_object(key) {
@@ -545,10 +772,10 @@ impl EmbeddedStore {
             return RedisObjectResult::WrongType;
         }
         let (result, object_changed) = op(&mut bucket);
-        if !had_object && object_changed {
-            self.objects.note_created(route.shard_id);
-        } else if had_object && object_changed {
-            self.objects.note_deleted(route.shard_id);
+        match (had_object, object_changed) {
+            (false, true) => self.objects.note_created(route.shard_id),
+            (true, true) => self.objects.note_deleted(route.shard_id),
+            (_, false) => {}
         }
         result
     }
@@ -556,13 +783,16 @@ impl EmbeddedStore {
     pub(crate) fn clone_object_value(&self, key: &[u8]) -> Option<RedisObjectValue> {
         let route = self.route_key(key);
         let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-        if bucket.has_expirations() && bucket.object_is_expired(key, now_millis()) {
-            drop(bucket);
-            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-            if bucket.delete_expired(key, now_millis()) {
-                self.objects.note_deleted(route.shard_id);
+        if bucket.has_expirations() {
+            let now_ms = now_millis();
+            if bucket.object_is_expired(key, now_ms) {
+                drop(bucket);
+                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+                if bucket.delete_expired(key, now_ms) {
+                    self.objects.note_deleted(route.shard_id);
+                }
+                return None;
             }
-            return None;
         }
         bucket.clone_value(key)
     }

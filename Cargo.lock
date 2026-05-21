@@ -256,6 +256,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "creusot-std"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0eeaaebdee9aa688b8ad786e721deaee4e2d15da3a043acf6fcb7efb4a4e226c"
+dependencies = [
+ "creusot-std-proc",
+ "num-rational",
+]
+
+[[package]]
+name = "creusot-std-proc"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bee44c269dbf2a9c3afc96f5983ec3b0cd7e7105218e4dadf62eb821bd20ca46"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -364,11 +385,13 @@ dependencies = [
  "clap",
  "core_affinity",
  "crc32fast",
+ "creusot-std",
  "crossbeam-channel",
  "crossbeam-utils",
  "fast-telemetry",
  "flume",
  "hashbrown 0.14.5",
+ "indextreemap",
  "itoa",
  "libc",
  "log",
@@ -408,6 +431,13 @@ dependencies = [
  "parking_lot",
  "rand",
  "xxhash-rust",
+]
+
+[[package]]
+name = "fast-cache-formal"
+version = "0.1.0"
+dependencies = [
+ "creusot-std",
 ]
 
 [[package]]
@@ -674,6 +704,12 @@ dependencies = [
  "serde",
  "serde_core",
 ]
+
+[[package]]
+name = "indextreemap"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8da02f77ec2e796359b8be67098f95eb06931a177977f3055ff2df807f873163"
 
 [[package]]
 name = "indoc"
@@ -950,11 +986,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-integer"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
 dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-bigint",
+ "num-integer",
  "num-traits",
 ]
 

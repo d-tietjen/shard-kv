@@ -223,18 +223,17 @@ impl FlatMap {
                     entry.expire_at_ms = None;
                     self.ttl_entries = self.ttl_entries.saturating_sub(1);
                 }
-                if let Some(old_value) = retired_value {
-                    if has_active_readers {
-                        self.retire_value(old_value);
-                    } else if reuse_values {
+                match retired_value {
+                    Some(old_value) if has_active_readers => self.retire_value(old_value),
+                    Some(old_value) if reuse_values => {
                         recycle_value_into_pool(
                             old_value,
                             &mut reusable_values,
                             &mut reusable_value_bytes,
                         );
-                    } else {
-                        self.recycle_value(old_value);
                     }
+                    Some(old_value) => self.recycle_value(old_value),
+                    None => {}
                 }
             }
             hashbrown::hash_table::Entry::Vacant(vacant) => {

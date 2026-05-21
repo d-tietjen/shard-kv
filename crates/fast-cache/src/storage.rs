@@ -65,6 +65,8 @@ pub use embedded_store_shared::{
     SharedEmbeddedConfig, SharedEmbeddedLockPolicy, SharedEmbeddedStore,
     VacantEntry as SharedEmbeddedVacantEntry,
 };
+#[cfg(feature = "redis-compat")]
+pub(crate) use redis_objects::RedisObjectArrayItem;
 
 #[cfg(feature = "sharded")]
 pub fn with_local_embedded_store<R>(

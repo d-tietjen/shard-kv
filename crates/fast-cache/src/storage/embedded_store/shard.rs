@@ -1,5 +1,5 @@
 use crate::config::EvictionPolicy;
-use crate::storage::FlatMap;
+use crate::storage::{Bytes, FlatMap};
 
 use super::{EmbeddedRouteMode, SessionSlotMap, derived_session_storage_prefix};
 
@@ -76,6 +76,28 @@ impl EmbeddedShard {
     #[inline(always)]
     pub(crate) fn value_mut_hashed_no_ttl(&mut self, hash: u64, key: &[u8]) -> Option<&mut [u8]> {
         self.map.value_mut_hashed_no_ttl(hash, key)
+    }
+
+    #[inline(always)]
+    pub(crate) fn update_value_hashed_no_ttl<R>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        update: impl FnOnce(&mut [u8]) -> R,
+    ) -> Option<R> {
+        self.map.update_value_hashed_no_ttl(hash, key, update)
+    }
+
+    #[inline(always)]
+    pub(crate) fn transform_value_hashed_no_ttl<R, E>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
+    ) -> std::result::Result<R, E> {
+        self.map
+            .transform_value_hashed_no_ttl(hash, key, now_ms, transform)
     }
 
     #[inline(always)]
@@ -338,13 +360,12 @@ impl EmbeddedShard {
 
     #[inline(always)]
     fn update_lazy_read_sampling(&mut self) {
-        let enabled = if self.eviction_policy == EvictionPolicy::None {
-            false
-        } else if let Some(limit) = self.memory_limit_bytes {
-            let watermark = limit.saturating_mul(3) / 4;
-            self.stored_bytes() >= watermark.max(1)
-        } else {
-            false
+        let enabled = match (self.eviction_policy, self.memory_limit_bytes) {
+            (EvictionPolicy::None, _) | (_, None) => false,
+            (_, Some(limit)) => {
+                let watermark = limit.saturating_mul(3) / 4;
+                self.stored_bytes() >= watermark.max(1)
+            }
         };
         self.session_slots.configure_read_sampling(enabled);
     }

@@ -179,6 +179,18 @@ impl RedisObjectBucket {
         }
     }
 
+    pub(crate) fn zscore_value(&self, key: &[u8], member: &[u8]) -> Result<Option<f64>, ()> {
+        match self.zsets.get(key).copied() {
+            Some(slot) => Ok(self
+                .zset_slab
+                .get(slot)
+                .expect("zset slab slot missing")
+                .score(member)),
+            None if self.has_non_zset(key) => Err(()),
+            None => Ok(None),
+        }
+    }
+
     pub(crate) fn zmscore(&self, key: &[u8], members: &[&[u8]]) -> RedisObjectResult {
         match self.zsets.get(key).copied() {
             Some(slot) => {
@@ -315,19 +327,63 @@ impl RedisObjectBucket {
         }
     }
 
+    pub(crate) fn zrank_visit(
+        &self,
+        key: &[u8],
+        member: &[u8],
+        rev: bool,
+        write: impl FnOnce(Option<usize>),
+    ) -> RedisObjectReadOutcome {
+        match self.zsets.get(key).copied() {
+            Some(slot) => {
+                write(
+                    self.zset_slab
+                        .get(slot)
+                        .expect("zset slab slot missing")
+                        .rank(member, rev),
+                );
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_zset(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
+        }
+    }
+
     pub(crate) fn zcount(&self, key: &[u8], min: f64, max: f64) -> RedisObjectResult {
         match self.zsets.get(key).copied() {
             Some(slot) => RedisObjectResult::Integer(
                 self.zset_slab
                     .get(slot)
                     .expect("zset slab slot missing")
-                    .entries()
-                    .into_iter()
-                    .filter(|(_, score)| *score >= min && *score <= max)
-                    .count() as i64,
+                    .count_by_score(min, true, max, true) as i64,
             ),
             None if self.has_non_zset(key) => RedisObjectResult::WrongType,
             None => RedisObjectResult::Integer(0),
+        }
+    }
+
+    pub(crate) fn zcount_range_visit(
+        &self,
+        key: &[u8],
+        min: f64,
+        min_inclusive: bool,
+        max: f64,
+        max_inclusive: bool,
+        write: impl FnOnce(i64),
+    ) -> RedisObjectReadOutcome {
+        match self.zsets.get(key).copied() {
+            Some(slot) => {
+                let count = self
+                    .zset_slab
+                    .get(slot)
+                    .expect("zset slab slot missing")
+                    .count_by_score(min, min_inclusive, max, max_inclusive)
+                    as i64;
+                write(count);
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_zset(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
         }
     }
 
@@ -342,14 +398,7 @@ impl RedisObjectBucket {
                 .zset_slab
                 .get_mut(slot)
                 .expect("zset slab slot missing");
-            let mut entries = zset.entries();
-            if max {
-                entries.reverse();
-            }
-            let entries = entries.into_iter().take(count).collect::<Vec<_>>();
-            for (member, _) in &entries {
-                zset.remove(member);
-            }
+            let entries = zset.pop_extreme(count, max);
             let empty = zset.is_empty();
             if empty {
                 self.zsets.remove(key);

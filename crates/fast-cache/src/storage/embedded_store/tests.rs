@@ -119,6 +119,77 @@ fn redis_list_set_and_zset_semantics() {
         store.zscore(b"z", b"b"),
         RedisObjectResult::Bulk(Some(b"2".to_vec()))
     );
+
+    for (score, member) in [
+        (1.0, b"c".as_slice()),
+        (1.0, b"a".as_slice()),
+        (1.0, b"b".as_slice()),
+        (2.0, b"e".as_slice()),
+        (0.0, b"d".as_slice()),
+    ] {
+        assert_eq!(
+            store.zadd(b"z-indexed", score, member),
+            RedisObjectResult::Integer(1)
+        );
+    }
+    assert_eq!(
+        store.zrange(b"z-indexed", 0, -1),
+        RedisObjectResult::Array(vec![
+            Some(b"d".to_vec()),
+            Some(b"a".to_vec()),
+            Some(b"b".to_vec()),
+            Some(b"c".to_vec()),
+            Some(b"e".to_vec())
+        ])
+    );
+    assert_eq!(
+        store.zrank(b"z-indexed", b"b", false),
+        RedisObjectResult::Integer(2)
+    );
+    assert_eq!(
+        store.zrank(b"z-indexed", b"b", true),
+        RedisObjectResult::Integer(2)
+    );
+    assert_eq!(
+        store
+            .zcount_range(b"z-indexed", 1.0, true, 2.0, true)
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        store
+            .zcount_range(b"z-indexed", 1.0, false, 2.0, true)
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .zcount_range(b"z-indexed", 1.0, true, 2.0, false)
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        store.zadd(b"z-indexed", 3.0, b"d"),
+        RedisObjectResult::Integer(0)
+    );
+    assert_eq!(
+        store.zrange(b"z-indexed", 0, -1),
+        RedisObjectResult::Array(vec![
+            Some(b"a".to_vec()),
+            Some(b"b".to_vec()),
+            Some(b"c".to_vec()),
+            Some(b"e".to_vec()),
+            Some(b"d".to_vec())
+        ])
+    );
+    assert_eq!(
+        store.zrank(b"z-indexed", b"d", false),
+        RedisObjectResult::Integer(4)
+    );
+    assert_eq!(
+        store.zrank(b"z-indexed", b"d", true),
+        RedisObjectResult::Integer(0)
+    );
 }
 
 #[cfg(feature = "redis-compat")]

@@ -33,7 +33,7 @@ pub fn run(data: &[u8]) {
     let steps = 1 + (input.byte() as usize % MAX_STEPS);
 
     for step in 0..steps {
-        match input.byte() % 28 {
+        match input.byte() % 31 {
             0 => op_set(&store, &mut model, &mut input),
             1 => op_get(&store, &model, &mut input),
             2 => op_delete(&store, &mut model, &mut input),
@@ -61,6 +61,9 @@ pub fn run(data: &[u8]) {
             24 => op_zscore(&store, &model, &mut input),
             25 => op_zcard(&store, &model, &mut input),
             26 => op_zrange(&store, &model, &mut input),
+            27 => op_zrank(&store, &model, &mut input, false),
+            28 => op_zrank(&store, &model, &mut input, true),
+            29 => op_zcount(&store, &model, &mut input),
             _ => op_exists_and_type_checks(&store, &model, &mut input),
         }
 
@@ -237,10 +240,9 @@ fn push_list(
     let key = input.key();
     let values = input.values();
     let value_refs = values.iter().map(Vec::as_slice).collect::<Vec<_>>();
-    let result = if front {
-        store.lpush(&key, &value_refs)
-    } else {
-        store.rpush(&key, &value_refs)
+    let result = match front {
+        true => store.lpush(&key, &value_refs),
+        false => store.rpush(&key, &value_refs),
     };
     match model.get_mut(&key) {
         Some(ModelValue::List(list)) => {
@@ -281,17 +283,15 @@ fn pop_list(
     front: bool,
 ) {
     let key = input.key();
-    let result = if front {
-        store.lpop(&key)
-    } else {
-        store.rpop(&key)
+    let result = match front {
+        true => store.lpop(&key),
+        false => store.rpop(&key),
     };
     match model.get_mut(&key) {
         Some(ModelValue::List(list)) => {
-            let expected = if front {
-                list.pop_front()
-            } else {
-                list.pop_back()
+            let expected = match front {
+                true => list.pop_front(),
+                false => list.pop_back(),
             };
             let empty = list.is_empty();
             expect_bulk(result, expected);
@@ -519,6 +519,46 @@ fn op_zrange(store: &EmbeddedStore, model: &BTreeMap<Vec<u8>, ModelValue>, input
     }
 }
 
+fn op_zrank(
+    store: &EmbeddedStore,
+    model: &BTreeMap<Vec<u8>, ModelValue>,
+    input: &mut Input<'_>,
+    rev: bool,
+) {
+    let key = input.key();
+    let member = input.field();
+    match model.get(&key) {
+        Some(ModelValue::ZSet(zset)) => {
+            expect_integer(
+                store.zrank(&key, &member, rev),
+                zset_rank(zset, &member, rev),
+            );
+        }
+        Some(_) => expect_wrong_type(store.zrank(&key, &member, rev)),
+        None => expect_integer(store.zrank(&key, &member, rev), -1),
+    }
+}
+
+fn op_zcount(store: &EmbeddedStore, model: &BTreeMap<Vec<u8>, ModelValue>, input: &mut Input<'_>) {
+    let key = input.key();
+    let left = input.score();
+    let right = input.score();
+    let (min, max) = match left <= right {
+        true => (left, right),
+        false => (right, left),
+    };
+    match model.get(&key) {
+        Some(ModelValue::ZSet(zset)) => {
+            expect_integer(
+                store.zcount(&key, min as f64, max as f64),
+                zset_count(zset, min, max),
+            );
+        }
+        Some(_) => expect_wrong_type(store.zcount(&key, min as f64, max as f64)),
+        None => expect_integer(store.zcount(&key, min as f64, max as f64), 0),
+    }
+}
+
 fn op_exists_and_type_checks(
     store: &EmbeddedStore,
     model: &BTreeMap<Vec<u8>, ModelValue>,
@@ -588,6 +628,22 @@ fn assert_all_values(store: &EmbeddedStore, model: &BTreeMap<Vec<u8>, ModelValue
             ModelValue::ZSet(zset) => {
                 expect_integer(store.zcard(key), zset.len() as i64);
                 expect_array(store.zrange(key, 0, -1), zset_range(zset, 0, -1));
+                let entries = zset_ordered_entries(zset);
+                for (index, (member, score)) in entries.iter().enumerate() {
+                    expect_bulk(store.zscore(key, member), Some(format_score(score)));
+                    expect_integer(store.zrank(key, member, false), index as i64);
+                    expect_integer(
+                        store.zrank(key, member, true),
+                        (entries.len() - index - 1) as i64,
+                    );
+                    expect_integer(
+                        store.zcount(key, *score as f64, *score as f64),
+                        entries
+                            .iter()
+                            .filter(|(_, candidate_score)| candidate_score == score)
+                            .count() as i64,
+                    );
+                }
             }
         }
     }
@@ -595,10 +651,9 @@ fn assert_all_values(store: &EmbeddedStore, model: &BTreeMap<Vec<u8>, ModelValue
 
 fn push_model_list(list: &mut VecDeque<Vec<u8>>, values: Vec<Vec<u8>>, front: bool) {
     for value in values {
-        if front {
-            list.push_front(value);
-        } else {
-            list.push_back(value);
+        match front {
+            true => list.push_front(value),
+            false => list.push_back(value),
         }
     }
 }
@@ -616,15 +671,7 @@ fn list_range(list: &VecDeque<Vec<u8>>, start: i64, stop: i64) -> Vec<Option<Vec
 }
 
 fn zset_range(zset: &BTreeMap<Vec<u8>, i64>, start: i64, stop: i64) -> Vec<Option<Vec<u8>>> {
-    let mut entries = zset
-        .iter()
-        .map(|(member, score)| (member.clone(), *score))
-        .collect::<Vec<_>>();
-    entries.sort_by(|(left_member, left_score), (right_member, right_score)| {
-        left_score
-            .cmp(right_score)
-            .then_with(|| left_member.cmp(right_member))
-    });
+    let entries = zset_ordered_entries(zset);
     let Some((start, stop)) = normalize_range(start, stop, entries.len()) else {
         return Vec::new();
     };
@@ -636,12 +683,48 @@ fn zset_range(zset: &BTreeMap<Vec<u8>, i64>, start: i64, stop: i64) -> Vec<Optio
         .collect()
 }
 
+fn zset_rank(zset: &BTreeMap<Vec<u8>, i64>, member: &[u8], rev: bool) -> i64 {
+    let entries = zset_ordered_entries(zset);
+    let rank = match rev {
+        true => entries
+            .iter()
+            .rev()
+            .position(|(existing, _)| existing.as_slice() == member),
+        false => entries
+            .iter()
+            .position(|(existing, _)| existing.as_slice() == member),
+    };
+    rank.map(|rank| rank as i64).unwrap_or(-1)
+}
+
+fn zset_count(zset: &BTreeMap<Vec<u8>, i64>, min: i64, max: i64) -> i64 {
+    zset.values()
+        .filter(|score| (min..=max).contains(score))
+        .count() as i64
+}
+
+fn zset_ordered_entries(zset: &BTreeMap<Vec<u8>, i64>) -> Vec<(Vec<u8>, i64)> {
+    let mut entries = zset
+        .iter()
+        .map(|(member, score)| (member.clone(), *score))
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left_member, left_score), (right_member, right_score)| {
+        left_score
+            .cmp(right_score)
+            .then_with(|| left_member.cmp(right_member))
+    });
+    entries
+}
+
 fn normalize_index(index: i64, len: usize) -> Option<usize> {
     if len == 0 {
         return None;
     }
     let len = len as i64;
-    let index = if index < 0 { len + index } else { index };
+    let index = match index < 0 {
+        true => len + index,
+        false => index,
+    };
     (0..len).contains(&index).then_some(index as usize)
 }
 
@@ -650,8 +733,14 @@ fn normalize_range(start: i64, stop: i64, len: usize) -> Option<(usize, usize)> 
         return None;
     }
     let len = len as i64;
-    let mut start = if start < 0 { len + start } else { start };
-    let mut stop = if stop < 0 { len + stop } else { stop };
+    let mut start = match start < 0 {
+        true => len + start,
+        false => start,
+    };
+    let mut stop = match stop < 0 {
+        true => len + stop,
+        false => stop,
+    };
     if start < 0 {
         start = 0;
     }
@@ -742,10 +831,9 @@ impl<'a> Input<'a> {
     fn range(&mut self) -> (i64, i64) {
         let start = self.index();
         let width = self.byte() as i64 % 24;
-        let stop = if self.byte() & 1 == 0 {
-            start + width
-        } else {
-            start - width
+        let stop = match self.byte() & 1 {
+            0 => start + width,
+            _ => start - width,
         };
         (start, stop)
     }

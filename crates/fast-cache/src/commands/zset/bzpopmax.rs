@@ -1,1 +1,12 @@
-pub(crate) use super::redis_compat::bzpopmax::COMMAND;
+use crate::commands::redis::define_redis_command;
+use crate::commands::zset_shared::bzpop;
+use crate::protocol::Frame;
+use crate::storage::EmbeddedStore;
+
+define_redis_command!(BZPopMax, "BZPOPMAX", true);
+
+impl crate::commands::redis::RedisCommand for BZPopMax {
+    fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        bzpop(store, args, true)
+    }
+}

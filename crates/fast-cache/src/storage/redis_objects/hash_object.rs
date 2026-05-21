@@ -92,6 +92,51 @@ impl HashObject {
         entries
     }
 
+    pub(super) fn visit_entries(&self, mut visit: impl FnMut(&[u8], &[u8])) {
+        match self {
+            Self::Small(entries) => {
+                for (field, value) in entries {
+                    visit(field, value);
+                }
+            }
+            Self::Map(map) => {
+                for (field, value) in map {
+                    visit(field, value);
+                }
+            }
+        }
+    }
+
+    pub(super) fn visit_fields(&self, mut visit: impl FnMut(&[u8])) {
+        match self {
+            Self::Small(entries) => {
+                for (field, _) in entries {
+                    visit(field);
+                }
+            }
+            Self::Map(map) => {
+                for field in map.keys() {
+                    visit(field);
+                }
+            }
+        }
+    }
+
+    pub(super) fn visit_values(&self, mut visit: impl FnMut(&[u8])) {
+        match self {
+            Self::Small(entries) => {
+                for (_, value) in entries {
+                    visit(value);
+                }
+            }
+            Self::Map(map) => {
+                for value in map.values() {
+                    visit(value);
+                }
+            }
+        }
+    }
+
     pub(super) fn remove(&mut self, field: &[u8]) -> Option<Bytes> {
         match self {
             Self::Small(entries) => {

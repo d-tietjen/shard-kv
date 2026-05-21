@@ -2,6 +2,17 @@ use super::helpers::{normalize_index, normalize_range};
 use super::*;
 
 impl RedisObjectBucket {
+    pub(crate) fn list_presence_hashed(&self, key_hash: u64, key: &[u8]) -> RedisObjectReadOutcome {
+        match (
+            self.lists.get_hashed(key_hash, key).is_some(),
+            self.has_non_list_hashed(key_hash, key),
+        ) {
+            (true, _) => RedisObjectReadOutcome::Written,
+            (false, true) => RedisObjectReadOutcome::WrongType,
+            (false, false) => RedisObjectReadOutcome::Missing,
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn push_list_existing_or_wrongtype_hashed(
         &mut self,
@@ -44,8 +55,9 @@ impl RedisObjectBucket {
         RedisObjectResult::Integer(values.len() as i64)
     }
 
-    pub(crate) fn push_list_existing(
+    pub(crate) fn push_list_existing_hashed(
         &mut self,
+        key_hash: u64,
         key: &[u8],
         values: &[&[u8]],
         front: bool,
@@ -53,7 +65,7 @@ impl RedisObjectBucket {
         if values.is_empty() {
             return (RedisObjectResult::Integer(0), false);
         }
-        if let Some(slot) = self.lists.get(key).copied() {
+        if let Some(slot) = self.lists.get_hashed(key_hash, key) {
             let list = self
                 .list_slab
                 .get_mut(slot)
@@ -61,7 +73,7 @@ impl RedisObjectBucket {
             list.push_values(values, front);
             return (RedisObjectResult::Integer(list.len() as i64), false);
         }
-        if self.has_non_list(key) {
+        if self.has_non_list_hashed(key_hash, key) {
             (RedisObjectResult::WrongType, false)
         } else {
             (RedisObjectResult::Integer(0), false)

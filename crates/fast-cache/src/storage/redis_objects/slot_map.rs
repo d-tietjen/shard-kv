@@ -7,6 +7,11 @@ impl SlotMap {
     }
 
     #[inline(always)]
+    pub(super) fn contains_key_hashed(&self, hash: u64, key: &[u8]) -> bool {
+        self.get_hashed(hash, key).is_some()
+    }
+
+    #[inline(always)]
     pub(super) fn get(&self, key: &[u8]) -> Option<&SlotId> {
         let hash = hash_key(key);
         self.table

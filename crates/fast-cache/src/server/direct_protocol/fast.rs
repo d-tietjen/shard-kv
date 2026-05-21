@@ -46,16 +46,14 @@ impl DirectProtocol {
             Some((command, args)) => {
                 #[cfg(feature = "redis-compat")]
                 if command.eq_ignore_ascii_case(b"FCNP.SCAN") {
-                    crate::commands::redis_compat::write_fcnp_scan_fast_response(store, args, out);
+                    crate::commands::redis::write_fcnp_scan_fast_response(store, args, out);
                     return;
                 }
                 #[cfg(feature = "redis-compat")]
                 if command.eq_ignore_ascii_case(b"FCNP.SCANSHARD")
                     || command.eq_ignore_ascii_case(b"FCNP.SCAN.SHARD")
                 {
-                    crate::commands::redis_compat::write_fcnp_scan_shard_fast_response(
-                        store, args, out,
-                    );
+                    crate::commands::redis::write_fcnp_scan_shard_fast_response(store, args, out);
                     return;
                 }
                 let mut direct_args = RespDirectArgs::new();

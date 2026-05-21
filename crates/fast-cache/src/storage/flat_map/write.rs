@@ -16,6 +16,77 @@ impl FlatMap {
         self.set_slice_hashed(hash_key(key), key, value, expire_at_ms, now_ms);
     }
 
+    pub(crate) fn transform_value_hashed_no_ttl<R, E>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
+    ) -> std::result::Result<R, E> {
+        self.disable_fast_point_map();
+        self.reclaim_retired_if_quiescent();
+        if self.ttl_entries != 0 && self.entry_is_expired_hashed(hash, key, now_ms) {
+            self.delete_hashed_internal(hash, key, now_ms, DeleteReason::Expired);
+        }
+        let access_tick = if self.eviction_policy == EvictionPolicy::None {
+            0
+        } else {
+            self.next_access_tick()
+        };
+        self.record_lru_touch(hash, access_tick);
+
+        let key_tag = hash_key_tag_from_hash(hash);
+        match self.entries.entry(
+            hash,
+            |entry| entry.matches_hashed_key(hash, key),
+            |entry| entry.hash,
+        ) {
+            hashbrown::hash_table::Entry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
+                let (result, value) = transform(Some(entry.value.as_ref()))?;
+                let value = SharedBytes::from(value);
+                let had_ttl = entry.expire_at_ms.is_some();
+                let previous_value_len = entry.value.len();
+                let new_value_len = value.len();
+                let retired_value = mem::replace(&mut entry.value, value);
+                entry.access.record_access(access_tick);
+                self.stored_bytes = self
+                    .stored_bytes
+                    .saturating_sub(previous_value_len)
+                    .saturating_add(new_value_len);
+                entry.expire_at_ms = None;
+                self.adjust_ttl_count(had_ttl, false);
+                self.retire_value(retired_value);
+                self.enforce_memory_limit(now_ms);
+                Ok(result)
+            }
+            hashbrown::hash_table::Entry::Vacant(vacant) => {
+                let (result, value) = transform(None)?;
+                let key_len = key.len();
+                let value = SharedBytes::from(value);
+                let value_len = value.len();
+                vacant.insert(FlatEntry {
+                    hash,
+                    key_tag,
+                    key_len,
+                    key: key.to_vec().into_boxed_slice(),
+                    value,
+                    expire_at_ms: None,
+                    access: EntryAccessMeta {
+                        last_touch: access_tick,
+                        frequency: 1,
+                    },
+                });
+                self.stored_bytes = self
+                    .stored_bytes
+                    .saturating_add(key_len)
+                    .saturating_add(value_len);
+                self.enforce_memory_limit(now_ms);
+                Ok(result)
+            }
+        }
+    }
+
     /// Zero-copy `SET` for the multi-direct hot path: takes `value` as an
     /// already-owned `SharedBytes` (typically a `split_prefix` slice from the
     /// connection read buffer). Avoids the heap allocation that
@@ -276,18 +347,17 @@ impl FlatMap {
                     entry.expire_at_ms = None;
                     self.adjust_ttl_count(true, false);
                 }
-                if let Some(old_value) = retired_value {
-                    if has_active_readers {
-                        self.retire_value(old_value);
-                    } else if reuse_values {
+                match retired_value {
+                    Some(old_value) if has_active_readers => self.retire_value(old_value),
+                    Some(old_value) if reuse_values => {
                         recycle_value_into_pool(
                             old_value,
                             &mut reusable_values,
                             &mut reusable_value_bytes,
                         );
-                    } else {
-                        self.recycle_value(old_value);
                     }
+                    Some(old_value) => self.recycle_value(old_value),
+                    None => {}
                 }
             }
             hashbrown::hash_table::Entry::Vacant(vacant) => {
@@ -437,18 +507,17 @@ impl FlatMap {
                     entry.expire_at_ms = expire_at_ms;
                     self.adjust_ttl_count(had_ttl, expire_at_ms.is_some());
                 }
-                if let Some(old_value) = retired_value {
-                    if has_active_readers {
-                        self.retire_value(old_value);
-                    } else if reuse_values {
+                match retired_value {
+                    Some(old_value) if has_active_readers => self.retire_value(old_value),
+                    Some(old_value) if reuse_values => {
                         recycle_value_into_pool(
                             old_value,
                             &mut reusable_values,
                             &mut reusable_value_bytes,
                         );
-                    } else {
-                        self.recycle_value(old_value);
                     }
+                    Some(old_value) => self.recycle_value(old_value),
+                    None => {}
                 }
             }
             hashbrown::hash_table::Entry::Vacant(vacant) => {

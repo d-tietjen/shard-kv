@@ -303,6 +303,10 @@ fn main() -> fast_cache::Result<()> {
 ```
 
 The repository includes `fast-cache.toml.example` with the supported fields.
+Redis-compatible transactions default to `transaction_mode = "shard_local"`.
+Use `coordinated_cross_shard` only when the server/router should gate all
+affected shards for cross-shard `EXEC`; use `disabled` to reject
+`MULTI`/`EXEC`/`DISCARD`.
 
 ### WAL TCP Export
 

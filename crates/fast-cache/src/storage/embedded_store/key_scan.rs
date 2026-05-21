@@ -184,6 +184,7 @@ impl EmbeddedStore {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn scan_string_shard(
         &self,
         shard_id: usize,
@@ -204,6 +205,7 @@ impl EmbeddedStore {
             .scan_keys_visit(offset, limit, now_ms, visited, emitted, visit)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn scan_object_shard(
         &self,
         shard_id: usize,

@@ -1,9 +1,13 @@
 use super::connection::{ConnectionRejector, EngineConnection, HandoffConfig, SnapshotTask};
 use super::direct::{DirectConnection, DirectServer};
+#[cfg(feature = "embedded")]
+use super::transactions::TransactionCoordinator;
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
 use super::transport::{MonoioMultiDirectWorker, MonoioWorkerConfig};
 #[cfg(feature = "embedded")]
-use super::transport::{MultiDirectAddress, MultiDirectWorker, TokioHybridWorkerConfig};
+use super::transport::{
+    MultiDirectAddress, MultiDirectWorker, TokioHybridWorkerConfig, TokioWorkerConfig,
+};
 use super::*;
 
 impl FastCacheServer {
@@ -326,6 +330,8 @@ impl FastCacheServer {
         );
         let shared_store = Arc::new(store);
         let limiter = Arc::new(Semaphore::new(max_connections));
+        let transaction_coordinator =
+            TransactionCoordinator::new(shard_count, self.config.transaction_mode).map(Arc::new);
 
         #[cfg(all(target_os = "linux", feature = "monoio"))]
         let use_monoio = std::env::var("FAST_CACHE_USE_MONOIO").is_ok_and(|v| v != "0");
@@ -377,6 +383,7 @@ impl FastCacheServer {
             worker_txs.push(tx);
             let store = shared_store.clone();
             let limiter = limiter.clone();
+            let transaction_coordinator = transaction_coordinator.clone();
             let core_id = if core_ids.is_empty() {
                 None
             } else {
@@ -402,6 +409,7 @@ impl FastCacheServer {
                                 core_id,
                                 single_threaded,
                                 started_at,
+                                transaction_coordinator,
                             },
                             store,
                             limiter,
@@ -418,6 +426,7 @@ impl FastCacheServer {
                                     single_threaded,
                                     owned_shard_id: worker_id,
                                     started_at,
+                                    transaction_coordinator,
                                 },
                                 store,
                                 limiter,
@@ -430,13 +439,16 @@ impl FastCacheServer {
                         return;
                     }
                     MultiDirectWorker::run(
-                        worker_id,
+                        TokioWorkerConfig {
+                            worker_id,
+                            core_id,
+                            single_threaded,
+                            started_at,
+                            transaction_coordinator,
+                        },
                         store,
                         limiter,
                         rx,
-                        core_id,
-                        single_threaded,
-                        started_at,
                     )
                 })
                 .map_err(|error| {

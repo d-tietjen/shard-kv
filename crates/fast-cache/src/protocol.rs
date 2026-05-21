@@ -13,6 +13,6 @@ pub use fast::{
     FastRequestDecodeResult, FastResponse, FastResponseDecodeResult,
 };
 pub use resp::{
-    BorrowedCommandFrame, CommandFrame, CommandSpanFrame, Frame, RespCodec,
+    BorrowedCommandFrame, BorrowedCommandParts, CommandFrame, CommandSpanFrame, Frame, RespCodec,
     RespCommandDecodeResult, RespCommandSpanDecodeResult, RespDecodeResult,
 };

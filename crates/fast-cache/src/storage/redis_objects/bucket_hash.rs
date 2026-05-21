@@ -121,6 +121,27 @@ impl RedisObjectBucket {
         }
     }
 
+    pub(crate) fn hexists_visit(
+        &self,
+        key: &[u8],
+        field: &[u8],
+        write: impl FnOnce(i64),
+    ) -> RedisObjectReadOutcome {
+        match self.hashes.get(key).copied() {
+            Some(slot) => {
+                write(
+                    self.hash_slab
+                        .get(slot)
+                        .expect("hash slab slot missing")
+                        .contains_key(field) as i64,
+                );
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_hash(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
+        }
+    }
+
     pub(crate) fn hget_visit(
         &self,
         key: &[u8],
@@ -262,6 +283,40 @@ impl RedisObjectBucket {
         }
     }
 
+    pub(crate) fn hkeys_visit(
+        &self,
+        key: &[u8],
+        emit: &mut impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        match self.hashes.get(key).copied() {
+            Some(slot) => {
+                let hash = self.hash_slab.get(slot).expect("hash slab slot missing");
+                emit(RedisObjectArrayItem::Begin(hash.len()));
+                hash.visit_fields(|field| emit(RedisObjectArrayItem::Bulk(Some(field))));
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_hash(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
+        }
+    }
+
+    pub(crate) fn hvals_visit(
+        &self,
+        key: &[u8],
+        emit: &mut impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        match self.hashes.get(key).copied() {
+            Some(slot) => {
+                let hash = self.hash_slab.get(slot).expect("hash slab slot missing");
+                emit(RedisObjectArrayItem::Begin(hash.len()));
+                hash.visit_values(|value| emit(RedisObjectArrayItem::Bulk(Some(value))));
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_hash(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
+        }
+    }
+
     pub(crate) fn hgetall(&self, key: &[u8]) -> RedisObjectResult {
         match self.hashes.get(key).copied() {
             Some(slot) => RedisObjectResult::Array(
@@ -275,6 +330,26 @@ impl RedisObjectBucket {
             ),
             None if self.has_non_hash(key) => RedisObjectResult::WrongType,
             None => RedisObjectResult::Array(Vec::new()),
+        }
+    }
+
+    pub(crate) fn hgetall_visit(
+        &self,
+        key: &[u8],
+        emit: &mut impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        match self.hashes.get(key).copied() {
+            Some(slot) => {
+                let hash = self.hash_slab.get(slot).expect("hash slab slot missing");
+                emit(RedisObjectArrayItem::Begin(hash.len().saturating_mul(2)));
+                hash.visit_entries(|field, value| {
+                    emit(RedisObjectArrayItem::Bulk(Some(field)));
+                    emit(RedisObjectArrayItem::Bulk(Some(value)));
+                });
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_hash(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
         }
     }
 

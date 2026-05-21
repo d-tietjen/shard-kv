@@ -3,6 +3,7 @@ members = [
     "benchmarks",
     "crates/fcnp-client-rs",
     "crates/fast-cache",
+    "crates/fast-cache-formal",
     "crates/fast-cache-py",
     "crates/fast-cache-runtime",
 ]
@@ -28,6 +29,7 @@ crc32fast = "1.4"
 crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"
 hashbrown = "0.14"
+indextreemap = { version = "0.2.0", default-features = false }
 log = "0.4"
 libc = "0.2"
 lz4_flex = "0.11"

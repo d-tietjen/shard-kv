@@ -12,11 +12,17 @@ impl DirectProtocol {
         mut fast_write_queue: Option<&mut FastWriteQueue>,
         single_threaded: bool,
         owned_shard_id: Option<usize>,
+        transaction_coordinator: Option<&TransactionCoordinator>,
     ) -> FcnpDispatch {
         match FcnpFrameDecoder::new(buf).decode_for_catalog() {
             FcnpFrameDecode::Ready(decoded) => {
                 match FcnpCommandDispatcher::find_opcode(decoded.opcode) {
                     Some(entry) => {
+                        let _transaction_guard = transaction_coordinator.and_then(|coordinator| {
+                            decoded.frame.read_key_prefix().map(|prefix| {
+                                coordinator.read_guard_for_fcnp_key_hash(store, prefix.key_hash)
+                            })
+                        });
                         FcnpMutationBarrier::from_bool(entry.mutates_value())
                             .materialize(fast_write_queue.as_deref_mut(), out);
                         entry.try_execute_fcnp(FcnpCommandContext {

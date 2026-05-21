@@ -128,16 +128,20 @@ impl Del {
         ctx: FcnpCommandContext<'_, '_, '_, '_>,
         frame: DelFcnpFrame<'_>,
     ) -> FcnpDispatch {
-        if let Some(owned_shard_id) = ctx.owned_shard_id {
-            let Some(route_shard) = frame.route_shard else {
-                return FcnpDispatch::Unsupported;
-            };
-            if route_shard != owned_shard_id
-                || !ctx.request_matches_owned_shard_for_key(route_shard, frame.key_hash, frame.key)
-            {
+        match (
+            ctx.owned_shard_id.is_some(),
+            ctx.fcnp_route_matches_owned_shard_for_key(
+                frame.route_shard,
+                frame.key_hash,
+                frame.key,
+            ),
+        ) {
+            (true, false) if frame.route_shard.is_none() => return FcnpDispatch::Unsupported,
+            (true, false) => {
                 ServerWire::write_fast_error(ctx.out, "ERR FCNP route shard mismatch");
                 return FcnpDispatch::Complete(ctx.frame.frame_len);
             }
+            _ => {}
         }
 
         let deleted = ctx.store.delete(frame.key);

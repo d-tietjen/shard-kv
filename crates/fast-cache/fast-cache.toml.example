@@ -3,6 +3,7 @@ max_connections = 4096
 shard_count = 4
 ttl_sweep_interval_ms = 1000
 stats_interval_ms = 5000
+transaction_mode = "shard_local"
 
 [tiers]
 hot_capacity = 2048

@@ -345,7 +345,7 @@ impl EmbeddedStore {
             key_hash,
         };
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
             if bucket.delete_any(key) {
@@ -1051,7 +1051,7 @@ impl EmbeddedStore {
             return false;
         }
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(shard_id) {
             return false;
         }
 
@@ -1096,7 +1096,7 @@ impl EmbeddedStore {
                 return false;
             }
             #[cfg(feature = "redis-compat")]
-            if self.objects.has_objects() {
+            if self.objects.shard_has_objects(shard_id) {
                 return false;
             }
 
@@ -1135,7 +1135,7 @@ impl EmbeddedStore {
             return false;
         }
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(shard_id) {
             return false;
         }
 

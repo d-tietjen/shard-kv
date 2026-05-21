@@ -2,6 +2,7 @@
 pub enum RedisCommandFamily {
     Connection,
     Server,
+    Transaction,
     String,
     Key,
     Hash,
@@ -15,6 +16,7 @@ impl RedisCommandFamily {
         match self {
             Self::Connection => "connection",
             Self::Server => "server",
+            Self::Transaction => "transaction",
             Self::String => "string",
             Self::Key => "key",
             Self::Hash => "hash",
@@ -50,6 +52,7 @@ pub struct RedisCommandCase {
     pub case_name: &'static str,
     pub profile: RedisCommandProfile,
     pub parts: RedisCommandParts,
+    pub script: RedisCommandSetup,
     pub setup: RedisCommandSetup,
 }
 
@@ -71,6 +74,47 @@ macro_rules! case {
             case_name: $case_name,
             profile: RedisCommandProfile::Small,
             parts: &[$($part),+],
+            script: &[],
+            setup: &[],
+        }
+    };
+}
+
+macro_rules! case_with_setup {
+    (
+        $family:ident,
+        $command_name:literal,
+        $case_name:literal,
+        [$($part:literal),+ $(,)?],
+        [$([$($setup_part:literal),+ $(,)?]),* $(,)?]
+    ) => {
+        RedisCommandCase {
+            family: RedisCommandFamily::$family,
+            command_name: $command_name,
+            case_name: $case_name,
+            profile: RedisCommandProfile::Small,
+            parts: &[$($part),+],
+            script: &[],
+            setup: &[$(&[$($setup_part),+] as RedisCommandParts),*],
+        }
+    };
+}
+
+macro_rules! case_script {
+    (
+        $family:ident,
+        $command_name:literal,
+        $case_name:literal,
+        [$($display_part:literal),+ $(,)?],
+        [$([$($script_part:literal),+ $(,)?]),+ $(,)?]
+    ) => {
+        RedisCommandCase {
+            family: RedisCommandFamily::$family,
+            command_name: $command_name,
+            case_name: $case_name,
+            profile: RedisCommandProfile::Small,
+            parts: &[$($display_part),+],
+            script: &[$(&[$($script_part),+] as RedisCommandParts),+],
             setup: &[],
         }
     };
@@ -90,6 +134,7 @@ macro_rules! large_case {
             case_name: $case_name,
             profile: RedisCommandProfile::Large,
             parts: &[$($part),+],
+            script: &[],
             setup: &[$(&[$($setup_part),+] as RedisCommandParts),*],
         }
     };
@@ -100,16 +145,79 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Connection, "ECHO", "ECHO", ["ECHO", "hello"]),
     case!(Connection, "SELECT", "SELECT", ["SELECT", "0"]),
     case!(Server, "DBSIZE", "DBSIZE empty", ["DBSIZE"]),
+    case_script!(
+        Transaction,
+        "MULTI",
+        "MULTI DISCARD",
+        ["MULTI"],
+        [["MULTI"], ["DISCARD"]]
+    ),
+    case_script!(
+        Transaction,
+        "EXEC",
+        "MULTI EXEC SET GET",
+        ["EXEC"],
+        [["MULTI"], ["SET", "txn", "v"], ["GET", "txn"], ["EXEC"]]
+    ),
+    case_script!(
+        Transaction,
+        "DISCARD",
+        "DISCARD queued SET",
+        ["DISCARD"],
+        [["MULTI"], ["SET", "txn-discard", "v"], ["DISCARD"]]
+    ),
     case!(String, "SET", "SET string", ["SET", "s", "v"]),
     case!(String, "GET", "GET string", ["GET", "s"]),
     case!(String, "SET", "SET NX miss", ["SET", "s-nx", "v", "NX"]),
     case!(String, "SET", "SET XX hit", ["SET", "s", "v2", "XX"]),
+    case_with_setup!(
+        String,
+        "SETNX",
+        "SETNX existing",
+        ["SETNX", "setnx-bench", "v2"],
+        [["SET", "setnx-bench", "v"]]
+    ),
     case!(String, "SET", "SET EX", ["SET", "exp", "v", "EX", "60"]),
     case!(Key, "TTL", "TTL positive", ["TTL", "exp"]),
     case!(Key, "PTTL", "PTTL positive", ["PTTL", "exp"]),
     case!(Key, "PERSIST", "PERSIST", ["PERSIST", "exp"]),
+    case_with_setup!(
+        Key,
+        "EXPIREAT",
+        "EXPIREAT future",
+        ["EXPIREAT", "expireat-bench", "9999999999"],
+        [["SET", "expireat-bench", "v"]]
+    ),
+    case_with_setup!(
+        Key,
+        "PEXPIREAT",
+        "PEXPIREAT future",
+        ["PEXPIREAT", "pexpireat-bench", "9999999999000"],
+        [["SET", "pexpireat-bench", "v"]]
+    ),
     case!(Key, "TYPE", "TYPE string", ["TYPE", "s"]),
+    case_with_setup!(
+        Key,
+        "OBJECT",
+        "OBJECT ENCODING string",
+        ["OBJECT", "ENCODING", "object-bench"],
+        [["SET", "object-bench", "v"]]
+    ),
     case!(Key, "EXISTS", "EXISTS mixed", ["EXISTS", "s", "missing"]),
+    case_with_setup!(
+        Key,
+        "TOUCH",
+        "TOUCH mixed",
+        ["TOUCH", "touch-a", "touch-b", "missing"],
+        [["MSET", "touch-a", "1", "touch-b", "2"]]
+    ),
+    case_with_setup!(
+        Key,
+        "RANDOMKEY",
+        "RANDOMKEY nonempty",
+        ["RANDOMKEY"],
+        [["SET", "randomkey-bench", "v"]]
+    ),
     case!(Key, "KEYS", "KEYS all", ["KEYS", "*"]),
     case!(
         Key,
@@ -123,10 +231,82 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "SCAN type string",
         ["SCAN", "0", "TYPE", "string", "COUNT", "1000"]
     ),
+    case_with_setup!(
+        Key,
+        "RENAME",
+        "RENAME a to b",
+        ["RENAME", "rename-a", "rename-b"],
+        [["SET", "rename-a", "v"]]
+    ),
+    case_with_setup!(
+        Key,
+        "RENAME",
+        "RENAME b to a",
+        ["RENAME", "rename-b", "rename-a"],
+        [["SET", "rename-a", "v"]]
+    ),
+    case_with_setup!(
+        Key,
+        "RENAMENX",
+        "RENAMENX existing dest",
+        ["RENAMENX", "renamenx-src", "renamenx-dst"],
+        [
+            ["SET", "renamenx-src", "v"],
+            ["SET", "renamenx-dst", "existing"]
+        ]
+    ),
+    case!(
+        Key,
+        "UNLINK",
+        "UNLINK missing",
+        ["UNLINK", "missing-unlink"]
+    ),
+    case_with_setup!(
+        Key,
+        "COPY",
+        "COPY existing dest",
+        ["COPY", "copy-src", "copy-dst"],
+        [["SET", "copy-src", "v"], ["SET", "copy-dst", "existing"]]
+    ),
     case!(String, "APPEND", "APPEND", ["APPEND", "s", "+"]),
     case!(String, "STRLEN", "STRLEN", ["STRLEN", "s"]),
     case!(String, "GETRANGE", "GETRANGE", ["GETRANGE", "s", "1", "-1"]),
     case!(String, "SETRANGE", "SETRANGE", ["SETRANGE", "s", "1", "XX"]),
+    case_with_setup!(
+        String,
+        "GETBIT",
+        "GETBIT",
+        ["GETBIT", "bitstr", "1"],
+        [["SET", "bitstr", "A"]]
+    ),
+    case_with_setup!(
+        String,
+        "SETBIT",
+        "SETBIT",
+        ["SETBIT", "bitstr", "3", "1"],
+        [["SET", "bitstr", "A"]]
+    ),
+    case_with_setup!(
+        String,
+        "BITCOUNT",
+        "BITCOUNT",
+        ["BITCOUNT", "bitstr"],
+        [["SET", "bitstr", "A"]]
+    ),
+    case_with_setup!(
+        String,
+        "BITPOS",
+        "BITPOS",
+        ["BITPOS", "bitstr", "1"],
+        [["SET", "bitstr", "A"]]
+    ),
+    case_with_setup!(
+        String,
+        "BITOP",
+        "BITOP OR",
+        ["BITOP", "OR", "bit-out", "bit-a", "bit-b"],
+        [["SET", "bit-a", "A"], ["SET", "bit-b", "B"]]
+    ),
     case!(String, "GETSET", "GETSET", ["GETSET", "s", "old"]),
     case!(String, "GETDEL", "GETDEL", ["GETDEL", "s-del"]),
     case!(String, "INCR", "INCR", ["INCR", "n"]),
@@ -153,6 +333,12 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["MSETNX", "ma", "x", "mc", "3"]
     ),
     case!(Hash, "HSET", "HSET", ["HSET", "h", "f1", "v1", "f2", "v2"]),
+    case!(
+        Hash,
+        "HMSET",
+        "HMSET",
+        ["HMSET", "hm", "f1", "v1", "f2", "v2"]
+    ),
     case!(Hash, "HGET", "HGET", ["HGET", "h", "f1"]),
     case!(
         Hash,
@@ -163,6 +349,13 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Hash, "HLEN", "HLEN", ["HLEN", "h"]),
     case!(Hash, "HEXISTS", "HEXISTS", ["HEXISTS", "h", "f2"]),
     case!(Hash, "HSETNX", "HSETNX", ["HSETNX", "h", "f3", "v3"]),
+    case_with_setup!(
+        Hash,
+        "HSTRLEN",
+        "HSTRLEN",
+        ["HSTRLEN", "h", "f2"],
+        [["HSET", "h", "f2", "v2"]]
+    ),
     case!(Hash, "HINCRBY", "HINCRBY", ["HINCRBY", "h", "num", "5"]),
     case!(
         Hash,
@@ -189,6 +382,20 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(List, "LPUSH", "LPUSH", ["LPUSH", "l", "b", "a"]),
     case!(List, "RPUSH", "RPUSH", ["RPUSH", "l", "c"]),
     case!(List, "LRANGE", "LRANGE", ["LRANGE", "l", "0", "-1"]),
+    case_with_setup!(
+        List,
+        "RPOPLPUSH",
+        "RPOPLPUSH self",
+        ["RPOPLPUSH", "l", "l"],
+        [["RPUSH", "l", "a", "b", "c"]]
+    ),
+    case_with_setup!(
+        List,
+        "LMOVE",
+        "LMOVE self",
+        ["LMOVE", "lmove-bench", "lmove-bench", "RIGHT", "LEFT"],
+        [["RPUSH", "lmove-bench", "a", "b", "c"]]
+    ),
     case!(List, "LLEN", "LLEN", ["LLEN", "l"]),
     case!(List, "LINDEX", "LINDEX", ["LINDEX", "l", "1"]),
     case!(List, "LSET", "LSET", ["LSET", "l", "1", "B"]),
@@ -276,6 +483,13 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(ZSet, "ZSCORE", "ZSCORE", ["ZSCORE", "z", "a"]),
     case!(ZSet, "ZCARD", "ZCARD", ["ZCARD", "z"]),
     case!(ZSet, "ZRANGE", "ZRANGE", ["ZRANGE", "z", "0", "-1"]),
+    case_with_setup!(
+        ZSet,
+        "ZREVRANGE",
+        "ZREVRANGE",
+        ["ZREVRANGE", "z", "0", "-1"],
+        [["ZADD", "z", "1", "a", "2", "b"]]
+    ),
     case!(
         ZSet,
         "ZRANGE",
@@ -327,6 +541,27 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "ZRANGEBYSCORE exclusive",
         ["ZRANGEBYSCORE", "z2", "(2", "8"]
     ),
+    case_with_setup!(
+        ZSet,
+        "ZREVRANGEBYSCORE",
+        "ZREVRANGEBYSCORE limit",
+        ["ZREVRANGEBYSCORE", "z2", "8", "(2", "LIMIT", "0", "2"],
+        [["ZADD", "z2", "1", "a", "2", "b", "3", "c"]]
+    ),
+    case_with_setup!(
+        ZSet,
+        "ZREMRANGEBYRANK",
+        "ZREMRANGEBYRANK no-op",
+        ["ZREMRANGEBYRANK", "z2", "999", "1000"],
+        [["ZADD", "z2", "1", "a", "2", "b", "3", "c"]]
+    ),
+    case_with_setup!(
+        ZSet,
+        "ZREMRANGEBYSCORE",
+        "ZREMRANGEBYSCORE no-op",
+        ["ZREMRANGEBYSCORE", "z2", "999", "1000"],
+        [["ZADD", "z2", "1", "a", "2", "b", "3", "c"]]
+    ),
     case!(
         ZSet,
         "ZSCAN",
@@ -350,6 +585,13 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "ZREVRANGEBYLEX",
         "ZREVRANGEBYLEX",
         ["ZREVRANGEBYLEX", "zlex", "[c", "[a"]
+    ),
+    case_with_setup!(
+        ZSet,
+        "ZREMRANGEBYLEX",
+        "ZREMRANGEBYLEX no-op",
+        ["ZREMRANGEBYLEX", "zlex", "[z", "[zz"],
+        [["ZADD", "zlex", "0", "a", "0", "b", "0", "c"]]
     ),
     case!(
         ZSet,
@@ -747,17 +989,25 @@ pub const REDIS_COMMAND_LARGE_CASES: &[RedisCommandCase] = &[
 
 pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "APPEND",
+    "BITCOUNT",
+    "BITOP",
+    "BITPOS",
     "BLMOVE",
     "BLPOP",
     "BRPOP",
     "BZPOPMAX",
     "BZPOPMIN",
+    "COPY",
     "DBSIZE",
     "DECR",
     "DECRBY",
+    "DISCARD",
     "ECHO",
+    "EXEC",
     "EXISTS",
+    "EXPIREAT",
     "GET",
+    "GETBIT",
     "GETDEL",
     "GETRANGE",
     "GETSET",
@@ -769,11 +1019,13 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "HINCRBYFLOAT",
     "HKEYS",
     "HLEN",
+    "HMSET",
     "HMGET",
     "HRANDFIELD",
     "HSCAN",
     "HSET",
     "HSETNX",
+    "HSTRLEN",
     "HVALS",
     "INCR",
     "INCRBY",
@@ -782,6 +1034,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "LINDEX",
     "LINSERT",
     "LLEN",
+    "LMOVE",
     "LPOP",
     "LPUSH",
     "LPUSHX",
@@ -792,10 +1045,17 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "MGET",
     "MSET",
     "MSETNX",
+    "MULTI",
+    "OBJECT",
     "PERSIST",
     "PING",
+    "PEXPIREAT",
     "PTTL",
+    "RANDOMKEY",
+    "RENAME",
+    "RENAMENX",
     "RPOP",
+    "RPOPLPUSH",
     "RPUSH",
     "RPUSHX",
     "SADD",
@@ -805,6 +1065,8 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "SDIFFSTORE",
     "SELECT",
     "SET",
+    "SETBIT",
+    "SETNX",
     "SETRANGE",
     "SINTER",
     "SINTERSTORE",
@@ -820,7 +1082,9 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "SUNION",
     "SUNIONSTORE",
     "TTL",
+    "TOUCH",
     "TYPE",
+    "UNLINK",
     "ZADD",
     "ZCARD",
     "ZCOUNT",
@@ -835,7 +1099,12 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "ZRANGEBYSCORE",
     "ZRANGESTORE",
     "ZRANK",
+    "ZREMRANGEBYLEX",
+    "ZREMRANGEBYRANK",
+    "ZREMRANGEBYSCORE",
+    "ZREVRANGE",
     "ZREVRANGEBYLEX",
+    "ZREVRANGEBYSCORE",
     "ZREVRANK",
     "ZSCAN",
     "ZSCORE",

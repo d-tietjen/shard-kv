@@ -164,7 +164,7 @@ impl EmbeddedStore {
     /// The visitor receives `(key, value, expire_at_ms)` while each shard read
     /// lock is held. Keep callbacks lightweight, and return `false` to stop
     /// early. Redis object values are intentionally excluded; this mirrors
-    /// [`entry_snapshot`].
+    /// [`Self::entry_snapshot`].
     pub fn visit_string_entries(&self, mut visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool) {
         let now_ms = now_millis();
         for shard in &self.shards {

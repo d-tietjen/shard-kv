@@ -1,5 +1,8 @@
 /target/
 /crates/*/target/
+/verif/
+/.why3find/
+rustc-ice-*.txt
 
 /.claude/
 /.DS_Store

@@ -34,6 +34,7 @@ mod direct;
 mod direct_protocol;
 mod fast_write;
 mod lifecycle;
+mod transactions;
 mod transport;
 pub(crate) mod wire;
 

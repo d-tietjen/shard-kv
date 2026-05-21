@@ -28,6 +28,11 @@ impl RedisObjectStore {
     }
 
     #[inline(always)]
+    pub(crate) fn shard_has_objects(&self, shard_id: usize) -> bool {
+        self.shard_object_count_hint(shard_id) != 0
+    }
+
+    #[inline(always)]
     pub(crate) fn object_count(&self) -> usize {
         let count = self
             .shards

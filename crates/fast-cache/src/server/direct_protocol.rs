@@ -3,6 +3,7 @@ use super::commands::{
     RawCommandDispatcher,
 };
 use super::fast_write::FastWriteQueue;
+use super::transactions::{TransactionCoordinator, TransactionState};
 use super::wire::*;
 use super::*;
 
@@ -12,6 +13,9 @@ mod fcnp;
 mod read;
 mod request;
 mod resp;
+
+#[cfg(feature = "embedded")]
+pub(in crate::server) use request::SharedRequestBufferContext;
 
 pub(super) struct DirectProtocol;
 

@@ -15,7 +15,7 @@ impl EmbeddedStore {
         let route = self.route_key(&key);
         let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
             if bucket.delete_any(&key) {
@@ -87,7 +87,7 @@ impl EmbeddedStore {
             false => self.route_key(key),
         };
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
             if bucket.delete_any(key) {
@@ -138,7 +138,7 @@ impl EmbeddedStore {
             false => self.route_key(key),
         };
         #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
+        if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
             if bucket.delete_any(key) {
@@ -309,28 +309,6 @@ impl EmbeddedStore {
 
         let now_ms = now_millis();
         let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
-        #[cfg(feature = "redis-compat")]
-        if self.objects.has_objects() {
-            for (key, value) in items {
-                let route = self.route_key(&key);
-                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-                let mut shard = self.shards[route.shard_id].write();
-                if bucket.delete_any(&key) {
-                    self.objects.note_deleted(route.shard_id);
-                }
-                if let Some(session_prefix) = point_write_session_storage_prefix(&key) {
-                    shard
-                        .session_slots
-                        .delete_hashed(&session_prefix, route.key_hash, &key);
-                }
-                shard
-                    .map
-                    .set_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
-                shard.enforce_memory_limit(now_ms);
-                self.refresh_string_key_count(route.shard_id, &shard);
-            }
-            return;
-        }
         let mut groups = vec![Vec::<(Bytes, Bytes, u64)>::new(); self.shards.len()];
 
         for (key, value) in items {
@@ -340,6 +318,27 @@ impl EmbeddedStore {
 
         for (shard_id, batch) in groups.into_iter().enumerate() {
             if batch.is_empty() {
+                continue;
+            }
+            #[cfg(feature = "redis-compat")]
+            if self.objects.shard_has_objects(shard_id) {
+                for (key, value, key_hash) in batch {
+                    let mut bucket = self.objects.write_bucket(shard_id, key_hash);
+                    let mut shard = self.shards[shard_id].write();
+                    if bucket.delete_any(&key) {
+                        self.objects.note_deleted(shard_id);
+                    }
+                    if let Some(session_prefix) = point_write_session_storage_prefix(&key) {
+                        shard
+                            .session_slots
+                            .delete_hashed(&session_prefix, key_hash, &key);
+                    }
+                    shard
+                        .map
+                        .set_hashed(key_hash, key, value, expire_at_ms, now_ms);
+                    shard.enforce_memory_limit(now_ms);
+                    self.refresh_string_key_count(shard_id, &shard);
+                }
                 continue;
             }
             let mut shard = self.shards[shard_id].write();

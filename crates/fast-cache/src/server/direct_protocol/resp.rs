@@ -3,9 +3,18 @@ use super::*;
 impl DirectProtocol {
     #[cfg(feature = "embedded")]
     #[inline(always)]
+    #[allow(dead_code)]
     pub(in crate::server) fn try_resp_direct_dispatch<'a>(
         buf: &'a [u8],
     ) -> Option<(usize, RespDirectCommandBox<'a>)> {
+        let (pos, command, args) = DirectProtocol::try_resp_command_parts(buf)?;
+        DirectProtocol::parse_resp_direct_command(command, args).map(|command| (pos, command))
+    }
+
+    #[inline(always)]
+    pub(in crate::server) fn try_resp_command_parts<'a>(
+        buf: &'a [u8],
+    ) -> Option<(usize, &'a [u8], RespDirectArgs<'a>)> {
         let (arg_count, mut pos) = DirectProtocol::read_resp_array_header(buf)?;
         match RespDirectArgCount::from_raw(arg_count) {
             RespDirectArgCount::Supported => {
@@ -14,8 +23,7 @@ impl DirectProtocol {
                 for _ in 1..arg_count {
                     args.push(DirectProtocol::read_resp_bulk_arg(buf, &mut pos)?);
                 }
-                DirectProtocol::parse_resp_direct_command(command, args)
-                    .map(|command| (pos, command))
+                Some((pos, command, args))
             }
             RespDirectArgCount::Unsupported => None,
         }
