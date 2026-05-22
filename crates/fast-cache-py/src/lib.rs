@@ -7,7 +7,7 @@
 // `cargo test --workspace` path still runs them.
 
 use dashmap::DashMap;
-extern crate fast_cache as fast_cache_crate;
+extern crate fast_cache_core as fast_cache_crate;
 use fast_cache_crate::config::{EvictionPolicy, FastCacheConfig};
 use fast_cache_crate::cuda::CudaConfig;
 use fast_cache_crate::persistence::{PersistenceRuntime, WalAppender, load_recovery_state};
@@ -45,7 +45,7 @@ mod fcnp_store;
 
 #[pyfunction(name = "hash_key")]
 fn py_hash_key(key: &[u8]) -> u64 {
-    ::fast_cache::storage::hash_key(key)
+    fast_cache_crate::storage::hash_key(key)
 }
 
 #[derive(Debug, Clone)]
@@ -625,7 +625,7 @@ impl ThreadedStoreCore {
 
     #[inline(always)]
     fn route_session(&self, session_prefix: &[u8]) -> usize {
-        self.worker_for_hash(::fast_cache::storage::hash_key(session_prefix))
+        self.worker_for_hash(fast_cache_crate::storage::hash_key(session_prefix))
     }
 
     #[inline(always)]
@@ -637,11 +637,11 @@ impl ThreadedStoreCore {
         }
         match self.route_mode {
             EmbeddedRouteMode::FullKey => {
-                self.worker_for_hash(::fast_cache::storage::hash_key(key))
+                self.worker_for_hash(fast_cache_crate::storage::hash_key(key))
             }
-            EmbeddedRouteMode::SessionPrefix => {
-                self.worker_for_hash(::fast_cache::storage::hash_key(session_route_prefix(key)))
-            }
+            EmbeddedRouteMode::SessionPrefix => self.worker_for_hash(
+                fast_cache_crate::storage::hash_key(session_route_prefix(key)),
+            ),
         }
     }
 
@@ -734,12 +734,12 @@ fn routed_shard_for_key(
 ) -> usize {
     let shard_count = shard_count.max(1);
     if prefer_session_tags && let Some(session_prefix) = extract_lmcache_session_prefix(key) {
-        return (::fast_cache::storage::hash_key(&session_prefix) as usize) % shard_count;
+        return (fast_cache_crate::storage::hash_key(&session_prefix) as usize) % shard_count;
     }
     let route_hash = match route_mode {
-        EmbeddedRouteMode::FullKey => ::fast_cache::storage::hash_key(key),
+        EmbeddedRouteMode::FullKey => fast_cache_crate::storage::hash_key(key),
         EmbeddedRouteMode::SessionPrefix => {
-            ::fast_cache::storage::hash_key(session_route_prefix(key))
+            fast_cache_crate::storage::hash_key(session_route_prefix(key))
         }
     };
     (route_hash as usize) % shard_count
@@ -4971,7 +4971,7 @@ fn prepare_encoded_lmcache_keys(encoded: Vec<Vec<u8>>) -> PreparedLmcacheKeys {
     let mut common_session = None::<Vec<u8>>;
 
     for key in &encoded {
-        key_hashes.push(::fast_cache::storage::hash_key(key));
+        key_hashes.push(fast_cache_crate::storage::hash_key(key));
         let session = extract_lmcache_session_prefix(key);
         common_session = match (common_session, session) {
             (None, Some(session)) => Some(session),

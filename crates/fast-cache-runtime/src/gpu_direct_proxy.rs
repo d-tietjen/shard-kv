@@ -1,5 +1,5 @@
-use fast_cache::cuda::CudaConfig;
-use fast_cache::storage::LocalEmbeddedStore;
+use fast_cache_core::cuda::CudaConfig;
+use fast_cache_core::storage::LocalEmbeddedStore;
 use serde::{Deserialize, Serialize};
 
 use crate::gpu_direct_api::GpuDirectApiVersion;

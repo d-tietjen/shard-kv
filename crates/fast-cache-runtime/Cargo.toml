@@ -10,14 +10,14 @@ rust-version.workspace = true
 description = "Rust-native GPU/runtime integration layer for fast-cache"
 
 [features]
-default = ["embedded", "sharded"]
-embedded = ["fast-cache/embedded"]
-sharded = ["embedded", "fast-cache/sharded"]
-cuda = ["fast-cache/cuda", "sharded", "dep:cust"]
+default = ["sharded"]
+embedded = ["fast_cache_core/embedded"]
+sharded = ["embedded", "fast_cache_core/sharded"]
+cuda = ["sharded", "fast_cache_core/cuda", "dep:cust"]
 gpu-direct-api = ["sharded"]
 
 [dependencies]
-fast-cache = { workspace = true }
+fast_cache_core = { package = "fast-cache-core", path = "../fast-cache-core", version = "0.2.0", default-features = false }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

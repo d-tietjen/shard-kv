@@ -1,4 +1,4 @@
-use fast_cache::cuda::CudaConfig;
+use fast_cache_core::cuda::CudaConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::{RuntimeError, RuntimeResult};
@@ -241,7 +241,7 @@ impl HostStagingPool for CudaPinnedStagingPool {
 
 #[cfg(test)]
 mod tests {
-    use fast_cache::cuda::CudaConfig;
+    use fast_cache_core::cuda::CudaConfig;
 
     use super::{HeapStagingPool, HostStagingPool, HostTransferPath, HostTransferPolicy};
 

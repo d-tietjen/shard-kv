@@ -378,7 +378,35 @@ dependencies = [
 
 [[package]]
 name = "fast-cache"
-version = "0.1.0"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "fast-cache-core",
+ "tokio",
+]
+
+[[package]]
+name = "fast-cache-benchmarks"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "crossbeam-channel",
+ "dashmap",
+ "fast-cache",
+ "fcnp-client-rs",
+ "hdrhistogram",
+ "libc",
+ "lru",
+ "moka",
+ "parking_lot",
+ "rand",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "fast-cache-core"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "bytes-handoff",
@@ -415,37 +443,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast-cache-benchmarks"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "clap",
- "crossbeam-channel",
- "dashmap",
- "fast-cache",
- "fcnp-client-rs",
- "hdrhistogram",
- "libc",
- "lru",
- "moka",
- "parking_lot",
- "rand",
- "xxhash-rust",
-]
-
-[[package]]
 name = "fast-cache-formal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "creusot-std",
 ]
 
 [[package]]
 name = "fast-cache-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dashmap",
- "fast-cache",
+ "fast-cache-core",
  "fast-cache-runtime",
  "fcnp-client-rs",
  "pyo3",
@@ -453,11 +462,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-cache-redis"
+version = "0.2.0"
+dependencies = [
+ "fast-cache-core",
+]
+
+[[package]]
 name = "fast-cache-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cust",
- "fast-cache",
+ "fast-cache-core",
  "serde",
  "thiserror",
 ]
@@ -495,7 +511,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "fcnp-client-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "thiserror",

@@ -2,9 +2,13 @@ target
 crates/*/target
 tmp
 var
+.why3find
+verif
 .git
 .claude
 .DS_Store
+*.DS_Store
+rustc-ice-*.txt
 docs
 benchmarks/results
 crates/fast-cache/bench
@@ -12,3 +16,9 @@ crates/fast-cache/src/bin/bench_*.rs
 **/__pycache__
 **/.pytest_cache
 **/.mypy_cache
+*.py[cod]
+*.egg-info
+**/*.egg-info
+perf.data*
+*.trace
+*.rdb

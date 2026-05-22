@@ -18,27 +18,44 @@ Use this checklist before publishing the repository or the crates.io crates.
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p fast-cache
-cargo test -p fast-cache --features unsafe
+cargo test --workspace
+cargo test -p fast-cache-core --features unsafe
+cargo test -p fast-cache-core --features redis-compat
+cargo test -p fast-cache-formal
+FAST_CACHE_COMPAT_SERVER_BIN=redis-server \
+  cargo test -p fast-cache-core --features redis-server \
+  --test redis_compat_differential_test -- --nocapture
+cargo check -p fast-cache --features redis-compat
+cargo check -p fast-cache --features redis-server
+cargo check -p fast-cache-redis --all-features
 cargo test -p fcnp-client-rs
+cargo doc -p fast-cache-core --no-deps --all-features
 cargo doc -p fast-cache --no-deps --all-features
+cargo doc -p fast-cache-redis --no-deps --all-features
 cargo doc -p fcnp-client-rs --no-deps
 cargo package -p fcnp-client-rs --locked
-cargo package -p fast-cache --locked
+cargo package -p fast-cache-core --locked
+git diff --check
 ```
 
 For full release confidence, also run any Redis compatibility or performance
 validation suites that support the release announcement. Keep raw artifacts
 outside the public repository unless they have been intentionally curated.
+For the current 0.2.0 release shape, known limits, and smoke benchmark command,
+see `docs/RELEASE_0_2_READINESS.md`.
 
 ## Publishing
 
 ```bash
 cargo publish -p fcnp-client-rs --dry-run
-cargo publish -p fast-cache --dry-run
+cargo publish -p fast-cache-core --dry-run
 cargo publish -p fcnp-client-rs
+cargo publish -p fast-cache-core
+cargo publish -p fast-cache --dry-run
 cargo publish -p fast-cache
 ```
 
-Only publish after the dry run succeeds and the final changelog or performance
+Publish `fast-cache-core` before dry-running or publishing the public
+`fast-cache` facade so the facade's registry dependency can resolve. Only
+publish after the dry run succeeds and the final changelog or performance
 claims have been checked against source artifacts.

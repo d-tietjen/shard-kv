@@ -1,4 +1,4 @@
-use fast_cache::storage::{Bytes, FastHashMap};
+use fast_cache_core::storage::{Bytes, FastHashMap};
 
 use crate::{
     CpuTransferTarget, PagedGpuTransferPage, PagedGpuTransferTarget, RuntimeError, RuntimeResult,
@@ -258,8 +258,8 @@ impl VllmConnectorLoadSpec {
 
 #[cfg(test)]
 mod tests {
-    use fast_cache::cuda::CudaConfig;
-    use fast_cache::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap};
+    use fast_cache_core::cuda::CudaConfig;
+    use fast_cache_core::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap};
 
     use super::{VllmBlockAllocation, VllmConnectorLoadSpec, VllmRequestedPage};
     use crate::test_support::SimulatedGpuEngine;

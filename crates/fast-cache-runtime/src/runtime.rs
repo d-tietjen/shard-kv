@@ -1,8 +1,8 @@
-use fast_cache::cuda::{
+use fast_cache_core::cuda::{
     CudaChunkTransferDescriptor, CudaSessionChunkEvent, CudaSessionTransferRequest,
     CudaSessionTransferStats,
 };
-use fast_cache::storage::{LocalEmbeddedStore, LocalRouteError};
+use fast_cache_core::storage::{LocalEmbeddedStore, LocalRouteError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -566,8 +566,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use fast_cache::cuda::{CudaChunkTransferDescriptor, CudaSessionTransferRequest};
-    use fast_cache::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap};
+    use fast_cache_core::cuda::{CudaChunkTransferDescriptor, CudaSessionTransferRequest};
+    use fast_cache_core::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap};
 
     use crate::host::{HeapStagingPool, HostTransferPath, HostTransferPolicy};
 

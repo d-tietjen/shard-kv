@@ -15,130 +15,34 @@ readme = "README.md"
 autobins = false
 autotests = false
 autobenches = false
-exclude = [
-    "bench/**",
-    "fuzz/**",
-    "tests/**",
-    "src/bin/bench_*.rs",
-    ".DS_Store",
-]
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(creusot)"] }
+exclude = [".DS_Store"]
 
 [features]
-# The crate defaults to the embedded Rust API. The TCP server and Redis/Valkey
-# compatibility surface are opt-in so embedded cache-only users keep the core
-# string map lean.
-default = ["embedded", "sharded"]
-embedded = []
-sharded = ["embedded"]
-# Embedded Redis/Valkey data-type semantics (hash/list/set/zset helpers and
-# wrong-type behavior) without pulling in network server dependencies.
-redis-compat = ["embedded"]
-server = [
-    "sharded",
-    "dep:bytes-handoff",
-    "dep:clap",
-    "dep:flume",
-    "dep:socket2",
-    "dep:tracing-subscriber",
+default = ["sharded"]
+embedded = ["fast_cache_core/embedded"]
+sharded = ["embedded", "fast_cache_core/sharded"]
+redis-compat = [
+    "embedded",
+    "fast_cache_core/redis-compat",
 ]
-# Convenience feature for Redis/Valkey-compatible RESP/FCNP server builds.
-redis-server = ["server", "redis-compat"]
-# Linux-only runtime for the TCP server. It uses bytes-handoff's monoio read
-# adapter while monoio owns the socket driver and shard-local worker runtime.
-# Plain `server` remains the portable tokio implementation.
-monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
-cuda = ["sharded"]
-telemetry = ["embedded"]
-# Experimental point-key-only hot path for TTL-free workloads. This implies
-# `no-ttl`; any operation that needs TTL/object/memory-policy semantics drains
-# the experimental point table back into the normal flat map.
-experimental-no-ttl-point-hot-path = ["no-ttl"]
-# Specialize shared embedded point-key hot paths for deployments that never
-# create TTL entries. TTL-oriented shared-store APIs are unsupported in this
-# build, while broader server and Redis/Valkey-compat TTL code remains unchanged.
-no-ttl = []
-# Exposes `value_mut_no_ttl()` on embedded mutation guards. This gives callers
-# a raw `&mut [u8]` only for uniquely-owned, no-TTL values. TTL entries are
-# intentionally rejected; use `set_slice` when TTL preservation matters.
-mutable-value-slices = []
-# Benchmark-only comparison knob for the shared embedded store lock.
-# Default builds use `rblock`; enabling this swaps those stripes to
-# `parking_lot::RwLock` so cache-level lock behavior can be A/B measured.
-shared-parking-lot-lock = []
-# Benchmark-only comparison knob for the server/direct `EmbeddedStore` lock.
-# Default builds keep `parking_lot::RwLock`; enabling this swaps shard locks to
-# `rblock::RwLock` so the server path can be A/B measured.
-embedded-read-biased-lock = []
-# Opt into reviewed unsafe hot paths for maximum throughput. This enables
-# direct single-worker lock bypass, unchecked flat-map indexing/comparison
-# helpers, and raw response-buffer writes.
-unsafe = []
+server = ["sharded", "fast_cache_core/server", "dep:clap", "dep:tokio"]
+redis-server = ["server", "redis-compat", "fast_cache_core/redis-server"]
+monoio = ["server", "fast_cache_core/monoio"]
+cuda = ["sharded", "fast_cache_core/cuda"]
+telemetry = ["embedded", "fast_cache_core/telemetry"]
+experimental-no-ttl-point-hot-path = ["fast_cache_core/experimental-no-ttl-point-hot-path"]
+no-ttl = ["fast_cache_core/no-ttl"]
+mutable-value-slices = ["fast_cache_core/mutable-value-slices"]
+shared-parking-lot-lock = ["fast_cache_core/shared-parking-lot-lock"]
+embedded-read-biased-lock = ["fast_cache_core/embedded-read-biased-lock"]
+unsafe = ["fast_cache_core/unsafe"]
 
 [dependencies]
-bytes = "1"
-bytes-handoff = { version = "1.2.0", optional = true }
+fast_cache_core = { package = "fast-cache-core", path = "../fast-cache-core", version = "0.2.0", default-features = false }
 clap = { workspace = true, optional = true }
-core_affinity = { workspace = true }
-crc32fast = { workspace = true }
-crossbeam-channel = { workspace = true }
-crossbeam-utils = { workspace = true }
-fast-telemetry = { workspace = true }
-hashbrown = { workspace = true }
-indextreemap = { workspace = true }
-itoa = "1"
-log = { workspace = true }
-libc = { workspace = true }
-lz4_flex = { workspace = true }
-memchr = "2"
-parking_lot = { workspace = true }
-rblock = { workspace = true }
-serde = { workspace = true }
-smallvec = "1"
-socket2 = { version = "0.5", features = ["all"], optional = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-toml = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true, optional = true }
-xxhash-rust = { workspace = true }
-zstd = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
-
-# Runtime-agnostic mpsc used by the tokio fanout acceptor. Monoio and tokio
-# direct-shard workers bind their own shard-local listeners instead.
-[dependencies.flume]
-version = "0.11"
-default-features = false
-features = ["async"]
-optional = true
-
-# Linux-only monoio runtime, gated via FAST_CACHE_USE_MONOIO=1 at runtime.
-[target.'cfg(target_os = "linux")'.dependencies]
-monoio = { version = "0.2", optional = true }
-
-[target.'cfg(creusot)'.dependencies]
-creusot-std = "0.11.0"
+tokio = { workspace = true, optional = true }
 
 [[bin]]
 name = "fast-cache-server"
+path = "src/bin/fast-cache-server.rs"
 required-features = ["server"]
-
-[[test]]
-name = "redis_tier1_coverage_test"
-path = "tests/redis_tier1_coverage_test.rs"
-
-[[test]]
-name = "fuzz_harness_test"
-path = "tests/fuzz_harness_test.rs"
-required-features = ["redis-compat"]
-
-[[test]]
-name = "redis_compat_differential_test"
-path = "tests/redis_compat_differential_test.rs"
-required-features = ["redis-server"]

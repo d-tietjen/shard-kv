@@ -9,8 +9,10 @@ The public documentation is centered on rustdoc, the same way users encounter
 open source crates on crates.io:
 
 - [Crate guide and API docs](https://docs.rs/fast-cache)
-- [Crate README](crates/fast-cache/README.md)
-- [Safety notes](crates/fast-cache/SAFETY.md)
+- [Facade crate README](crates/fast-cache/README.md)
+- [Core crate README](crates/fast-cache-core/README.md)
+- [Safety notes](crates/fast-cache-core/SAFETY.md)
+- [Project structure](docs/PROJECT_STRUCTURE.md)
 
 ## Quick Start
 
@@ -45,12 +47,12 @@ caller needs a value handle that outlives the shard read guard. Use `get_mut`
 when an existing point value should be replaced or removed while preserving its
 TTL.
 
-The crate keeps the core in one package and exposes layered surfaces:
-`FastMap` for cloneable embedded use, `FastCache` as the cache-flavored alias,
-`embedded::ShardedEngine` for the full sharded core used by server mode,
-`embedded::LocalEmbeddedStore` for pinned owner-local workers, the optional
-`server` feature for RESP/FCNP access from other processes, and `redis-compat`
-when Redis/Valkey data-type semantics are required.
+The public `fast-cache` crate is a facade over `fast-cache-core`. It exposes
+layered surfaces: `FastMap` for cloneable embedded use, `FastCache` as the
+cache-flavored alias, `embedded::ShardedEngine` for the full sharded core used
+by server mode, `embedded::LocalEmbeddedStore` for pinned owner-local workers,
+the optional `server` feature for RESP/FCNP access from other processes, and
+`redis-compat` when Redis/Valkey data-type semantics are required.
 
 For callers that need raw in-place mutation, the opt-in
 `mutable-value-slices` feature adds `value_mut_no_ttl()` to embedded mutation
@@ -233,8 +235,13 @@ reproduction commands.
 
 This repository now contains the open source crate surface:
 
-- `crates/fast-cache`: the library crate and optional `fast-cache-server`
+- `crates/fast-cache`: public facade crate and optional `fast-cache-server`
   binary.
+- `crates/fast-cache-core`: core embedded cache, storage, protocol,
+  persistence, replication, and server runtime implementation.
+- `crates/fast-cache-redis`: Redis/Valkey compatibility crate. Its source root
+  is `crates/fast-cache-redis/src`; core includes it by path only while the
+  remaining extension points are being narrowed.
 - `crates/fcnp-client-rs`: blocking Rust client for the native FCNP TCP
   protocol and direct shard routing.
 - `crates/fast-cache-runtime`: Rust-native runtime and GPU transfer layer for
@@ -248,46 +255,65 @@ This repository now contains the open source crate surface:
   packaging checks.
 - `fast-cache.toml.example`: example server configuration.
 - `CONTRIBUTING.md`, `SECURITY.md`, `RELEASE.md`, and `LICENSE`.
+- `CHANGELOG.md` and `docs/RELEASE_0_2_READINESS.md` for release notes,
+  validation commands, and known compatibility limits.
+
+For a contributor-oriented map of the workspace, crate internals, generated
+artifact policy, and common change locations, see
+[Project Structure](docs/PROJECT_STRUCTURE.md).
 
 ## Feature Flags
 
-- `embedded`: default embedded Rust database API.
-- `sharded`: default sharded storage and owner-local embedded API.
-- `redis-compat`: enables embedded Redis/Valkey data-type semantics and
-  wrong-type behavior without requiring server networking.
-- `server`: builds the RESP/FCNP `fast-cache-server` binary.
-- `redis-server`: enables both `server` and `redis-compat` for Redis/Valkey
-  compatibility deployments.
-- `monoio`: enables the Linux-only server runtime selected with
-  `FAST_CACHE_USE_MONOIO=1`. The server still uses `bytes-handoff` for
-  connection read buffering, using its monoio adapter on Linux. With
-  `FAST_CACHE_DIRECT_SHARD_PORTS=1`, the server also binds one listener per
-  shard, starting at `FAST_CACHE_DIRECT_SHARD_BASE_PORT` or the fanout port + 1,
-  so direct clients can route while fanout RESP/FCNP stays available. Monoio
-  writer experiments are selected with
-  `FAST_CACHE_MONOIO_SAFE_WRITER=inline|split|writev`. WAL TCP export and
-  native replication have separate Linux-only monoio switches,
-  `FAST_CACHE_WAL_TCP_USE_MONOIO=1` and
-  `FAST_CACHE_REPLICATION_USE_MONOIO=1`, so those paths can be benchmarked
-  independently. Tokio/std remain the portable defaults.
-- `telemetry`: integrates with `fast-telemetry`.
-- `cuda`: exposes GPU-facing configuration and transfer descriptors.
-- `experimental-no-ttl-point-hot-path`: experimental benchmark knob for the
-  internal point-key-only hot path. It implies `no-ttl`, is only intended for
-  TTL-free workloads, and falls back to the normal map when richer storage
-  semantics are needed.
-- `no-ttl`: specializes shared embedded point-key hot paths for TTL-free
-  deployments.
-- `unsafe`: opts into reviewed unsafe hot paths for lower overhead.
+Public product surfaces:
+
+| Feature | Purpose |
+| --- | --- |
+| `default` | Embedded, sharded Rust API. Equivalent to `sharded`. |
+| `embedded` | Minimal in-process cache API. |
+| `sharded` | Embedded sharded storage and owner-local APIs; implies `embedded`. |
+| `redis-compat` | Redis/Valkey object types, command families, and wrong-type behavior without server networking. |
+| `server` | RESP/FCNP `fast-cache-server` runtime without the full Redis compatibility catalog. |
+| `redis-server` | Redis/Valkey-compatible server build; implies `server` and `redis-compat`. |
+
+Runtime integrations:
+
+| Feature | Purpose |
+| --- | --- |
+| `monoio` | Linux-only server runtime selected with `FAST_CACHE_USE_MONOIO=1`; portable builds continue to use Tokio/std. |
+| `telemetry` | Integrates with `fast-telemetry`. |
+| `cuda` | Exposes GPU-facing configuration and transfer descriptors. |
+
+Internal and benchmark knobs:
+
+| Feature | Purpose |
+| --- | --- |
+| `mutable-value-slices` | Exposes no-TTL mutable slice access for uniquely owned embedded values. |
+| `no-ttl` | Specializes shared embedded point-key hot paths for TTL-free deployments. |
+| `experimental-no-ttl-point-hot-path` | Benchmark-only point-key hot path; implies `no-ttl`. |
+| `shared-parking-lot-lock` | Benchmark comparison knob for shared embedded store locks. |
+| `embedded-read-biased-lock` | Benchmark comparison knob for server/direct embedded shard locks. |
+| `unsafe` | Opts into reviewed unsafe hot paths for lower overhead. |
+
+Monoio still uses `bytes-handoff` for connection read buffering. With
+`FAST_CACHE_DIRECT_SHARD_PORTS=1`, the server also binds one listener per shard,
+starting at `FAST_CACHE_DIRECT_SHARD_BASE_PORT` or the fanout port + 1, so
+direct clients can route while fanout RESP/FCNP stays available. WAL TCP export
+and native replication use separate Linux-only monoio switches:
+`FAST_CACHE_WAL_TCP_USE_MONOIO=1` and `FAST_CACHE_REPLICATION_USE_MONOIO=1`.
 
 ## Development
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p fast-cache
-cargo test -p fast-cache --features unsafe
-cargo doc -p fast-cache --no-deps --all-features
-cargo package -p fast-cache --locked
+cargo test --workspace
+cargo test -p fast-cache-core --features unsafe
+cargo test -p fast-cache-core --features redis-compat
+cargo check -p fast-cache --features redis-compat
+cargo check -p fast-cache --features redis-server
+cargo check -p fast-cache-redis --all-features
+cargo doc -p fast-cache-core --no-deps --all-features
+cargo doc -p fast-cache-redis --no-deps --all-features
+cargo package -p fast-cache-core --locked
 ```
 
 For local benchmark and profiling builds, use the repo-level native CPU

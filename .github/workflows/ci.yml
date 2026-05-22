@@ -14,7 +14,7 @@ jobs:
           set -euo pipefail
           bad_files="$(
             git ls-files \
-              | grep -E '(^|/)(\.DS_Store|\.claude|results|target|__pycache__|[^/]+\.egg-info)(/|$)|\.(pyc|aux|fdb_latexmk|fls|log|out|rdb|synctex\.gz)$|(^|/)texput\.log$|\.xlsx$|\.pdf$' \
+              | grep -E '(^|/)(\.DS_Store|\.claude|\.why3find|results|target|var|tmp|__pycache__|\.pytest_cache|\.mypy_cache|[^/]+\.egg-info)(/|$)|(^|/)rustc-ice-[^/]*\.txt$|\.(pyc|aux|fdb_latexmk|fls|log|out|rdb|tmp|trace|synctex\.gz)$|(^|/)texput\.log$|(^|/)perf\.data|\.xlsx$|\.pdf$' \
               || true
           )"
           if [ -n "$bad_files" ]; then
@@ -27,18 +27,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: install Redis reference server
+        run: sudo apt-get update && sudo apt-get install -y redis-server
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --all -- --check
       - name: test
         run: cargo test --workspace
+      - name: test formal command laws
+        run: cargo test -p fast-cache-formal
       - name: test unsafe feature
-        run: cargo test -p fast-cache --features unsafe
+        run: cargo test -p fast-cache-core --features unsafe
+      - name: test redis compatibility feature
+        run: cargo test -p fast-cache-core --features redis-compat
+      - name: test redis command coverage
+        run: cargo test -p fast-cache-core --features redis-compat --test redis_tier1_coverage_test
+      - name: test redis differential compatibility
+        env:
+          FAST_CACHE_COMPAT_SERVER_BIN: redis-server
+        run: cargo test -p fast-cache-core --features redis-server --test redis_compat_differential_test -- --nocapture
+      - name: redis compatibility feature
+        run: cargo check -p fast-cache --features redis-compat
+      - name: redis server feature
+        run: cargo check -p fast-cache --features redis-server
+      - name: redis compatibility source crate
+        run: cargo check -p fast-cache-redis --all-features
       - name: rustdoc
+        run: cargo doc -p fast-cache-core --no-deps --all-features
+      - name: rustdoc facade
         run: cargo doc -p fast-cache --no-deps --all-features
+      - name: rustdoc redis compatibility crate
+        run: cargo doc -p fast-cache-redis --no-deps --all-features
       - name: rustdoc fcnp client
         run: cargo doc -p fcnp-client-rs --no-deps
       - name: package fcnp client crate
         run: cargo package -p fcnp-client-rs --locked
-      - name: package fast-cache crate
-        run: cargo package -p fast-cache --locked
+      - name: package fast-cache-core crate
+        run: cargo package -p fast-cache-core --locked
