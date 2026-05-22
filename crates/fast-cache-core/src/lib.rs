@@ -8,6 +8,7 @@ compile_error!(
     "fast-cache currently requires the `embedded` feature; build with default features enabled or enable `embedded`/`sharded` explicitly"
 );
 
+#[cfg(feature = "embedded")]
 pub mod commands;
 #[cfg(feature = "embedded")]
 pub mod config;

@@ -37,6 +37,10 @@ cargo test -p fast-cache-formal
 FAST_CACHE_COMPAT_SERVER_BIN=redis-server \
   cargo test -p fast-cache-core --features redis-server \
   --test redis_compat_differential_test -- --nocapture
+cargo check -p fast-cache-core --no-default-features --features embedded
+cargo check -p fast-cache-core --no-default-features --features redis-compat
+cargo check -p fast-cache --no-default-features --features embedded
+cargo check -p fast-cache --no-default-features --features redis-compat
 cargo check -p fast-cache --features redis-server
 cargo check -p fast-cache-redis --all-features
 cargo doc -p fast-cache-core --no-deps --all-features
@@ -46,6 +50,14 @@ cargo package -p fcnp-client-rs --locked
 cargo package -p fast-cache-core --locked
 git diff --check
 ```
+
+The pure `--no-default-features` build is intentionally unsupported for 0.2.0
+and should fail with a single compile error telling users to enable `embedded`
+or `sharded`.
+
+`fast-cache-core` packages the explicit release tests and the small fuzz support
+module they use. The large fuzz corpus and fuzz build artifacts stay out of the
+published package.
 
 ## Benchmark Smoke
 
@@ -64,6 +76,39 @@ CSV=benchmarks/results/redis-command-matrix-smoke.csv \
 
 For publishable claims, rerun the full Linux benchmark matrices from
 `benchmarks/README.md` on a pinned host and update only curated writeups.
+
+For full local command-path proofing, include all Redis command families and
+fail on harness errors:
+
+```bash
+DOCKER=0 \
+TARGETS=fast-cache=127.0.0.1:6383 \
+CASES=all \
+CLIENTS=1 \
+WARMUP=1 \
+DURATION=1 \
+FAIL_ON_ERROR=1 \
+CSV=/private/tmp/fast-cache-0.2-redis-command-matrix-all-proof.csv \
+./benchmarks/scripts/run-redis-command-matrix.sh
+```
+
+When a local Redis reference is available, run the same matrix against both
+targets:
+
+```bash
+DOCKER=0 \
+TARGETS=fast-cache=127.0.0.1:6383,redis=127.0.0.1:6384 \
+CASES=all \
+CLIENTS=1 \
+WARMUP=1 \
+DURATION=1 \
+FAIL_ON_ERROR=1 \
+CSV=/private/tmp/fast-cache-0.2-redis-command-matrix-fastcache-vs-redis.csv \
+./benchmarks/scripts/run-redis-command-matrix.sh
+```
+
+Valkey and Dragonfly should still be run before merge on a machine with Docker
+or local server binaries available.
 
 ## Publish Order
 

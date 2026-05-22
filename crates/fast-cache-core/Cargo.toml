@@ -22,6 +22,8 @@ include = [
     "SAFETY.md",
     "fast-cache.toml.example",
     "src/**",
+    "tests/**",
+    "fuzz/support/**",
 ]
 
 [lib]
