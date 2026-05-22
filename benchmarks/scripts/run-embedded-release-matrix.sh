@@ -75,7 +75,7 @@ run_pinned() {
 }
 
 log_progress() {
-  printf '[%s] %s\n' "$(date -Is)" "$*"
+  printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"
 }
 
 key_count_for_value_size() {
