@@ -20,7 +20,7 @@ impl EmbeddedStore {
     /// owned `Vec<u8>` is required.
     pub fn get_ref(&self, key: &[u8]) -> Option<EmbeddedRef<'_>> {
         let route = self.route_key(key);
-        self.get_ref_routed(route, key, now_millis())
+        self.get_ref_routed(route, key)
     }
 
     /// Returns a mutable point-key guard for `key`.
@@ -1195,6 +1195,10 @@ impl EmbeddedStore {
             if shard_id >= self.shards.len() {
                 return false;
             }
+            #[cfg(feature = "redis-compat")]
+            if self.objects.shard_has_objects(shard_id) {
+                return false;
+            }
 
             // SAFETY (per fn contract): this direct worker owns `shard_id`.
             let shard = unsafe { &mut *self.shards[shard_id].data_ptr() };
@@ -1493,12 +1497,7 @@ impl EmbeddedStore {
             .map(<[u8]>::to_vec)
     }
 
-    fn get_ref_routed(
-        &self,
-        route: EmbeddedKeyRoute,
-        key: &[u8],
-        now_ms: u64,
-    ) -> Option<EmbeddedRef<'_>> {
+    fn get_ref_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Option<EmbeddedRef<'_>> {
         if uses_flat_key_storage(self.route_mode, key) {
             let guard = self.shards[route.shard_id].read();
             let value = if guard.map.has_no_ttl_entries() {
@@ -1508,7 +1507,7 @@ impl EmbeddedStore {
             } else {
                 guard
                     .map
-                    .get_ref_hashed_shared(route.key_hash, key, now_ms)?
+                    .get_ref_hashed_shared(route.key_hash, key, now_millis())?
             } as *const [u8];
             return Some(EmbeddedRef {
                 guard: views::EmbeddedRefGuard::Read(guard),
@@ -1525,8 +1524,12 @@ impl EmbeddedStore {
                     .get_ref_hashed(&session_prefix, route.key_hash, key)
         {
             value
+        } else if guard.map.has_no_ttl_entries() {
+            guard.map.get_ref_hashed_no_ttl(route.key_hash, key)?
         } else {
-            guard.map.get_ref_hashed(route.key_hash, key, now_ms)?
+            guard
+                .map
+                .get_ref_hashed(route.key_hash, key, now_millis())?
         } as *const [u8];
         Some(EmbeddedRef {
             guard: views::EmbeddedRefGuard::Write(guard),

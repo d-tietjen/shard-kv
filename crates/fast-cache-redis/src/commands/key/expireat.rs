@@ -1,12 +1,13 @@
 use bytes::BytesMut;
 
+use crate::commands::expire::{ExpireCondition, expire_at_changed, parse_expire_condition_frame};
 use crate::commands::redis::{
     define_redis_command, error, int, parse_i64, write_frame, wrong_arity,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
-use crate::storage::{EmbeddedStore, now_millis};
+use crate::storage::EmbeddedStore;
 
 define_redis_command!(ExpireAt, "EXPIREAT", true);
 
@@ -28,13 +29,16 @@ pub(crate) fn execute_absolute_expire(
 ) -> Frame {
     let command = if millis { "PEXPIREAT" } else { "EXPIREAT" };
     match args {
-        [key, timestamp] => match parse_i64(timestamp) {
+        [key, timestamp, options @ ..] if options.len() <= 1 => match parse_i64(timestamp) {
             Ok(timestamp) => {
                 let expire_at_ms = match millis {
                     true => timestamp,
                     false => timestamp.saturating_mul(1_000),
                 };
-                int(expire_at_changed(store, key, expire_at_ms))
+                let Ok(condition) = parse_expire_condition_frame(options) else {
+                    return error("ERR syntax error");
+                };
+                int(expire_at_changed_i64(store, key, expire_at_ms, condition))
             }
             Err(_) => error("ERR value is not an integer or out of range"),
         },
@@ -42,10 +46,15 @@ pub(crate) fn execute_absolute_expire(
     }
 }
 
-fn expire_at_changed(store: &EmbeddedStore, key: &[u8], expire_at_ms: i64) -> i64 {
-    match expire_at_ms <= now_millis() as i64 {
-        true => store.delete(key) as i64,
-        false => store.expire(key, expire_at_ms as u64) as i64,
+pub(crate) fn expire_at_changed_i64(
+    store: &EmbeddedStore,
+    key: &[u8],
+    expire_at_ms: i64,
+    condition: ExpireCondition,
+) -> i64 {
+    match expire_at_ms <= 0 {
+        true => expire_at_changed(store, key, 0, condition),
+        false => expire_at_changed(store, key, expire_at_ms as u64, condition),
     }
 }
 
@@ -58,13 +67,20 @@ pub(crate) fn write_absolute_expire_resp(
 ) {
     let command = if millis { "PEXPIREAT" } else { "EXPIREAT" };
     match args {
-        [key, timestamp] => match parse_i64(timestamp) {
+        [key, timestamp, options @ ..] if options.len() <= 1 => match parse_i64(timestamp) {
             Ok(timestamp) => {
                 let expire_at_ms = match millis {
                     true => timestamp,
                     false => timestamp.saturating_mul(1_000),
                 };
-                ServerWire::write_resp_integer(out, expire_at_changed(store, key, expire_at_ms));
+                let Ok(condition) = parse_expire_condition_frame(options) else {
+                    ServerWire::write_resp_error(out, "ERR syntax error");
+                    return;
+                };
+                ServerWire::write_resp_integer(
+                    out,
+                    expire_at_changed_i64(store, key, expire_at_ms, condition),
+                );
             }
             Err(_) => {
                 ServerWire::write_resp_error(out, "ERR value is not an integer or out of range")

@@ -32,12 +32,152 @@ The default script starts Redis and Valkey from
 `benchmarks/docker/compose.yml`, starts `fast-cache-server` with the
 `redis-server` feature, and writes
 `benchmarks/results/redis-command-matrix.csv`. Use `CASES=hash,zset` or
-`CASES=HSET,ZRANGE` for focused runs. `CASES=large` runs the production-shaped
-profile with larger values, 4K-key keyspace scans, and 1K-element
-hash/list/set/zset objects. `CLIENTS`, `WARMUP`, and `DURATION` scale the run;
-for example, `CASES=large CLIENTS=16 DURATION=10` is a useful higher-pressure
-command pass. Set `FAIL_ON_ERROR=1` when the matrix should fail on any RESP
-error reply instead of recording the error count in the output.
+`CASES=HSET,ZRANGE` for focused runs. `CASES=extended` runs the full repeatable
+matrix, including larger values, 4K-key keyspace walks, and 1K-element
+hash/list/set/zset objects. For concurrency scaling, prefer
+`CASES=extended-no-keyspace` and run the expensive keyspace-wide cases
+separately with `CASES=profile:keyspace`; otherwise `KEYS`/global `SCAN` cases
+can dominate the mixed loop and hide point-command scaling. Set
+`FIXTURE_SCOPE=shared-keyspace` for concurrent keyspace runs so increasing
+`CLIENTS` does not also multiply the seeded keyspace size. `SKIP_CASES` accepts
+the same command, family, case, and profile filters as `CASES`. `CLIENTS`,
+`WARMUP`, and `DURATION` scale the run. Set `KEY_SHARDS` to split per-client
+fixtures across logical key lanes, normally matching fast-cache's `SHARD_COUNT`
+for parallel shard fanout runs. Set `PIPELINE_DEPTH` to keep multiple adjacent
+case operations in flight on each socket while preserving the global case order;
+this is useful for separating strict request/response latency from socket-fed
+throughput. Set `FAIL_ON_ERROR=1` when the matrix should fail on any RESP error
+reply instead of recording the error count in the output.
+For fast-cache direct shard ports, use `host:base_port+shards` in `TARGETS`
+and set `KEY_SHARDS` to the same shard count. When the script starts
+fast-cache, also set `SERVER_DIRECT_SHARD_PORTS=1` and optionally
+`FAST_CACHE_DIRECT_SHARD_BASE_PORT`; for example
+`SERVER_DIRECT_SHARD_PORTS=1 FAST_CACHE_DIRECT_SHARD_BASE_PORT=6384
+TARGETS=fast-cache-sharded=fcnp:127.0.0.1:6384+4 KEY_SHARDS=4` routes each
+worker to the shard-owned FCNP port for its generated key lane.
+
+Destructive keyspace-wide commands such as `FLUSHDB` and `FLUSHALL` are in an
+explicit profile so they are present in the perf matrix without corrupting the
+ordinary mixed command loop:
+
+```bash
+CASES=profile:destructive ./benchmarks/scripts/run-redis-command-matrix.sh
+```
+
+Set `DOCKER_SERVICES="redis valkey dragonfly"` and include
+`dragonfly=127.0.0.1:6382` in `TARGETS` when running Dragonfly in the same
+matrix.
+
+For proof and release work, prefer the bundle wrapper:
+
+```bash
+CASES=extended-no-keyspace \
+CLIENTS=16 \
+KEY_SHARDS=4 \
+FIXTURE_SCOPE=shared-keyspace \
+WARMUP=2 \
+DURATION=10 \
+./benchmarks/scripts/run-redis-command-benchmark-bundle.sh
+```
+
+It writes an ignored artifact directory under `benchmarks/results/` containing
+run metadata, the raw CSV, a Markdown report, a JSON summary, and the Redis
+compatibility manifest captured at the same git SHA. Use
+`docs/PROOF_GATES.md` for the exact artifact contract.
+
+### Current Adam Command Snapshot
+
+The latest no-keyspace Redis-command matrix was run on `adam` on 2026-05-24
+with 16 clients, 16 key shards, `SHARD_COUNT=16`, shared keyspace fixtures,
+and direct shard ports enabled at `127.0.0.1:6384+16`. The fast-cache rows use
+the pass-2 optimized artifacts below; Redis/Valkey/Dragonfly rows are saved
+reference rows from the same Adam setup so fast-cache can be rerun without
+rerunning external services. Transaction cases are skipped for direct shard
+ports because transactions are connection-scoped and intentionally unsupported
+on shard-owned listeners.
+
+Depth 1, strict request/response:
+
+| Target | Cases | Sum ops/sec | Mean avg us | Errors |
+| --- | ---: | ---: | ---: | ---: |
+| fast-cache FCNP direct | 209 | 460,886 | 34.6 | 0 |
+| fast-cache FCNP shared | 209 | 460,459 | 34.6 | 0 |
+| fast-cache RESP | 209 | 381,477 | 41.8 | 0 |
+| Redis | 209 | 29,251 | 546.5 | 2,818 |
+| Valkey | 209 | 31,198 | 512.3 | 3,004 |
+| Dragonfly | 209 | 6,506 | 2,459.9 | 3,133 |
+
+Depth 16, ordered pipelining:
+
+| Target | Cases | Sum ops/sec | Mean avg us | Errors |
+| --- | ---: | ---: | ---: | ---: |
+| fast-cache FCNP direct | 209 | 1,324,917 | 88.7 | 0 |
+| fast-cache FCNP shared | 209 | 1,328,698 | 88.4 | 0 |
+| fast-cache RESP | 209 | 841,790 | 116.9 | 0 |
+| Redis | 209 | 37,483 | 5,216.9 | 3,604 |
+| Valkey | 209 | 46,885 | 4,184.5 | 4,492 |
+| Dragonfly | 209 | 17,500 | 12,175.6 | 8,396 |
+
+Zero-error common-case summaries are often more useful for implementation
+comparisons. Excluding commands that produced reference-service errors, the
+depth-1 Redis/Valkey common subset has 207 cases: FCNP direct `456,474`
+ops/sec at `34.6 us`, FCNP shared `456,051` at `34.6 us`, RESP `377,825` at
+`41.9 us`, Redis `28,969` at `541.9 us`, and Valkey `30,898` at `507.7 us`.
+The ordered depth-16 common subset has 207 cases: FCNP direct `1,312,237`
+ops/sec at `88.5 us`, FCNP shared `1,315,982` at `88.2 us`, RESP `833,734`
+at `117.1 us`, Redis `37,123` at `5,150.4 us`, and Valkey `46,436` at
+`4,125.1 us`.
+
+For fast-cache optimization loops, save the Redis/Valkey/Dragonfly side once
+and reuse those CSVs while only rerunning fast-cache. First capture the external
+reference services:
+
+```bash
+OUT_DIR=benchmarks/results/redis-command-reference-$(date -u +%Y%m%dT%H%M%SZ) \
+START_FAST_CACHE=0 \
+TARGETS=redis=127.0.0.1:6379,valkey=127.0.0.1:6381,dragonfly=127.0.0.1:6382 \
+DOCKER_SERVICES="redis valkey dragonfly" \
+CASES=extended-no-keyspace \
+CLIENTS=16 \
+FIXTURE_SCOPE=shared-keyspace \
+WARMUP=2 \
+DURATION=10 \
+BASELINE=redis \
+./benchmarks/scripts/run-redis-command-benchmark-bundle.sh
+```
+
+Then rerun fast-cache only and merge the saved reference CSV into the report:
+
+```bash
+OUT_DIR=benchmarks/results/redis-command-fast-cache-$(date -u +%Y%m%dT%H%M%SZ) \
+TARGETS=fast-cache=127.0.0.1:6383 \
+DOCKER=0 \
+REFERENCE_CSVS=benchmarks/results/redis-command-reference-YYYYMMDDTHHMMSSZ/redis-command-matrix.csv \
+CASES=extended-no-keyspace \
+CLIENTS=16 \
+FIXTURE_SCOPE=shared-keyspace \
+WARMUP=2 \
+DURATION=10 \
+BASELINE=redis \
+./benchmarks/scripts/run-redis-command-benchmark-bundle.sh
+```
+
+Reference CSVs should use the same `CASES`, `CLIENTS`, `FIXTURE_SCOPE`,
+`WARMUP`, `DURATION`, host, and CPU pinning knobs as the fast-cache run. The
+report still shows the full target rollup, and its common-case comparison table
+only compares command cases present in both the current run and the saved
+references. `REFERENCE_CSVS` accepts a comma-separated list when Redis/Valkey
+and Dragonfly are stored in separate files. Set `BASELINE=redis` for the usual
+fast-cache-over-Redis speedup table, or `BASELINE=fast-cache` when you want the
+external services normalized against the current fast-cache run.
+
+The tracked Redis compatibility manifest is generated from the same command
+registry:
+
+```bash
+cargo run -p fast-cache-benchmarks --bin redis_command_manifest -- \
+  --output docs/REDIS_COMPATIBILITY.md
+```
 
 ## Native CPU Builds
 

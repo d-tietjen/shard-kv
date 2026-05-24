@@ -2,11 +2,13 @@ use crate::storage::RedisStringStore;
 use bytes::BytesMut;
 
 use crate::commands::redis::{
-    define_redis_command, error, int, optional_string_value, parse_i64, write_frame, wrong_arity,
-    wrongtype,
+    define_redis_command, error, int, optional_string_value, parse_i64, write_frame,
+    write_resp_array_header, write_resp_null, wrong_arity, wrongtype,
 };
 use crate::commands::string_bits::read_bit;
 use crate::protocol::Frame;
+#[cfg(feature = "server")]
+use crate::server::wire::ServerWire;
 use crate::storage::EmbeddedStore;
 
 const REDIS_STRING_MAX_BYTES: usize = 512 * 1024 * 1024;
@@ -16,15 +18,31 @@ define_redis_command!(BitField, "BITFIELD", true);
 
 impl crate::commands::redis::RedisCommand for BitField {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        match bitfield_value(store, args) {
-            Ok(values) => Frame::Array(values),
+        match bitfield_values(store, args) {
+            Ok(values) => Frame::Array(
+                values
+                    .into_iter()
+                    .map(|value| value.map_or(Frame::Null, int))
+                    .collect(),
+            ),
             Err(frame) => frame,
         }
     }
 
     #[cfg(feature = "server")]
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-        write_frame(out, &Self::execute(store, args));
+        match bitfield_values(store, args) {
+            Ok(values) => {
+                write_resp_array_header(out, values.len());
+                for value in values {
+                    match value {
+                        Some(value) => ServerWire::write_resp_integer(out, value),
+                        None => write_resp_null(out),
+                    }
+                }
+            }
+            Err(frame) => write_frame(out, &frame),
+        }
     }
 }
 
@@ -59,7 +77,10 @@ enum BitFieldOp {
     },
 }
 
-fn bitfield_value(store: &EmbeddedStore, args: &[&[u8]]) -> std::result::Result<Vec<Frame>, Frame> {
+fn bitfield_values(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+) -> std::result::Result<Vec<Option<i64>>, Frame> {
     let [key, tail @ ..] = args else {
         return Err(wrong_arity("BITFIELD"));
     };
@@ -209,12 +230,12 @@ fn apply_read_ops(
     store: &EmbeddedStore,
     key: &[u8],
     ops: &[BitFieldOp],
-) -> std::result::Result<Vec<Frame>, Frame> {
+) -> std::result::Result<Vec<Option<i64>>, Frame> {
     let value = optional_string_value(store, key, true)?.unwrap_or_default();
     Ok(ops
         .iter()
         .map(|op| match *op {
-            BitFieldOp::Get { encoding, offset } => int(read_field(&value, encoding, offset)),
+            BitFieldOp::Get { encoding, offset } => Some(read_field(&value, encoding, offset)),
             BitFieldOp::Set { .. } | BitFieldOp::IncrBy { .. } => unreachable!(),
         })
         .collect())
@@ -224,7 +245,7 @@ fn apply_write_ops(
     store: &EmbeddedStore,
     key: &[u8],
     ops: &[BitFieldOp],
-) -> std::result::Result<Vec<Frame>, Frame> {
+) -> std::result::Result<Vec<Option<i64>>, Frame> {
     store.transform_string_value_no_ttl(
         key,
         |existing| {
@@ -233,14 +254,14 @@ fn apply_write_ops(
             for op in ops {
                 match *op {
                     BitFieldOp::Get { encoding, offset } => {
-                        responses.push(int(read_field(&current, encoding, offset)));
+                        responses.push(Some(read_field(&current, encoding, offset)));
                     }
                     BitFieldOp::Set {
                         encoding,
                         offset,
                         value,
                     } => {
-                        responses.push(int(read_field(&current, encoding, offset)));
+                        responses.push(Some(read_field(&current, encoding, offset)));
                         write_field(&mut current, encoding, offset, value as i128);
                     }
                     BitFieldOp::IncrBy {
@@ -253,9 +274,9 @@ fn apply_write_ops(
                         match apply_increment(old, increment as i128, encoding, overflow) {
                             Some(value) => {
                                 write_field(&mut current, encoding, offset, value);
-                                responses.push(int(value as i64));
+                                responses.push(Some(value as i64));
                             }
-                            None => responses.push(Frame::Null),
+                            None => responses.push(None),
                         }
                     }
                 }

@@ -43,8 +43,8 @@ pub use command::{BorrowedCommand, Command};
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
 #[cfg(feature = "redis-compat")]
 pub(crate) use embedded_store::{
-    DEFAULT_SCAN_COUNT, RedisHashStore, RedisKeyScanType, RedisKeyStore, RedisObjectStoreAccess,
-    RedisSetStore, RedisStringStore, RedisZSetStore,
+    DEFAULT_SCAN_COUNT, RedisHashStore, RedisKeyScanType, RedisKeyStore, RedisListStore,
+    RedisObjectStoreAccess, RedisSetStore, RedisStringStore, RedisZSetStore,
 };
 pub use embedded_store::{
     EmbeddedBatchReadView, EmbeddedKeyRoute, EmbeddedReadSlice, EmbeddedReadView, EmbeddedRef,

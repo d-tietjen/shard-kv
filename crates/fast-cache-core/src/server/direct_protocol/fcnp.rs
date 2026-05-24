@@ -54,7 +54,7 @@ impl DirectProtocol {
             FcnpFrameDecode::Ready(decoded) => {
                 ServerWire::write_fast_error(
                     out,
-                    "ERR FCNP direct shard port requires routed GET/SET/DEL",
+                    "ERR FCNP direct shard port requires a routed shard-local command",
                 );
                 FcnpDispatch::Complete(decoded.frame.frame_len)
             }

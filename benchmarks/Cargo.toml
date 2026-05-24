@@ -72,5 +72,13 @@ name = "redis_command_matrix"
 path = "src/bin/redis_command_matrix.rs"
 
 [[bin]]
+name = "redis_command_manifest"
+path = "src/bin/redis_command_manifest.rs"
+
+[[bin]]
+name = "redis_command_report"
+path = "src/bin/redis_command_report.rs"
+
+[[bin]]
 name = "fcnp_scan_matrix"
 path = "src/bin/fcnp_scan_matrix.rs"

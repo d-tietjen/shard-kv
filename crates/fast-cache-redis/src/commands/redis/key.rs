@@ -3,7 +3,7 @@ use bytes::BytesMut;
 use super::parse::glob_matches;
 use super::{
     eq_ignore_ascii_case, error, parse_u64, parse_usize, reserve_resp_bulk_array_hint, write_frame,
-    write_resp_array_header, wrong_arity, wrongtype,
+    write_resp_array_header, write_resp_null, write_resp_wrongtype, wrong_arity,
 };
 use crate::commands::redis::RedisCommand;
 use crate::protocol::Frame;
@@ -88,7 +88,51 @@ pub(crate) fn write_object_array_item(out: &mut BytesMut, item: RedisObjectArray
             write_resp_array_header(out, len);
         }
         RedisObjectArrayItem::Bulk(Some(value)) => ServerWire::write_resp_blob_string(out, value),
-        RedisObjectArrayItem::Bulk(None) => out.extend_from_slice(b"$-1\r\n"),
+        RedisObjectArrayItem::Bulk(None) => write_resp_null(out),
+    }
+}
+
+#[cfg(feature = "server")]
+pub(crate) struct FastObjectArrayWriter<'out> {
+    out: &'out mut BytesMut,
+    start: Option<usize>,
+}
+
+#[cfg(feature = "server")]
+impl<'out> FastObjectArrayWriter<'out> {
+    pub(crate) fn new(out: &'out mut BytesMut) -> Self {
+        Self { out, start: None }
+    }
+
+    pub(crate) fn write(&mut self, item: RedisObjectArrayItem<'_>) {
+        match item {
+            RedisObjectArrayItem::Begin(len) => {
+                self.start = Some(ServerWire::begin_fast_array(self.out, len));
+            }
+            RedisObjectArrayItem::Bulk(value) => {
+                ServerWire::write_fast_array_item(self.out, value);
+            }
+        }
+    }
+
+    pub(crate) fn into_inner(self) -> &'out mut BytesMut {
+        self.out
+    }
+
+    pub(crate) fn finish(self, outcome: RedisObjectReadOutcome) {
+        match outcome {
+            RedisObjectReadOutcome::Written => {
+                if let Some(start) = self.start {
+                    ServerWire::finish_fast_array(self.out, start);
+                } else {
+                    ServerWire::write_fast_empty_array(self.out);
+                }
+            }
+            RedisObjectReadOutcome::Missing => ServerWire::write_fast_empty_array(self.out),
+            RedisObjectReadOutcome::WrongType => {
+                ServerWire::write_fast_error(self.out, crate::storage::WRONGTYPE_MESSAGE)
+            }
+        }
     }
 }
 
@@ -97,7 +141,7 @@ pub(crate) fn finish_object_array_visit(out: &mut BytesMut, outcome: RedisObject
     match outcome {
         RedisObjectReadOutcome::Written => {}
         RedisObjectReadOutcome::Missing => write_resp_array_header(out, 0),
-        RedisObjectReadOutcome::WrongType => write_frame(out, &wrongtype()),
+        RedisObjectReadOutcome::WrongType => write_resp_wrongtype(out),
     }
 }
 
@@ -105,8 +149,8 @@ pub(crate) fn finish_object_array_visit(out: &mut BytesMut, outcome: RedisObject
 pub(crate) fn finish_object_bulk_visit(out: &mut BytesMut, outcome: RedisObjectReadOutcome) {
     match outcome {
         RedisObjectReadOutcome::Written => {}
-        RedisObjectReadOutcome::Missing => out.extend_from_slice(b"$-1\r\n"),
-        RedisObjectReadOutcome::WrongType => write_frame(out, &wrongtype()),
+        RedisObjectReadOutcome::Missing => write_resp_null(out),
+        RedisObjectReadOutcome::WrongType => write_resp_wrongtype(out),
     }
 }
 
@@ -120,7 +164,7 @@ pub(crate) fn finish_object_integer_visit(
     match outcome {
         RedisObjectReadOutcome::Written => ServerWire::write_resp_integer(out, value),
         RedisObjectReadOutcome::Missing => ServerWire::write_resp_integer(out, missing),
-        RedisObjectReadOutcome::WrongType => write_frame(out, &wrongtype()),
+        RedisObjectReadOutcome::WrongType => write_resp_wrongtype(out),
     }
 }
 
@@ -134,7 +178,7 @@ pub(crate) fn write_scan_object_array_item(out: &mut BytesMut, item: RedisObject
             write_resp_array_header(out, len);
         }
         RedisObjectArrayItem::Bulk(Some(value)) => ServerWire::write_resp_blob_string(out, value),
-        RedisObjectArrayItem::Bulk(None) => out.extend_from_slice(b"$-1\r\n"),
+        RedisObjectArrayItem::Bulk(None) => write_resp_null(out),
     }
 }
 
@@ -147,7 +191,7 @@ pub(crate) fn finish_scan_object_array_visit(out: &mut BytesMut, outcome: RedisO
             ServerWire::write_resp_blob_string(out, b"0");
             write_resp_array_header(out, 0);
         }
-        RedisObjectReadOutcome::WrongType => write_frame(out, &wrongtype()),
+        RedisObjectReadOutcome::WrongType => write_resp_wrongtype(out),
     }
 }
 
@@ -317,13 +361,39 @@ fn parse_key_scan_options<'a>(
 pub(crate) fn filter_key_pattern(keys: Vec<Vec<u8>>, pattern: &[u8]) -> Vec<Vec<u8>> {
     match pattern {
         b"*" => keys,
-        pattern => keys
-            .into_iter()
-            .filter(|key| glob_matches(pattern, key))
-            .collect(),
+        pattern => {
+            if let Some(prefix) = simple_prefix_pattern(pattern) {
+                return keys
+                    .into_iter()
+                    .filter(|key| key.starts_with(prefix))
+                    .collect();
+            }
+            keys.into_iter()
+                .filter(|key| glob_matches(pattern, key))
+                .collect()
+        }
     }
 }
 
 pub(crate) fn key_pattern_matches(key: &[u8], pattern: &[u8]) -> bool {
-    pattern == b"*" || glob_matches(pattern, key)
+    if pattern == b"*" {
+        return true;
+    }
+    if let Some(prefix) = simple_prefix_pattern(pattern) {
+        return key.starts_with(prefix);
+    }
+    glob_matches(pattern, key)
+}
+
+#[inline(always)]
+fn simple_prefix_pattern(pattern: &[u8]) -> Option<&[u8]> {
+    let prefix = pattern.strip_suffix(b"*")?;
+    if prefix.is_empty()
+        || prefix
+            .iter()
+            .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']' | b'\\'))
+    {
+        return None;
+    }
+    Some(prefix)
 }

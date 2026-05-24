@@ -108,7 +108,7 @@ impl ServerWire {
 
     #[cfg(feature = "embedded")]
     #[inline(always)]
-    pub(super) fn begin_fast_array(out: &mut BytesMut, len: usize) -> usize {
+    pub(crate) fn begin_fast_array(out: &mut BytesMut, len: usize) -> usize {
         let start = out.len();
         out.extend_from_slice(&[
             FAST_RESPONSE_MAGIC,
@@ -126,7 +126,7 @@ impl ServerWire {
 
     #[cfg(feature = "embedded")]
     #[inline(always)]
-    pub(super) fn write_fast_array_item(out: &mut BytesMut, value: Option<&[u8]>) {
+    pub(crate) fn write_fast_array_item(out: &mut BytesMut, value: Option<&[u8]>) {
         match value {
             Some(value) => {
                 out.extend_from_slice(&(value.len() as u32).to_le_bytes());
@@ -138,7 +138,7 @@ impl ServerWire {
 
     #[cfg(feature = "embedded")]
     #[inline(always)]
-    pub(super) fn finish_fast_array(out: &mut BytesMut, start: usize) {
+    pub(crate) fn finish_fast_array(out: &mut BytesMut, start: usize) {
         let body_len = (out.len() - start - 8) as u32;
         out[start + 4..start + 8].copy_from_slice(&body_len.to_le_bytes());
     }
@@ -155,7 +155,7 @@ impl ServerWire {
 
     #[cfg(feature = "embedded")]
     #[inline(always)]
-    pub(super) fn write_fast_empty_array(out: &mut BytesMut) {
+    pub(crate) fn write_fast_empty_array(out: &mut BytesMut) {
         ServerWire::write_fast_null_array(out, 0);
     }
 
@@ -400,6 +400,14 @@ impl ServerWire {
     }
 
     pub(crate) fn write_resp_blob_string(out: &mut BytesMut, payload: &[u8]) {
+        if payload.len() < 10 {
+            let header = [b'$', b'0' + payload.len() as u8, b'\r', b'\n'];
+            out.extend_from_slice(&header);
+            out.extend_from_slice(payload);
+            out.extend_from_slice(b"\r\n");
+            return;
+        }
+
         #[cfg(not(feature = "unsafe"))]
         {
             let mut buf = itoa::Buffer::new();

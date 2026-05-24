@@ -42,6 +42,16 @@ jobs:
         run: cargo test -p fast-cache-core --features redis-compat
       - name: test redis command coverage
         run: cargo test -p fast-cache-core --features redis-compat --test redis_tier1_coverage_test
+      - name: test benchmark command tooling
+        run: |
+          cargo test -p fast-cache-benchmarks --bin redis_command_matrix
+          cargo test -p fast-cache-benchmarks --bin redis_command_manifest
+          cargo test -p fast-cache-benchmarks --bin redis_command_report
+          cargo test -p fast-cache-benchmarks redis_command_cases::tests
+      - name: redis compatibility manifest is fresh
+        run: ./scripts/check-redis-compatibility-doc.sh
+      - name: feature flag contract
+        run: ./scripts/check-feature-matrix.sh
       - name: test redis differential compatibility
         env:
           FAST_CACHE_COMPAT_SERVER_BIN: redis-server

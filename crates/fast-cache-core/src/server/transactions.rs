@@ -1,15 +1,17 @@
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::BytesMut;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use smallvec::SmallVec;
 
 use crate::config::TransactionMode;
-use crate::protocol::{BorrowedCommandParts, FastCommand, FastRequest, Frame, RespCodec};
+use crate::protocol::{BorrowedCommandParts, FastCommand, FastRequest};
 use crate::storage::{BorrowedCommand, EmbeddedRouteMode, EmbeddedStore};
 #[cfg(feature = "redis-compat")]
 use crate::storage::{RedisKeyStore, RedisObjectValue};
 
+use super::commands::BorrowedCommandContext;
 use super::wire::ServerWire;
 
 const CROSSSLOT_ERROR: &str = "CROSSSLOT Keys in request don't hash to the same shard";
@@ -18,6 +20,7 @@ const CROSSSLOT_ERROR: &str = "CROSSSLOT Keys in request don't hash to the same 
 pub(super) struct TransactionCoordinator {
     mode: TransactionMode,
     gates: Vec<RwLock<()>>,
+    active_transactions: AtomicUsize,
 }
 
 impl TransactionCoordinator {
@@ -27,6 +30,7 @@ impl TransactionCoordinator {
             TransactionMode::ShardLocal | TransactionMode::CoordinatedCrossShard => Some(Self {
                 mode,
                 gates: (0..shard_count).map(|_| RwLock::new(())).collect(),
+                active_transactions: AtomicUsize::new(0),
             }),
         }
     }
@@ -36,6 +40,9 @@ impl TransactionCoordinator {
         store: &EmbeddedStore,
         parts: &[&[u8]],
     ) -> TransactionReadGuard<'a> {
+        if !self.has_active_transactions() {
+            return TransactionReadGuard::empty();
+        }
         let shards = command_shards(store, parts);
         self.read_guard_for_shards(&shards)
     }
@@ -45,6 +52,9 @@ impl TransactionCoordinator {
         store: &EmbeddedStore,
         request: &FastRequest<'_>,
     ) -> TransactionReadGuard<'a> {
+        if !self.has_active_transactions() {
+            return TransactionReadGuard::empty();
+        }
         let shards = fast_request_shards(store, request);
         self.read_guard_for_shards(&shards)
     }
@@ -54,6 +64,9 @@ impl TransactionCoordinator {
         store: &EmbeddedStore,
         key_hash: u64,
     ) -> TransactionReadGuard<'a> {
+        if !self.has_active_transactions() {
+            return TransactionReadGuard::empty();
+        }
         match store.route_mode() {
             EmbeddedRouteMode::FullKey => {
                 let shard_id = crate::storage::stripe_index(
@@ -67,6 +80,19 @@ impl TransactionCoordinator {
                 self.read_guard_for_shards(&shards)
             }
         }
+    }
+
+    fn begin_transaction(&self) {
+        self.active_transactions.fetch_add(1, Ordering::AcqRel);
+    }
+
+    fn end_transaction(&self) {
+        let previous = self.active_transactions.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "transaction coordinator underflow");
+    }
+
+    fn has_active_transactions(&self) -> bool {
+        self.active_transactions.load(Ordering::Acquire) != 0
     }
 
     fn read_guard_for_shards<'a>(&'a self, shards: &[usize]) -> TransactionReadGuard<'a> {
@@ -96,22 +122,31 @@ impl TransactionCoordinator {
 
         let _guard = self.write_guard_for_shards(&shards);
         ServerWire::write_resp_array_header(out, commands.len());
-        let now_ms = crate::storage::now_millis();
         for command in commands {
             let parts = command.borrowed_parts();
-            let frame = match BorrowedCommand::from_parts(&parts) {
-                Ok(command) => command.execute_borrowed_frame(store, now_ms),
-                Err(error) => Frame::Error(format!("ERR {error}")),
-            };
-            let mut encoded = Vec::new();
-            RespCodec::encode(&frame, &mut encoded);
-            out.extend_from_slice(&encoded);
+            match BorrowedCommand::from_parts(&parts) {
+                Ok(command) => command.execute_borrowed(BorrowedCommandContext {
+                    store,
+                    out,
+                    fast_write_queue: None,
+                    single_threaded: false,
+                }),
+                Err(error) => ServerWire::write_resp_error(out, &format!("ERR {error}")),
+            }
         }
     }
 }
 
 pub(super) struct TransactionReadGuard<'a> {
     _guards: SmallVec<[RwLockReadGuard<'a, ()>; 8]>,
+}
+
+impl<'a> TransactionReadGuard<'a> {
+    fn empty() -> Self {
+        Self {
+            _guards: SmallVec::new(),
+        }
+    }
 }
 
 struct TransactionWriteGuard<'a> {
@@ -123,6 +158,7 @@ pub(super) struct TransactionState {
     queued: Vec<QueuedCommand>,
     dirty: bool,
     active: bool,
+    counted_active: bool,
     #[cfg(feature = "redis-compat")]
     watched: Vec<WatchedKey>,
 }
@@ -166,7 +202,7 @@ impl TransactionState {
             return true;
         }
         if command.eq_ignore_ascii_case(b"DISCARD") {
-            self.discard(parts, out);
+            self.discard(coordinator, parts, out);
             return true;
         }
         if command.eq_ignore_ascii_case(b"EXEC") {
@@ -197,6 +233,12 @@ impl TransactionState {
             (true, 1, false) => {
                 self.active = true;
                 self.dirty = false;
+                if let Some(coordinator) = coordinator
+                    && !self.counted_active
+                {
+                    coordinator.begin_transaction();
+                    self.counted_active = true;
+                }
                 self.queued.clear();
                 write_simple_string(out, "OK");
             }
@@ -204,12 +246,17 @@ impl TransactionState {
         }
     }
 
-    fn discard(&mut self, parts: &[&[u8]], out: &mut BytesMut) {
+    fn discard(
+        &mut self,
+        coordinator: Option<&TransactionCoordinator>,
+        parts: &[&[u8]],
+        out: &mut BytesMut,
+    ) {
         match (parts.len(), self.active) {
             (len, _) if len != 1 => write_wrong_arity(out, "discard"),
             (1, false) => ServerWire::write_resp_error(out, "ERR DISCARD without MULTI"),
             (1, true) => {
-                self.clear();
+                self.clear(coordinator);
                 write_simple_string(out, "OK");
             }
             (_, _) => unreachable!("non-unit DISCARD arity is handled by guard"),
@@ -232,7 +279,7 @@ impl TransactionState {
             return;
         }
         if self.dirty {
-            self.clear();
+            self.clear(coordinator);
             ServerWire::write_resp_error(
                 out,
                 "EXECABORT Transaction discarded because of previous errors.",
@@ -241,13 +288,13 @@ impl TransactionState {
         }
         #[cfg(feature = "redis-compat")]
         if self.watched_keys_changed(store) {
-            self.clear();
+            self.clear(coordinator);
             write_null_array(out);
             return;
         }
 
         let Some(coordinator) = coordinator else {
-            self.clear();
+            self.clear(None);
             ServerWire::write_resp_error(out, "ERR transactions are disabled");
             return;
         };
@@ -256,6 +303,7 @@ impl TransactionState {
         #[cfg(feature = "redis-compat")]
         self.watched.clear();
         coordinator.execute(store, &queued, out);
+        self.finish_counted_transaction(Some(coordinator));
     }
 
     fn queue_command(&mut self, parts: &[&[u8]], out: &mut BytesMut) {
@@ -271,12 +319,26 @@ impl TransactionState {
         }
     }
 
-    fn clear(&mut self) {
+    pub(super) fn close(&mut self, coordinator: Option<&TransactionCoordinator>) {
+        self.clear(coordinator);
+    }
+
+    fn clear(&mut self, coordinator: Option<&TransactionCoordinator>) {
+        self.finish_counted_transaction(coordinator);
         self.queued.clear();
         self.dirty = false;
         self.active = false;
         #[cfg(feature = "redis-compat")]
         self.watched.clear();
+    }
+
+    fn finish_counted_transaction(&mut self, coordinator: Option<&TransactionCoordinator>) {
+        if self.counted_active {
+            if let Some(coordinator) = coordinator {
+                coordinator.end_transaction();
+            }
+            self.counted_active = false;
+        }
     }
 
     #[cfg(feature = "redis-compat")]
@@ -387,7 +449,7 @@ fn transaction_shards(store: &EmbeddedStore, commands: &[QueuedCommand]) -> Vec<
     shards.into_iter().collect()
 }
 
-fn command_shards(store: &EmbeddedStore, parts: &[&[u8]]) -> Vec<usize> {
+pub(super) fn command_shards(store: &EmbeddedStore, parts: &[&[u8]]) -> Vec<usize> {
     let Some((command, args)) = parts.split_first() else {
         return Vec::new();
     };
@@ -412,6 +474,14 @@ fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'_>) -> Vec<
     let mut shards = BTreeSet::new();
     match &request.command {
         FastCommand::RespCommand { parts } => return command_shards(store, parts),
+        FastCommand::RedisCommand { kind, args } => {
+            if let Some(command) = kind.redis_name() {
+                let mut parts = Vec::with_capacity(args.len() + 1);
+                parts.push(command.as_bytes());
+                parts.extend(args.iter().copied());
+                return command_shards(store, &parts);
+            }
+        }
         FastCommand::MGet { keys } => {
             shards.extend(keys.iter().map(|key| store.route_key(key).shard_id));
         }
@@ -466,8 +536,17 @@ fn command_keys<'a>(command: &[u8], args: &'a [&'a [u8]]) -> CommandKeys<'a> {
     if command.eq_ignore_ascii_case(b"OBJECT") {
         return first_n_keys(args.get(1..).unwrap_or_default(), 1);
     }
+    if command.eq_ignore_ascii_case(b"MEMORY") {
+        return first_n_keys(args.get(1..).unwrap_or_default(), 1);
+    }
     if command.eq_ignore_ascii_case(b"BITOP") {
-        return first_and_tail_keys(args, 1, 2);
+        return CommandKeys::Keys(args.iter().skip(1).copied().collect());
+    }
+    if command.eq_ignore_ascii_case(b"LMPOP") || command.eq_ignore_ascii_case(b"ZMPOP") {
+        return counted_keys(args, 0);
+    }
+    if command.eq_ignore_ascii_case(b"BLMPOP") || command.eq_ignore_ascii_case(b"BZMPOP") {
+        return counted_keys(args, 1);
     }
     if command.eq_ignore_ascii_case(b"BLPOP")
         || command.eq_ignore_ascii_case(b"BRPOP")
@@ -487,6 +566,13 @@ fn command_keys<'a>(command: &[u8], args: &'a [&'a [u8]]) -> CommandKeys<'a> {
         || command.eq_ignore_ascii_case(b"ZDIFFSTORE")
     {
         return zaggregate_store_keys(args);
+    }
+    if command.eq_ignore_ascii_case(b"ZUNION")
+        || command.eq_ignore_ascii_case(b"ZINTER")
+        || command.eq_ignore_ascii_case(b"ZDIFF")
+        || command.eq_ignore_ascii_case(b"ZINTERCARD")
+    {
+        return counted_keys(args, 0);
     }
     if command.eq_ignore_ascii_case(b"ZRANGESTORE") {
         return first_n_keys(args, 2);
@@ -513,6 +599,8 @@ fn is_all_shard_command(command: &[u8]) -> bool {
     command.eq_ignore_ascii_case(b"KEYS")
         || command.eq_ignore_ascii_case(b"SCAN")
         || command.eq_ignore_ascii_case(b"RANDOMKEY")
+        || command.eq_ignore_ascii_case(b"FLUSHDB")
+        || command.eq_ignore_ascii_case(b"FLUSHALL")
         || command.eq_ignore_ascii_case(b"FCNP.SCAN")
 }
 
@@ -559,6 +647,24 @@ fn keys_before_last_arg<'a>(args: &'a [&'a [u8]]) -> CommandKeys<'a> {
             .copied()
             .collect(),
     )
+}
+
+fn counted_keys<'a>(args: &'a [&'a [u8]], numkeys_index: usize) -> CommandKeys<'a> {
+    let Some(raw_numkeys) = args.get(numkeys_index) else {
+        return CommandKeys::AllShards;
+    };
+    let Ok(numkeys) = std::str::from_utf8(raw_numkeys)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or(())
+    else {
+        return CommandKeys::AllShards;
+    };
+    let key_start = numkeys_index + 1;
+    if numkeys == 0 || args.len() < key_start + numkeys {
+        return CommandKeys::AllShards;
+    }
+    CommandKeys::Keys(args.iter().skip(key_start).take(numkeys).copied().collect())
 }
 
 fn zaggregate_store_keys<'a>(args: &'a [&'a [u8]]) -> CommandKeys<'a> {

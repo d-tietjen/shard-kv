@@ -20,6 +20,7 @@ benchmark outputs, and local verification caches outside version control.
 | `integrations/lmcache_storage_backend` | Python LMCache storage backend package. |
 | `integrations/vllm_direct_connector` | Python vLLM connector shim for the fast-cache runtime path. |
 | `docs` | Contributor-facing repository maps and design notes. |
+| `scripts` | Release/proof gates and source-of-truth consistency checks. |
 | `.github/workflows` | CI checks for formatting, tests, rustdoc, packaging, and repository hygiene. |
 | `.cargo/config.toml` | Local cargo aliases for native CPU benchmark/server builds. |
 | `why3find.json` | Tracked prover settings for Creusot/Why3 verification; generated solver caches stay ignored. |
@@ -88,3 +89,8 @@ New contributors should be able to answer the first set of questions from:
 - `RELEASE.md`: release checklist.
 - `docs/RELEASE_0_2_READINESS.md`: current 0.2.0 proof, benchmark, and known
   limitation checklist.
+- `docs/REDIS_COMPATIBILITY.md`: generated Redis command compatibility
+  manifest based on the live command matrix registry.
+- `docs/PROOF_GATES.md`: local and CI proof gates.
+- `docs/OPERATIONS.md`: server build, startup, configuration, and benchmark
+  artifact guidance.

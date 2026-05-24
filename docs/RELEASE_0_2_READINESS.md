@@ -19,36 +19,21 @@ This note tracks what must be true before tagging `v0.2.0`.
 - Redis source has moved out of core, but core still path-includes it behind
   `redis-compat`. A later release should replace that bridge with a normal
   extension dependency boundary.
-- Redis tier-1 compatibility intentionally excludes `DUMP` and `RESTORE`.
-- `WATCH` and `UNWATCH` have snapshot-based runtime behavior and are recorded
-  as partial in the compatibility ledger.
+- Redis tier-1 compatibility now has explicit coverage for every command in the
+  0.2.0 surface, including `DUMP` and `RESTORE`.
+- `WATCH` and `UNWATCH` have snapshot-based runtime behavior; version-accurate
+  invalidation for values changed away and back remains a compatibility gap.
 - Benchmark writeups are curated summaries; raw outputs belong under ignored
   `benchmarks/results/`.
+- `docs/REDIS_COMPATIBILITY.md` is generated from the command benchmark
+  registry and guarded by `./scripts/check-redis-compatibility-doc.sh`.
 
 ## Required Proofs
 
 Run these before tagging:
 
 ```bash
-cargo fmt --all -- --check
-cargo test --workspace
-cargo test -p fast-cache-core --features unsafe
-cargo test -p fast-cache-formal
-FAST_CACHE_COMPAT_SERVER_BIN=redis-server \
-  cargo test -p fast-cache-core --features redis-server \
-  --test redis_compat_differential_test -- --nocapture
-cargo check -p fast-cache-core --no-default-features --features embedded
-cargo check -p fast-cache-core --no-default-features --features redis-compat
-cargo check -p fast-cache --no-default-features --features embedded
-cargo check -p fast-cache --no-default-features --features redis-compat
-cargo check -p fast-cache --features redis-server
-cargo check -p fast-cache-redis --all-features
-cargo doc -p fast-cache-core --no-deps --all-features
-cargo doc -p fast-cache --no-deps --all-features
-cargo doc -p fast-cache-redis --no-deps --all-features
-cargo package -p fcnp-client-rs --locked
-cargo package -p fast-cache-core --locked
-git diff --check
+./scripts/proof-gate.sh release
 ```
 
 The pure `--no-default-features` build is intentionally unsupported for 0.2.0
@@ -73,6 +58,24 @@ DURATION=2 \
 CSV=benchmarks/results/redis-command-matrix-smoke.csv \
 ./benchmarks/scripts/run-redis-command-matrix.sh
 ```
+
+For a reproducible artifact bundle with metadata, CSV, Markdown, JSON, and a
+compatibility manifest:
+
+```bash
+CASES=extended-no-keyspace \
+CLIENTS=16 \
+KEY_SHARDS=16 \
+FIXTURE_SCOPE=shared-keyspace \
+WARMUP=2 \
+DURATION=10 \
+./benchmarks/scripts/run-redis-command-benchmark-bundle.sh
+```
+
+The latest Adam proof artifacts from 2026-05-24 are:
+
+- depth 1: `benchmarks/results/redis-command-opcode-optimized-pass2-depth1-20260524T1555Z`
+- ordered depth 16: `benchmarks/results/redis-command-opcode-optimized-pass2-depth16-20260524T1600Z`
 
 For publishable claims, rerun the full Linux benchmark matrices from
 `benchmarks/README.md` on a pinned host and update only curated writeups.

@@ -31,25 +31,18 @@ impl RedisKeyStore for EmbeddedStore {
     }
 
     fn set_object_value(&self, key: &[u8], value: RedisObjectValue, ttl_ms: Option<u64>) {
-        let route = self.route_key(key);
+        let Some(ttl_ms) = ttl_ms else {
+            set_object_value_expire_at(self, key, value, None, 0);
+            return;
+        };
         let now_ms = now_millis();
-        let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
-        let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-        let mut shard = self.shards[route.shard_id].write();
-        let had_object = bucket.contains_object(key);
-        if let Some(session_prefix) = point_write_session_storage_prefix(key) {
-            shard
-                .session_slots
-                .delete_hashed(&session_prefix, route.key_hash, key);
-        }
-        shard.map.delete_hashed(route.key_hash, key, now_ms);
-        let created = bucket.insert_value(key.to_vec(), value);
-        if created && !had_object {
-            self.objects.note_created(route.shard_id);
-        }
-        if let Some(expire_at_ms) = expire_at_ms {
-            bucket.expire(key, expire_at_ms, now_ms);
-        }
+        set_object_value_expire_at(
+            self,
+            key,
+            value,
+            Some(now_ms.saturating_add(ttl_ms)),
+            now_ms,
+        );
     }
 
     fn rename_key(
@@ -83,5 +76,31 @@ impl RedisKeyStore for EmbeddedStore {
             return Ok(true);
         }
         Err(RedisObjectError::MissingKey)
+    }
+}
+
+fn set_object_value_expire_at(
+    store: &EmbeddedStore,
+    key: &[u8],
+    value: RedisObjectValue,
+    expire_at_ms: Option<u64>,
+    now_ms: u64,
+) {
+    let route = store.route_key(key);
+    let mut bucket = store.objects.write_bucket(route.shard_id, route.key_hash);
+    let mut shard = store.shards[route.shard_id].write();
+    let had_object = bucket.contains_object(key);
+    if let Some(session_prefix) = point_write_session_storage_prefix(key) {
+        shard
+            .session_slots
+            .delete_hashed(&session_prefix, route.key_hash, key);
+    }
+    shard.map.delete_hashed(route.key_hash, key, now_ms);
+    let created = bucket.insert_value(key.to_vec(), value);
+    if created && !had_object {
+        store.objects.note_created(route.shard_id);
+    }
+    if let Some(expire_at_ms) = expire_at_ms {
+        bucket.expire(key, expire_at_ms, now_ms);
     }
 }

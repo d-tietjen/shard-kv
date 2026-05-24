@@ -75,8 +75,7 @@ unsupported. Major gaps before a full Redis 5 claim:
 - Scripting: `EVAL`, `EVALSHA`, `SCRIPT *`, deterministic write behavior, and
   script cache semantics.
 - HyperLogLog and geospatial families: `PF*` and `GEO*`.
-- Additional generic key commands: `SORT`, `DUMP`, `RESTORE`, `MIGRATE`, and
-  database movement.
+- Additional generic key commands: `SORT`, `MIGRATE`, and database movement.
 - Server and connection compatibility beyond lightweight stubs: `COMMAND` /
   `CONFIG` shapes, `CLIENT` subcommands, `MONITOR`, `SLOWLOG`, `ROLE`,
   `REPLICAOF`, persistence/admin commands, and accurate `INFO` sections.

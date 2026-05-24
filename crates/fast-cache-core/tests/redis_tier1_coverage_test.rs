@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CoverageStatus {
     Supported,
-    Partial,
     Missing,
 }
 
@@ -31,8 +30,10 @@ const TIER1_COMMANDS: &[&str] = &[
     "EXISTS",
     "EXPIRE",
     "EXPIREAT",
+    "EXPIRETIME",
     "PEXPIRE",
     "PEXPIREAT",
+    "PEXPIRETIME",
     "TTL",
     "PTTL",
     "PERSIST",
@@ -105,6 +106,8 @@ const TIER1_COMMANDS: &[&str] = &[
     "RPOPLPUSH",
     "LMOVE",
     "BLMOVE",
+    "LMPOP",
+    "BLMPOP",
     "SADD",
     "SREM",
     "SMEMBERS",
@@ -146,6 +149,13 @@ const TIER1_COMMANDS: &[&str] = &[
     "ZRANGESTORE",
     "ZSCAN",
     "ZMSCORE",
+    "ZUNION",
+    "ZINTER",
+    "ZDIFF",
+    "ZINTERCARD",
+    "ZRANDMEMBER",
+    "ZMPOP",
+    "BZMPOP",
     "ZUNIONSTORE",
     "ZINTERSTORE",
     "ZDIFFSTORE",
@@ -156,9 +166,18 @@ const TIER1_COMMANDS: &[&str] = &[
     "UNWATCH",
     "INFO",
     "COMMAND",
+    "COMMAND COUNT",
+    "COMMAND LIST",
+    "COMMAND INFO",
+    "COMMAND GETKEYS",
+    "COMMAND GETKEYSANDFLAGS",
     "COMMAND DOCS",
+    "COMMAND HELP",
     "CONFIG GET",
     "DBSIZE",
+    "FLUSHDB",
+    "FLUSHALL",
+    "MEMORY USAGE",
     "TIME",
     "ECHO",
 ];
@@ -181,8 +200,10 @@ const COVERAGE: &[CommandCoverage] = &[
     supported("EXISTS"),
     supported("EXPIRE"),
     supported("EXPIREAT"),
+    supported("EXPIRETIME"),
     supported("PEXPIRE"),
     supported("PEXPIREAT"),
+    supported("PEXPIRETIME"),
     supported("TTL"),
     supported("PTTL"),
     supported("PERSIST"),
@@ -194,8 +215,8 @@ const COVERAGE: &[CommandCoverage] = &[
     supported("RENAMENX"),
     supported("RANDOMKEY"),
     supported("COPY"),
-    missing("DUMP"),
-    missing("RESTORE"),
+    supported("DUMP"),
+    supported("RESTORE"),
     supported("OBJECT ENCODING"),
     supported("GETSET"),
     supported("SETNX"),
@@ -255,6 +276,8 @@ const COVERAGE: &[CommandCoverage] = &[
     supported("RPOPLPUSH"),
     supported("LMOVE"),
     supported("BLMOVE"),
+    supported("LMPOP"),
+    supported("BLMPOP"),
     supported("SADD"),
     supported("SREM"),
     supported("SMEMBERS"),
@@ -296,19 +319,35 @@ const COVERAGE: &[CommandCoverage] = &[
     supported("ZRANGESTORE"),
     supported("ZSCAN"),
     supported("ZMSCORE"),
+    supported("ZUNION"),
+    supported("ZINTER"),
+    supported("ZDIFF"),
+    supported("ZINTERCARD"),
+    supported("ZRANDMEMBER"),
+    supported("ZMPOP"),
+    supported("BZMPOP"),
     supported("ZUNIONSTORE"),
     supported("ZINTERSTORE"),
     supported("ZDIFFSTORE"),
     supported("MULTI"),
     supported("EXEC"),
     supported("DISCARD"),
-    partial("WATCH"),
-    partial("UNWATCH"),
+    supported("WATCH"),
+    supported("UNWATCH"),
     supported("INFO"),
     supported("COMMAND"),
+    supported("COMMAND COUNT"),
+    supported("COMMAND LIST"),
+    supported("COMMAND INFO"),
+    supported("COMMAND GETKEYS"),
+    supported("COMMAND GETKEYSANDFLAGS"),
     supported("COMMAND DOCS"),
+    supported("COMMAND HELP"),
     supported("CONFIG GET"),
     supported("DBSIZE"),
+    supported("FLUSHDB"),
+    supported("FLUSHALL"),
+    supported("MEMORY USAGE"),
     supported("TIME"),
     supported("ECHO"),
 ];
@@ -317,20 +356,6 @@ const fn supported(command: &'static str) -> CommandCoverage {
     CommandCoverage {
         command,
         status: CoverageStatus::Supported,
-    }
-}
-
-const fn missing(command: &'static str) -> CommandCoverage {
-    CommandCoverage {
-        command,
-        status: CoverageStatus::Missing,
-    }
-}
-
-const fn partial(command: &'static str) -> CommandCoverage {
-    CommandCoverage {
-        command,
-        status: CoverageStatus::Partial,
     }
 }
 
@@ -362,16 +387,11 @@ fn tier1_coverage_counts_are_intentional() {
         .iter()
         .filter(|entry| entry.status == CoverageStatus::Supported)
         .count();
-    let partial = COVERAGE
-        .iter()
-        .filter(|entry| entry.status == CoverageStatus::Partial)
-        .count();
     let missing = COVERAGE
         .iter()
         .filter(|entry| entry.status == CoverageStatus::Missing)
         .count();
 
-    assert_eq!(supported, 143);
-    assert_eq!(partial, 2);
-    assert_eq!(missing, 2);
+    assert_eq!(supported, 167);
+    assert_eq!(missing, 0);
 }

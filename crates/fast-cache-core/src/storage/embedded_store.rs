@@ -47,8 +47,8 @@ mod write;
 pub(crate) use key_scan::{DEFAULT_SCAN_COUNT, RedisKeyScanType};
 #[cfg(feature = "redis-compat")]
 pub(crate) use objects::{
-    RedisHashStore, RedisKeyStore, RedisObjectStoreAccess, RedisSetStore, RedisStringStore,
-    RedisZSetStore,
+    RedisHashStore, RedisKeyStore, RedisListStore, RedisObjectStoreAccess, RedisSetStore,
+    RedisStringStore, RedisZSetStore,
 };
 pub use owned::{
     EmbeddedShardHandle, OwnedEmbeddedShard, OwnedEmbeddedWorkerReadSession,

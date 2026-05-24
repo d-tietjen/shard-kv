@@ -13,7 +13,7 @@ use super::storage::EmbeddedStringWrite;
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Set {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         let RawCommandContext {
             store, args, out, ..
         } = ctx;

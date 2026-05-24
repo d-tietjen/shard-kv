@@ -50,6 +50,15 @@ impl EmbeddedStore {
         <Self as RedisHashStore>::hmget(self, key, fields)
     }
 
+    pub(crate) fn hmget_visit(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        <Self as RedisHashStore>::hmget_visit(self, key, fields, emit)
+    }
+
     pub fn hkeys(&self, key: &[u8]) -> RedisObjectResult {
         <Self as RedisHashStore>::hkeys(self, key)
     }

@@ -23,21 +23,7 @@ pub(super) struct DirectProtocol;
 pub(super) type RespDirectArgs<'a> = smallvec::SmallVec<[&'a [u8]; 8]>;
 
 #[cfg(feature = "embedded")]
-pub(super) type RespDirectCommandBox<'a> = Box<dyn RespDirectCommand<'a> + 'a>;
-
-#[cfg(feature = "embedded")]
-pub(super) trait RespDirectCommand<'a> {
-    fn mutates_value(&self) -> bool;
-
-    fn execute(
-        self: Box<Self>,
-        store: &EmbeddedStore,
-        out: &mut BytesMut,
-        fast_write_queue: Option<&mut FastWriteQueue>,
-        single_threaded: bool,
-        started_at: Instant,
-    );
-}
+pub(super) use resp::RespDirectCommand;
 
 #[derive(Debug)]
 pub(crate) enum FcnpDispatch {

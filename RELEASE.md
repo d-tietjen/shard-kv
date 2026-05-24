@@ -17,25 +17,7 @@ Use this checklist before publishing the repository or the crates.io crates.
 ## Validation
 
 ```bash
-cargo fmt --all -- --check
-cargo test --workspace
-cargo test -p fast-cache-core --features unsafe
-cargo test -p fast-cache-core --features redis-compat
-cargo test -p fast-cache-formal
-FAST_CACHE_COMPAT_SERVER_BIN=redis-server \
-  cargo test -p fast-cache-core --features redis-server \
-  --test redis_compat_differential_test -- --nocapture
-cargo check -p fast-cache --features redis-compat
-cargo check -p fast-cache --features redis-server
-cargo check -p fast-cache-redis --all-features
-cargo test -p fcnp-client-rs
-cargo doc -p fast-cache-core --no-deps --all-features
-cargo doc -p fast-cache --no-deps --all-features
-cargo doc -p fast-cache-redis --no-deps --all-features
-cargo doc -p fcnp-client-rs --no-deps
-cargo package -p fcnp-client-rs --locked
-cargo package -p fast-cache-core --locked
-git diff --check
+./scripts/proof-gate.sh release
 ```
 
 For full release confidence, also run any Redis compatibility or performance
@@ -43,6 +25,10 @@ validation suites that support the release announcement. Keep raw artifacts
 outside the public repository unless they have been intentionally curated.
 For the current 0.2.0 release shape, known limits, and smoke benchmark command,
 see `docs/RELEASE_0_2_READINESS.md`.
+
+Use `./benchmarks/scripts/run-redis-command-benchmark-bundle.sh` for command
+matrix performance proofs so each run carries metadata, raw CSV, Markdown,
+JSON, and compatibility-manifest artifacts together.
 
 ## Publishing
 

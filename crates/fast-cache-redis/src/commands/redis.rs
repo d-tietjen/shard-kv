@@ -23,9 +23,12 @@ pub(crate) use define_redis_command;
 pub(crate) use frame::{
     array_bulk, bulk, error, frame_from_result, int, object_result, optional_string_value,
     reserve_resp_bulk_array_hint, scan_array, scan_array_with_cursor, scan_from_result, simple,
-    string_value, write_frame, write_resp_array_header, write_resp_simple_string,
-    write_result_resp, wrong_arity, wrongtype, zentries_flat, zentries_frame,
+    string_value, write_frame, write_resp_array_header, write_resp_null, write_resp_simple_string,
+    write_resp_wrong_arity, write_resp_wrongtype, write_result_resp, wrong_arity, wrongtype,
+    zentries_flat, zentries_frame,
 };
+#[cfg(feature = "server")]
+pub(crate) use key::FastObjectArrayWriter;
 pub(crate) use key::{
     filter_key_pattern, finish_object_array_visit, finish_object_bulk_visit,
     finish_object_integer_visit, finish_scan_object_array_visit, key_pattern_matches,

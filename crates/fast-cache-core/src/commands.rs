@@ -23,6 +23,12 @@ pub(crate) mod redis;
 pub mod copy;
 #[path = "commands/key/del.rs"]
 pub mod del;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/key/dump.rs"]
+pub mod dump;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/key/dump_restore.rs"]
+pub(crate) mod dump_restore;
 #[path = "commands/key/exists.rs"]
 pub mod exists;
 #[path = "commands/key/expire.rs"]
@@ -30,6 +36,9 @@ pub mod expire;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/key/expireat.rs"]
 pub mod expireat;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/key/expiretime.rs"]
+pub mod expiretime;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/key/keys.rs"]
 pub mod keys;
@@ -43,6 +52,9 @@ pub mod pexpire;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/key/pexpireat.rs"]
 pub mod pexpireat;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/key/pexpiretime.rs"]
+pub mod pexpiretime;
 #[path = "commands/key/pttl.rs"]
 pub mod pttl;
 #[cfg(feature = "redis-compat")]
@@ -54,6 +66,9 @@ pub mod rename;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/key/renamenx.rs"]
 pub mod renamenx;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/key/restore.rs"]
+pub mod restore;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/key/scan.rs"]
 pub mod scan;
@@ -184,8 +199,14 @@ pub mod config;
 #[path = "../../fast-cache-redis/src/commands/server/dbsize.rs"]
 pub mod dbsize;
 #[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/server/flush.rs"]
+pub mod flush;
+#[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/server/info.rs"]
 pub mod info;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/server/memory.rs"]
+pub mod memory;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/server/time.rs"]
 pub mod time;
@@ -245,6 +266,9 @@ pub mod hvals;
 #[path = "../../fast-cache-redis/src/commands/list/blmove.rs"]
 pub mod blmove;
 #[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/list/blmpop.rs"]
+pub mod blmpop;
+#[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/list/blpop.rs"]
 pub mod blpop;
 #[cfg(feature = "redis-compat")]
@@ -265,6 +289,9 @@ pub mod llen;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/list/lmove.rs"]
 pub mod lmove;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/list/lmpop.rs"]
+pub mod lmpop;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/list/lpop.rs"]
 pub mod lpop;
@@ -354,6 +381,9 @@ pub mod sunionstore;
 
 // Sorted set commands.
 #[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/zset/bzmpop.rs"]
+pub mod bzmpop;
+#[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/bzpopmax.rs"]
 pub mod bzpopmax;
 #[cfg(feature = "redis-compat")]
@@ -369,17 +399,29 @@ pub mod zcard;
 #[path = "../../fast-cache-redis/src/commands/zset/zcount.rs"]
 pub mod zcount;
 #[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/zset/zdiff.rs"]
+pub mod zdiff;
+#[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/zdiffstore.rs"]
 pub mod zdiffstore;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/zincrby.rs"]
 pub mod zincrby;
 #[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/zset/zinter.rs"]
+pub mod zinter;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/zset/zintercard.rs"]
+pub mod zintercard;
+#[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/zinterstore.rs"]
 pub mod zinterstore;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/zlexcount.rs"]
 pub mod zlexcount;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/zset/zmpop.rs"]
+pub mod zmpop;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/zmscore.rs"]
 pub mod zmscore;
@@ -389,6 +431,9 @@ pub mod zpopmax;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/zpopmin.rs"]
 pub mod zpopmin;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/zset/zrandmember.rs"]
+pub mod zrandmember;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/zrange.rs"]
 pub mod zrange;
@@ -437,6 +482,9 @@ pub mod zscore;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/shared.rs"]
 pub(crate) mod zset_shared;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/zset/zunion.rs"]
+pub mod zunion;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/zset/zunionstore.rs"]
 pub mod zunionstore;
@@ -608,6 +656,7 @@ pub(crate) trait BorrowedCommandParse<'a>: CommandSpec {
 
 /// Object-safe metadata shared by command implementations.
 pub(crate) trait CommandMetadata: Sync {
+    fn name(&self) -> &'static str;
     fn mutates_value(&self) -> bool;
     fn matches(&self, name: &[u8]) -> bool;
 }
@@ -616,6 +665,10 @@ impl<T> CommandMetadata for T
 where
     T: CommandSpec + Sync,
 {
+    fn name(&self) -> &'static str {
+        T::NAME
+    }
+
     fn mutates_value(&self) -> bool {
         T::MUTATES_VALUE
     }
@@ -681,6 +734,10 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     &expireat::COMMAND,
     #[cfg(feature = "redis-compat")]
     &pexpireat::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &expiretime::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &pexpiretime::COMMAND,
     &persist::COMMAND,
     &getex::COMMAND,
     &setex::COMMAND,
@@ -706,9 +763,15 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     #[cfg(feature = "redis-compat")]
     &dbsize::COMMAND,
     #[cfg(feature = "redis-compat")]
+    &flush::FLUSHDB_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &flush::FLUSHALL_COMMAND,
+    #[cfg(feature = "redis-compat")]
     &time::COMMAND,
     #[cfg(feature = "redis-compat")]
     &info::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &memory::COMMAND,
     #[cfg(feature = "redis-compat")]
     &object::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -723,6 +786,10 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     &randomkey::COMMAND,
     #[cfg(feature = "redis-compat")]
     &copy::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &dump::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &restore::COMMAND,
     #[cfg(feature = "redis-compat")]
     &rename::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -840,6 +907,10 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     #[cfg(feature = "redis-compat")]
     &blmove::COMMAND,
     #[cfg(feature = "redis-compat")]
+    &lmpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &blmpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
     &sadd::COMMAND,
     #[cfg(feature = "redis-compat")]
     &sismember::COMMAND,
@@ -880,6 +951,16 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     #[cfg(feature = "redis-compat")]
     &zcard::COMMAND,
     #[cfg(feature = "redis-compat")]
+    &zunion::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zinter::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zdiff::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zintercard::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zrandmember::COMMAND,
+    #[cfg(feature = "redis-compat")]
     &zrange::COMMAND,
     #[cfg(feature = "redis-compat")]
     &zincrby::COMMAND,
@@ -893,6 +974,8 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     &zpopmin::COMMAND,
     #[cfg(feature = "redis-compat")]
     &zpopmax::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &zmpop::COMMAND,
     #[cfg(feature = "redis-compat")]
     &zrem::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -927,6 +1010,8 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     &bzpopmin::COMMAND,
     #[cfg(feature = "redis-compat")]
     &bzpopmax::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &bzmpop::COMMAND,
 ];
 
 pub(crate) struct CommandCatalog;

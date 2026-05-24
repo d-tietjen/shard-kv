@@ -13,8 +13,10 @@ use super::Get;
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Get {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
-        let RawCommandContext { store, args, out } = ctx;
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
+        let RawCommandContext {
+            store, args, out, ..
+        } = ctx;
         match GetRawArgs::from_args(args.as_slice()) {
             GetRawArgs::Ready { key } => match store.get(key) {
                 Some(value) => ServerWire::write_resp_blob_string(out, &value),
@@ -22,6 +24,51 @@ impl RawDirectCommand for Get {
             },
             GetRawArgs::WrongArity => ServerWire::write_resp_error(
                 out,
+                &format!(
+                    "ERR wrong number of arguments for '{}' command",
+                    <Self as CommandSpec>::NAME
+                ),
+            ),
+        }
+    }
+
+    fn execute_fast(&self, mut ctx: RawCommandContext<'_, '_, '_, '_>) {
+        match GetRawArgs::from_args(ctx.args.as_slice()) {
+            GetRawArgs::Ready { key } => {
+                let key_hash = hash_key(key);
+                let out = &mut *ctx.out;
+                let found = if ctx.single_threaded {
+                    // SAFETY: forwarded from the connection worker's single-threaded contract.
+                    unsafe {
+                        ctx.store
+                            .with_shared_value_bytes_route_hashed_single_threaded(
+                                key_hash,
+                                key,
+                                |value| {
+                                    if let Some(queue) = ctx.fast_write_queue.as_mut() {
+                                        queue.push_fast_value(out, value);
+                                    } else {
+                                        ServerWire::write_fast_value(out, value.as_ref());
+                                    }
+                                },
+                            )
+                    }
+                } else {
+                    ctx.store
+                        .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+                            if let Some(queue) = ctx.fast_write_queue.as_mut() {
+                                queue.push_fast_value(out, value);
+                            } else {
+                                ServerWire::write_fast_value(out, value.as_ref());
+                            }
+                        })
+                };
+                if !found {
+                    ServerWire::write_fast_null(ctx.out);
+                }
+            }
+            GetRawArgs::WrongArity => ServerWire::write_fast_error(
+                ctx.out,
                 &format!(
                     "ERR wrong number of arguments for '{}' command",
                     <Self as CommandSpec>::NAME

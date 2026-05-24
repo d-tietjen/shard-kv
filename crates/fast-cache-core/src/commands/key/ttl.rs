@@ -168,7 +168,7 @@ impl Ttl {
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Ttl {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         match ctx.args.as_slice() {
             [key] => ServerWire::write_resp_integer(ctx.out, ctx.store.ttl_seconds(key)),
             _ => ServerWire::write_resp_error(

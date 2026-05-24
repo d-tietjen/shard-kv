@@ -284,7 +284,7 @@ fn relative_expire_at_ms(ttl_ms: u64) -> u64 {
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for GetEx {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         match parse_getex_raw(ctx.args.as_slice()) {
             Some((key, expiration)) => {
                 match BorrowedGetEx::execute_embedded(ctx.store, key, expiration, now_millis()) {

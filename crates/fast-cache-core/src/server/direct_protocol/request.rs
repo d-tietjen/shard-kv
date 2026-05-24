@@ -1,4 +1,6 @@
 use super::*;
+use crate::protocol::FastRedisRouteKeys;
+use crate::storage::{hash_key, hash_key_tag_from_hash};
 
 impl DirectProtocol {
     #[cfg(feature = "embedded")]
@@ -131,6 +133,12 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
         if let Some(step) = self.process_owned_scan_fcnp(slice)? {
             return Ok(step);
         }
+        if let Some(step) = self.process_owned_redis_opcode_fcnp(slice)? {
+            return Ok(step);
+        }
+        if let Some(step) = self.process_owned_decoded_fast_fcnp(slice)? {
+            return Ok(step);
+        }
         match DirectProtocol::reject_unsupported_owned_fcnp_frame(slice, self.write_buffer) {
             FcnpDispatch::Complete(consumed) => Ok(RequestBufferStep::Consumed(consumed)),
             FcnpDispatch::Incomplete => Ok(RequestBufferStep::Pending),
@@ -161,6 +169,7 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
                             self.store,
                             request,
                             self.write_buffer,
+                            self.fast_write_queue.as_deref_mut(),
                             self.single_threaded,
                             self.started_at,
                         )
@@ -174,6 +183,162 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
             }
             _ => Ok(None),
         }
+    }
+
+    fn process_owned_redis_opcode_fcnp(
+        &mut self,
+        slice: &'buf [u8],
+    ) -> Result<Option<RequestBufferStep>> {
+        let Some(owned_shard_id) = self.owned_shard_id else {
+            return Ok(None);
+        };
+        let Some((request, consumed)) = FastCodec::decode_request(slice)? else {
+            return Ok(Some(RequestBufferStep::Pending));
+        };
+        let FastCommand::RedisCommand { kind, args } = &request.command else {
+            return Ok(None);
+        };
+        let route_matches = Self::redis_opcode_matches_owned_route(
+            self.store,
+            *kind,
+            args,
+            request.key_hash,
+            request.route_shard,
+            request.key_tag,
+            owned_shard_id,
+        );
+        if !route_matches {
+            ServerWire::write_fast_error(self.write_buffer, "ERR FCNP route shard mismatch");
+            return Ok(Some(RequestBufferStep::Consumed(consumed)));
+        }
+        self.materialize_on_mutation(DirectProtocol::fast_command_mutates_value(&request.command));
+        let _transaction_guard = self
+            .transaction_coordinator
+            .map(|coordinator| coordinator.read_guard_for_fast_request(self.store, &request));
+        DirectProtocol::shared_execute_fast_into(
+            self.store,
+            request,
+            self.write_buffer,
+            self.fast_write_queue.as_deref_mut(),
+            self.single_threaded,
+            self.started_at,
+        );
+        Ok(Some(RequestBufferStep::Consumed(consumed)))
+    }
+
+    fn redis_opcode_matches_owned_route(
+        store: &EmbeddedStore,
+        kind: crate::protocol::FastCommandKind,
+        args: &[&[u8]],
+        request_key_hash: Option<u64>,
+        request_route_shard: Option<u32>,
+        request_key_tag: Option<u64>,
+        owned_shard_id: usize,
+    ) -> bool {
+        let route_keys = match kind.redis_route_keys(args) {
+            FastRedisRouteKeys::None => return true,
+            FastRedisRouteKeys::AllShards => return false,
+            FastRedisRouteKeys::Keys(keys) if keys.is_empty() => return true,
+            FastRedisRouteKeys::Keys(keys) => keys,
+        };
+
+        let Some((&first_key, remaining_keys)) = route_keys.split_first() else {
+            return true;
+        };
+        if !Self::redis_opcode_first_key_matches_owned_route(
+            store,
+            first_key,
+            request_key_hash,
+            request_route_shard,
+            request_key_tag,
+            owned_shard_id,
+        ) {
+            return false;
+        }
+        remaining_keys
+            .iter()
+            .all(|key| Self::redis_opcode_key_matches_owned_route(store, key, owned_shard_id))
+    }
+
+    fn redis_opcode_first_key_matches_owned_route(
+        store: &EmbeddedStore,
+        key: &[u8],
+        request_key_hash: Option<u64>,
+        request_route_shard: Option<u32>,
+        request_key_tag: Option<u64>,
+        owned_shard_id: usize,
+    ) -> bool {
+        match (
+            store.route_mode(),
+            request_key_hash,
+            request_route_shard.and_then(|shard| usize::try_from(shard).ok()),
+        ) {
+            (EmbeddedRouteMode::FullKey, Some(key_hash), Some(route_shard)) => {
+                route_shard == owned_shard_id
+                    && route_shard < store.shard_count()
+                    && crate::storage::stripe_index(
+                        key_hash,
+                        crate::storage::shift_for(store.shard_count()),
+                    ) == owned_shard_id
+                    && request_key_tag
+                        .is_none_or(|key_tag| key_tag == hash_key_tag_from_hash(key_hash))
+                    && hash_key(key) == key_hash
+            }
+            _ => Self::redis_opcode_key_matches_owned_route(store, key, owned_shard_id),
+        }
+    }
+
+    fn redis_opcode_key_matches_owned_route(
+        store: &EmbeddedStore,
+        key: &[u8],
+        owned_shard_id: usize,
+    ) -> bool {
+        owned_shard_id < store.shard_count() && store.route_key(key).shard_id == owned_shard_id
+    }
+
+    fn process_owned_decoded_fast_fcnp(
+        &mut self,
+        slice: &'buf [u8],
+    ) -> Result<Option<RequestBufferStep>> {
+        let Some(owned_shard_id) = self.owned_shard_id else {
+            return Ok(None);
+        };
+        let Some((request, consumed)) = FastCodec::decode_request(slice)? else {
+            return Ok(Some(RequestBufferStep::Pending));
+        };
+        if matches!(
+            request.command,
+            FastCommand::RespCommand { .. } | FastCommand::RedisCommand { .. }
+        ) {
+            return Ok(None);
+        }
+        let Some(decoded) = DirectProtocol::decoded_fast_redis_command(&request.command) else {
+            return Ok(None);
+        };
+        let args = decoded.args.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let mut parts = Vec::with_capacity(args.len() + 1);
+        parts.push(decoded.command);
+        parts.extend(args.iter().copied());
+        let route_matches = crate::server::transactions::command_shards(self.store, &parts)
+            .into_iter()
+            .all(|shard_id| shard_id == owned_shard_id);
+        if !route_matches {
+            ServerWire::write_fast_error(self.write_buffer, "ERR FCNP route shard mismatch");
+            return Ok(Some(RequestBufferStep::Consumed(consumed)));
+        }
+        self.materialize_on_mutation(DirectProtocol::fast_command_mutates_value(&request.command));
+        let _transaction_guard = self
+            .transaction_coordinator
+            .map(|coordinator| coordinator.read_guard_for_fast_request(self.store, &request));
+        DirectProtocol::shared_execute_fast_into(
+            self.store,
+            request,
+            self.write_buffer,
+            self.fast_write_queue.as_deref_mut(),
+            self.single_threaded,
+            self.started_at,
+        );
+        Ok(Some(RequestBufferStep::Consumed(consumed)))
     }
 
     fn process_generic_fast(&mut self, slice: &'buf [u8]) -> Result<RequestBufferStep> {
@@ -200,6 +365,7 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
                     self.store,
                     request,
                     self.write_buffer,
+                    self.fast_write_queue.as_deref_mut(),
                     self.single_threaded,
                     self.started_at,
                 );
@@ -210,33 +376,39 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
     }
 
     fn process_fast_resp_transaction(&mut self, request: &FastRequest<'buf>) -> bool {
-        let FastCommand::RespCommand { parts } = &request.command else {
-            return false;
-        };
+        match &request.command {
+            FastCommand::RespCommand { parts } => self.process_fast_transaction_parts(parts),
+            FastCommand::RedisCommand { kind, args } => {
+                let Some(command) = kind.redis_name() else {
+                    return false;
+                };
+                let mut parts = Vec::with_capacity(args.len() + 1);
+                parts.push(command.as_bytes());
+                parts.extend(args.iter().copied());
+                self.process_fast_transaction_parts(&parts)
+            }
+            _ => false,
+        }
+    }
 
-        let mut resp_out = BytesMut::new();
+    fn process_fast_transaction_parts(&mut self, parts: &[&[u8]]) -> bool {
+        let start = ServerWire::begin_fast_value(self.write_buffer);
         if !self.transaction_state.handle_resp_command(
             self.transaction_coordinator,
             self.store,
             parts,
-            &mut resp_out,
+            self.write_buffer,
         ) {
+            self.write_buffer.truncate(start);
             return false;
         }
 
-        let start = ServerWire::begin_fast_value(self.write_buffer);
-        self.write_buffer.extend_from_slice(&resp_out);
         ServerWire::finish_fast_value(self.write_buffer, start);
         true
     }
 
     fn process_resp(&mut self, slice: &'buf [u8]) -> Result<RequestBufferStep> {
-        match self.owned_shard_id {
-            Some(_) => Err(crate::FastCacheError::Protocol(
-                "direct shard ports only accept routed FCNP frames".into(),
-            )),
-            None => self.process_direct_or_borrowed_resp(slice),
-        }
+        self.process_direct_or_borrowed_resp(slice)
     }
 
     fn process_direct_or_borrowed_resp(&mut self, slice: &'buf [u8]) -> Result<RequestBufferStep> {
@@ -248,6 +420,13 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
         parts.push(command_name);
         parts.extend(args.iter().copied());
 
+        if self.reject_unsupported_owned_resp_transaction(&parts) {
+            return Ok(RequestBufferStep::Consumed(consumed));
+        }
+        if !self.resp_parts_match_owned_shard(&parts) {
+            ServerWire::write_resp_error(self.write_buffer, "ERR direct shard route mismatch");
+            return Ok(RequestBufferStep::Consumed(consumed));
+        }
         if self.transaction_state.handle_resp_command(
             self.transaction_coordinator,
             self.store,
@@ -271,9 +450,14 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
 
     fn execute_resp_direct_with_parts(
         &mut self,
-        command: RespDirectCommandBox<'buf>,
+        command: RespDirectCommand<'buf>,
         parts: &[&[u8]],
     ) {
+        if let Some(owned_shard_id) = self.owned_shard_id
+            && command.try_execute_owned_shard(self.store, self.write_buffer, owned_shard_id)
+        {
+            return;
+        }
         self.materialize_on_mutation(command.mutates_value());
         let _transaction_guard = self
             .transaction_coordinator
@@ -300,6 +484,16 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
     fn process_borrowed_resp(&mut self, slice: &'buf [u8]) -> Result<RequestBufferStep> {
         match RespCodec::decode_command(slice)? {
             Some((frame, consumed)) => {
+                if self.reject_unsupported_owned_resp_transaction(&frame.parts) {
+                    return Ok(RequestBufferStep::Consumed(consumed));
+                }
+                if !self.resp_parts_match_owned_shard(&frame.parts) {
+                    ServerWire::write_resp_error(
+                        self.write_buffer,
+                        "ERR direct shard route mismatch",
+                    );
+                    return Ok(RequestBufferStep::Consumed(consumed));
+                }
                 if self.transaction_state.handle_resp_command(
                     self.transaction_coordinator,
                     self.store,
@@ -362,6 +556,32 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
         MutationBarrier::from_bool(mutates_value)
             .materialize(self.fast_write_queue.as_deref_mut(), self.write_buffer);
     }
+
+    fn reject_unsupported_owned_resp_transaction(&mut self, parts: &[&[u8]]) -> bool {
+        if self.owned_shard_id.is_none() {
+            return false;
+        }
+        let Some(command) = parts.first().copied() else {
+            return false;
+        };
+        if self.transaction_state.is_active() || is_resp_transaction_command(command) {
+            ServerWire::write_resp_error(
+                self.write_buffer,
+                "ERR transactions are not supported on direct shard RESP ports",
+            );
+            return true;
+        }
+        false
+    }
+
+    fn resp_parts_match_owned_shard(&self, parts: &[&[u8]]) -> bool {
+        let Some(owned_shard_id) = self.owned_shard_id else {
+            return true;
+        };
+        crate::server::transactions::command_shards(self.store, parts)
+            .into_iter()
+            .all(|shard_id| shard_id == owned_shard_id)
+    }
 }
 
 fn is_fcnp_scan_shard(parts: &[&[u8]]) -> bool {
@@ -377,6 +597,14 @@ fn fcnp_scan_shard_matches(parts: &[&[u8]], owned_shard_id: usize) -> bool {
         .and_then(|raw| std::str::from_utf8(raw).ok())
         .and_then(|raw| raw.parse::<usize>().ok())
         == Some(owned_shard_id)
+}
+
+fn is_resp_transaction_command(command: &[u8]) -> bool {
+    command.eq_ignore_ascii_case(b"MULTI")
+        || command.eq_ignore_ascii_case(b"EXEC")
+        || command.eq_ignore_ascii_case(b"DISCARD")
+        || command.eq_ignore_ascii_case(b"WATCH")
+        || command.eq_ignore_ascii_case(b"UNWATCH")
 }
 
 #[cfg(feature = "embedded")]

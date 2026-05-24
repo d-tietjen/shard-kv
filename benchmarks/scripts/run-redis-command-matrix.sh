@@ -10,10 +10,21 @@
 #   TARGETS=fast-cache=127.0.0.1:6383,redis=127.0.0.1:6379,valkey=127.0.0.1:6381
 #   CASES=hash,zset
 #   CASES=large
+#   CASES=extended-no-keyspace
+#   CASES=profile:keyspace
+#   CASES=profile:destructive
+#   SKIP_CASES=OBJECT,COPY
+#   FIXTURE_SCOPE=shared-keyspace
 #   CLIENTS=4
+#   KEY_SHARDS=4
+#   PIPELINE_DEPTH=16
 #   WARMUP=2
 #   DURATION=10
+#   START_FAST_CACHE=0
 #   DOCKER=0
+#   DOCKER_SERVICES="redis valkey dragonfly"
+#   SERVER_DIRECT_SHARD_PORTS=1
+#   FAST_CACHE_DIRECT_SHARD_BASE_PORT=6384
 
 set -euo pipefail
 
@@ -27,31 +38,46 @@ cd "$ws_root"
 
 fc_addr="${FAST_CACHE_ADDR:-127.0.0.1:6383}"
 targets="${TARGETS:-fast-cache=$fc_addr,redis=127.0.0.1:6379,valkey=127.0.0.1:6381}"
+start_fast_cache="${START_FAST_CACHE:-1}"
+server_env=()
+if [[ "${SERVER_DIRECT_SHARD_PORTS:-0}" != "0" ]]; then
+  server_env+=(FAST_CACHE_DIRECT_SHARD_PORTS=1)
+  if [[ -n "${FAST_CACHE_DIRECT_SHARD_BASE_PORT:-}" ]]; then
+    server_env+=(FAST_CACHE_DIRECT_SHARD_BASE_PORT="$FAST_CACHE_DIRECT_SHARD_BASE_PORT")
+  fi
+fi
 
-cargo build --release -p fast-cache --features redis-server --bin fast-cache-server
+if [[ "$start_fast_cache" == "1" ]]; then
+  cargo build --release -p fast-cache --features redis-server --bin fast-cache-server
+fi
 cargo build --release -p fast-cache-benchmarks --bin redis_command_matrix
 report_pinning
 
 if [[ "${DOCKER:-1}" == "1" ]]; then
-  docker compose -f "$root/docker/compose.yml" up -d redis valkey
+  # shellcheck disable=SC2206
+  docker_services=(${DOCKER_SERVICES:-redis valkey})
+  docker compose -f "$root/docker/compose.yml" up -d "${docker_services[@]}"
 fi
 
-if [[ -n "${SERVER_CPUSET:-}" ]] && command -v taskset >/dev/null 2>&1; then
-  taskset -c "$SERVER_CPUSET" "$ws_root/target/release/fast-cache-server" \
-    --bind-addr "$fc_addr" \
-    --shard-count "${SHARD_COUNT:-4}" \
-    --disable-persistence \
-    --server-mode direct \
-    >/tmp/fast-cache-server.redis-command-matrix.log 2>&1 &
-else
-  "$ws_root/target/release/fast-cache-server" \
-    --bind-addr "$fc_addr" \
-    --shard-count "${SHARD_COUNT:-4}" \
-    --disable-persistence \
-    --server-mode direct \
-    >/tmp/fast-cache-server.redis-command-matrix.log 2>&1 &
+fc_server_pid=""
+if [[ "$start_fast_cache" == "1" ]]; then
+  if [[ -n "${SERVER_CPUSET:-}" ]] && command -v taskset >/dev/null 2>&1; then
+    env "${server_env[@]}" taskset -c "$SERVER_CPUSET" "$ws_root/target/release/fast-cache-server" \
+      --bind-addr "$fc_addr" \
+      --shard-count "${SHARD_COUNT:-4}" \
+      --disable-persistence \
+      --server-mode direct \
+      >/tmp/fast-cache-server.redis-command-matrix.log 2>&1 &
+  else
+    env "${server_env[@]}" "$ws_root/target/release/fast-cache-server" \
+      --bind-addr "$fc_addr" \
+      --shard-count "${SHARD_COUNT:-4}" \
+      --disable-persistence \
+      --server-mode direct \
+      >/tmp/fast-cache-server.redis-command-matrix.log 2>&1 &
+  fi
+  fc_server_pid=$!
 fi
-fc_server_pid=$!
 
 cleanup() {
   if [[ -n "${fc_server_pid:-}" ]]; then
@@ -74,11 +100,24 @@ trap cleanup EXIT
 sleep "${STARTUP_SLEEP:-1}"
 mkdir -p "$root/results"
 
+extra_args=()
+if [[ -n "${SKIP_CASES:-}" ]]; then
+  extra_args+=(--skip-cases "$SKIP_CASES")
+fi
+if [[ -n "${FIXTURE_SCOPE:-}" ]]; then
+  extra_args+=(--fixture-scope "$FIXTURE_SCOPE")
+fi
+if [[ -n "${FAIL_ON_ERROR:-}" ]]; then
+  extra_args+=(--fail-on-error)
+fi
+
 "$ws_root/target/release/redis_command_matrix" \
   --targets "$targets" \
   --cases "${CASES:-all}" \
   --clients "${CLIENTS:-1}" \
+  --key-shards "${KEY_SHARDS:-1}" \
+  --pipeline-depth "${PIPELINE_DEPTH:-1}" \
   --warmup "${WARMUP:-1}" \
   --duration "${DURATION:-5}" \
   --csv "${CSV:-$root/results/redis-command-matrix.csv}" \
-  ${FAIL_ON_ERROR:+--fail-on-error}
+  "${extra_args[@]}"

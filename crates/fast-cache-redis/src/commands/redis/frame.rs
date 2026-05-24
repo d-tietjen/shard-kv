@@ -186,18 +186,24 @@ pub(crate) fn write_result_resp(out: &mut BytesMut, result: RedisObjectResult) {
             }
         }
         RedisObjectResult::Bulk(Some(value)) => ServerWire::write_resp_blob_string(out, &value),
-        RedisObjectResult::Bulk(None) => out.extend_from_slice(b"$-1\r\n"),
+        RedisObjectResult::Bulk(None) => write_resp_null(out),
         RedisObjectResult::Array(values) => {
             write_resp_array_header(out, values.len());
             for value in values {
                 match value {
                     Some(value) => ServerWire::write_resp_blob_string(out, &value),
-                    None => out.extend_from_slice(b"$-1\r\n"),
+                    None => write_resp_null(out),
                 }
             }
         }
-        RedisObjectResult::WrongType => write_frame(out, &wrongtype()),
+        RedisObjectResult::WrongType => write_resp_wrongtype(out),
     }
+}
+
+#[cfg(feature = "server")]
+#[inline(always)]
+pub(crate) fn write_resp_null(out: &mut BytesMut) {
+    out.extend_from_slice(b"$-1\r\n");
 }
 
 #[cfg(feature = "server")]
@@ -206,6 +212,23 @@ pub(crate) fn write_resp_simple_string(out: &mut BytesMut, value: &str) {
     out.extend_from_slice(b"+");
     out.extend_from_slice(value.as_bytes());
     out.extend_from_slice(b"\r\n");
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn write_resp_wrong_arity(out: &mut BytesMut, command: &str) {
+    ServerWire::write_resp_error(
+        out,
+        &format!(
+            "ERR wrong number of arguments for '{}' command",
+            command.to_ascii_lowercase()
+        ),
+    );
+}
+
+#[cfg(feature = "server")]
+#[inline(always)]
+pub(crate) fn write_resp_wrongtype(out: &mut BytesMut) {
+    ServerWire::write_resp_error(out, crate::storage::WRONGTYPE_MESSAGE);
 }
 
 #[cfg(feature = "server")]
@@ -233,7 +256,22 @@ pub(crate) fn write_result_resp(_out: &mut BytesMut, _result: RedisObjectResult)
 }
 
 #[cfg(not(feature = "server"))]
+pub(crate) fn write_resp_null(_out: &mut BytesMut) {
+    unreachable!("RESP writers are only called by the server feature")
+}
+
+#[cfg(not(feature = "server"))]
 pub(crate) fn write_resp_simple_string(_out: &mut BytesMut, _value: &str) {
+    unreachable!("RESP writers are only called by the server feature")
+}
+
+#[cfg(not(feature = "server"))]
+pub(crate) fn write_resp_wrong_arity(_out: &mut BytesMut, _command: &str) {
+    unreachable!("RESP writers are only called by the server feature")
+}
+
+#[cfg(not(feature = "server"))]
+pub(crate) fn write_resp_wrongtype(_out: &mut BytesMut) {
     unreachable!("RESP writers are only called by the server feature")
 }
 

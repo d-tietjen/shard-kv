@@ -6,13 +6,14 @@ use crate::commands::formal_range::normalize_redis_range;
 use crate::commands::redis::write_result_resp;
 use crate::commands::redis::{
     array_bulk, bulk, error, int, parse_f64, parse_i64, parse_usize, reserve_resp_bulk_array_hint,
-    write_frame, write_resp_array_header, wrong_arity, wrongtype, zentries_frame,
+    write_frame, write_resp_array_header, write_resp_null, write_resp_wrong_arity,
+    write_resp_wrongtype, wrong_arity, wrongtype, zentries_frame,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
 use crate::storage::{
-    EmbeddedStore, RedisObjectError, RedisObjectReadOutcome, RedisObjectValue,
+    EmbeddedStore, RedisObjectError, RedisObjectReadOutcome, RedisObjectResult, RedisObjectValue,
     RedisObjectZSetRangeItem,
 };
 
@@ -46,6 +47,47 @@ pub(crate) fn write_zrange_rank_resp(
         RedisObjectReadOutcome::Written => {}
         RedisObjectReadOutcome::Missing => write_resp_array_header(out, 0),
         RedisObjectReadOutcome::WrongType => write_frame(out, &wrongtype()),
+    }
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn write_zrange_rank_fast(
+    store: &EmbeddedStore,
+    key: &[u8],
+    start: i64,
+    stop: i64,
+    rev: bool,
+    with_scores: bool,
+    out: &mut BytesMut,
+) {
+    let mut array_start = None;
+    match store.zrange_entries_visit(key, start, stop, rev, |item| match item {
+        RedisObjectZSetRangeItem::Begin(count) => {
+            let len = if with_scores {
+                count.saturating_mul(2)
+            } else {
+                count
+            };
+            array_start = Some(ServerWire::begin_fast_array(out, len));
+        }
+        RedisObjectZSetRangeItem::Entry { member, score } => {
+            ServerWire::write_fast_array_item(out, Some(member));
+            if with_scores {
+                write_fast_score_array_item(out, score);
+            }
+        }
+    }) {
+        RedisObjectReadOutcome::Written => {
+            if let Some(start) = array_start {
+                ServerWire::finish_fast_array(out, start);
+            } else {
+                ServerWire::write_fast_empty_array(out);
+            }
+        }
+        RedisObjectReadOutcome::Missing => ServerWire::write_fast_empty_array(out),
+        RedisObjectReadOutcome::WrongType => {
+            ServerWire::write_fast_error(out, crate::storage::WRONGTYPE_MESSAGE)
+        }
     }
 }
 
@@ -105,6 +147,84 @@ pub(crate) fn zrange_by_score_impl(
 }
 
 #[cfg(feature = "server")]
+pub(crate) fn write_zrange_score_resp(
+    store: &EmbeddedStore,
+    key: &[u8],
+    min: &[u8],
+    max: &[u8],
+    rev: bool,
+    with_scores: bool,
+    limit: Option<(usize, usize)>,
+    out: &mut BytesMut,
+) {
+    let lower = if rev { max } else { min };
+    let upper_bound = if rev { min } else { max };
+    let Ok(lower) = crate::commands::redis::parse_score_bound(lower) else {
+        ServerWire::write_resp_error(out, "ERR min or max is not a float");
+        return;
+    };
+    let Ok(upper) = crate::commands::redis::parse_score_bound(upper_bound) else {
+        ServerWire::write_resp_error(out, "ERR min or max is not a float");
+        return;
+    };
+    let mut entries = match store.zentries(key) {
+        Ok(entries) => entries,
+        Err(RedisObjectError::WrongType) => {
+            write_resp_wrongtype(out);
+            return;
+        }
+        Err(RedisObjectError::MissingKey) => Vec::new(),
+    };
+    entries.retain(|(_, score)| lower.contains(*score, true) && upper.contains(*score, false));
+    if rev {
+        entries.reverse();
+    }
+    if let Some((offset, count)) = limit {
+        entries = entries.into_iter().skip(offset).take(count).collect();
+    }
+    write_zentries_resp(out, entries, with_scores);
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn write_zrange_score_fast(
+    store: &EmbeddedStore,
+    key: &[u8],
+    min: &[u8],
+    max: &[u8],
+    rev: bool,
+    with_scores: bool,
+    limit: Option<(usize, usize)>,
+    out: &mut BytesMut,
+) {
+    let lower = if rev { max } else { min };
+    let upper_bound = if rev { min } else { max };
+    let Ok(lower) = crate::commands::redis::parse_score_bound(lower) else {
+        ServerWire::write_fast_error(out, "ERR min or max is not a float");
+        return;
+    };
+    let Ok(upper) = crate::commands::redis::parse_score_bound(upper_bound) else {
+        ServerWire::write_fast_error(out, "ERR min or max is not a float");
+        return;
+    };
+    let mut entries = match store.zentries(key) {
+        Ok(entries) => entries,
+        Err(RedisObjectError::WrongType) => {
+            ServerWire::write_fast_error(out, crate::storage::WRONGTYPE_MESSAGE);
+            return;
+        }
+        Err(RedisObjectError::MissingKey) => Vec::new(),
+    };
+    entries.retain(|(_, score)| lower.contains(*score, true) && upper.contains(*score, false));
+    if rev {
+        entries.reverse();
+    }
+    if let Some((offset, count)) = limit {
+        entries = entries.into_iter().skip(offset).take(count).collect();
+    }
+    write_zentries_fast(out, entries, with_scores);
+}
+
+#[cfg(feature = "server")]
 pub(crate) fn write_resp_score(out: &mut BytesMut, score: f64) {
     if score.fract() == 0.0 && score.is_finite() {
         let mut buffer = itoa::Buffer::new();
@@ -112,6 +232,17 @@ pub(crate) fn write_resp_score(out: &mut BytesMut, score: f64) {
     } else {
         let score = score.to_string();
         ServerWire::write_resp_blob_string(out, score.as_bytes());
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_fast_score_array_item(out: &mut BytesMut, score: f64) {
+    if score.fract() == 0.0 && score.is_finite() {
+        let mut buffer = itoa::Buffer::new();
+        ServerWire::write_fast_array_item(out, Some(buffer.format(score as i64).as_bytes()));
+    } else {
+        let score = score.to_string();
+        ServerWire::write_fast_array_item(out, Some(score.as_bytes()));
     }
 }
 
@@ -154,6 +285,101 @@ pub(crate) fn zpop(store: &EmbeddedStore, args: &[&[u8]], max: bool) -> Frame {
     }
 }
 
+pub(crate) fn zmpop(store: &EmbeddedStore, args: &[&[u8]], blocking: bool) -> Frame {
+    let parsed = match parse_zmpop_args(args, blocking) {
+        Ok(parsed) => parsed,
+        Err(frame) => return frame,
+    };
+    for key in parsed.keys {
+        match store.zpop(key, parsed.count, parsed.max) {
+            RedisObjectResult::Array(values) if values.is_empty() => {}
+            RedisObjectResult::Array(values) => {
+                return Frame::Array(vec![bulk((*key).to_vec()), zmpop_entries_frame(values)]);
+            }
+            RedisObjectResult::WrongType => return wrongtype(),
+            _ => {}
+        }
+    }
+    Frame::Null
+}
+
+#[derive(Clone, Copy)]
+struct ZMpopArgs<'a> {
+    keys: &'a [&'a [u8]],
+    max: bool,
+    count: usize,
+}
+
+fn parse_zmpop_args<'a>(
+    args: &'a [&'a [u8]],
+    blocking: bool,
+) -> std::result::Result<ZMpopArgs<'a>, Frame> {
+    let name = if blocking { "BZMPOP" } else { "ZMPOP" };
+    let offset = usize::from(blocking);
+    if args.len() < offset + 3 {
+        return Err(wrong_arity(name));
+    }
+    if blocking {
+        let Ok(timeout) = parse_f64(args[0]) else {
+            return Err(error("ERR timeout is not a float or out of range"));
+        };
+        if timeout < 0.0 {
+            return Err(error("ERR timeout is negative"));
+        }
+    }
+    let Ok(numkeys) = parse_usize(args[offset]) else {
+        return Err(error("ERR value is not an integer or out of range"));
+    };
+    if numkeys == 0 {
+        return Err(error("ERR numkeys should be greater than 0"));
+    }
+    let direction_index = offset + 1 + numkeys;
+    if args.len() <= direction_index {
+        return Err(error("ERR syntax error"));
+    }
+    let max = match args[direction_index] {
+        value if crate::commands::redis::eq_ignore_ascii_case(value, b"MIN") => false,
+        value if crate::commands::redis::eq_ignore_ascii_case(value, b"MAX") => true,
+        _ => return Err(error("ERR syntax error")),
+    };
+    let mut count = 1usize;
+    let mut index = direction_index + 1;
+    while index < args.len() {
+        if crate::commands::redis::eq_ignore_ascii_case(args[index], b"COUNT")
+            && index + 1 < args.len()
+        {
+            let Ok(parsed) = parse_usize(args[index + 1]) else {
+                return Err(error("ERR value is not an integer or out of range"));
+            };
+            if parsed == 0 {
+                return Err(error("ERR count should be greater than 0"));
+            }
+            count = parsed;
+            index += 2;
+            continue;
+        }
+        return Err(error("ERR syntax error"));
+    }
+    Ok(ZMpopArgs {
+        keys: &args[offset + 1..direction_index],
+        max,
+        count,
+    })
+}
+
+fn zmpop_entries_frame(values: Vec<Option<Vec<u8>>>) -> Frame {
+    let mut entries = Vec::with_capacity(values.len() / 2);
+    for pair in values.chunks(2) {
+        let member = pair.first().and_then(|value| value.clone());
+        let score = pair.get(1).and_then(|value| value.clone());
+        entries.push(Frame::Array(vec![
+            member.map_or(Frame::Null, bulk),
+            score.map_or(Frame::Null, bulk),
+        ]));
+    }
+    Frame::Array(entries)
+}
+
 #[cfg(feature = "server")]
 pub(crate) fn write_zpop_resp(
     store: &EmbeddedStore,
@@ -173,6 +399,16 @@ pub(crate) fn write_zpop_resp(
     }
 }
 
+#[cfg(feature = "server")]
+pub(crate) fn write_zmpop_resp(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    blocking: bool,
+    out: &mut BytesMut,
+) {
+    write_frame(out, &zmpop(store, args, blocking));
+}
+
 #[cfg(not(feature = "server"))]
 pub(crate) fn write_zrange_rank_resp(
     _store: &EmbeddedStore,
@@ -184,6 +420,47 @@ pub(crate) fn write_zrange_rank_resp(
     _out: &mut BytesMut,
 ) {
     unreachable!("RESP zset writers are only called by the server feature")
+}
+
+#[cfg(not(feature = "server"))]
+pub(crate) fn write_zrange_rank_fast(
+    _store: &EmbeddedStore,
+    _key: &[u8],
+    _start: i64,
+    _stop: i64,
+    _rev: bool,
+    _with_scores: bool,
+    _out: &mut BytesMut,
+) {
+    unreachable!("FCNP zset writers are only called by the server feature")
+}
+
+#[cfg(not(feature = "server"))]
+pub(crate) fn write_zrange_score_resp(
+    _store: &EmbeddedStore,
+    _key: &[u8],
+    _min: &[u8],
+    _max: &[u8],
+    _rev: bool,
+    _with_scores: bool,
+    _limit: Option<(usize, usize)>,
+    _out: &mut BytesMut,
+) {
+    unreachable!("RESP zset writers are only called by the server feature")
+}
+
+#[cfg(not(feature = "server"))]
+pub(crate) fn write_zrange_score_fast(
+    _store: &EmbeddedStore,
+    _key: &[u8],
+    _min: &[u8],
+    _max: &[u8],
+    _rev: bool,
+    _with_scores: bool,
+    _limit: Option<(usize, usize)>,
+    _out: &mut BytesMut,
+) {
+    unreachable!("FCNP zset writers are only called by the server feature")
 }
 
 #[cfg(not(feature = "server"))]
@@ -206,6 +483,16 @@ pub(crate) fn write_zpop_resp(
     _store: &EmbeddedStore,
     _args: &[&[u8]],
     _max: bool,
+    _out: &mut BytesMut,
+) {
+    unreachable!("RESP zset writers are only called by the server feature")
+}
+
+#[cfg(not(feature = "server"))]
+pub(crate) fn write_zmpop_resp(
+    _store: &EmbeddedStore,
+    _args: &[&[u8]],
+    _blocking: bool,
     _out: &mut BytesMut,
 ) {
     unreachable!("RESP zset writers are only called by the server feature")
@@ -239,6 +526,82 @@ pub(crate) fn zrangebylex(store: &EmbeddedStore, args: &[&[u8]], rev: bool) -> F
     }
 }
 
+#[cfg(feature = "server")]
+pub(crate) fn write_zrange_lex_resp(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    rev: bool,
+    out: &mut BytesMut,
+) {
+    match args {
+        [key, min, max] => {
+            let lower = if rev { *max } else { *min };
+            let upper = if rev { *min } else { *max };
+            let (Ok(min), Ok(max)) = (
+                crate::commands::redis::parse_lex_bound(lower),
+                crate::commands::redis::parse_lex_bound(upper),
+            ) else {
+                ServerWire::write_resp_error(out, "ERR min or max not valid string range item");
+                return;
+            };
+            let mut entries = match store.zentries(key) {
+                Ok(entries) => entries,
+                Err(RedisObjectError::WrongType) => {
+                    write_resp_wrongtype(out);
+                    return;
+                }
+                Err(RedisObjectError::MissingKey) => Vec::new(),
+            };
+            entries.retain(|(member, _)| {
+                min.contains(member.as_slice(), true) && max.contains(member.as_slice(), false)
+            });
+            if rev {
+                entries.reverse();
+            }
+            reserve_resp_bulk_array_hint(out, entries.len());
+            write_resp_array_header(out, entries.len());
+            for (member, _) in entries {
+                ServerWire::write_resp_blob_string(out, &member);
+            }
+        }
+        _ => write_resp_wrong_arity(out, if rev { "ZREVRANGEBYLEX" } else { "ZRANGEBYLEX" }),
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_zentries_resp(out: &mut BytesMut, entries: Vec<(Vec<u8>, f64)>, with_scores: bool) {
+    let len = if with_scores {
+        entries.len().saturating_mul(2)
+    } else {
+        entries.len()
+    };
+    reserve_resp_bulk_array_hint(out, len);
+    write_resp_array_header(out, len);
+    for (member, score) in entries {
+        ServerWire::write_resp_blob_string(out, &member);
+        if with_scores {
+            write_resp_score(out, score);
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_zentries_fast(out: &mut BytesMut, entries: Vec<(Vec<u8>, f64)>, with_scores: bool) {
+    let len = if with_scores {
+        entries.len().saturating_mul(2)
+    } else {
+        entries.len()
+    };
+    let start = ServerWire::begin_fast_array(out, len);
+    for (member, score) in entries {
+        ServerWire::write_fast_array_item(out, Some(&member));
+        if with_scores {
+            write_fast_score_array_item(out, score);
+        }
+    }
+    ServerWire::finish_fast_array(out, start);
+}
+
 pub(crate) fn zrangestore_len(
     store: &EmbeddedStore,
     args: &[&[u8]],
@@ -267,7 +630,7 @@ pub(crate) fn zrangestore_len(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ZAggregateKind {
     Union,
     Inter,
@@ -275,11 +638,19 @@ pub(crate) enum ZAggregateKind {
 }
 
 impl ZAggregateKind {
-    fn name(self) -> &'static str {
+    pub(crate) fn store_name(self) -> &'static str {
         match self {
             Self::Union => "ZUNIONSTORE",
             Self::Inter => "ZINTERSTORE",
             Self::Diff => "ZDIFFSTORE",
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Union => "ZUNION",
+            Self::Inter => "ZINTER",
+            Self::Diff => "ZDIFF",
         }
     }
 }
@@ -297,7 +668,7 @@ pub(crate) fn zaggregate_store(
     kind: ZAggregateKind,
 ) -> Frame {
     if args.len() < 3 {
-        return wrong_arity(kind.name());
+        return wrong_arity(kind.store_name());
     }
     let Ok(numkeys) = parse_usize(args[1]) else {
         return error("ERR value is not an integer or out of range");
@@ -355,6 +726,221 @@ pub(crate) fn zaggregate_store(
     };
     store.set_object_value(dest, RedisObjectValue::ZSet(entries.clone()), None);
     int(entries.len() as i64)
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn write_zaggregate_store_resp(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    kind: ZAggregateKind,
+    out: &mut BytesMut,
+) {
+    if args.len() < 3 {
+        write_resp_wrong_arity(out, kind.store_name());
+        return;
+    }
+    let Ok(numkeys) = parse_usize(args[1]) else {
+        ServerWire::write_resp_error(out, "ERR value is not an integer or out of range");
+        return;
+    };
+    if args.len() < 2 + numkeys {
+        ServerWire::write_resp_error(out, "ERR syntax error");
+        return;
+    }
+    let dest = args[0];
+    let keys = &args[2..2 + numkeys];
+    let mut weights = vec![1.0; numkeys];
+    let mut aggregate = Aggregate::Sum;
+    let mut index = 2 + numkeys;
+    while index < args.len() {
+        let option = args[index];
+        match option {
+            option
+                if crate::commands::redis::eq_ignore_ascii_case(option, b"WEIGHTS")
+                    && index + numkeys < args.len() =>
+            {
+                for (weight, raw) in weights
+                    .iter_mut()
+                    .zip(&args[index + 1..index + 1 + numkeys])
+                {
+                    let Ok(parsed) = parse_f64(raw) else {
+                        ServerWire::write_resp_error(out, "ERR weight value is not a float");
+                        return;
+                    };
+                    *weight = parsed;
+                }
+                index += 1 + numkeys;
+            }
+            option
+                if crate::commands::redis::eq_ignore_ascii_case(option, b"AGGREGATE")
+                    && index + 1 < args.len() =>
+            {
+                aggregate = match args[index + 1] {
+                    raw if crate::commands::redis::eq_ignore_ascii_case(raw, b"SUM") => {
+                        Aggregate::Sum
+                    }
+                    raw if crate::commands::redis::eq_ignore_ascii_case(raw, b"MIN") => {
+                        Aggregate::Min
+                    }
+                    raw if crate::commands::redis::eq_ignore_ascii_case(raw, b"MAX") => {
+                        Aggregate::Max
+                    }
+                    _ => {
+                        ServerWire::write_resp_error(out, "ERR syntax error");
+                        return;
+                    }
+                };
+                index += 2;
+            }
+            _ => {
+                ServerWire::write_resp_error(out, "ERR syntax error");
+                return;
+            }
+        }
+    }
+    let entries = match compute_zaggregate(store, keys, &weights, kind, aggregate) {
+        Ok(entries) => entries,
+        Err(_) => {
+            write_resp_wrongtype(out);
+            return;
+        }
+    };
+    let len = entries.len();
+    store.set_object_value(dest, RedisObjectValue::ZSet(entries), None);
+    ServerWire::write_resp_integer(out, len as i64);
+}
+
+pub(crate) fn zaggregate(store: &EmbeddedStore, args: &[&[u8]], kind: ZAggregateKind) -> Frame {
+    let parsed = match parse_zaggregate_args(args, kind, false) {
+        Ok(parsed) => parsed,
+        Err(frame) => return frame,
+    };
+    let entries =
+        match compute_zaggregate(store, parsed.keys, &parsed.weights, kind, parsed.aggregate) {
+            Ok(entries) => entries,
+            Err(frame) => return frame,
+        };
+    zentries_frame(entries, parsed.with_scores)
+}
+
+pub(crate) fn zintercard(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+    let parsed = match parse_zaggregate_args(args, ZAggregateKind::Inter, true) {
+        Ok(parsed) => parsed,
+        Err(frame) => return frame,
+    };
+    let entries = match compute_zaggregate(
+        store,
+        parsed.keys,
+        &parsed.weights,
+        ZAggregateKind::Inter,
+        Aggregate::Sum,
+    ) {
+        Ok(entries) => entries,
+        Err(frame) => return frame,
+    };
+    let len = match parsed.limit {
+        Some(0) | None => entries.len(),
+        Some(limit) => entries.len().min(limit),
+    };
+    int(len as i64)
+}
+
+struct ParsedZAggregate<'a> {
+    keys: &'a [&'a [u8]],
+    weights: Vec<f64>,
+    aggregate: Aggregate,
+    with_scores: bool,
+    limit: Option<usize>,
+}
+
+fn parse_zaggregate_args<'a>(
+    args: &'a [&'a [u8]],
+    kind: ZAggregateKind,
+    cardinality_only: bool,
+) -> std::result::Result<ParsedZAggregate<'a>, Frame> {
+    if args.len() < 2 {
+        return Err(wrong_arity(match cardinality_only {
+            true => "ZINTERCARD",
+            false => kind.name(),
+        }));
+    }
+    let Ok(numkeys) = parse_usize(args[0]) else {
+        return Err(error("ERR value is not an integer or out of range"));
+    };
+    if numkeys == 0 || args.len() < 1 + numkeys {
+        return Err(error("ERR syntax error"));
+    }
+    let keys = &args[1..1 + numkeys];
+    let mut weights = vec![1.0; numkeys];
+    let mut aggregate = Aggregate::Sum;
+    let mut with_scores = false;
+    let mut limit = None;
+    let mut index = 1 + numkeys;
+    while index < args.len() {
+        let option = args[index];
+        if cardinality_only {
+            if crate::commands::redis::eq_ignore_ascii_case(option, b"LIMIT")
+                && index + 1 < args.len()
+            {
+                let Ok(parsed) = parse_usize(args[index + 1]) else {
+                    return Err(error("ERR value is not an integer or out of range"));
+                };
+                limit = Some(parsed);
+                index += 2;
+                continue;
+            }
+            return Err(error("ERR syntax error"));
+        }
+        match option {
+            option if crate::commands::redis::eq_ignore_ascii_case(option, b"WITHSCORES") => {
+                with_scores = true;
+                index += 1;
+            }
+            option
+                if kind != ZAggregateKind::Diff
+                    && crate::commands::redis::eq_ignore_ascii_case(option, b"WEIGHTS")
+                    && index + numkeys < args.len() =>
+            {
+                for (weight, raw) in weights
+                    .iter_mut()
+                    .zip(&args[index + 1..index + 1 + numkeys])
+                {
+                    let Ok(parsed) = parse_f64(raw) else {
+                        return Err(error("ERR weight value is not a float"));
+                    };
+                    *weight = parsed;
+                }
+                index += 1 + numkeys;
+            }
+            option
+                if kind != ZAggregateKind::Diff
+                    && crate::commands::redis::eq_ignore_ascii_case(option, b"AGGREGATE")
+                    && index + 1 < args.len() =>
+            {
+                aggregate = match args[index + 1] {
+                    raw if crate::commands::redis::eq_ignore_ascii_case(raw, b"SUM") => {
+                        Aggregate::Sum
+                    }
+                    raw if crate::commands::redis::eq_ignore_ascii_case(raw, b"MIN") => {
+                        Aggregate::Min
+                    }
+                    raw if crate::commands::redis::eq_ignore_ascii_case(raw, b"MAX") => {
+                        Aggregate::Max
+                    }
+                    _ => return Err(error("ERR syntax error")),
+                };
+                index += 2;
+            }
+            _ => return Err(error("ERR syntax error")),
+        }
+    }
+    Ok(ParsedZAggregate {
+        keys,
+        weights,
+        aggregate,
+        with_scores,
+        limit,
+    })
 }
 
 fn compute_zaggregate(
@@ -456,4 +1042,41 @@ pub(crate) fn bzpop(store: &EmbeddedStore, args: &[&[u8]], max: bool) -> Frame {
         ]);
     }
     Frame::Null
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn write_bzpop_resp(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    max: bool,
+    out: &mut BytesMut,
+) {
+    if args.len() < 2 {
+        write_resp_wrong_arity(out, if max { "BZPOPMAX" } else { "BZPOPMIN" });
+        return;
+    }
+    for key in &args[..args.len() - 1] {
+        let mut entries = match store.zentries(key) {
+            Ok(entries) => entries,
+            Err(RedisObjectError::WrongType) => {
+                write_resp_wrongtype(out);
+                return;
+            }
+            Err(RedisObjectError::MissingKey) => Vec::new(),
+        };
+        if entries.is_empty() {
+            continue;
+        }
+        if max {
+            entries.reverse();
+        }
+        let (member, score) = entries[0].clone();
+        let _ = store.zrem(key, &member);
+        write_resp_array_header(out, 3);
+        ServerWire::write_resp_blob_string(out, key);
+        ServerWire::write_resp_blob_string(out, &member);
+        write_resp_score(out, score);
+        return;
+    }
+    write_resp_null(out);
 }

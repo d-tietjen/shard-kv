@@ -139,7 +139,7 @@ impl Persist {
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Persist {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         match ctx.args.as_slice() {
             [key] => ServerWire::write_resp_integer(ctx.out, ctx.store.persist(key) as i64),
             _ => ServerWire::write_resp_error(

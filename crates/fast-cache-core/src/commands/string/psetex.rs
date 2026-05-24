@@ -139,7 +139,7 @@ impl DecodedFastCommand for PSetEx {
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for PSetEx {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         match ctx.args.as_slice() {
             [key, ttl, value] => match TtlMillis::<()>::ascii_millis(ttl) {
                 Some(ttl_ms) => {

@@ -3,6 +3,7 @@ use super::transactions::{TransactionCoordinator, TransactionState};
 use super::wire::*;
 use super::*;
 use crate::config::TransactionMode;
+use crate::protocol::FastCommandKind;
 #[cfg(feature = "redis-compat")]
 use crate::storage::RedisObjectResult;
 use crate::storage::{hash_key, hash_key_tag, shift_for, stripe_index};
@@ -39,6 +40,15 @@ impl RespTestHarness {
         commands: &[&[&[u8]]],
         transaction_mode: TransactionMode,
     ) -> Vec<Frame> {
+        Self::exec_resp_sequence_on_owned_shard(store, commands, transaction_mode, None)
+    }
+
+    fn exec_resp_sequence_on_owned_shard(
+        store: &EmbeddedStore,
+        commands: &[&[&[u8]]],
+        transaction_mode: TransactionMode,
+        owned_shard_id: Option<usize>,
+    ) -> Vec<Frame> {
         let mut input = Vec::new();
         for command in commands {
             encode_resp_command(command, &mut input);
@@ -55,7 +65,7 @@ impl RespTestHarness {
             None,
             SharedRequestBufferContext {
                 single_threaded: false,
-                owned_shard_id: None,
+                owned_shard_id,
                 started_at: Instant::now(),
                 transaction_coordinator: coordinator.as_deref(),
                 transaction_state: &mut transaction_state,
@@ -126,6 +136,7 @@ impl RespTestHarness {
                 command: FastCommand::RespCommand { parts },
             },
             &mut out,
+            None,
             false,
             Instant::now(),
         );
@@ -158,6 +169,38 @@ fn encode_fcnp_resp_command(parts: &[&[u8]], out: &mut Vec<u8>) {
         },
         out,
     );
+}
+
+fn exec_fcnp_redis_opcode_on_owned_shard(
+    store: &EmbeddedStore,
+    owned_shard_id: usize,
+    kind: FastCommandKind,
+    args: Vec<&[u8]>,
+) -> FastResponse {
+    let route = args.first().map(|key| store.route_key(key));
+    let mut frame = Vec::new();
+    FastCodec::encode_request(
+        &FastRequest {
+            key_hash: route.as_ref().map(|route| route.key_hash),
+            route_shard: route.as_ref().map(|route| route.shard_id as u32),
+            key_tag: args.first().map(|key| hash_key_tag(key)),
+            command: FastCommand::RedisCommand { kind, args },
+        },
+        &mut frame,
+    );
+    let mut out = BytesMut::new();
+    let consumed = DirectProtocol::process_shared_request_buffer(
+        &frame,
+        store,
+        &mut out,
+        None,
+        false,
+        Some(owned_shard_id),
+        Instant::now(),
+    )
+    .expect("FCNP Redis opcode should process");
+    assert_eq!(consumed, frame.len());
+    FastCodec::decode_response(&out).unwrap().unwrap().0
 }
 
 fn decode_resp_stream(mut raw: &[u8]) -> Vec<Frame> {
@@ -239,6 +282,17 @@ fn decode_bulk_array(raw: &[u8]) -> Vec<Vec<u8>> {
 }
 
 #[cfg(feature = "redis-compat")]
+fn decode_optional_bulk(raw: &[u8]) -> Option<Vec<u8>> {
+    let (frame, consumed) = RespCodec::decode(raw).unwrap().expect("bulk response");
+    assert_eq!(consumed, raw.len());
+    match frame {
+        Frame::BlobString(value) => Some(value),
+        Frame::Null => None,
+        other => panic!("response should be bulk string or null, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "redis-compat")]
 fn assert_resp_error_contains(store: &EmbeddedStore, parts: &[&[u8]], expected: &str) {
     let raw = RespTestHarness::exec_resp(store, parts);
     let (frame, consumed) = RespCodec::decode(&raw).unwrap().expect("error response");
@@ -249,6 +303,172 @@ fn assert_resp_error_contains(store: &EmbeddedStore, parts: &[&[u8]], expected: 
     assert!(
         message.contains(expected),
         "expected error containing {expected:?}, got {message:?}"
+    );
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn raw_resp_dump_restore_round_trips_strings_and_objects() {
+    let store = EmbeddedStore::new(4);
+
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"DUMP", b"missing"]),
+        b"$-1\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SET", b"dump-s", b"value"]),
+        b"+OK\r\n".to_vec()
+    );
+    let string_dump =
+        decode_optional_bulk(&RespTestHarness::exec_resp(&store, &[b"DUMP", b"dump-s"]))
+            .expect("dump-s should exist");
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"RESTORE",
+                b"restore-s",
+                b"0",
+                string_dump.as_slice(),
+                b"REPLACE",
+            ],
+        ),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"GET", b"restore-s"]),
+        b"$5\r\nvalue\r\n".to_vec()
+    );
+    assert_resp_error_contains(
+        &store,
+        &[b"RESTORE", b"restore-s", b"0", string_dump.as_slice()],
+        "BUSYKEY",
+    );
+    let mut bad_dump = string_dump.clone();
+    bad_dump[1] ^= 0xff;
+    assert_resp_error_contains(
+        &store,
+        &[
+            b"RESTORE",
+            b"bad-restore",
+            b"0",
+            bad_dump.as_slice(),
+            b"REPLACE",
+        ],
+        "DUMP payload",
+    );
+
+    let past = crate::storage::now_millis().saturating_sub(1).to_string();
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"RESTORE",
+                b"restore-expired",
+                past.as_bytes(),
+                string_dump.as_slice(),
+                b"REPLACE",
+                b"ABSTTL",
+            ],
+        ),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"EXISTS", b"restore-expired"]),
+        0
+    );
+
+    assert_eq!(
+        store.hset(b"dump-h", b"a", b"1"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        store.hset(b"dump-h", b"b", b"2"),
+        RedisObjectResult::Integer(1)
+    );
+    let hash_dump =
+        decode_optional_bulk(&RespTestHarness::exec_resp(&store, &[b"DUMP", b"dump-h"]))
+            .expect("dump-h should exist");
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[b"RESTORE", b"restore-h", b"0", hash_dump.as_slice()],
+        ),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"HGET", b"restore-h", b"b"]),
+        b"$1\r\n2\r\n".to_vec()
+    );
+
+    assert_eq!(
+        store.rpush(b"dump-l", &[b"a".as_slice(), b"b".as_slice()]),
+        RedisObjectResult::Integer(2)
+    );
+    let list_dump =
+        decode_optional_bulk(&RespTestHarness::exec_resp(&store, &[b"DUMP", b"dump-l"]))
+            .expect("dump-l should exist");
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[b"RESTORE", b"restore-l", b"0", list_dump.as_slice()],
+        ),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"LRANGE", b"restore-l", b"0", b"-1"],
+        )),
+        vec![b"a".to_vec(), b"b".to_vec()]
+    );
+
+    assert_eq!(
+        store.sadd(b"dump-set", &[b"b".as_slice(), b"a".as_slice()]),
+        RedisObjectResult::Integer(2)
+    );
+    let set_dump =
+        decode_optional_bulk(&RespTestHarness::exec_resp(&store, &[b"DUMP", b"dump-set"]))
+            .expect("dump-set should exist");
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[b"RESTORE", b"restore-set", b"0", set_dump.as_slice()],
+        ),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        BTreeSet::from_iter(decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"SMEMBERS", b"restore-set"],
+        ))),
+        BTreeSet::from([b"a".to_vec(), b"b".to_vec()])
+    );
+
+    assert_eq!(
+        store.zadd(b"dump-z", 1.0, b"a"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        store.zadd(b"dump-z", 2.5, b"b"),
+        RedisObjectResult::Integer(1)
+    );
+    let zset_dump =
+        decode_optional_bulk(&RespTestHarness::exec_resp(&store, &[b"DUMP", b"dump-z"]))
+            .expect("dump-z should exist");
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[b"RESTORE", b"restore-z", b"0", zset_dump.as_slice()],
+        ),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"ZRANGE", b"restore-z", b"0", b"-1", b"WITHSCORES"],
+        )),
+        vec![b"a".to_vec(), b"1".to_vec(), b"b".to_vec(), b"2.5".to_vec()]
     );
 }
 
@@ -599,6 +819,247 @@ fn raw_resp_missing_compat_batch_round_trip() {
             &[b"LRANGE", b"lm-dst", b"0", b"-1"]
         )),
         vec![b"c".to_vec()]
+    );
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn raw_resp_expanded_redis_surface_round_trip() {
+    let store = EmbeddedStore::new(4);
+    let bulk = |value: &[u8]| Frame::BlobString(value.to_vec());
+
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SET", b"exp-nx", b"v"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"EXPIRE", b"exp-nx", b"60", b"NX"]),
+        1
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"EXPIRE", b"exp-nx", b"60", b"NX"]),
+        0
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"EXPIRE", b"exp-nx", b"120", b"GT"]),
+        1
+    );
+    assert!(RespTestHarness::exec_resp_integer(&store, &[b"EXPIRETIME", b"exp-nx"]) > 0);
+    assert!(RespTestHarness::exec_resp_integer(&store, &[b"PEXPIRETIME", b"exp-nx"]) > 0);
+
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SET", b"mem", b"value"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert!(RespTestHarness::exec_resp_integer(&store, &[b"MEMORY", b"USAGE", b"mem"]) >= 8);
+
+    assert!(RespTestHarness::exec_resp_integer(&store, &[b"COMMAND", b"COUNT"]) > 0);
+    let command_list =
+        decode_bulk_array(&RespTestHarness::exec_resp(&store, &[b"COMMAND", b"LIST"]));
+    assert!(command_list.iter().any(|name| name == b"GET"));
+    assert!(command_list.iter().any(|name| name == b"FLUSHDB"));
+    let command_info = decode_resp_stream(&RespTestHarness::exec_resp(
+        &store,
+        &[b"COMMAND", b"INFO", b"GET"],
+    ));
+    assert!(matches!(
+        &command_info[..],
+        [Frame::Array(items)] if matches!(items.first(), Some(Frame::Array(_)))
+    ));
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"COMMAND", b"GETKEYS", b"MGET", b"ca", b"cb"]
+        )),
+        vec![b"ca".to_vec(), b"cb".to_vec()]
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"COMMAND", b"GETKEYS", b"LMPOP", b"2", b"la", b"lb", b"LEFT"
+            ]
+        )),
+        vec![Frame::Array(vec![bulk(b"la"), bulk(b"lb")])]
+    );
+    let keys_and_flags = decode_resp_stream(&RespTestHarness::exec_resp(
+        &store,
+        &[b"COMMAND", b"GETKEYSANDFLAGS", b"MEMORY", b"USAGE", b"mem"],
+    ));
+    assert!(matches!(
+        &keys_and_flags[..],
+        [Frame::Array(items)]
+            if matches!(
+                items.first(),
+                Some(Frame::Array(pair))
+                    if matches!(pair.first(), Some(Frame::BlobString(key)) if key == b"mem")
+            )
+    ));
+    assert!(
+        !decode_bulk_array(&RespTestHarness::exec_resp(&store, &[b"COMMAND", b"HELP"])).is_empty()
+    );
+
+    assert_eq!(
+        store.rpush(
+            b"lmpop",
+            &[b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]
+        ),
+        RedisObjectResult::Integer(3)
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[b"LMPOP", b"1", b"lmpop", b"LEFT", b"COUNT", b"2"]
+        )),
+        vec![Frame::Array(vec![
+            bulk(b"lmpop"),
+            Frame::Array(vec![bulk(b"a"), bulk(b"b")])
+        ])]
+    );
+
+    assert_eq!(
+        store.rpush(
+            b"blmpop",
+            &[b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]
+        ),
+        RedisObjectResult::Integer(3)
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"BLMPOP", b"0.001", b"1", b"blmpop", b"RIGHT", b"COUNT", b"2"
+            ]
+        )),
+        vec![Frame::Array(vec![
+            bulk(b"blmpop"),
+            Frame::Array(vec![bulk(b"c"), bulk(b"b")])
+        ])]
+    );
+
+    assert_eq!(store.zadd(b"zu1", 1.0, b"a"), RedisObjectResult::Integer(1));
+    assert_eq!(store.zadd(b"zu1", 2.0, b"b"), RedisObjectResult::Integer(1));
+    assert_eq!(store.zadd(b"zu2", 3.0, b"a"), RedisObjectResult::Integer(1));
+    assert_eq!(store.zadd(b"zu2", 4.0, b"c"), RedisObjectResult::Integer(1));
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"ZUNION", b"2", b"zu1", b"zu2", b"WITHSCORES"]
+        )),
+        vec![
+            b"b".to_vec(),
+            b"2".to_vec(),
+            b"a".to_vec(),
+            b"4".to_vec(),
+            b"c".to_vec(),
+            b"4".to_vec(),
+        ]
+    );
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"ZINTER", b"2", b"zu1", b"zu2", b"WITHSCORES"]
+        )),
+        vec![b"a".to_vec(), b"4".to_vec()]
+    );
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"ZDIFF", b"2", b"zu1", b"zu2"]
+        )),
+        vec![b"b".to_vec()]
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(
+            &store,
+            &[b"ZINTERCARD", b"2", b"zu1", b"zu2", b"LIMIT", b"10"]
+        ),
+        1
+    );
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"ZRANDMEMBER", b"zu1", b"2", b"WITHSCORES"]
+        )),
+        vec![b"a".to_vec(), b"1".to_vec(), b"b".to_vec(), b"2".to_vec()]
+    );
+
+    assert_eq!(
+        store.zadd(b"zmpop", 1.0, b"a"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        store.zadd(b"zmpop", 2.0, b"b"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        store.zadd(b"zmpop", 3.0, b"c"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[b"ZMPOP", b"1", b"zmpop", b"MIN", b"COUNT", b"2"]
+        )),
+        vec![Frame::Array(vec![
+            bulk(b"zmpop"),
+            Frame::Array(vec![
+                Frame::Array(vec![bulk(b"a"), bulk(b"1")]),
+                Frame::Array(vec![bulk(b"b"), bulk(b"2")]),
+            ])
+        ])]
+    );
+
+    assert_eq!(
+        store.zadd(b"bzmpop", 1.0, b"a"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        store.zadd(b"bzmpop", 2.0, b"b"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        store.zadd(b"bzmpop", 3.0, b"c"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[b"BZMPOP", b"0.001", b"1", b"bzmpop", b"MAX", b"COUNT", b"2"]
+        )),
+        vec![Frame::Array(vec![
+            bulk(b"bzmpop"),
+            Frame::Array(vec![
+                Frame::Array(vec![bulk(b"c"), bulk(b"3")]),
+                Frame::Array(vec![bulk(b"b"), bulk(b"2")]),
+            ])
+        ])]
+    );
+
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SET", b"flush-me", b"v"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"FLUSHDB"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"EXISTS", b"flush-me"]),
+        0
+    );
+
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SET", b"flush-all", b"v"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"FLUSHALL", b"SYNC"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"EXISTS", b"flush-all"]),
+        0
     );
 }
 
@@ -1294,6 +1755,74 @@ fn raw_resp_scan_type_string_excludes_object_keys() {
 
 #[test]
 #[cfg(feature = "redis-compat")]
+fn raw_resp_scan_type_object_walks_objects_with_cursor() {
+    let store = EmbeddedStore::new(4);
+    assert_eq!(
+        store.hset(b"h:one", b"f", b"1"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        store.hset(b"h:two", b"f", b"2"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        store.sadd(b"s", &[b"m".as_slice()]),
+        RedisObjectResult::Integer(1)
+    );
+
+    let mut cursor = 0;
+    let mut seen = BTreeSet::new();
+    for _ in 0..16 {
+        let cursor_text = cursor.to_string();
+        let raw = RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"SCAN",
+                cursor_text.as_bytes(),
+                b"TYPE",
+                b"hash",
+                b"COUNT",
+                b"1",
+            ],
+        );
+        let (next_cursor, keys) = decode_scan_response(&raw);
+        assert!(keys.len() <= 1);
+        seen.extend(keys);
+        cursor = next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    assert_eq!(seen, BTreeSet::from([b"h:one".to_vec(), b"h:two".to_vec()]));
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn raw_resp_keys_streams_string_and_object_keys() {
+    let store = EmbeddedStore::new(4);
+    store.set(b"str:one".to_vec(), b"v".to_vec(), None);
+    store.set(b"other".to_vec(), b"v".to_vec(), None);
+    assert_eq!(
+        store.hset(b"hash:one", b"field", b"value"),
+        RedisObjectResult::Integer(1)
+    );
+
+    let all = decode_bulk_array(&RespTestHarness::exec_resp(&store, &[b"KEYS", b"*"]));
+    assert_eq!(
+        BTreeSet::from_iter(all),
+        BTreeSet::from([b"hash:one".to_vec(), b"other".to_vec(), b"str:one".to_vec()])
+    );
+
+    let filtered = decode_bulk_array(&RespTestHarness::exec_resp(&store, &[b"KEYS", b"*one"]));
+    assert_eq!(
+        BTreeSet::from_iter(filtered),
+        BTreeSet::from([b"hash:one".to_vec(), b"str:one".to_vec()])
+    );
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
 fn raw_resp_object_streaming_commands_round_trip() {
     let store = EmbeddedStore::new(4);
 
@@ -1774,6 +2303,441 @@ fn fcnp_owned_shard_fast_path_handles_tagged_get_set_del() {
     let response = FastCodec::decode_response(&out).unwrap().unwrap().0;
     assert_eq!(response, FastResponse::Integer(1));
     assert!(store.get(key).is_none());
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn fcnp_owned_shard_port_accepts_typed_object_opcodes() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let owned_shard = 2;
+    let key = key_for_shard(&store, owned_shard);
+    let route = store.route_key(&key);
+
+    let mut frame = Vec::new();
+    FastCodec::encode_request(
+        &FastRequest {
+            key_hash: Some(route.key_hash),
+            route_shard: Some(route.shard_id as u32),
+            key_tag: Some(hash_key_tag(&key)),
+            command: FastCommand::HSet {
+                key: key.as_slice(),
+                field: b"field",
+                value: b"value",
+            },
+        },
+        &mut frame,
+    );
+    let mut out = BytesMut::new();
+    let consumed = DirectProtocol::process_shared_request_buffer(
+        &frame,
+        &store,
+        &mut out,
+        None,
+        false,
+        Some(owned_shard),
+        Instant::now(),
+    )
+    .expect("typed HSET should process on owned shard");
+    assert_eq!(consumed, frame.len());
+    let response = FastCodec::decode_response(&out).unwrap().unwrap().0;
+    let FastResponse::Value(raw) = response else {
+        panic!("typed HSET should return RESP bytes, got {response:?}");
+    };
+    assert_eq!(decode_resp_stream(&raw), vec![Frame::Integer(1)]);
+
+    frame.clear();
+    out.clear();
+    FastCodec::encode_request(
+        &FastRequest {
+            key_hash: Some(route.key_hash),
+            route_shard: Some(route.shard_id as u32),
+            key_tag: Some(hash_key_tag(&key)),
+            command: FastCommand::HGet {
+                key: key.as_slice(),
+                field: b"field",
+            },
+        },
+        &mut frame,
+    );
+    let consumed = DirectProtocol::process_shared_request_buffer(
+        &frame,
+        &store,
+        &mut out,
+        None,
+        false,
+        Some(owned_shard),
+        Instant::now(),
+    )
+    .expect("typed HGET should process on owned shard");
+    assert_eq!(consumed, frame.len());
+    let response = FastCodec::decode_response(&out).unwrap().unwrap().0;
+    let FastResponse::Value(raw) = response else {
+        panic!("typed HGET should return RESP bytes, got {response:?}");
+    };
+    assert_eq!(
+        decode_resp_stream(&raw),
+        vec![Frame::BlobString(b"value".to_vec())]
+    );
+}
+
+#[test]
+fn resp_owned_shard_port_accepts_routed_redis_commands() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let owned_shard = 2;
+    let key = key_for_shard(&store, owned_shard);
+    let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[
+            &[b"SET", key.as_slice(), b"value"],
+            &[b"GET", key.as_slice()],
+        ],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+
+    assert_eq!(
+        responses,
+        vec![
+            Frame::SimpleString("OK".to_string()),
+            Frame::BlobString(b"value".to_vec())
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn resp_owned_shard_port_handles_dump_restore_fast_path() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let owned_shard = 2;
+    let key = key_for_shard(&store, owned_shard);
+    let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[
+            &[b"SET", key.as_slice(), b"value"],
+            &[b"DUMP", key.as_slice()],
+        ],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+
+    assert_eq!(responses[0], Frame::SimpleString("OK".to_string()));
+    let Frame::BlobString(payload) = responses[1].clone() else {
+        panic!("DUMP should return a payload");
+    };
+
+    let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[
+            b"RESTORE",
+            key.as_slice(),
+            b"0",
+            payload.as_slice(),
+            b"REPLACE",
+        ]],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+    assert_eq!(responses, vec![Frame::SimpleString("OK".to_string())]);
+
+    let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[b"GET", key.as_slice()]],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+    assert_eq!(responses, vec![Frame::BlobString(b"value".to_vec())]);
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn fcnp_owned_shard_port_accepts_opcode_redis_commands() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let owned_shard = 2;
+    let key = key_for_shard(&store, owned_shard);
+    RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[b"SET", key.as_slice(), b"value"]],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::Dump,
+        vec![key.as_slice()],
+    );
+    let FastResponse::Value(raw) = response else {
+        panic!("DUMP opcode should return RESP bytes");
+    };
+    let payload = decode_optional_bulk(&raw).expect("DUMP payload");
+
+    RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[b"SET", key.as_slice(), b"changed"]],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::Restore,
+        vec![
+            key.as_slice(),
+            b"0".as_slice(),
+            payload.as_slice(),
+            b"REPLACE".as_slice(),
+        ],
+    );
+    let FastResponse::Value(raw) = response else {
+        panic!("RESTORE opcode should return RESP bytes");
+    };
+    assert_eq!(
+        decode_resp_stream(&raw),
+        vec![Frame::SimpleString("OK".to_string())]
+    );
+
+    let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[b"GET", key.as_slice()]],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+    assert_eq!(responses, vec![Frame::BlobString(b"value".to_vec())]);
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn fcnp_redis_opcode_hot_arrays_use_fast_array_responses() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let owned_shard = 2;
+    let key = key_for_shard(&store, owned_shard);
+    let same_shard_key = (0..10_000)
+        .map(|index| format!("array-key-{owned_shard}-{index}").into_bytes())
+        .find(|candidate| candidate != &key && store.route_key(candidate).shard_id == owned_shard)
+        .expect("same-shard key");
+
+    RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[
+            &[b"SET", key.as_slice(), b"value"],
+            &[b"SET", same_shard_key.as_slice(), b"other"],
+        ],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::MGet,
+        vec![key.as_slice(), same_shard_key.as_slice()],
+    );
+    assert_eq!(
+        response,
+        FastResponse::Array(vec![Some(b"value".to_vec()), Some(b"other".to_vec())])
+    );
+
+    let list_key = (0..10_000)
+        .map(|index| format!("array-list-{owned_shard}-{index}").into_bytes())
+        .find(|candidate| store.route_key(candidate).shard_id == owned_shard)
+        .expect("same-shard list key");
+    assert_eq!(
+        store.rpush(&list_key, &[b"a".as_slice(), b"b".as_slice()]),
+        RedisObjectResult::Integer(2)
+    );
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::LRange,
+        vec![list_key.as_slice(), b"0".as_slice(), b"-1".as_slice()],
+    );
+    assert_eq!(
+        response,
+        FastResponse::Array(vec![Some(b"a".to_vec()), Some(b"b".to_vec())])
+    );
+
+    let hash_key = (0..10_000)
+        .map(|index| format!("array-hash-{owned_shard}-{index}").into_bytes())
+        .find(|candidate| store.route_key(candidate).shard_id == owned_shard)
+        .expect("same-shard hash key");
+    RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[b"HSET", hash_key.as_slice(), b"f1", b"v1", b"f2", b"v2"]],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::HGetAll,
+        vec![hash_key.as_slice()],
+    );
+    let FastResponse::Array(values) = response else {
+        panic!("HGETALL should use FCNP array status");
+    };
+    assert_eq!(
+        values
+            .chunks_exact(2)
+            .map(|pair| (pair[0].clone().unwrap(), pair[1].clone().unwrap()))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            (b"f1".to_vec(), b"v1".to_vec()),
+            (b"f2".to_vec(), b"v2".to_vec())
+        ])
+    );
+
+    let zset_key = (0..10_000)
+        .map(|index| format!("array-zset-{owned_shard}-{index}").into_bytes())
+        .find(|candidate| store.route_key(candidate).shard_id == owned_shard)
+        .expect("same-shard zset key");
+    assert_eq!(
+        store.zadd(&zset_key, 1.0, b"one"),
+        RedisObjectResult::Integer(1)
+    );
+    assert_eq!(
+        store.zadd(&zset_key, 2.0, b"two"),
+        RedisObjectResult::Integer(1)
+    );
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::ZRange,
+        vec![
+            zset_key.as_slice(),
+            b"0".as_slice(),
+            b"-1".as_slice(),
+            b"WITHSCORES".as_slice(),
+        ],
+    );
+    assert_eq!(
+        response,
+        FastResponse::Array(vec![
+            Some(b"one".to_vec()),
+            Some(b"1".to_vec()),
+            Some(b"two".to_vec()),
+            Some(b"2".to_vec())
+        ])
+    );
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn fcnp_redis_opcode_command_uses_cached_fast_responses() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let owned_shard = 0;
+
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::Command,
+        vec![b"COUNT".as_slice()],
+    );
+    let FastResponse::Integer(count) = response else {
+        panic!("COMMAND COUNT should use FCNP integer status");
+    };
+    assert!(count > 0);
+
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::Command,
+        vec![b"LIST".as_slice()],
+    );
+    let FastResponse::Array(commands) = response else {
+        panic!("COMMAND LIST should use FCNP array status");
+    };
+    assert!(commands.iter().any(|command| {
+        command
+            .as_deref()
+            .is_some_and(|name| name.eq_ignore_ascii_case(b"GET"))
+    }));
+
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::Command,
+        vec![],
+    );
+    let FastResponse::Value(raw) = response else {
+        panic!("COMMAND should keep RESP bytes for nested command metadata");
+    };
+    assert!(matches!(
+        decode_resp_stream(&raw).as_slice(),
+        [Frame::Array(_)]
+    ));
+}
+
+#[test]
+#[cfg(feature = "redis-compat")]
+fn fcnp_owned_shard_port_rejects_misrouted_opcode_redis_commands() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let owned_shard = 0;
+    let wrong_shard = 1;
+    let key = key_for_shard(&store, wrong_shard);
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::Dump,
+        vec![key.as_slice()],
+    );
+
+    assert_eq!(
+        response,
+        FastResponse::Error(b"ERR FCNP route shard mismatch".to_vec())
+    );
+}
+
+#[test]
+fn resp_owned_shard_port_rejects_misrouted_redis_commands() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let owned_shard = 0;
+    let wrong_shard = 1;
+    let key = key_for_shard(&store, wrong_shard);
+    let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[b"GET", key.as_slice()]],
+        TransactionMode::Disabled,
+        Some(owned_shard),
+    );
+
+    assert_eq!(
+        responses,
+        vec![Frame::Error("ERR direct shard route mismatch".to_string())]
+    );
+}
+
+#[test]
+fn resp_owned_shard_port_rejects_all_shard_redis_commands() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[b"KEYS", b"*"]],
+        TransactionMode::Disabled,
+        Some(0),
+    );
+
+    assert_eq!(
+        responses,
+        vec![Frame::Error("ERR direct shard route mismatch".to_string())]
+    );
+}
+
+#[test]
+fn resp_owned_shard_port_rejects_transactions() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[b"MULTI"]],
+        TransactionMode::ShardLocal,
+        Some(0),
+    );
+
+    assert_eq!(
+        responses,
+        vec![Frame::Error(
+            "ERR transactions are not supported on direct shard RESP ports".to_string()
+        )]
+    );
 }
 
 #[test]

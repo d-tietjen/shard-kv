@@ -247,6 +247,193 @@ impl RedisObjectBucket {
         );
     }
 
+    pub(crate) fn visit_keys(&self, now_ms: u64, visitor: &mut impl FnMut(&[u8]) -> bool) -> bool {
+        if !self.has_expirations() {
+            return visit_key_iter(self.hashes.keys(), visitor)
+                && visit_key_iter(self.lists.keys(), visitor)
+                && visit_key_iter(self.sets.keys(), visitor)
+                && visit_key_iter(self.zsets.keys(), visitor);
+        }
+
+        self.visit_unexpired_key_iter(self.hashes.keys(), now_ms, visitor)
+            && self.visit_unexpired_key_iter(self.lists.keys(), now_ms, visitor)
+            && self.visit_unexpired_key_iter(self.sets.keys(), now_ms, visitor)
+            && self.visit_unexpired_key_iter(self.zsets.keys(), now_ms, visitor)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn scan_keys_visit(
+        &self,
+        now_ms: u64,
+        type_filter: Option<&[u8]>,
+        cursor_offset: usize,
+        position: &mut usize,
+        visited: &mut usize,
+        emitted: &mut usize,
+        limit: usize,
+        visitor: &mut impl FnMut(&[u8]) -> bool,
+    ) -> Option<usize> {
+        if let Some(kind) = type_filter {
+            if kind.eq_ignore_ascii_case(b"hash") {
+                return self.scan_key_iter(
+                    self.hashes.keys(),
+                    now_ms,
+                    cursor_offset,
+                    position,
+                    visited,
+                    emitted,
+                    limit,
+                    visitor,
+                );
+            }
+            if kind.eq_ignore_ascii_case(b"list") {
+                return self.scan_key_iter(
+                    self.lists.keys(),
+                    now_ms,
+                    cursor_offset,
+                    position,
+                    visited,
+                    emitted,
+                    limit,
+                    visitor,
+                );
+            }
+            if kind.eq_ignore_ascii_case(b"set") {
+                return self.scan_key_iter(
+                    self.sets.keys(),
+                    now_ms,
+                    cursor_offset,
+                    position,
+                    visited,
+                    emitted,
+                    limit,
+                    visitor,
+                );
+            }
+            if kind.eq_ignore_ascii_case(b"zset") {
+                return self.scan_key_iter(
+                    self.zsets.keys(),
+                    now_ms,
+                    cursor_offset,
+                    position,
+                    visited,
+                    emitted,
+                    limit,
+                    visitor,
+                );
+            }
+            return None;
+        }
+
+        if let Some(offset) = self.scan_key_iter(
+            self.hashes.keys(),
+            now_ms,
+            cursor_offset,
+            position,
+            visited,
+            emitted,
+            limit,
+            visitor,
+        ) {
+            return Some(offset);
+        }
+        if let Some(offset) = self.scan_key_iter(
+            self.lists.keys(),
+            now_ms,
+            cursor_offset,
+            position,
+            visited,
+            emitted,
+            limit,
+            visitor,
+        ) {
+            return Some(offset);
+        }
+        if let Some(offset) = self.scan_key_iter(
+            self.sets.keys(),
+            now_ms,
+            cursor_offset,
+            position,
+            visited,
+            emitted,
+            limit,
+            visitor,
+        ) {
+            return Some(offset);
+        }
+        self.scan_key_iter(
+            self.zsets.keys(),
+            now_ms,
+            cursor_offset,
+            position,
+            visited,
+            emitted,
+            limit,
+            visitor,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scan_key_iter<'a>(
+        &self,
+        keys: impl Iterator<Item = &'a Bytes>,
+        now_ms: u64,
+        cursor_offset: usize,
+        position: &mut usize,
+        visited: &mut usize,
+        emitted: &mut usize,
+        limit: usize,
+        visitor: &mut impl FnMut(&[u8]) -> bool,
+    ) -> Option<usize> {
+        if !self.has_expirations() {
+            return scan_key_iter_no_expiration(
+                keys,
+                cursor_offset,
+                position,
+                visited,
+                emitted,
+                limit,
+                visitor,
+            );
+        }
+
+        for key in keys {
+            if self.object_is_expired(key, now_ms) {
+                continue;
+            }
+
+            if *position < cursor_offset {
+                *position += 1;
+                continue;
+            }
+
+            *position += 1;
+            *visited = visited.saturating_add(1);
+            if visitor(key) {
+                *emitted = emitted.saturating_add(1);
+            }
+            if *visited >= limit {
+                return Some(*position);
+            }
+        }
+        None
+    }
+
+    #[inline(always)]
+    fn visit_unexpired_key_iter<'a>(
+        &self,
+        keys: impl Iterator<Item = &'a Bytes>,
+        now_ms: u64,
+        visitor: &mut impl FnMut(&[u8]) -> bool,
+    ) -> bool {
+        for key in keys {
+            if !self.object_is_expired(key, now_ms) && !visitor(key) {
+                return false;
+            }
+        }
+        true
+    }
+
     #[inline(always)]
     pub(super) fn has_non_hash(&self, key: &[u8]) -> bool {
         self.lists.contains_key(key) || self.sets.contains_key(key) || self.zsets.contains_key(key)
@@ -275,4 +462,46 @@ impl RedisObjectBucket {
     pub(super) fn has_non_zset(&self, key: &[u8]) -> bool {
         self.hashes.contains_key(key) || self.lists.contains_key(key) || self.sets.contains_key(key)
     }
+}
+
+#[inline(always)]
+fn visit_key_iter<'a>(
+    keys: impl Iterator<Item = &'a Bytes>,
+    visitor: &mut impl FnMut(&[u8]) -> bool,
+) -> bool {
+    for key in keys {
+        if !visitor(key) {
+            return false;
+        }
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn scan_key_iter_no_expiration<'a>(
+    keys: impl Iterator<Item = &'a Bytes>,
+    cursor_offset: usize,
+    position: &mut usize,
+    visited: &mut usize,
+    emitted: &mut usize,
+    limit: usize,
+    visitor: &mut impl FnMut(&[u8]) -> bool,
+) -> Option<usize> {
+    for key in keys {
+        if *position < cursor_offset {
+            *position += 1;
+            continue;
+        }
+
+        *position += 1;
+        *visited = visited.saturating_add(1);
+        if visitor(key) {
+            *emitted = emitted.saturating_add(1);
+        }
+        if *visited >= limit {
+            return Some(*position);
+        }
+    }
+    None
 }

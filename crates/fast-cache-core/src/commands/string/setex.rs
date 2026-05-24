@@ -200,7 +200,7 @@ impl SetEx {
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for SetEx {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         match ctx.args.as_slice() {
             [key, ttl, value] => match TtlMillis::<()>::ascii_seconds(ttl) {
                 Some(ttl_ms) => {

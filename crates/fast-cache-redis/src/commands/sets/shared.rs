@@ -2,9 +2,10 @@ use crate::storage::RedisKeyStore;
 #[cfg(feature = "server")]
 use bytes::BytesMut;
 
-#[cfg(feature = "server")]
-use crate::commands::redis::write_frame;
-use crate::commands::redis::{array_bulk, int, wrong_arity, wrongtype};
+use crate::commands::redis::{
+    array_bulk, int, reserve_resp_bulk_array_hint, write_resp_array_header, write_resp_wrong_arity,
+    write_resp_wrongtype, wrong_arity, wrongtype,
+};
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
@@ -61,6 +62,31 @@ pub(crate) fn set_store(store: &EmbeddedStore, args: &[&[u8]], op: SetOp) -> Fra
 }
 
 #[cfg(feature = "server")]
+pub(crate) fn write_set_op_resp(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    op: SetOp,
+    out: &mut BytesMut,
+) {
+    if args.is_empty() {
+        write_resp_wrong_arity(out, op.name(false));
+        return;
+    }
+    let result = match compute_set_op(store, args, op) {
+        Ok(values) => values,
+        Err(_) => {
+            write_resp_wrongtype(out);
+            return;
+        }
+    };
+    reserve_resp_bulk_array_hint(out, result.len());
+    write_resp_array_header(out, result.len());
+    for value in result {
+        ServerWire::write_resp_blob_string(out, &value);
+    }
+}
+
+#[cfg(feature = "server")]
 pub(crate) fn write_set_store_resp(
     store: &EmbeddedStore,
     args: &[&[u8]],
@@ -68,13 +94,13 @@ pub(crate) fn write_set_store_resp(
     out: &mut BytesMut,
 ) {
     if args.len() < 2 {
-        write_frame(out, &wrong_arity(op.name(true)));
+        write_resp_wrong_arity(out, op.name(true));
         return;
     }
     let result = match compute_set_op(store, &args[1..], op) {
         Ok(values) => values,
-        Err(frame) => {
-            write_frame(out, &frame);
+        Err(_) => {
+            write_resp_wrongtype(out);
             return;
         }
     };

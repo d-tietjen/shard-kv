@@ -12,8 +12,22 @@ pub(crate) trait RedisListStore {
     fn lpop_count(&self, key: &[u8], count: usize) -> RedisObjectResult;
     fn rpop_count(&self, key: &[u8], count: usize) -> RedisObjectResult;
     fn llen(&self, key: &[u8]) -> RedisObjectResult;
+    fn llen_visit(&self, key: &[u8], write: impl FnOnce(i64)) -> RedisObjectReadOutcome;
     fn lindex(&self, key: &[u8], index: i64) -> RedisObjectResult;
+    fn lindex_visit(
+        &self,
+        key: &[u8],
+        index: i64,
+        write: impl FnOnce(Option<&[u8]>),
+    ) -> RedisObjectReadOutcome;
     fn lrange(&self, key: &[u8], start: i64, stop: i64) -> RedisObjectResult;
+    fn lrange_visit(
+        &self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome;
     fn lset(&self, key: &[u8], index: i64, value: &[u8]) -> RedisObjectResult;
     fn lrem(&self, key: &[u8], count: i64, value: &[u8]) -> RedisObjectResult;
     fn ltrim(&self, key: &[u8], start: i64, stop: i64) -> RedisObjectResult;
@@ -71,12 +85,39 @@ impl RedisListStore for EmbeddedStore {
         self.object_read(key, |bucket| bucket.llen(key))
     }
 
+    fn llen_visit(&self, key: &[u8], write: impl FnOnce(i64)) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| bucket.llen_visit(key, write))
+    }
+
     fn lindex(&self, key: &[u8], index: i64) -> RedisObjectResult {
         self.object_read(key, |bucket| bucket.lindex(key, index))
     }
 
+    fn lindex_visit(
+        &self,
+        key: &[u8],
+        index: i64,
+        write: impl FnOnce(Option<&[u8]>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.lindex_visit(key, index, write)
+        })
+    }
+
     fn lrange(&self, key: &[u8], start: i64, stop: i64) -> RedisObjectResult {
         self.object_read(key, |bucket| bucket.lrange(key, start, stop))
+    }
+
+    fn lrange_visit(
+        &self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        mut emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.lrange_visit(key, start, stop, &mut emit)
+        })
     }
 
     fn lset(&self, key: &[u8], index: i64, value: &[u8]) -> RedisObjectResult {

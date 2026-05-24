@@ -128,4 +128,56 @@ impl RedisObjectStore {
         }
         keys
     }
+
+    pub(crate) fn visit_keys(&self, now_ms: u64, visitor: &mut impl FnMut(&[u8]) -> bool) -> bool {
+        if !self.has_objects() {
+            return true;
+        }
+
+        for shard_id in 0..self.shards.len() {
+            if self.shard_object_count_hint(shard_id) == 0 {
+                continue;
+            }
+            for bucket in &self.shards[shard_id].buckets {
+                if !bucket.read().visit_keys(now_ms, visitor) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn scan_keys_in_shard_visit(
+        &self,
+        shard_id: usize,
+        now_ms: u64,
+        type_filter: Option<&[u8]>,
+        offset: usize,
+        limit: usize,
+        visited: &mut usize,
+        emitted: &mut usize,
+        visitor: &mut impl FnMut(&[u8]) -> bool,
+    ) -> Option<usize> {
+        if self.shard_object_count_hint(shard_id) == 0 {
+            return None;
+        }
+
+        let mut position = 0usize;
+        for bucket in &self.shards[shard_id].buckets {
+            if let Some(offset) = bucket.read().scan_keys_visit(
+                now_ms,
+                type_filter,
+                offset,
+                &mut position,
+                visited,
+                emitted,
+                limit,
+                visitor,
+            ) {
+                return Some(offset);
+            }
+        }
+        None
+    }
 }

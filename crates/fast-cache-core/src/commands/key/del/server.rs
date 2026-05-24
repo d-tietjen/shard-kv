@@ -11,8 +11,10 @@ use super::Del;
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Del {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
-        let RawCommandContext { store, args, out } = ctx;
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
+        let RawCommandContext {
+            store, args, out, ..
+        } = ctx;
         match DelRawArgs::from_args(args.as_slice()) {
             DelRawArgs::Ready { keys } => {
                 ServerWire::write_resp_integer(out, Del::delete_embedded_keys(store, keys));

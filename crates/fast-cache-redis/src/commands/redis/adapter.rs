@@ -93,6 +93,25 @@ pub(crate) trait RedisCommand: CommandSpec + Send + Sync + 'static {
         write_frame(out, &Self::execute(store, args));
     }
 
+    #[cfg(feature = "server")]
+    #[inline(always)]
+    fn write_fast(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        let start = ServerWire::begin_fast_value(out);
+        Self::write_resp(store, args, out);
+        ServerWire::finish_fast_value(out, start);
+    }
+
+    #[cfg(feature = "server")]
+    #[inline(always)]
+    fn write_resp_owned_shard(
+        _store: &EmbeddedStore,
+        _args: &[&[u8]],
+        _owned_shard_id: usize,
+        _out: &mut BytesMut,
+    ) -> bool {
+        false
+    }
+
     #[inline(always)]
     fn matches_fast(_command: &FastCommand<'_>) -> bool {
         false
@@ -208,8 +227,22 @@ impl<C> RawDirectCommand for C
 where
     C: RedisCommand,
 {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         C::write_resp(ctx.store, &ctx.args, ctx.out);
+    }
+
+    fn execute_fast(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
+        C::write_fast(ctx.store, &ctx.args, ctx.out);
+    }
+
+    fn execute_owned_shard(
+        &self,
+        store: &EmbeddedStore,
+        args: &[&[u8]],
+        out: &mut BytesMut,
+        owned_shard_id: usize,
+    ) -> bool {
+        C::write_resp_owned_shard(store, args, owned_shard_id, out)
     }
 }
 

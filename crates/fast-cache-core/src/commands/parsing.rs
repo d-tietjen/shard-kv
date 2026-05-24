@@ -31,6 +31,16 @@ where
         }
     }
 
+    pub(crate) fn range(actual: usize, min: usize, max: usize) -> Result<()> {
+        match (min..=max).contains(&actual) {
+            true => Ok(()),
+            false => Err(FastCacheError::Command(format!(
+                "{} expects {min} to {max} arguments, got {actual}",
+                C::NAME
+            ))),
+        }
+    }
+
     pub(crate) fn at_least(actual: usize, min: usize, requirement: &str) -> Result<()> {
         match actual >= min {
             true => Ok(()),

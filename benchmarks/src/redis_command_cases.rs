@@ -34,6 +34,7 @@ pub type RedisCommandSetup = &'static [RedisCommandParts];
 pub enum RedisCommandProfile {
     Small,
     Large,
+    Destructive,
 }
 
 impl RedisCommandProfile {
@@ -41,6 +42,7 @@ impl RedisCommandProfile {
         match self {
             Self::Small => "small",
             Self::Large => "large",
+            Self::Destructive => "destructive",
         }
     }
 }
@@ -63,6 +65,17 @@ impl RedisCommandCase {
             || filter.eq_ignore_ascii_case(self.family.label())
             || filter.eq_ignore_ascii_case(self.command_name)
             || filter.eq_ignore_ascii_case(self.case_name)
+    }
+
+    pub fn is_keyspace_wide(self) -> bool {
+        self.command_name == "FLUSHALL"
+            || self.command_name == "FLUSHDB"
+            || self.command_name == "KEYS"
+            || self.command_name == "RANDOMKEY"
+            || matches!(
+                self.case_name,
+                "SCAN all" | "SCAN type string" | "SCAN large keyspace"
+            )
     }
 }
 
@@ -120,6 +133,26 @@ macro_rules! case_script {
     };
 }
 
+macro_rules! destructive_case_script {
+    (
+        $family:ident,
+        $command_name:literal,
+        $case_name:literal,
+        [$($display_part:literal),+ $(,)?],
+        [$([$($script_part:literal),+ $(,)?]),+ $(,)?]
+    ) => {
+        RedisCommandCase {
+            family: RedisCommandFamily::$family,
+            command_name: $command_name,
+            case_name: $case_name,
+            profile: RedisCommandProfile::Destructive,
+            parts: &[$($display_part),+],
+            script: &[$(&[$($script_part),+] as RedisCommandParts),+],
+            setup: &[],
+        }
+    };
+}
+
 macro_rules! large_case {
     (
         $family:ident,
@@ -141,10 +174,65 @@ macro_rules! large_case {
 }
 
 pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
+    case!(Connection, "AUTH", "AUTH", ["AUTH", "unused"]),
     case!(Connection, "PING", "PING", ["PING"]),
     case!(Connection, "ECHO", "ECHO", ["ECHO", "hello"]),
+    case!(Connection, "HELLO", "HELLO 2", ["HELLO", "2"]),
     case!(Connection, "SELECT", "SELECT", ["SELECT", "0"]),
+    case!(
+        Connection,
+        "CLIENT",
+        "CLIENT GETNAME",
+        ["CLIENT", "GETNAME"]
+    ),
+    case!(
+        Connection,
+        "CLIENT",
+        "CLIENT SETNAME",
+        ["CLIENT", "SETNAME", "bench"]
+    ),
+    case!(Connection, "CLIENT", "CLIENT ID", ["CLIENT", "ID"]),
+    case!(Connection, "CLIENT", "CLIENT LIST", ["CLIENT", "LIST"]),
+    case!(
+        Connection,
+        "CLIENT",
+        "CLIENT KILL ID 0",
+        ["CLIENT", "KILL", "ID", "0"]
+    ),
     case!(Server, "DBSIZE", "DBSIZE empty", ["DBSIZE"]),
+    case!(Server, "TIME", "TIME", ["TIME"]),
+    case!(Server, "INFO", "INFO", ["INFO"]),
+    case_with_setup!(
+        Server,
+        "MEMORY",
+        "MEMORY USAGE string",
+        ["MEMORY", "USAGE", "memory-bench"],
+        [["SET", "memory-bench", "v"]]
+    ),
+    case!(Server, "COMMAND", "COMMAND", ["COMMAND"]),
+    case!(Server, "COMMAND", "COMMAND COUNT", ["COMMAND", "COUNT"]),
+    case!(Server, "COMMAND", "COMMAND LIST", ["COMMAND", "LIST"]),
+    case!(
+        Server,
+        "COMMAND",
+        "COMMAND INFO GET",
+        ["COMMAND", "INFO", "GET"]
+    ),
+    case!(
+        Server,
+        "COMMAND",
+        "COMMAND GETKEYS MGET",
+        ["COMMAND", "GETKEYS", "MGET", "ca", "cb"]
+    ),
+    case!(
+        Server,
+        "COMMAND",
+        "COMMAND GETKEYSANDFLAGS MGET",
+        ["COMMAND", "GETKEYSANDFLAGS", "MGET", "ca", "cb"]
+    ),
+    case!(Server, "COMMAND", "COMMAND DOCS", ["COMMAND", "DOCS"]),
+    case!(Server, "COMMAND", "COMMAND HELP", ["COMMAND", "HELP"]),
+    case!(Server, "CONFIG", "CONFIG GET all", ["CONFIG", "GET", "*"]),
     case_script!(
         Transaction,
         "MULTI",
@@ -166,8 +254,34 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["DISCARD"],
         [["MULTI"], ["SET", "txn-discard", "v"], ["DISCARD"]]
     ),
+    case_script!(
+        Transaction,
+        "WATCH",
+        "WATCH simple",
+        ["WATCH", "$key:watch-bench"],
+        [["WATCH", "$key:watch-bench"], ["UNWATCH"]]
+    ),
+    case_script!(
+        Transaction,
+        "UNWATCH",
+        "UNWATCH simple",
+        ["UNWATCH"],
+        [["WATCH", "$key:unwatch-bench"], ["UNWATCH"]]
+    ),
     case!(String, "SET", "SET string", ["SET", "s", "v"]),
     case!(String, "GET", "GET string", ["GET", "s"]),
+    case!(
+        String,
+        "SETEX",
+        "SETEX",
+        ["SETEX", "$key:setex-bench", "60", "v"]
+    ),
+    case!(
+        String,
+        "PSETEX",
+        "PSETEX",
+        ["PSETEX", "$key:psetex-bench", "60000", "v"]
+    ),
     case!(String, "SET", "SET NX miss", ["SET", "s-nx", "v", "NX"]),
     case!(String, "SET", "SET XX hit", ["SET", "s", "v2", "XX"]),
     case_with_setup!(
@@ -183,17 +297,68 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Key, "PERSIST", "PERSIST", ["PERSIST", "exp"]),
     case_with_setup!(
         Key,
+        "EXPIRE",
+        "EXPIRE future",
+        ["EXPIRE", "$key:expire-bench", "60"],
+        [["SET", "$key:expire-bench", "v"]]
+    ),
+    case_with_setup!(
+        Key,
+        "PEXPIRE",
+        "PEXPIRE future",
+        ["PEXPIRE", "$key:pexpire-bench", "60000"],
+        [["SET", "$key:pexpire-bench", "v"]]
+    ),
+    case_with_setup!(
+        Key,
         "EXPIREAT",
         "EXPIREAT future",
-        ["EXPIREAT", "expireat-bench", "9999999999"],
+        ["EXPIREAT", "expireat-bench", "2000000000"],
         [["SET", "expireat-bench", "v"]]
     ),
     case_with_setup!(
         Key,
         "PEXPIREAT",
         "PEXPIREAT future",
-        ["PEXPIREAT", "pexpireat-bench", "9999999999000"],
+        ["PEXPIREAT", "pexpireat-bench", "2000000000000"],
         [["SET", "pexpireat-bench", "v"]]
+    ),
+    case_with_setup!(
+        Key,
+        "EXPIRE",
+        "EXPIRE NX",
+        ["EXPIRE", "$key:expire-nx-bench", "60", "NX"],
+        [["SET", "$key:expire-nx-bench", "v"]]
+    ),
+    case_with_setup!(
+        Key,
+        "PEXPIRE",
+        "PEXPIRE XX",
+        ["PEXPIRE", "$key:pexpire-xx-bench", "60000", "XX"],
+        [
+            ["SET", "$key:pexpire-xx-bench", "v"],
+            ["PEXPIRE", "$key:pexpire-xx-bench", "60000"]
+        ]
+    ),
+    case_with_setup!(
+        Key,
+        "EXPIRETIME",
+        "EXPIRETIME future",
+        ["EXPIRETIME", "$key:expiretime-bench"],
+        [
+            ["SET", "$key:expiretime-bench", "v"],
+            ["EXPIRE", "$key:expiretime-bench", "60"]
+        ]
+    ),
+    case_with_setup!(
+        Key,
+        "PEXPIRETIME",
+        "PEXPIRETIME future",
+        ["PEXPIRETIME", "$key:pexpiretime-bench"],
+        [
+            ["SET", "$key:pexpiretime-bench", "v"],
+            ["PEXPIRE", "$key:pexpiretime-bench", "60000"]
+        ]
     ),
     case!(Key, "TYPE", "TYPE string", ["TYPE", "s"]),
     case_with_setup!(
@@ -203,12 +368,36 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["OBJECT", "ENCODING", "object-bench"],
         [["SET", "object-bench", "v"]]
     ),
-    case!(Key, "EXISTS", "EXISTS mixed", ["EXISTS", "s", "missing"]),
+    case_with_setup!(
+        Key,
+        "DUMP",
+        "DUMP string",
+        ["DUMP", "$key:dump-bench"],
+        [["SET", "$key:dump-bench", "v"]]
+    ),
+    case!(
+        Key,
+        "RESTORE",
+        "RESTORE string replace",
+        [
+            "RESTORE",
+            "$key:restore-bench",
+            "0",
+            "$dump:string:v",
+            "REPLACE"
+        ]
+    ),
+    case!(
+        Key,
+        "EXISTS",
+        "EXISTS mixed",
+        ["EXISTS", "s", "$key:missing"]
+    ),
     case_with_setup!(
         Key,
         "TOUCH",
         "TOUCH mixed",
-        ["TOUCH", "touch-a", "touch-b", "missing"],
+        ["TOUCH", "touch-a", "touch-b", "$key:missing"],
         [["MSET", "touch-a", "1", "touch-b", "2"]]
     ),
     case_with_setup!(
@@ -255,11 +444,12 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
             ["SET", "renamenx-dst", "existing"]
         ]
     ),
+    case!(Key, "DEL", "DEL missing", ["DEL", "$key:del-bench-missing"]),
     case!(
         Key,
         "UNLINK",
         "UNLINK missing",
-        ["UNLINK", "missing-unlink"]
+        ["UNLINK", "$key:missing-unlink"]
     ),
     case_with_setup!(
         Key,
@@ -307,7 +497,31 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["BITOP", "OR", "bit-out", "bit-a", "bit-b"],
         [["SET", "bit-a", "A"], ["SET", "bit-b", "B"]]
     ),
+    case_with_setup!(
+        String,
+        "BITFIELD",
+        "BITFIELD GET SET",
+        [
+            "BITFIELD",
+            "$key:bitfield-bench",
+            "GET",
+            "u8",
+            "0",
+            "SET",
+            "u8",
+            "8",
+            "42"
+        ],
+        [["SET", "$key:bitfield-bench", "AB"]]
+    ),
     case!(String, "GETSET", "GETSET", ["GETSET", "s", "old"]),
+    case_with_setup!(
+        String,
+        "GETEX",
+        "GETEX PX",
+        ["GETEX", "$key:getex-bench", "PX", "60000"],
+        [["SET", "$key:getex-bench", "v"]]
+    ),
     case!(String, "GETDEL", "GETDEL", ["GETDEL", "s-del"]),
     case!(String, "INCR", "INCR", ["INCR", "n"]),
     case!(String, "INCRBY", "INCRBY", ["INCRBY", "n", "4"]),
@@ -324,7 +538,7 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         String,
         "MGET",
         "MGET order",
-        ["MGET", "mb", "missing", "ma"]
+        ["MGET", "mb", "$key:missing", "ma"]
     ),
     case!(
         String,
@@ -432,6 +646,28 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "BLMOVE ready",
         ["BLMOVE", "bm", "bmd", "RIGHT", "LEFT", "0.001"]
     ),
+    case_with_setup!(
+        List,
+        "LMPOP",
+        "LMPOP left count",
+        ["LMPOP", "1", "lmpop-bench", "LEFT", "COUNT", "2"],
+        [["RPUSH", "lmpop-bench", "a", "b", "c"]]
+    ),
+    case_with_setup!(
+        List,
+        "BLMPOP",
+        "BLMPOP right count",
+        [
+            "BLMPOP",
+            "0.001",
+            "1",
+            "blmpop-bench",
+            "RIGHT",
+            "COUNT",
+            "2"
+        ],
+        [["RPUSH", "blmpop-bench", "a", "b", "c"]]
+    ),
     case!(Set, "SADD", "SADD set-a", ["SADD", "set-a", "a", "b"]),
     case!(Set, "SADD", "SADD set-b", ["SADD", "set-b", "b", "c"]),
     case!(Set, "SISMEMBER", "SISMEMBER", ["SISMEMBER", "set-a", "a"]),
@@ -497,6 +733,13 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["ZRANGE", "z", "0", "-1", "WITHSCORES"]
     ),
     case!(ZSet, "ZINCRBY", "ZINCRBY", ["ZINCRBY", "z", "2", "a"]),
+    case_with_setup!(
+        ZSet,
+        "ZREM",
+        "ZREM missing",
+        ["ZREM", "$key:zrem-bench", "missing"],
+        [["ZADD", "$key:zrem-bench", "1", "a", "2", "b"]]
+    ),
     case!(ZSet, "ZCOUNT", "ZCOUNT", ["ZCOUNT", "z", "0", "10"]),
     case!(ZSet, "ZRANK", "ZRANK", ["ZRANK", "z", "a"]),
     case!(ZSet, "ZREVRANK", "ZREVRANK", ["ZREVRANK", "z", "a"]),
@@ -527,6 +770,12 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["ZADD", "z2", "XX", "GT", "8", "a"]
     ),
     case!(ZSet, "ZSCORE", "ZSCORE z2", ["ZSCORE", "z2", "a"]),
+    case!(
+        ZSet,
+        "ZMSCORE",
+        "ZMSCORE z2",
+        ["ZMSCORE", "z2", "a", "missing", "b"]
+    ),
     case!(
         ZSet,
         "ZRANGE",
@@ -677,6 +926,31 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(
         ZSet,
+        "ZUNION",
+        "ZUNION WITHSCORES",
+        ["ZUNION", "2", "zu1", "zu2", "WITHSCORES"]
+    ),
+    case!(
+        ZSet,
+        "ZINTER",
+        "ZINTER WITHSCORES",
+        ["ZINTER", "2", "zu1", "zu2", "WITHSCORES"]
+    ),
+    case!(ZSet, "ZDIFF", "ZDIFF", ["ZDIFF", "2", "zu1", "zu2"]),
+    case!(
+        ZSet,
+        "ZINTERCARD",
+        "ZINTERCARD",
+        ["ZINTERCARD", "2", "zu1", "zu2", "LIMIT", "10"]
+    ),
+    case!(
+        ZSet,
+        "ZRANDMEMBER",
+        "ZRANDMEMBER WITHSCORES",
+        ["ZRANDMEMBER", "zu1", "2", "WITHSCORES"]
+    ),
+    case!(
+        ZSet,
         "ZRANGE",
         "ZRANGE zd",
         ["ZRANGE", "zd", "0", "-1", "WITHSCORES"]
@@ -694,6 +968,37 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "BZPOPMAX",
         "BZPOPMAX ready",
         ["BZPOPMAX", "bzmax", "0.001"]
+    ),
+    case_with_setup!(
+        ZSet,
+        "ZMPOP",
+        "ZMPOP min count",
+        ["ZMPOP", "1", "zmpop-bench", "MIN", "COUNT", "2"],
+        [["ZADD", "zmpop-bench", "1", "a", "2", "b", "3", "c"]]
+    ),
+    case_with_setup!(
+        ZSet,
+        "BZMPOP",
+        "BZMPOP max count",
+        ["BZMPOP", "0.001", "1", "bzmpop-bench", "MAX", "COUNT", "2"],
+        [["ZADD", "bzmpop-bench", "1", "a", "2", "b", "3", "c"]]
+    ),
+];
+
+pub const REDIS_COMMAND_DESTRUCTIVE_CASES: &[RedisCommandCase] = &[
+    destructive_case_script!(
+        Server,
+        "FLUSHDB",
+        "FLUSHDB one key",
+        ["FLUSHDB"],
+        [["SET", "$key:flushdb-bench", "v"], ["FLUSHDB"]]
+    ),
+    destructive_case_script!(
+        Server,
+        "FLUSHALL",
+        "FLUSHALL one key",
+        ["FLUSHALL"],
+        [["SET", "$key:flushall-bench", "v"], ["FLUSHALL", "SYNC"]]
     ),
 ];
 
@@ -989,28 +1294,43 @@ pub const REDIS_COMMAND_LARGE_CASES: &[RedisCommandCase] = &[
 
 pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "APPEND",
+    "AUTH",
     "BITCOUNT",
+    "BITFIELD",
     "BITOP",
     "BITPOS",
     "BLMOVE",
+    "BLMPOP",
     "BLPOP",
     "BRPOP",
+    "BZMPOP",
     "BZPOPMAX",
     "BZPOPMIN",
+    "CLIENT",
+    "COMMAND",
+    "CONFIG",
     "COPY",
     "DBSIZE",
     "DECR",
     "DECRBY",
+    "DEL",
     "DISCARD",
+    "DUMP",
     "ECHO",
     "EXEC",
     "EXISTS",
+    "EXPIRE",
     "EXPIREAT",
+    "EXPIRETIME",
+    "FLUSHALL",
+    "FLUSHDB",
     "GET",
     "GETBIT",
     "GETDEL",
+    "GETEX",
     "GETRANGE",
     "GETSET",
+    "HELLO",
     "HDEL",
     "HEXISTS",
     "HGET",
@@ -1027,6 +1347,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "HSETNX",
     "HSTRLEN",
     "HVALS",
+    "INFO",
     "INCR",
     "INCRBY",
     "INCRBYFLOAT",
@@ -1035,6 +1356,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "LINSERT",
     "LLEN",
     "LMOVE",
+    "LMPOP",
     "LPOP",
     "LPUSH",
     "LPUSHX",
@@ -1043,17 +1365,22 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "LSET",
     "LTRIM",
     "MGET",
+    "MEMORY",
     "MSET",
     "MSETNX",
     "MULTI",
     "OBJECT",
     "PERSIST",
     "PING",
+    "PEXPIRE",
     "PEXPIREAT",
+    "PEXPIRETIME",
+    "PSETEX",
     "PTTL",
     "RANDOMKEY",
     "RENAME",
     "RENAMENX",
+    "RESTORE",
     "RPOP",
     "RPOPLPUSH",
     "RPUSH",
@@ -1066,6 +1393,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "SELECT",
     "SET",
     "SETBIT",
+    "SETEX",
     "SETNX",
     "SETRANGE",
     "SINTER",
@@ -1081,24 +1409,34 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "STRLEN",
     "SUNION",
     "SUNIONSTORE",
+    "TIME",
     "TTL",
     "TOUCH",
     "TYPE",
     "UNLINK",
+    "UNWATCH",
+    "WATCH",
     "ZADD",
     "ZCARD",
     "ZCOUNT",
+    "ZDIFF",
     "ZDIFFSTORE",
     "ZINCRBY",
+    "ZINTER",
+    "ZINTERCARD",
     "ZINTERSTORE",
     "ZLEXCOUNT",
+    "ZMPOP",
+    "ZMSCORE",
     "ZPOPMAX",
     "ZPOPMIN",
+    "ZRANDMEMBER",
     "ZRANGE",
     "ZRANGEBYLEX",
     "ZRANGEBYSCORE",
     "ZRANGESTORE",
     "ZRANK",
+    "ZREM",
     "ZREMRANGEBYLEX",
     "ZREMRANGEBYRANK",
     "ZREMRANGEBYSCORE",
@@ -1108,6 +1446,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "ZREVRANK",
     "ZSCAN",
     "ZSCORE",
+    "ZUNION",
     "ZUNIONSTORE",
 ];
 
@@ -1115,12 +1454,19 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{BENCHMARKED_COMMANDS, REDIS_COMMAND_CASES, REDIS_COMMAND_LARGE_CASES};
+    use fast_cache::protocol::FastCommandKind;
+
+    use super::{
+        BENCHMARKED_COMMANDS, REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES,
+        REDIS_COMMAND_LARGE_CASES,
+    };
 
     #[test]
     fn benchmark_cases_cover_declared_commands() {
         let actual = REDIS_COMMAND_CASES
             .iter()
+            .chain(REDIS_COMMAND_LARGE_CASES.iter())
+            .chain(REDIS_COMMAND_DESTRUCTIVE_CASES.iter())
             .map(|case| case.command_name)
             .collect::<BTreeSet<_>>();
         let expected = BENCHMARKED_COMMANDS
@@ -1141,11 +1487,25 @@ mod tests {
     }
 
     #[test]
+    fn benchmarked_commands_have_fcnp_opcodes() {
+        let missing = BENCHMARKED_COMMANDS
+            .iter()
+            .copied()
+            .filter(|command| FastCommandKind::from_redis_name(command.as_bytes()).is_none())
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "benchmarked Redis commands without FCNP opcodes: {missing:?}"
+        );
+    }
+
+    #[test]
     fn benchmark_case_names_are_unique() {
         let mut names = BTreeSet::new();
         for case in REDIS_COMMAND_CASES
             .iter()
             .chain(REDIS_COMMAND_LARGE_CASES.iter())
+            .chain(REDIS_COMMAND_DESTRUCTIVE_CASES.iter())
         {
             assert!(
                 names.insert(case.case_name),
@@ -1171,6 +1531,22 @@ mod tests {
             assert!(
                 case.case_name.contains("large"),
                 "large profile case should be clearly labeled: {}",
+                case.case_name
+            );
+        }
+    }
+
+    #[test]
+    fn destructive_benchmark_cases_are_isolated_from_default_profiles() {
+        assert!(
+            !REDIS_COMMAND_DESTRUCTIVE_CASES.is_empty(),
+            "destructive command benchmark profile is empty"
+        );
+        for case in REDIS_COMMAND_DESTRUCTIVE_CASES {
+            assert!(case.matches_filter("destructive"));
+            assert!(
+                case.is_keyspace_wide(),
+                "destructive case should be keyspace-wide: {}",
                 case.case_name
             );
         }

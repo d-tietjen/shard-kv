@@ -8,9 +8,10 @@ mod fast;
 mod resp;
 
 pub use fast::{
-    FAST_FLAG_KEY_HASH, FAST_FLAG_KEY_TAG, FAST_FLAG_ROUTE_SHARD, FAST_PROTOCOL_VERSION,
-    FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC, FastCodec, FastCommand, FastCommandKind, FastRequest,
-    FastRequestDecodeResult, FastResponse, FastResponseDecodeResult,
+    FAST_FLAG_KEY_HASH, FAST_FLAG_KEY_TAG, FAST_FLAG_REDIS_COMMAND_ARGS, FAST_FLAG_ROUTE_SHARD,
+    FAST_PROTOCOL_VERSION, FAST_REDIS_COMMAND_OPCODES, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC,
+    FastCodec, FastCommand, FastCommandKind, FastRedisCommandOpcode, FastRedisRouteKeys,
+    FastRequest, FastRequestDecodeResult, FastResponse, FastResponseDecodeResult,
 };
 pub use resp::{
     BorrowedCommandFrame, BorrowedCommandParts, CommandFrame, CommandSpanFrame, Frame, RespCodec,

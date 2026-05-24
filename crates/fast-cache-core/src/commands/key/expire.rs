@@ -28,11 +28,16 @@ pub(crate) static COMMAND: Expire = Expire;
 pub(crate) struct OwnedExpire {
     key: Vec<u8>,
     ttl_ms: u64,
+    condition: ExpireCondition,
 }
 
 impl OwnedExpire {
-    fn new(key: Vec<u8>, ttl_ms: u64) -> Self {
-        Self { key, ttl_ms }
+    fn new(key: Vec<u8>, ttl_ms: u64, condition: ExpireCondition) -> Self {
+        Self {
+            key,
+            ttl_ms,
+            condition,
+        }
     }
 }
 
@@ -44,7 +49,7 @@ impl super::OwnedCommandData for OwnedExpire {
     }
 
     fn to_borrowed_command(&self) -> super::BorrowedCommandBox<'_> {
-        Box::new(BorrowedExpire::new(&self.key, self.ttl_ms))
+        Box::new(BorrowedExpire::new(&self.key, self.ttl_ms, self.condition))
     }
 }
 
@@ -52,11 +57,16 @@ impl super::OwnedCommandData for OwnedExpire {
 pub(crate) struct BorrowedExpire<'a> {
     key: &'a [u8],
     ttl_ms: u64,
+    condition: ExpireCondition,
 }
 
 impl<'a> BorrowedExpire<'a> {
-    fn new(key: &'a [u8], ttl_ms: u64) -> Self {
-        Self { key, ttl_ms }
+    fn new(key: &'a [u8], ttl_ms: u64, condition: ExpireCondition) -> Self {
+        Self {
+            key,
+            ttl_ms,
+            condition,
+        }
     }
 }
 
@@ -68,7 +78,11 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedExpire<'a> {
     }
 
     fn to_owned_command(&self) -> Command {
-        Command::new(Box::new(OwnedExpire::new(self.key.to_vec(), self.ttl_ms)))
+        Command::new(Box::new(OwnedExpire::new(
+            self.key.to_vec(),
+            self.ttl_ms,
+            self.condition,
+        )))
     }
 
     fn execute_engine<'b>(&'b self, ctx: EngineCommandContext<'b>) -> EngineFrameFuture<'b>
@@ -82,20 +96,33 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedExpire<'a> {
 
     #[cfg(feature = "server")]
     fn execute_borrowed_frame(&self, store: &crate::storage::EmbeddedStore, _now_ms: u64) -> Frame {
-        Frame::Integer(store.expire(self.key, relative_expire_at_ms(self.ttl_ms)) as i64)
+        Frame::Integer(expire_at_changed(
+            store,
+            self.key,
+            relative_expire_at_ms(self.ttl_ms),
+            self.condition,
+        ))
     }
 
     #[cfg(feature = "server")]
     fn execute_borrowed(&self, ctx: BorrowedCommandContext<'_, '_, '_>) {
-        let changed = ctx
-            .store
-            .expire(self.key, relative_expire_at_ms(self.ttl_ms));
-        ServerWire::write_resp_integer(ctx.out, changed as i64);
+        let changed = expire_at_changed(
+            ctx.store,
+            self.key,
+            relative_expire_at_ms(self.ttl_ms),
+            self.condition,
+        );
+        ServerWire::write_resp_integer(ctx.out, changed);
     }
 
     #[cfg(feature = "server")]
     fn execute_direct_borrowed(&self, ctx: DirectCommandContext) -> Frame {
-        Frame::Integer(ctx.expire_at(self.key, ctx.now_ms.saturating_add(self.ttl_ms)) as i64)
+        match self.condition {
+            ExpireCondition::Always => Frame::Integer(
+                ctx.expire_at(self.key, ctx.now_ms.saturating_add(self.ttl_ms)) as i64,
+            ),
+            _ => Frame::Error("ERR conditional EXPIRE requires embedded storage".into()),
+        }
     }
 }
 
@@ -106,20 +133,24 @@ impl super::CommandSpec for Expire {
 
 impl super::OwnedCommandParse for Expire {
     fn parse_owned(parts: &[Vec<u8>]) -> Result<Command> {
-        CommandArity::<Self>::exact(parts.len(), 3)?;
+        CommandArity::<Self>::range(parts.len(), 3, 4)?;
+        let condition = parse_expire_condition(&parts[3..])?;
         Ok(Command::new(Box::new(OwnedExpire::new(
             parts[1].clone(),
             TtlMillis::<Self>::seconds(&parts[2])?,
+            condition,
         ))))
     }
 }
 
 impl<'a> super::BorrowedCommandParse<'a> for Expire {
     fn parse_borrowed(parts: &[&'a [u8]]) -> Result<super::BorrowedCommandBox<'a>> {
-        CommandArity::<Self>::exact(parts.len(), 3)?;
+        CommandArity::<Self>::range(parts.len(), 3, 4)?;
+        let condition = parse_expire_condition(&parts[3..])?;
         Ok(Box::new(BorrowedExpire::new(
             parts[1],
             TtlMillis::<Self>::seconds(parts[2])?,
+            condition,
         )))
     }
 }
@@ -192,20 +223,106 @@ pub(crate) fn relative_expire_at_ms(ttl_ms: u64) -> u64 {
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Expire {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         match ctx.args.as_slice() {
-            [key, ttl] => match TtlMillis::<()>::ascii_seconds(ttl) {
-                Some(ttl_ms) => {
-                    let changed = ctx.store.expire(key, relative_expire_at_ms(ttl_ms));
-                    ServerWire::write_resp_integer(ctx.out, changed as i64);
+            [key, ttl, options @ ..] if options.len() <= 1 => {
+                match TtlMillis::<()>::ascii_seconds(ttl) {
+                    Some(ttl_ms) => {
+                        let Ok(condition) = parse_expire_condition_frame(options) else {
+                            ServerWire::write_resp_error(ctx.out, "ERR syntax error");
+                            return;
+                        };
+                        let changed = expire_at_changed(
+                            ctx.store,
+                            key,
+                            relative_expire_at_ms(ttl_ms),
+                            condition,
+                        );
+                        ServerWire::write_resp_integer(ctx.out, changed);
+                    }
+                    None => ServerWire::write_resp_error(ctx.out, "ERR value is not an integer"),
                 }
-                None => ServerWire::write_resp_error(ctx.out, "ERR value is not an integer"),
-            },
+            }
             _ => ServerWire::write_resp_error(
                 ctx.out,
                 "ERR wrong number of arguments for 'EXPIRE' command",
             ),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExpireCondition {
+    Always,
+    Nx,
+    Xx,
+    Gt,
+    Lt,
+}
+
+pub(crate) fn parse_expire_condition(options: &[impl AsRef<[u8]>]) -> Result<ExpireCondition> {
+    parse_expire_condition_raw(options)
+        .ok_or_else(|| FastCacheError::Command("ERR syntax error".into()))
+}
+
+pub(crate) fn parse_expire_condition_frame(
+    options: &[impl AsRef<[u8]>],
+) -> std::result::Result<ExpireCondition, Frame> {
+    parse_expire_condition_raw(options).ok_or_else(|| Frame::Error("ERR syntax error".into()))
+}
+
+fn parse_expire_condition_raw(options: &[impl AsRef<[u8]>]) -> Option<ExpireCondition> {
+    match options {
+        [] => Some(ExpireCondition::Always),
+        [option] if option.as_ref().eq_ignore_ascii_case(b"NX") => Some(ExpireCondition::Nx),
+        [option] if option.as_ref().eq_ignore_ascii_case(b"XX") => Some(ExpireCondition::Xx),
+        [option] if option.as_ref().eq_ignore_ascii_case(b"GT") => Some(ExpireCondition::Gt),
+        [option] if option.as_ref().eq_ignore_ascii_case(b"LT") => Some(ExpireCondition::Lt),
+        _ => None,
+    }
+}
+
+pub(crate) fn expire_at_changed(
+    store: &crate::storage::EmbeddedStore,
+    key: &[u8],
+    expire_at_ms: u64,
+    condition: ExpireCondition,
+) -> i64 {
+    let now_ms = now_millis();
+    let pttl = store.pttl_millis(key);
+    if !expire_condition_allows(condition, pttl, expire_at_ms, now_ms) {
+        return 0;
+    }
+    if expire_at_ms <= now_ms {
+        store.delete(key) as i64
+    } else {
+        store.expire(key, expire_at_ms) as i64
+    }
+}
+
+fn expire_condition_allows(
+    condition: ExpireCondition,
+    current_pttl_ms: i64,
+    new_expire_at_ms: u64,
+    now_ms: u64,
+) -> bool {
+    match current_pttl_ms {
+        -2 => false,
+        -1 => matches!(
+            condition,
+            ExpireCondition::Always | ExpireCondition::Nx | ExpireCondition::Lt
+        ),
+        ttl if ttl >= 0 => {
+            let current_expire_at_ms = now_ms.saturating_add(ttl as u64);
+            match condition {
+                ExpireCondition::Always => true,
+                ExpireCondition::Nx => false,
+                ExpireCondition::Xx => true,
+                ExpireCondition::Gt => new_expire_at_ms > current_expire_at_ms,
+                ExpireCondition::Lt => new_expire_at_ms < current_expire_at_ms,
+            }
+        }
+        _ => false,
     }
 }
 

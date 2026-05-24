@@ -53,8 +53,12 @@ impl EmbeddedStore {
     /// buffer obtained via `HandoffBuffer::split_prefix`). Skips the
     /// `value.to_vec()` allocation that the generic `set` performs.
     pub fn set_value_bytes(&self, key: &[u8], value: bytes::Bytes, ttl_ms: Option<u64>) {
-        let now_ms = now_millis();
         let route = self.route_key(key);
+        if ttl_ms.is_none() {
+            self.set_value_bytes_routed_no_ttl_then(route, key, value, || {});
+            return;
+        }
+        let now_ms = now_millis();
         let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
         self.set_value_bytes_routed_expire_at(route, key, value, expire_at_ms, now_ms);
     }

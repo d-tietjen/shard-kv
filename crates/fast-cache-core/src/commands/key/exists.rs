@@ -185,7 +185,7 @@ impl Exists {
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Exists {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>) {
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         match ctx.args.as_slice() {
             [] => ServerWire::write_resp_error(
                 ctx.out,

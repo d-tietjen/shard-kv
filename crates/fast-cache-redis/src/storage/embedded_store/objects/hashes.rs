@@ -11,6 +11,12 @@ pub(crate) trait RedisHashStore {
     fn hdel_many(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
     fn hlen(&self, key: &[u8]) -> RedisObjectResult;
     fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
+    fn hmget_visit(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome;
     fn hkeys(&self, key: &[u8]) -> RedisObjectResult;
     fn hvals(&self, key: &[u8]) -> RedisObjectResult;
     fn hkeys_visit(
@@ -73,6 +79,17 @@ impl RedisHashStore for EmbeddedStore {
 
     fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult {
         self.object_read(key, |bucket| bucket.hmget(key, fields))
+    }
+
+    fn hmget_visit(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        mut emit: impl FnMut(RedisObjectArrayItem<'_>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.hmget_visit(key, fields, &mut emit)
+        })
     }
 
     fn hkeys(&self, key: &[u8]) -> RedisObjectResult {

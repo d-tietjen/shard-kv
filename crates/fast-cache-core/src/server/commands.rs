@@ -1,5 +1,4 @@
 use super::direct_protocol::*;
-use super::wire::*;
 use super::*;
 
 #[cfg(feature = "embedded")]
@@ -8,15 +7,43 @@ pub(crate) use super::direct_protocol::FcnpDispatch;
 pub(crate) use super::fast_write::FastWriteQueue;
 
 #[cfg(feature = "embedded")]
-pub(crate) struct RawCommandContext<'store, 'args, 'out> {
+pub(crate) struct RawCommandContext<'store, 'args, 'out, 'queue> {
     pub(crate) store: &'store EmbeddedStore,
     pub(crate) args: RespDirectArgs<'args>,
     pub(crate) out: &'out mut BytesMut,
+    pub(crate) fast_write_queue: Option<&'queue mut FastWriteQueue>,
+    pub(crate) single_threaded: bool,
 }
 
 #[cfg(feature = "embedded")]
 pub(crate) trait RawDirectCommand: crate::commands::CommandMetadata {
-    fn execute(&self, ctx: RawCommandContext<'_, '_, '_>);
+    fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>);
+
+    fn execute_fast(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
+        let RawCommandContext {
+            store, args, out, ..
+        } = ctx;
+        let start = crate::server::wire::ServerWire::begin_fast_value(out);
+        self.execute(RawCommandContext {
+            store,
+            args,
+            out,
+            fast_write_queue: None,
+            single_threaded: false,
+        });
+        crate::server::wire::ServerWire::finish_fast_value(out, start);
+    }
+
+    fn execute_owned_shard(
+        &self,
+        store: &EmbeddedStore,
+        args: &[&[u8]],
+        out: &mut BytesMut,
+        owned_shard_id: usize,
+    ) -> bool {
+        let _ = (store, args, out, owned_shard_id);
+        false
+    }
 }
 
 #[cfg(feature = "embedded")]
@@ -314,10 +341,16 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::expireat::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::pexpireat::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::expiretime::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::pexpiretime::COMMAND,
     &crate::commands::persist::COMMAND,
     &crate::commands::getex::COMMAND,
     &crate::commands::setex::COMMAND,
     &crate::commands::psetex::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::command::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::keys::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -329,7 +362,17 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis-compat")]
     &crate::commands::randomkey::COMMAND,
     #[cfg(feature = "redis-compat")]
+    &crate::commands::flush::FLUSHDB_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::flush::FLUSHALL_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::memory::COMMAND,
+    #[cfg(feature = "redis-compat")]
     &crate::commands::copy::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::dump::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::restore::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::rename::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -354,6 +397,8 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::bitfield::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::setnx::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::mget::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::hstrlen::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -385,6 +430,10 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis-compat")]
     &crate::commands::blmove::COMMAND,
     #[cfg(feature = "redis-compat")]
+    &crate::commands::lmpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::blmpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
     &crate::commands::scard::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::smembers::COMMAND,
@@ -394,6 +443,16 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::srandmember::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::smismember::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zunion::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zinter::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zdiff::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zintercard::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zrandmember::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::zrange::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -422,6 +481,10 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::zrevrank::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::zscan::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::zmpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::bzmpop::COMMAND,
 ];
 
 #[cfg(feature = "embedded")]
@@ -577,31 +640,217 @@ impl FastCommandDispatcher {
 
 #[cfg(feature = "embedded")]
 impl RawCommandDispatcher {
-    fn find(command: &[u8]) -> Option<&'static dyn RawDirectCommand> {
+    pub(super) fn find(command: &[u8]) -> Option<&'static dyn RawDirectCommand> {
         RAW_DIRECT_CATALOG
             .iter()
             .copied()
             .find(|candidate| candidate.matches(command))
     }
 
-    pub(super) fn supports(command: &[u8]) -> bool {
-        Self::find(command).is_some()
+    #[inline(always)]
+    pub(super) fn find_redis_opcode(
+        kind: crate::protocol::FastCommandKind,
+    ) -> Option<&'static dyn RawDirectCommand> {
+        match kind {
+            crate::protocol::FastCommandKind::Get => Some(&crate::commands::get::COMMAND),
+            crate::protocol::FastCommandKind::Set => Some(&crate::commands::set::COMMAND),
+            crate::protocol::FastCommandKind::Delete => Some(&crate::commands::del::COMMAND),
+            crate::protocol::FastCommandKind::Exists => Some(&crate::commands::exists::COMMAND),
+            crate::protocol::FastCommandKind::Ttl => Some(&crate::commands::ttl::COMMAND),
+            crate::protocol::FastCommandKind::PTtl => Some(&crate::commands::pttl::COMMAND),
+            crate::protocol::FastCommandKind::Expire => Some(&crate::commands::expire::COMMAND),
+            crate::protocol::FastCommandKind::PExpire => Some(&crate::commands::pexpire::COMMAND),
+            crate::protocol::FastCommandKind::Persist => Some(&crate::commands::persist::COMMAND),
+            crate::protocol::FastCommandKind::GetEx => Some(&crate::commands::getex::COMMAND),
+            crate::protocol::FastCommandKind::SetEx => Some(&crate::commands::setex::COMMAND),
+            crate::protocol::FastCommandKind::PSetEx => Some(&crate::commands::psetex::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ExpireAt => Some(&crate::commands::expireat::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::PExpireAt => {
+                Some(&crate::commands::pexpireat::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ExpireTime => {
+                Some(&crate::commands::expiretime::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::PExpireTime => {
+                Some(&crate::commands::pexpiretime::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Command => Some(&crate::commands::command::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Keys => Some(&crate::commands::keys::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Scan => Some(&crate::commands::scan::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Object => Some(&crate::commands::object::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Touch => Some(&crate::commands::touch::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::RandomKey => {
+                Some(&crate::commands::randomkey::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::FlushDb => {
+                Some(&crate::commands::flush::FLUSHDB_COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::FlushAll => {
+                Some(&crate::commands::flush::FLUSHALL_COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Memory => Some(&crate::commands::memory::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Copy => Some(&crate::commands::copy::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Dump => Some(&crate::commands::dump::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Restore => Some(&crate::commands::restore::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Rename => Some(&crate::commands::rename::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::RenameNx => Some(&crate::commands::renamenx::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Unlink => Some(&crate::commands::unlink::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::StrLen => Some(&crate::commands::strlen::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::GetRange => Some(&crate::commands::getrange::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::GetBit => Some(&crate::commands::getbit::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::SetBit => Some(&crate::commands::setbit::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::BitCount => Some(&crate::commands::bitcount::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::BitPos => Some(&crate::commands::bitpos::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::BitOp => Some(&crate::commands::bitop::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::BitField => Some(&crate::commands::bitfield::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::SetNx => Some(&crate::commands::setnx::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::MGet => Some(&crate::commands::mget::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::HStrLen => Some(&crate::commands::hstrlen::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::HGet => Some(&crate::commands::hget::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::HLen => Some(&crate::commands::hlen::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::HMSet => Some(&crate::commands::hmset::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::HMGet => Some(&crate::commands::hmget::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::HKeys => Some(&crate::commands::hkeys::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::HVals => Some(&crate::commands::hvals::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::HGetAll => Some(&crate::commands::hgetall::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::HScan => Some(&crate::commands::hscan::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::LRange => Some(&crate::commands::lrange::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::LLen => Some(&crate::commands::llen::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::LIndex => Some(&crate::commands::lindex::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::RPopLPush => {
+                Some(&crate::commands::rpoplpush::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::LMove => Some(&crate::commands::lmove::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::BLMove => Some(&crate::commands::blmove::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::LMPop => Some(&crate::commands::lmpop::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::BLMPop => Some(&crate::commands::blmpop::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::SCard => Some(&crate::commands::scard::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::SMembers => Some(&crate::commands::smembers::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::SScan => Some(&crate::commands::sscan::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::SRandMember => {
+                Some(&crate::commands::srandmember::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::SMIsMember => {
+                Some(&crate::commands::smismember::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZUnion => Some(&crate::commands::zunion::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZInter => Some(&crate::commands::zinter::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZDiff => Some(&crate::commands::zdiff::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZInterCard => {
+                Some(&crate::commands::zintercard::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRandMember => {
+                Some(&crate::commands::zrandmember::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRange => Some(&crate::commands::zrange::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRevRange => {
+                Some(&crate::commands::zrevrange::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZScore => Some(&crate::commands::zscore::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZCount => Some(&crate::commands::zcount::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRevRangeByScore => {
+                Some(&crate::commands::zrevrangebyscore::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRangeByLex => {
+                Some(&crate::commands::zrangebylex::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRevRangeByLex => {
+                Some(&crate::commands::zrevrangebylex::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZLexCount => {
+                Some(&crate::commands::zlexcount::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRemRangeByRank => {
+                Some(&crate::commands::zremrangebyrank::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRemRangeByScore => {
+                Some(&crate::commands::zremrangebyscore::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRemRangeByLex => {
+                Some(&crate::commands::zremrangebylex::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRank => Some(&crate::commands::zrank::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZRevRank => Some(&crate::commands::zrevrank::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZScan => Some(&crate::commands::zscan::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::ZMPop => Some(&crate::commands::zmpop::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::BZMPop => Some(&crate::commands::bzmpop::COMMAND),
+            _ => None,
+        }
     }
 
     pub(super) fn mutates_value(command: &[u8]) -> bool {
         Self::find(command).is_some_and(|command| command.mutates_value())
-    }
-
-    pub(super) fn execute<'args>(
-        store: &EmbeddedStore,
-        command: &[u8],
-        args: RespDirectArgs<'args>,
-        out: &mut BytesMut,
-        _started_at: Instant,
-    ) {
-        match Self::find(command) {
-            Some(command) => command.execute(RawCommandContext { store, args, out }),
-            None => ServerWire::write_resp_error(out, "ERR unsupported command"),
-        }
     }
 }

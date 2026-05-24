@@ -13,6 +13,9 @@ open source crates on crates.io:
 - [Core crate README](crates/fast-cache-core/README.md)
 - [Safety notes](crates/fast-cache-core/SAFETY.md)
 - [Project structure](docs/PROJECT_STRUCTURE.md)
+- [Redis compatibility manifest](docs/REDIS_COMPATIBILITY.md)
+- [Proof gates](docs/PROOF_GATES.md)
+- [Operations](docs/OPERATIONS.md)
 
 ## Quick Start
 
@@ -257,6 +260,10 @@ This repository now contains the open source crate surface:
 - `CONTRIBUTING.md`, `SECURITY.md`, `RELEASE.md`, and `LICENSE`.
 - `CHANGELOG.md` and `docs/RELEASE_0_2_READINESS.md` for release notes,
   validation commands, and known compatibility limits.
+- `docs/REDIS_COMPATIBILITY.md`, generated from the live command matrix
+  registry, for the supported, partial, and missing Redis command surface.
+- `scripts/proof-gate.sh` and focused checks under `scripts/` for local and CI
+  validation of docs, feature flags, and release proofs.
 
 For a contributor-oriented map of the workspace, crate internals, generated
 artifact policy, and common change locations, see
@@ -304,17 +311,11 @@ and native replication use separate Linux-only monoio switches:
 ## Development
 
 ```bash
-cargo fmt --all -- --check
-cargo test --workspace
-cargo test -p fast-cache-core --features unsafe
-cargo test -p fast-cache-core --features redis-compat
-cargo check -p fast-cache --features redis-compat
-cargo check -p fast-cache --features redis-server
-cargo check -p fast-cache-redis --all-features
-cargo doc -p fast-cache-core --no-deps --all-features
-cargo doc -p fast-cache-redis --no-deps --all-features
-cargo package -p fast-cache-core --locked
+./scripts/proof-gate.sh quick
 ```
+
+Use `./scripts/proof-gate.sh redis` before merging Redis compatibility changes
+and `./scripts/proof-gate.sh release` before tagging or publishing.
 
 For local benchmark and profiling builds, use the repo-level native CPU
 aliases:

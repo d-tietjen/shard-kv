@@ -33,6 +33,21 @@ pub(crate) struct RedisKeyScanVisitResult {
 }
 
 impl EmbeddedStore {
+    pub(crate) fn visit_redis_keys(&self, visitor: &mut impl FnMut(&[u8]) -> bool) {
+        let now_ms = now_millis();
+        for shard_id in 0..self.shards.len() {
+            if self.string_key_count_hint(shard_id) == 0 {
+                continue;
+            }
+            let shard = self.shards[shard_id].read();
+            if !shard.map.visit_keys(now_ms, visitor) {
+                return;
+            }
+        }
+
+        let _ = self.objects.visit_keys(now_ms, visitor);
+    }
+
     pub(crate) fn scan_redis_keys_visit(
         &self,
         cursor: u64,
@@ -221,30 +236,21 @@ impl EmbeddedStore {
             return None;
         }
 
-        let keys = match kind {
-            RedisKeyScanType::All => self.objects.keys_in_shard(shard_id, now_ms),
-            RedisKeyScanType::String => Vec::new(),
-            RedisKeyScanType::Object(kind) => self
-                .objects
-                .keys_with_type_in_shard(shard_id, now_ms)
-                .into_iter()
-                .filter(|(_, redis_type)| kind.eq_ignore_ascii_case(redis_type.as_bytes()))
-                .map(|(key, _)| key)
-                .collect(),
+        let type_filter = match kind {
+            RedisKeyScanType::All => None,
+            RedisKeyScanType::String => return None,
+            RedisKeyScanType::Object(kind) => Some(kind),
         };
-        let start = offset.min(keys.len());
-        let mut next_offset = start;
-        for key in keys.into_iter().skip(start) {
-            next_offset += 1;
-            *visited = visited.saturating_add(1);
-            if visit(&key) {
-                *emitted = emitted.saturating_add(1);
-            }
-            if *visited >= limit {
-                return Some(next_offset);
-            }
-        }
-        None
+        self.objects.scan_keys_in_shard_visit(
+            shard_id,
+            now_ms,
+            type_filter,
+            offset,
+            limit,
+            visited,
+            emitted,
+            visit,
+        )
     }
 }
 

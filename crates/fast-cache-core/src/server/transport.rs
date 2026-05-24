@@ -417,6 +417,7 @@ impl MultiDirectConnection {
         };
 
         let result = read_loop.await;
+        transaction_state.close(transaction_coordinator.as_deref());
         drop(write_tx);
         let _ = writer.await;
         result
@@ -997,15 +998,17 @@ impl MonoioMultiDirectConnection {
                 })
                 .await
             {
-                Ok((0, _)) => return,
+                Ok((0, _)) => break,
                 Ok((_, _)) => {}
-                Err(_) => return,
+                Err(_) => break,
             }
 
             if !MonoioResponseWriter::write_bytes(&mut stream, &mut write_buffer).await {
-                return;
+                break;
             }
         }
+
+        transaction_state.close(transaction_coordinator.as_deref());
     }
 
     #[cfg(not(feature = "unsafe"))]
@@ -1066,6 +1069,7 @@ impl MonoioMultiDirectConnection {
             }
         }
 
+        transaction_state.close(transaction_coordinator.as_deref());
         drop(write_tx);
         let _ = writer.await;
     }
@@ -1101,9 +1105,9 @@ impl MonoioMultiDirectConnection {
                 })
                 .await
             {
-                Ok((0, _)) => return,
+                Ok((0, _)) => break,
                 Ok((_, _)) => {}
-                Err(_) => return,
+                Err(_) => break,
             }
 
             fast_write_queue.flush_bytes(&mut write_buffer);
@@ -1114,9 +1118,11 @@ impl MonoioMultiDirectConnection {
             )
             .await
             {
-                return;
+                break;
             }
         }
+
+        transaction_state.close(transaction_coordinator.as_deref());
     }
 }
 
