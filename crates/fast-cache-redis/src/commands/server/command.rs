@@ -275,6 +275,9 @@ fn key_args_for_command<'a>(name: &[u8], args: &'a [&'a [u8]]) -> Vec<&'a [u8]> 
     {
         return counted_keys(args, 0);
     }
+    if eq_ignore_ascii_case(name, b"EVAL") || eq_ignore_ascii_case(name, b"EVALSHA") {
+        return counted_keys(args, 1);
+    }
     if eq_ignore_ascii_case(name, b"BLMPOP") || eq_ignore_ascii_case(name, b"BZMPOP") {
         return counted_keys(args, 1);
     }
@@ -341,6 +344,7 @@ fn command_has_no_key(name: &[u8]) -> bool {
             || eq_ignore_ascii_case(name, b"RANDOMKEY")
             || eq_ignore_ascii_case(name, b"FLUSHDB")
             || eq_ignore_ascii_case(name, b"FLUSHALL")
+            || eq_ignore_ascii_case(name, b"SCRIPT")
     )
 }
 

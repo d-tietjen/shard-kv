@@ -301,11 +301,15 @@ Internal and benchmark knobs:
 | `embedded-read-biased-lock` | Benchmark comparison knob for server/direct embedded shard locks. |
 | `unsafe` | Opts into reviewed unsafe hot paths for lower overhead. |
 
-Monoio still uses `bytes-handoff` for connection read buffering. With
-`FAST_CACHE_DIRECT_SHARD_PORTS=1`, the server also binds one listener per shard,
-starting at `FAST_CACHE_DIRECT_SHARD_BASE_PORT` or the fanout port + 1, so
-direct clients can route while fanout RESP/FCNP stays available. WAL TCP export
-and native replication use separate Linux-only monoio switches:
+Tokio direct mode writes responses inline by default, avoiding a per-connection
+writer task for Redis-style request/response traffic. Set
+`FAST_CACHE_TOKIO_WRITER_MODE=split` to restore the split read/write handoff
+for deployments that prefer full-duplex connection overlap. Monoio still uses
+`bytes-handoff` for connection read buffering. With `FAST_CACHE_DIRECT_SHARD_PORTS=1`,
+the server also binds one listener per shard, starting at
+`FAST_CACHE_DIRECT_SHARD_BASE_PORT` or the fanout port + 1, so direct clients
+can route while fanout RESP/FCNP stays available. WAL TCP export and native
+replication use separate Linux-only monoio switches:
 `FAST_CACHE_WAL_TCP_USE_MONOIO=1` and `FAST_CACHE_REPLICATION_USE_MONOIO=1`.
 
 ## Development

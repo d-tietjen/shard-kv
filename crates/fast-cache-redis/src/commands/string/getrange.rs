@@ -10,7 +10,7 @@ use crate::protocol::Frame;
 use crate::server::wire::ServerWire;
 use crate::storage::{EmbeddedStore, RedisStringLookup};
 
-define_redis_command!(GetRange, "GETRANGE", false);
+define_redis_command!(GetRange, "GETRANGE", false, aliases: ["SUBSTR"]);
 
 impl crate::commands::redis::RedisCommand for GetRange {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
@@ -41,6 +41,16 @@ impl crate::commands::redis::RedisCommand for GetRange {
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
         match args {
             [key, start, stop] => {
+                if *start == b"0" && *stop == b"-1" {
+                    match store.get_string_value_into(key, |bytes| {
+                        ServerWire::write_resp_blob_string(out, bytes);
+                    }) {
+                        RedisStringLookup::Hit => {}
+                        RedisStringLookup::Miss => ServerWire::write_resp_blob_string(out, b""),
+                        RedisStringLookup::WrongType => write_frame(out, &wrongtype()),
+                    }
+                    return;
+                }
                 let Ok(start) = parse_i64(start) else {
                     ServerWire::write_resp_error(
                         out,

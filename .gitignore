@@ -19,6 +19,7 @@ texput.log
 
 # Local editor, assistant, and OS files
 /.claude/
+/.idea/
 /.DS_Store
 *.DS_Store
 

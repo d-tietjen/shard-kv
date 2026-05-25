@@ -350,7 +350,67 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::setex::COMMAND,
     &crate::commands::psetex::COMMAND,
     #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::ASKING_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::BGREWRITEAOF_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::BGSAVE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::CLUSTER_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::DEBUG_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::HOST_WARNING_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::LASTSAVE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::LATENCY_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::LOLWUT_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::MIGRATE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::MODULE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::MONITOR_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::MOVE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::POST_WARNING_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::PSYNC_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::READONLY_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::READWRITE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::REPLCONF_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::REPLICAOF_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::ROLE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::SAVE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::SHUTDOWN_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::SLOWLOG_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::SORT_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::SWAPDB_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::SYNC_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::admin::WAIT_COMMAND,
+    #[cfg(feature = "redis-compat")]
     &crate::commands::command::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::scripting::EVAL_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::scripting::EVALSHA_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::scripting::SCRIPT_COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::keys::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -367,6 +427,72 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::flush::FLUSHALL_COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::memory::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::pubsub::PUBLISH_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::pubsub::PUBSUB_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::pubsub::SUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::pubsub::UNSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::pubsub::PSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::pubsub::PUNSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hll::PFADD_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hll::PFCOUNT_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hll::PFMERGE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hll::PFDEBUG_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::hll::PFSELFTEST_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::geo::GEOADD_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::geo::GEODIST_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::geo::GEOHASH_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::geo::GEOPOS_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::geo::GEORADIUS_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::geo::GEORADIUSBYMEMBER_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::geo::GEORADIUS_RO_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::geo::GEORADIUSBYMEMBER_RO_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XACK_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XADD_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XCLAIM_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XDEL_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XGROUP_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XINFO_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XLEN_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XPENDING_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XRANGE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XREAD_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XREADGROUP_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XREVRANGE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XSETID_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::stream::XTRIM_COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::copy::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -425,6 +551,8 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::lindex::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::rpoplpush::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &crate::commands::brpoplpush::COMMAND,
     #[cfg(feature = "redis-compat")]
     &crate::commands::lmove::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -709,6 +837,10 @@ impl RawCommandDispatcher {
             #[cfg(feature = "redis-compat")]
             crate::protocol::FastCommandKind::Restore => Some(&crate::commands::restore::COMMAND),
             #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::RestoreAsking => {
+                Some(&crate::commands::restore::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
             crate::protocol::FastCommandKind::Rename => Some(&crate::commands::rename::COMMAND),
             #[cfg(feature = "redis-compat")]
             crate::protocol::FastCommandKind::RenameNx => Some(&crate::commands::renamenx::COMMAND),
@@ -718,6 +850,8 @@ impl RawCommandDispatcher {
             crate::protocol::FastCommandKind::StrLen => Some(&crate::commands::strlen::COMMAND),
             #[cfg(feature = "redis-compat")]
             crate::protocol::FastCommandKind::GetRange => Some(&crate::commands::getrange::COMMAND),
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::Substr => Some(&crate::commands::getrange::COMMAND),
             #[cfg(feature = "redis-compat")]
             crate::protocol::FastCommandKind::GetBit => Some(&crate::commands::getbit::COMMAND),
             #[cfg(feature = "redis-compat")]
@@ -761,6 +895,10 @@ impl RawCommandDispatcher {
             #[cfg(feature = "redis-compat")]
             crate::protocol::FastCommandKind::RPopLPush => {
                 Some(&crate::commands::rpoplpush::COMMAND)
+            }
+            #[cfg(feature = "redis-compat")]
+            crate::protocol::FastCommandKind::BRPopLPush => {
+                Some(&crate::commands::brpoplpush::COMMAND)
             }
             #[cfg(feature = "redis-compat")]
             crate::protocol::FastCommandKind::LMove => Some(&crate::commands::lmove::COMMAND),

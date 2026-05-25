@@ -1,5 +1,6 @@
 use super::wire::ServerWire;
 use super::*;
+use std::io::IoSlice;
 
 #[cfg(feature = "embedded")]
 pub(super) enum FastWriteItem {
@@ -88,6 +89,27 @@ impl FastWriteQueue {
         self.items.is_empty()
     }
 
+    pub(super) async fn write_pending_tokio<W>(&mut self, stream: &mut W) -> std::io::Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        const MAX_WRITEV_IOVECS: usize = 1024;
+        while !self.items.is_empty() {
+            let mut batch = self.drain_iovec_batch(MAX_WRITEV_IOVECS);
+            if batch.len() == 1 {
+                match batch.pop().expect("single-item write batch") {
+                    FastWriteItem::Bytes(bytes) => {
+                        stream.write_all(bytes.as_ref()).await?;
+                        continue;
+                    }
+                    item => batch.push(item),
+                }
+            }
+            FastWriteTokioBatch::write_all(stream, FastWriteTokioBatch::new(batch)).await?;
+        }
+        Ok(())
+    }
+
     #[inline(always)]
     pub(super) fn materialize_optional(queue: Option<&mut FastWriteQueue>, out: &mut BytesMut) {
         if let Some(queue) = queue
@@ -97,9 +119,8 @@ impl FastWriteQueue {
         }
     }
 
-    #[cfg(all(target_os = "linux", feature = "monoio"))]
     #[inline(always)]
-    pub(super) fn drain_iovec_batch(&mut self, max_iovecs: usize) -> Vec<FastWriteItem> {
+    fn drain_iovec_batch(&mut self, max_iovecs: usize) -> Vec<FastWriteItem> {
         let mut take = 0usize;
         let mut iovecs = 0usize;
         for item in &self.items {
@@ -117,7 +138,7 @@ impl FastWriteQueue {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
+#[cfg(feature = "embedded")]
 impl FastWriteItem {
     #[inline(always)]
     fn iovec_count(&self) -> usize {
@@ -127,6 +148,187 @@ impl FastWriteItem {
             FastWriteItem::RespValue { .. } => 3,
         }
     }
+
+    #[inline(always)]
+    fn byte_len(&self) -> usize {
+        match self {
+            FastWriteItem::Bytes(bytes) => bytes.len(),
+            FastWriteItem::FastValue { header, payload } => header.len() + payload.len(),
+            FastWriteItem::RespValue {
+                header_len,
+                payload,
+                ..
+            } => *header_len as usize + payload.len() + RESP_CRLF.len(),
+        }
+    }
+
+    #[inline(always)]
+    fn push_tokio_iovecs<'a>(&'a self, offset: usize, out: &mut Vec<IoSlice<'a>>) {
+        match self {
+            FastWriteItem::Bytes(bytes) => {
+                push_slice_with_offset(bytes.as_ref(), offset, out);
+            }
+            FastWriteItem::FastValue { header, payload } => {
+                push_two_with_offset(header.as_slice(), payload.as_ref(), offset, out);
+            }
+            FastWriteItem::RespValue {
+                header,
+                header_len,
+                payload,
+            } => {
+                push_three_with_offset(
+                    &header[..*header_len as usize],
+                    payload.as_ref(),
+                    RESP_CRLF,
+                    offset,
+                    out,
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "embedded")]
+struct FastWriteTokioBatch {
+    items: Vec<FastWriteItem>,
+    item_index: usize,
+    item_offset: usize,
+    remaining_len: usize,
+}
+
+#[cfg(feature = "embedded")]
+impl FastWriteTokioBatch {
+    #[inline(always)]
+    fn new(items: Vec<FastWriteItem>) -> Self {
+        let remaining_len = items.iter().map(FastWriteItem::byte_len).sum();
+        Self {
+            items,
+            item_index: 0,
+            item_offset: 0,
+            remaining_len,
+        }
+    }
+
+    #[inline(always)]
+    fn remaining_len(&self) -> usize {
+        self.remaining_len
+    }
+
+    #[inline(always)]
+    fn fill_iovecs<'a>(&'a self, out: &mut Vec<IoSlice<'a>>, max_iovecs: usize) {
+        out.clear();
+        for (idx, item) in self.items.iter().enumerate().skip(self.item_index) {
+            let offset = if idx == self.item_index {
+                self.item_offset
+            } else {
+                0
+            };
+            item.push_tokio_iovecs(offset, out);
+            if out.len() >= max_iovecs {
+                out.truncate(max_iovecs);
+                break;
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn consume(&mut self, mut amt: usize) {
+        let consumed = amt;
+        while amt > 0 {
+            let Some(item) = self.items.get(self.item_index) else {
+                self.remaining_len = 0;
+                return;
+            };
+            let item_remaining = item.byte_len().saturating_sub(self.item_offset);
+            match item_remaining.cmp(&amt) {
+                std::cmp::Ordering::Greater => {
+                    self.item_offset += amt;
+                    break;
+                }
+                std::cmp::Ordering::Equal => {
+                    self.item_index += 1;
+                    self.item_offset = 0;
+                    break;
+                }
+                std::cmp::Ordering::Less => {
+                    amt -= item_remaining;
+                    self.item_index += 1;
+                    self.item_offset = 0;
+                }
+            }
+        }
+        self.remaining_len = self.remaining_len.saturating_sub(consumed);
+    }
+
+    async fn write_all<W>(stream: &mut W, mut batch: FastWriteTokioBatch) -> std::io::Result<()>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        const MAX_WRITEV_IOVECS: usize = 1024;
+        while batch.remaining_len() > 0 {
+            let written = {
+                let mut iovecs = Vec::with_capacity(MAX_WRITEV_IOVECS);
+                batch.fill_iovecs(&mut iovecs, MAX_WRITEV_IOVECS);
+                stream.write_vectored(&iovecs).await?
+            };
+            if written == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole vectored response batch",
+                ));
+            }
+            batch.consume(written);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "embedded")]
+#[inline(always)]
+fn push_slice_with_offset<'a>(slice: &'a [u8], offset: usize, out: &mut Vec<IoSlice<'a>>) {
+    if offset < slice.len() {
+        out.push(IoSlice::new(&slice[offset..]));
+    }
+}
+
+#[cfg(feature = "embedded")]
+#[inline(always)]
+fn push_two_with_offset<'a>(
+    first: &'a [u8],
+    second: &'a [u8],
+    offset: usize,
+    out: &mut Vec<IoSlice<'a>>,
+) {
+    if offset < first.len() {
+        out.push(IoSlice::new(&first[offset..]));
+        out.push(IoSlice::new(second));
+        return;
+    }
+    push_slice_with_offset(second, offset - first.len(), out);
+}
+
+#[cfg(feature = "embedded")]
+#[inline(always)]
+fn push_three_with_offset<'a>(
+    first: &'a [u8],
+    second: &'a [u8],
+    third: &'a [u8],
+    offset: usize,
+    out: &mut Vec<IoSlice<'a>>,
+) {
+    if offset < first.len() {
+        out.push(IoSlice::new(&first[offset..]));
+        out.push(IoSlice::new(second));
+        out.push(IoSlice::new(third));
+        return;
+    }
+    let offset = offset - first.len();
+    if offset < second.len() {
+        out.push(IoSlice::new(&second[offset..]));
+        out.push(IoSlice::new(third));
+        return;
+    }
+    push_slice_with_offset(third, offset - second.len(), out);
 }
 
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]

@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use bytes::BytesMut;
 use smallvec::SmallVec;
 
-use super::dispatch::{dispatch, route_key_for_name};
+use super::dispatch::{dispatch, route_key_for_command, route_key_for_owned_command};
 #[cfg(feature = "server")]
 use super::frame::{write_fast_frame, write_frame};
 use crate::commands::CommandSpec;
@@ -131,7 +131,7 @@ where
     type Spec = C;
 
     fn route_key(&self) -> Option<&[u8]> {
-        route_key_for_name(C::NAME, self.args.first().map(Vec::as_slice))
+        route_key_for_owned_command(C::NAME, &self.args)
     }
 
     fn to_borrowed_command(&self) -> crate::commands::BorrowedCommandBox<'_> {
@@ -151,7 +151,7 @@ where
     type Spec = C;
 
     fn route_key(&self) -> Option<&'a [u8]> {
-        route_key_for_name(C::NAME, self.args.first().copied())
+        route_key_for_command(C::NAME, &self.args)
     }
 
     fn to_owned_command(&self) -> Command {

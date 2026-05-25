@@ -339,6 +339,23 @@ fn raw_resp_dump_restore_round_trips_strings_and_objects() {
         RespTestHarness::exec_resp(&store, &[b"GET", b"restore-s"]),
         b"$5\r\nvalue\r\n".to_vec()
     );
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"RESTORE-ASKING",
+                b"restore-asking-s",
+                b"0",
+                string_dump.as_slice(),
+                b"REPLACE",
+            ],
+        ),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"GET", b"restore-asking-s"]),
+        b"$5\r\nvalue\r\n".to_vec()
+    );
     assert_resp_error_contains(
         &store,
         &[b"RESTORE", b"restore-s", b"0", string_dump.as_slice()],
@@ -632,11 +649,22 @@ fn raw_resp_redis_backfill_commands_round_trip() {
         b"$1\r\nc\r\n".to_vec()
     );
     assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"BRPOPLPUSH", b"l", b"l2", b"0"]),
+        b"$1\r\nb\r\n".to_vec()
+    );
+    assert_eq!(
         decode_bulk_array(&RespTestHarness::exec_resp(
             &store,
             &[b"LRANGE", b"l", b"0", b"-1"]
         )),
-        vec![b"c".to_vec(), b"a".to_vec(), b"b".to_vec()]
+        vec![b"c".to_vec(), b"a".to_vec()]
+    );
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"LRANGE", b"l2", b"0", b"-1"]
+        )),
+        vec![b"b".to_vec()]
     );
 
     assert_eq!(store.zadd(b"z", 1.0, b"a"), RedisObjectResult::Integer(1));
@@ -1037,6 +1065,230 @@ fn raw_resp_expanded_redis_surface_round_trip() {
     );
 
     assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"ASKING"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert!(RespTestHarness::exec_resp_integer(&store, &[b"LASTSAVE"]) > 0);
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(&store, &[b"ROLE"])),
+        vec![Frame::Array(vec![
+            bulk(b"master"),
+            Frame::Integer(0),
+            Frame::Array(Vec::new())
+        ])]
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(&store, &[b"MODULE", b"LIST"])),
+        vec![Frame::Array(Vec::new())]
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"SLOWLOG", b"LEN"]),
+        0
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"WAIT", b"1", b"1"]),
+        0
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"REPLICAOF", b"NO", b"ONE"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SLAVEOF", b"NO", b"ONE"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_resp_error_contains(&store, &[b"CLUSTER", b"INFO"], "cluster support disabled");
+
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"PUBLISH", b"chan", b"msg"]),
+        0
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"PUBSUB", b"NUMPAT"]),
+        0
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[b"SUBSCRIBE", b"chan"]
+        )),
+        vec![Frame::Array(vec![
+            bulk(b"subscribe"),
+            bulk(b"chan"),
+            Frame::Integer(1)
+        ])]
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[b"UNSUBSCRIBE", b"chan"]
+        )),
+        vec![Frame::Array(vec![
+            bulk(b"unsubscribe"),
+            bulk(b"chan"),
+            Frame::Integer(0)
+        ])]
+    );
+
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"PFADD", b"hll", b"a", b"b"]),
+        1
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"PFADD", b"hll", b"a"]),
+        0
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"PFCOUNT", b"hll"]),
+        2
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"PFMERGE", b"hll-merged", b"hll"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"PFCOUNT", b"hll-merged"]),
+        2
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"PFSELFTEST"]),
+        b"+OK\r\n".to_vec()
+    );
+
+    assert_eq!(
+        store.rpush(
+            b"sort-list",
+            &[b"3".as_slice(), b"1".as_slice(), b"2".as_slice()]
+        ),
+        RedisObjectResult::Integer(3)
+    );
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"SORT", b"sort-list"]
+        )),
+        vec![b"1".to_vec(), b"2".to_vec(), b"3".to_vec()]
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(
+            &store,
+            &[b"SORT", b"sort-list", b"DESC", b"STORE", b"sort-out"]
+        ),
+        3
+    );
+    assert_eq!(
+        decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"LRANGE", b"sort-out", b"0", b"-1"]
+        )),
+        vec![b"3".to_vec(), b"2".to_vec(), b"1".to_vec()]
+    );
+
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(
+            &store,
+            &[
+                b"GEOADD",
+                b"geo",
+                b"-73.9857",
+                b"40.7484",
+                b"empire",
+                b"-73.9897",
+                b"40.7411",
+                b"flatiron"
+            ]
+        ),
+        2
+    );
+    assert_eq!(store.zcard(b"geo"), RedisObjectResult::Integer(2));
+    assert!(
+        !decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[b"GEOPOS", b"geo", b"empire"]
+        ))
+        .is_empty()
+    );
+    assert!(
+        !decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"GEOHASH", b"geo", b"empire"]
+        ))
+        .is_empty()
+    );
+    assert!(
+        !decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"GEORADIUS", b"geo", b"-73.9857", b"40.7484", b"2", b"km"]
+        ))
+        .is_empty()
+    );
+    assert!(
+        !decode_bulk_array(&RespTestHarness::exec_resp(
+            &store,
+            &[b"GEORADIUSBYMEMBER", b"geo", b"empire", b"2", b"km"]
+        ))
+        .is_empty()
+    );
+    assert_ne!(
+        RespTestHarness::exec_resp(&store, &[b"GEODIST", b"geo", b"empire", b"flatiron", b"km"]),
+        b"$-1\r\n".to_vec()
+    );
+
+    let xadd = RespTestHarness::exec_resp(&store, &[b"XADD", b"stream", b"1-0", b"f", b"v"]);
+    assert_eq!(xadd, b"$3\r\n1-0\r\n".to_vec());
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"XLEN", b"stream"]),
+        1
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[b"XRANGE", b"stream", b"-", b"+"]
+        ))
+        .len(),
+        1
+    );
+    assert_eq!(
+        decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[b"XREAD", b"COUNT", b"1", b"STREAMS", b"stream", b"0-0"]
+        ))
+        .len(),
+        1
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"XGROUP", b"CREATE", b"stream", b"g", b"0-0"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"XACK", b"stream", b"g", b"1-0"]),
+        0
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"XCLAIM", b"stream", b"g", b"c", b"0", b"1-0"]),
+        b"*0\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"XDEL", b"stream", b"1-0"]),
+        1
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"XSETID", b"stream", b"5-0"]),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"XTRIM", b"stream", b"MAXLEN", b"1"]),
+        0
+    );
+    assert!(
+        !decode_resp_stream(&RespTestHarness::exec_resp(
+            &store,
+            &[b"XINFO", b"STREAM", b"stream"]
+        ))
+        .is_empty()
+    );
+
+    assert_eq!(
         RespTestHarness::exec_resp(&store, &[b"SET", b"flush-me", b"v"]),
         b"+OK\r\n".to_vec()
     );
@@ -1084,10 +1336,19 @@ fn raw_resp_redis_backfill_error_paths_round_trip() {
         b"$-1\r\n".to_vec()
     );
     assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"BRPOPLPUSH", b"missing-list", b"wrong", b"0"]),
+        b"$-1\r\n".to_vec()
+    );
+    assert_eq!(
         store.rpush(b"rpl-src", &[b"a".as_slice(), b"b".as_slice()]),
         RedisObjectResult::Integer(2)
     );
     assert_resp_error_contains(&store, &[b"RPOPLPUSH", b"rpl-src", b"wrong"], "WRONGTYPE");
+    assert_resp_error_contains(
+        &store,
+        &[b"BRPOPLPUSH", b"rpl-src", b"wrong", b"0"],
+        "WRONGTYPE",
+    );
     assert_eq!(
         decode_bulk_array(&RespTestHarness::exec_resp(
             &store,
@@ -1510,6 +1771,96 @@ fn raw_resp_watch_unwatch_and_exec_conflicts() {
 
 #[cfg(feature = "redis-compat")]
 #[test]
+fn raw_resp_scripting_commands_round_trip() {
+    let store = EmbeddedStore::new(4);
+
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"EVAL", b"return 'ok'", b"0"]),
+        b"$2\r\nok\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"EVAL",
+                b"return {KEYS[1], ARGV[1], tonumber(ARGV[2])}",
+                b"1",
+                b"script-key",
+                b"arg-value",
+                b"42",
+            ],
+        ),
+        b"*3\r\n$10\r\nscript-key\r\n$9\r\narg-value\r\n:42\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"EVAL",
+                b"redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])",
+                b"1",
+                b"script-store",
+                b"value",
+            ],
+        ),
+        b"$5\r\nvalue\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"GET", b"script-store"]),
+        b"$5\r\nvalue\r\n".to_vec()
+    );
+
+    let load = RespTestHarness::exec_resp(&store, &[b"SCRIPT", b"LOAD", b"return 'ok'"]);
+    assert_eq!(
+        load,
+        b"$40\r\n34f6a80fdc91746367dd8b572351df66b92c67ed\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"SCRIPT",
+                b"EXISTS",
+                b"34f6a80fdc91746367dd8b572351df66b92c67ed",
+                b"ffffffffffffffffffffffffffffffffffffffff",
+            ],
+        ),
+        b"*2\r\n:1\r\n:0\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"EVALSHA",
+                b"34f6a80fdc91746367dd8b572351df66b92c67ed",
+                b"0",
+            ],
+        ),
+        b"$2\r\nok\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SCRIPT", b"KILL"]),
+        b"-NOTBUSY No scripts in execution right now.\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SCRIPT", b"FLUSH"]),
+        b"+OK\r\n".to_vec()
+    );
+
+    let missing = RespTestHarness::exec_resp(
+        &store,
+        &[
+            b"EVALSHA",
+            b"34f6a80fdc91746367dd8b572351df66b92c67ed",
+            b"0",
+        ],
+    );
+    let frames = decode_resp_stream(&missing);
+    assert!(matches!(&frames[0], Frame::Error(message) if message.contains("NOSCRIPT")));
+}
+
+#[cfg(feature = "redis-compat")]
+#[test]
 fn raw_resp_transactions_unknown_command_aborts_exec() {
     let store = EmbeddedStore::new(4);
     let frames = RespTestHarness::exec_resp_sequence(
@@ -1831,9 +2182,32 @@ fn raw_resp_object_streaming_commands_round_trip() {
         RespTestHarness::exec_resp_integer(&store, &[b"STRLEN", b"blob"]),
         64
     );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SUBSTR", b"blob", b"1", b"3"]),
+        b"$3\r\nxxx\r\n".to_vec()
+    );
 
     assert_eq!(store.hset(b"h", b"a", b"1"), RedisObjectResult::Integer(1));
     assert_eq!(store.hset(b"h", b"b", b"2"), RedisObjectResult::Integer(1));
+    assert_eq!(
+        RespTestHarness::exec_resp_integer(&store, &[b"STRLEN", b"blob"]),
+        64
+    );
+    let mut full_blob = b"$64\r\n".to_vec();
+    full_blob.extend_from_slice(&[b'x'; 64]);
+    full_blob.extend_from_slice(b"\r\n");
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"GETRANGE", b"blob", b"0", b"-1"]),
+        full_blob
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"GET", b"blob"]),
+        full_blob
+    );
+    assert_resp_error_contains(&store, &[b"GET", b"h"], "WRONGTYPE");
+    assert_resp_error_contains(&store, &[b"STRLEN", b"h"], "WRONGTYPE");
+    assert_resp_error_contains(&store, &[b"GETRANGE", b"h", b"0", b"-1"], "WRONGTYPE");
+
     let hkeys = decode_bulk_array(&RespTestHarness::exec_resp(&store, &[b"HKEYS", b"h"]));
     assert_eq!(
         BTreeSet::from_iter(hkeys),

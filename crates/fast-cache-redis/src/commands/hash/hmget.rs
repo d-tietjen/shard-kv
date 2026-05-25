@@ -1,10 +1,11 @@
 #[cfg(feature = "server")]
 use bytes::BytesMut;
 
+#[cfg(feature = "server")]
+use crate::commands::redis::FastObjectArrayWriter;
 use crate::commands::redis::{
-    FastObjectArrayWriter, define_redis_command, frame_from_result, write_object_array_item,
-    write_resp_array_header, write_resp_null, write_resp_wrong_arity, write_resp_wrongtype,
-    wrong_arity,
+    define_redis_command, frame_from_result, write_object_array_item, write_resp_array_header,
+    write_resp_null, write_resp_wrong_arity, write_resp_wrongtype, wrong_arity,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]

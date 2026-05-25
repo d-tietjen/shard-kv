@@ -19,41 +19,37 @@ pub(crate) trait RedisStringStore {
 }
 
 impl RedisStringStore for EmbeddedStore {
+    #[inline(always)]
     fn get_string_value_into<F>(&self, key: &[u8], mut write: F) -> RedisStringLookup
     where
         F: FnMut(&bytes::Bytes),
     {
         let route = self.route_key(key);
-        if self.objects.shard_has_objects(route.shard_id) {
-            let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-            if bucket.has_expirations() {
-                let now_ms = now_millis();
-                if bucket.object_is_expired(key, now_ms) {
-                    drop(bucket);
-                    let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-                    if bucket.delete_expired(key, now_ms) {
-                        self.objects.note_deleted(route.shard_id);
-                    }
-                    drop(bucket);
-                    return if self.with_shared_value_bytes_routed(route, key, &mut write) {
-                        RedisStringLookup::Hit
-                    } else {
-                        RedisStringLookup::Miss
-                    };
-                }
-            }
-            if bucket.contains_object(key) {
-                return RedisStringLookup::WrongType;
-            }
-            drop(bucket);
-            return match self.with_shared_value_bytes_routed(route, key, &mut write) {
-                true => RedisStringLookup::Hit,
-                false => RedisStringLookup::Miss,
-            };
+
+        if self.with_shared_value_bytes_routed(route, key, &mut write) {
+            return RedisStringLookup::Hit;
         }
-        match self.with_shared_value_bytes_routed(route, key, &mut write) {
-            true => RedisStringLookup::Hit,
-            false => RedisStringLookup::Miss,
+
+        if !self.objects.shard_has_objects(route.shard_id) {
+            return RedisStringLookup::Miss;
+        }
+
+        let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
+        if bucket.has_expirations() {
+            let now_ms = now_millis();
+            if bucket.object_is_expired(key, now_ms) {
+                drop(bucket);
+                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+                if bucket.delete_expired(key, now_ms) {
+                    self.objects.note_deleted(route.shard_id);
+                }
+                return RedisStringLookup::Miss;
+            }
+        }
+        if bucket.contains_object(key) {
+            RedisStringLookup::WrongType
+        } else {
+            RedisStringLookup::Miss
         }
     }
 

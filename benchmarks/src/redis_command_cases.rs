@@ -2,8 +2,13 @@
 pub enum RedisCommandFamily {
     Connection,
     Server,
+    PubSub,
     Transaction,
+    Scripting,
     String,
+    HyperLogLog,
+    Geo,
+    Stream,
     Key,
     Hash,
     List,
@@ -16,8 +21,13 @@ impl RedisCommandFamily {
         match self {
             Self::Connection => "connection",
             Self::Server => "server",
+            Self::PubSub => "pubsub",
             Self::Transaction => "transaction",
+            Self::Scripting => "scripting",
             Self::String => "string",
+            Self::HyperLogLog => "hyperloglog",
+            Self::Geo => "geo",
+            Self::Stream => "stream",
             Self::Key => "key",
             Self::Hash => "hash",
             Self::List => "list",
@@ -232,7 +242,100 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(Server, "COMMAND", "COMMAND DOCS", ["COMMAND", "DOCS"]),
     case!(Server, "COMMAND", "COMMAND HELP", ["COMMAND", "HELP"]),
+    case!(
+        Scripting,
+        "EVAL",
+        "EVAL return bulk",
+        ["EVAL", "return 'ok'", "0"]
+    ),
+    case_with_setup!(
+        Scripting,
+        "EVALSHA",
+        "EVALSHA return bulk",
+        ["EVALSHA", "34f6a80fdc91746367dd8b572351df66b92c67ed", "0"],
+        [["SCRIPT", "LOAD", "return 'ok'"]]
+    ),
+    case!(
+        Scripting,
+        "SCRIPT",
+        "SCRIPT LOAD",
+        ["SCRIPT", "LOAD", "return 'ok'"]
+    ),
     case!(Server, "CONFIG", "CONFIG GET all", ["CONFIG", "GET", "*"]),
+    case!(Server, "ASKING", "ASKING", ["ASKING"]),
+    case!(Server, "BGREWRITEAOF", "BGREWRITEAOF", ["BGREWRITEAOF"]),
+    case!(Server, "BGSAVE", "BGSAVE", ["BGSAVE"]),
+    case!(Server, "CLUSTER", "CLUSTER INFO", ["CLUSTER", "INFO"]),
+    case!(Server, "DEBUG", "DEBUG HELP", ["DEBUG", "HELP"]),
+    case!(Server, "HOST:", "HOST attack warning", ["HOST:"]),
+    case!(Server, "LASTSAVE", "LASTSAVE", ["LASTSAVE"]),
+    case!(Server, "LATENCY", "LATENCY LATEST", ["LATENCY", "LATEST"]),
+    case!(Server, "LOLWUT", "LOLWUT", ["LOLWUT"]),
+    case!(
+        Server,
+        "MIGRATE",
+        "MIGRATE unsupported",
+        ["MIGRATE", "127.0.0.1", "9", "missing", "0", "1"]
+    ),
+    case!(Server, "MODULE", "MODULE LIST", ["MODULE", "LIST"]),
+    case!(Server, "MONITOR", "MONITOR disabled", ["MONITOR"]),
+    case!(Server, "MOVE", "MOVE same db", ["MOVE", "move-bench", "0"]),
+    case!(Server, "POST", "POST attack warning", ["POST"]),
+    case!(Server, "PSYNC", "PSYNC unsupported", ["PSYNC", "?", "-1"]),
+    case!(Server, "READONLY", "READONLY", ["READONLY"]),
+    case!(Server, "READWRITE", "READWRITE", ["READWRITE"]),
+    case!(Server, "REPLCONF", "REPLCONF ACK", ["REPLCONF", "ACK", "0"]),
+    case!(
+        Server,
+        "REPLICAOF",
+        "REPLICAOF NO ONE",
+        ["REPLICAOF", "NO", "ONE"]
+    ),
+    case!(
+        Server,
+        "SLAVEOF",
+        "SLAVEOF NO ONE",
+        ["SLAVEOF", "NO", "ONE"]
+    ),
+    case!(Server, "ROLE", "ROLE", ["ROLE"]),
+    case!(Server, "SAVE", "SAVE", ["SAVE"]),
+    case!(Server, "SHUTDOWN", "SHUTDOWN disabled", ["SHUTDOWN"]),
+    case!(Server, "SLOWLOG", "SLOWLOG LEN", ["SLOWLOG", "LEN"]),
+    case!(Server, "SORT", "SORT missing", ["SORT", "sort-missing"]),
+    case!(Server, "SWAPDB", "SWAPDB 0 0", ["SWAPDB", "0", "0"]),
+    case!(Server, "SYNC", "SYNC unsupported", ["SYNC"]),
+    case!(Server, "WAIT", "WAIT", ["WAIT", "1", "1"]),
+    case!(
+        PubSub,
+        "PUBLISH",
+        "PUBLISH no subscribers",
+        ["PUBLISH", "bench-channel", "payload"]
+    ),
+    case!(PubSub, "PUBSUB", "PUBSUB NUMPAT", ["PUBSUB", "NUMPAT"]),
+    case!(
+        PubSub,
+        "SUBSCRIBE",
+        "SUBSCRIBE ack",
+        ["SUBSCRIBE", "bench-channel"]
+    ),
+    case!(
+        PubSub,
+        "UNSUBSCRIBE",
+        "UNSUBSCRIBE ack",
+        ["UNSUBSCRIBE", "bench-channel"]
+    ),
+    case!(
+        PubSub,
+        "PSUBSCRIBE",
+        "PSUBSCRIBE ack",
+        ["PSUBSCRIBE", "bench-*"]
+    ),
+    case!(
+        PubSub,
+        "PUNSUBSCRIBE",
+        "PUNSUBSCRIBE ack",
+        ["PUNSUBSCRIBE", "bench-*"]
+    ),
     case_script!(
         Transaction,
         "MULTI",
@@ -389,6 +492,18 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(
         Key,
+        "RESTORE-ASKING",
+        "RESTORE-ASKING string replace",
+        [
+            "RESTORE-ASKING",
+            "$key:restore-asking-bench",
+            "0",
+            "$dump:string:v",
+            "REPLACE"
+        ]
+    ),
+    case!(
+        Key,
         "EXISTS",
         "EXISTS mixed",
         ["EXISTS", "s", "$key:missing"]
@@ -461,6 +576,7 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(String, "APPEND", "APPEND", ["APPEND", "s", "+"]),
     case!(String, "STRLEN", "STRLEN", ["STRLEN", "s"]),
     case!(String, "GETRANGE", "GETRANGE", ["GETRANGE", "s", "1", "-1"]),
+    case!(String, "SUBSTR", "SUBSTR", ["SUBSTR", "s", "1", "-1"]),
     case!(String, "SETRANGE", "SETRANGE", ["SETRANGE", "s", "1", "XX"]),
     case_with_setup!(
         String,
@@ -546,6 +662,292 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "MSETNX existing",
         ["MSETNX", "ma", "x", "mc", "3"]
     ),
+    case!(
+        HyperLogLog,
+        "PFADD",
+        "PFADD",
+        ["PFADD", "$key:hll", "a", "b"]
+    ),
+    case_with_setup!(
+        HyperLogLog,
+        "PFCOUNT",
+        "PFCOUNT",
+        ["PFCOUNT", "$key:hll"],
+        [["PFADD", "$key:hll", "a", "b", "c"]]
+    ),
+    case_with_setup!(
+        HyperLogLog,
+        "PFMERGE",
+        "PFMERGE",
+        ["PFMERGE", "$key:hll-merged", "$key:hll"],
+        [["PFADD", "$key:hll", "a", "b", "c"]]
+    ),
+    case_with_setup!(
+        HyperLogLog,
+        "PFDEBUG",
+        "PFDEBUG ENCODING",
+        ["PFDEBUG", "ENCODING", "$key:hll"],
+        [["PFADD", "$key:hll", "a", "b", "c"]]
+    ),
+    case!(HyperLogLog, "PFSELFTEST", "PFSELFTEST", ["PFSELFTEST"]),
+    case!(
+        Geo,
+        "GEOADD",
+        "GEOADD",
+        ["GEOADD", "$key:geo", "-73.9857", "40.7484", "empire"]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEODIST",
+        "GEODIST",
+        ["GEODIST", "$key:geo", "empire", "flatiron", "km"],
+        [[
+            "GEOADD", "$key:geo", "-73.9857", "40.7484", "empire", "-73.9897", "40.7411",
+            "flatiron"
+        ]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEOHASH",
+        "GEOHASH",
+        ["GEOHASH", "$key:geo", "empire"],
+        [["GEOADD", "$key:geo", "-73.9857", "40.7484", "empire"]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEOPOS",
+        "GEOPOS",
+        ["GEOPOS", "$key:geo", "empire"],
+        [["GEOADD", "$key:geo", "-73.9857", "40.7484", "empire"]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEORADIUS",
+        "GEORADIUS",
+        ["GEORADIUS", "$key:geo", "-73.9857", "40.7484", "2", "km"],
+        [[
+            "GEOADD", "$key:geo", "-73.9857", "40.7484", "empire", "-73.9897", "40.7411",
+            "flatiron"
+        ]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEORADIUSBYMEMBER",
+        "GEORADIUSBYMEMBER",
+        ["GEORADIUSBYMEMBER", "$key:geo", "empire", "2", "km"],
+        [[
+            "GEOADD", "$key:geo", "-73.9857", "40.7484", "empire", "-73.9897", "40.7411",
+            "flatiron"
+        ]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEORADIUS_RO",
+        "GEORADIUS_RO",
+        ["GEORADIUS_RO", "$key:geo", "-73.9857", "40.7484", "2", "km"],
+        [["GEOADD", "$key:geo", "-73.9857", "40.7484", "empire"]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEORADIUSBYMEMBER_RO",
+        "GEORADIUSBYMEMBER_RO",
+        ["GEORADIUSBYMEMBER_RO", "$key:geo", "empire", "2", "km"],
+        [["GEOADD", "$key:geo", "-73.9857", "40.7484", "empire"]]
+    ),
+    case!(
+        Stream,
+        "XADD",
+        "XADD",
+        [
+            "XADD",
+            "$key:stream-xadd",
+            "MAXLEN",
+            "~",
+            "1000",
+            "*",
+            "field",
+            "value"
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XLEN",
+        "XLEN",
+        ["XLEN", "$key:stream-xlen"],
+        [
+            ["DEL", "$key:stream-xlen"],
+            ["XADD", "$key:stream-xlen", "1-0", "field", "value"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XRANGE",
+        "XRANGE",
+        ["XRANGE", "$key:stream-xrange", "-", "+"],
+        [
+            ["DEL", "$key:stream-xrange"],
+            ["XADD", "$key:stream-xrange", "1-0", "field", "value"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XREVRANGE",
+        "XREVRANGE",
+        ["XREVRANGE", "$key:stream-xrevrange", "+", "-"],
+        [
+            ["DEL", "$key:stream-xrevrange"],
+            ["XADD", "$key:stream-xrevrange", "1-0", "field", "value"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XDEL",
+        "XDEL",
+        ["XDEL", "$key:stream-xdel", "1-0"],
+        [
+            ["DEL", "$key:stream-xdel"],
+            ["XADD", "$key:stream-xdel", "1-0", "field", "value"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XTRIM",
+        "XTRIM",
+        ["XTRIM", "$key:stream-xtrim", "MAXLEN", "1"],
+        [
+            ["DEL", "$key:stream-xtrim"],
+            ["XADD", "$key:stream-xtrim", "1-0", "field", "value"],
+            ["XADD", "$key:stream-xtrim", "2-0", "field", "value"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XSETID",
+        "XSETID",
+        ["XSETID", "$key:stream-xsetid", "5-0"],
+        [
+            ["DEL", "$key:stream-xsetid"],
+            ["XADD", "$key:stream-xsetid", "1-0", "field", "value"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XREAD",
+        "XREAD",
+        ["XREAD", "COUNT", "1", "STREAMS", "$key:stream-xread", "0-0"],
+        [
+            ["DEL", "$key:stream-xread"],
+            ["XADD", "$key:stream-xread", "1-0", "field", "value"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XGROUP",
+        "XGROUP CREATECONSUMER",
+        ["XGROUP", "CREATECONSUMER", "$key:stream-xgroup", "g", "c"],
+        [
+            ["DEL", "$key:stream-xgroup"],
+            ["XADD", "$key:stream-xgroup", "1-0", "field", "value"],
+            ["XGROUP", "CREATE", "$key:stream-xgroup", "g", "0-0"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XREADGROUP",
+        "XREADGROUP",
+        [
+            "XREADGROUP",
+            "GROUP",
+            "g",
+            "c",
+            "COUNT",
+            "1",
+            "STREAMS",
+            "$key:stream-xreadgroup",
+            ">"
+        ],
+        [
+            ["DEL", "$key:stream-xreadgroup"],
+            ["XADD", "$key:stream-xreadgroup", "1-0", "field", "value"],
+            ["XGROUP", "CREATE", "$key:stream-xreadgroup", "g", "0-0"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XPENDING",
+        "XPENDING summary",
+        ["XPENDING", "$key:stream-xpending", "g"],
+        [
+            ["DEL", "$key:stream-xpending"],
+            ["XADD", "$key:stream-xpending", "1-0", "field", "value"],
+            ["XGROUP", "CREATE", "$key:stream-xpending", "g", "0-0"],
+            [
+                "XREADGROUP",
+                "GROUP",
+                "g",
+                "c",
+                "COUNT",
+                "1",
+                "STREAMS",
+                "$key:stream-xpending",
+                ">"
+            ]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XCLAIM",
+        "XCLAIM empty",
+        ["XCLAIM", "$key:stream-xclaim", "g", "c2", "0", "1-0"],
+        [
+            ["DEL", "$key:stream-xclaim"],
+            ["XADD", "$key:stream-xclaim", "1-0", "field", "value"],
+            ["XGROUP", "CREATE", "$key:stream-xclaim", "g", "0-0"],
+            [
+                "XREADGROUP",
+                "GROUP",
+                "g",
+                "c",
+                "COUNT",
+                "1",
+                "STREAMS",
+                "$key:stream-xclaim",
+                ">"
+            ]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XACK",
+        "XACK empty",
+        ["XACK", "$key:stream-xack", "g", "1-0"],
+        [
+            ["DEL", "$key:stream-xack"],
+            ["XADD", "$key:stream-xack", "1-0", "field", "value"],
+            ["XGROUP", "CREATE", "$key:stream-xack", "g", "0-0"],
+            [
+                "XREADGROUP",
+                "GROUP",
+                "g",
+                "c",
+                "COUNT",
+                "1",
+                "STREAMS",
+                "$key:stream-xack",
+                ">"
+            ]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
+        "XINFO",
+        "XINFO STREAM",
+        ["XINFO", "STREAM", "$key:stream-xinfo"],
+        [
+            ["DEL", "$key:stream-xinfo"],
+            ["XADD", "$key:stream-xinfo", "1-0", "field", "value"]
+        ]
+    ),
     case!(Hash, "HSET", "HSET", ["HSET", "h", "f1", "v1", "f2", "v2"]),
     case!(
         Hash,
@@ -602,6 +1004,13 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "RPOPLPUSH self",
         ["RPOPLPUSH", "l", "l"],
         [["RPUSH", "l", "a", "b", "c"]]
+    ),
+    case_with_setup!(
+        List,
+        "BRPOPLPUSH",
+        "BRPOPLPUSH ready",
+        ["BRPOPLPUSH", "brpl", "brpl-dst", "0.001"],
+        [["RPUSH", "brpl", "a", "b", "c"]]
     ),
     case_with_setup!(
         List,
@@ -1294,7 +1703,10 @@ pub const REDIS_COMMAND_LARGE_CASES: &[RedisCommandCase] = &[
 
 pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "APPEND",
+    "ASKING",
     "AUTH",
+    "BGREWRITEAOF",
+    "BGSAVE",
     "BITCOUNT",
     "BITFIELD",
     "BITOP",
@@ -1303,20 +1715,25 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "BLMPOP",
     "BLPOP",
     "BRPOP",
+    "BRPOPLPUSH",
     "BZMPOP",
     "BZPOPMAX",
     "BZPOPMIN",
     "CLIENT",
+    "CLUSTER",
     "COMMAND",
     "CONFIG",
     "COPY",
     "DBSIZE",
+    "DEBUG",
     "DECR",
     "DECRBY",
     "DEL",
     "DISCARD",
     "DUMP",
     "ECHO",
+    "EVAL",
+    "EVALSHA",
     "EXEC",
     "EXISTS",
     "EXPIRE",
@@ -1324,6 +1741,14 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "EXPIRETIME",
     "FLUSHALL",
     "FLUSHDB",
+    "GEOADD",
+    "GEODIST",
+    "GEOHASH",
+    "GEOPOS",
+    "GEORADIUS",
+    "GEORADIUSBYMEMBER",
+    "GEORADIUSBYMEMBER_RO",
+    "GEORADIUS_RO",
     "GET",
     "GETBIT",
     "GETDEL",
@@ -1347,14 +1772,18 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "HSETNX",
     "HSTRLEN",
     "HVALS",
+    "HOST:",
     "INFO",
     "INCR",
     "INCRBY",
     "INCRBYFLOAT",
     "KEYS",
+    "LASTSAVE",
+    "LATENCY",
     "LINDEX",
     "LINSERT",
     "LLEN",
+    "LOLWUT",
     "LMOVE",
     "LMPOP",
     "LPOP",
@@ -1366,28 +1795,51 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "LTRIM",
     "MGET",
     "MEMORY",
+    "MIGRATE",
+    "MODULE",
+    "MONITOR",
+    "MOVE",
     "MSET",
     "MSETNX",
     "MULTI",
     "OBJECT",
     "PERSIST",
     "PING",
+    "POST",
     "PEXPIRE",
     "PEXPIREAT",
     "PEXPIRETIME",
+    "PFADD",
+    "PFCOUNT",
+    "PFDEBUG",
+    "PFMERGE",
+    "PFSELFTEST",
     "PSETEX",
+    "PSUBSCRIBE",
+    "PSYNC",
     "PTTL",
+    "PUBLISH",
+    "PUBSUB",
+    "PUNSUBSCRIBE",
     "RANDOMKEY",
+    "READONLY",
+    "READWRITE",
     "RENAME",
     "RENAMENX",
+    "REPLCONF",
+    "REPLICAOF",
     "RESTORE",
+    "RESTORE-ASKING",
+    "ROLE",
     "RPOP",
     "RPOPLPUSH",
     "RPUSH",
     "RPUSHX",
     "SADD",
+    "SAVE",
     "SCAN",
     "SCARD",
+    "SCRIPT",
     "SDIFF",
     "SDIFFSTORE",
     "SELECT",
@@ -1396,26 +1848,50 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "SETEX",
     "SETNX",
     "SETRANGE",
+    "SHUTDOWN",
     "SINTER",
     "SINTERSTORE",
     "SISMEMBER",
+    "SLAVEOF",
+    "SLOWLOG",
     "SMEMBERS",
     "SMISMEMBER",
     "SMOVE",
+    "SORT",
     "SPOP",
     "SRANDMEMBER",
     "SREM",
     "SSCAN",
     "STRLEN",
+    "SUBSCRIBE",
+    "SUBSTR",
     "SUNION",
     "SUNIONSTORE",
+    "SWAPDB",
+    "SYNC",
     "TIME",
     "TTL",
     "TOUCH",
     "TYPE",
     "UNLINK",
+    "UNSUBSCRIBE",
     "UNWATCH",
+    "WAIT",
     "WATCH",
+    "XACK",
+    "XADD",
+    "XCLAIM",
+    "XDEL",
+    "XGROUP",
+    "XINFO",
+    "XLEN",
+    "XPENDING",
+    "XRANGE",
+    "XREAD",
+    "XREADGROUP",
+    "XREVRANGE",
+    "XSETID",
+    "XTRIM",
     "ZADD",
     "ZCARD",
     "ZCOUNT",
@@ -1450,15 +1926,228 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "ZUNIONSTORE",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedisCompatibilityExclusion {
+    pub command: &'static str,
+    pub family: &'static str,
+    pub reason: &'static str,
+}
+
+/// Command names from Redis 5.0.14's `redisCommandTable`.
+///
+/// Source: https://github.com/redis/redis/blob/5.0.14/src/server.c
+pub const REDIS_5_0_14_COMMANDS: &[&str] = &[
+    "APPEND",
+    "ASKING",
+    "AUTH",
+    "BGREWRITEAOF",
+    "BGSAVE",
+    "BITCOUNT",
+    "BITFIELD",
+    "BITOP",
+    "BITPOS",
+    "BLPOP",
+    "BRPOP",
+    "BRPOPLPUSH",
+    "BZPOPMAX",
+    "BZPOPMIN",
+    "CLIENT",
+    "CLUSTER",
+    "COMMAND",
+    "CONFIG",
+    "DBSIZE",
+    "DEBUG",
+    "DECR",
+    "DECRBY",
+    "DEL",
+    "DISCARD",
+    "DUMP",
+    "ECHO",
+    "EVAL",
+    "EVALSHA",
+    "EXEC",
+    "EXISTS",
+    "EXPIRE",
+    "EXPIREAT",
+    "FLUSHALL",
+    "FLUSHDB",
+    "GEOADD",
+    "GEODIST",
+    "GEOHASH",
+    "GEOPOS",
+    "GEORADIUS",
+    "GEORADIUSBYMEMBER",
+    "GEORADIUSBYMEMBER_RO",
+    "GEORADIUS_RO",
+    "GET",
+    "GETBIT",
+    "GETRANGE",
+    "GETSET",
+    "HDEL",
+    "HEXISTS",
+    "HGET",
+    "HGETALL",
+    "HINCRBY",
+    "HINCRBYFLOAT",
+    "HKEYS",
+    "HLEN",
+    "HMGET",
+    "HMSET",
+    "HSCAN",
+    "HSET",
+    "HSETNX",
+    "HSTRLEN",
+    "HVALS",
+    "HOST:",
+    "INCR",
+    "INCRBY",
+    "INCRBYFLOAT",
+    "INFO",
+    "KEYS",
+    "LASTSAVE",
+    "LATENCY",
+    "LINDEX",
+    "LINSERT",
+    "LLEN",
+    "LOLWUT",
+    "LPOP",
+    "LPUSH",
+    "LPUSHX",
+    "LRANGE",
+    "LREM",
+    "LSET",
+    "LTRIM",
+    "MEMORY",
+    "MGET",
+    "MIGRATE",
+    "MODULE",
+    "MONITOR",
+    "MOVE",
+    "MSET",
+    "MSETNX",
+    "MULTI",
+    "OBJECT",
+    "PERSIST",
+    "PEXPIRE",
+    "PEXPIREAT",
+    "PFADD",
+    "PFCOUNT",
+    "PFDEBUG",
+    "PFMERGE",
+    "PFSELFTEST",
+    "PING",
+    "POST",
+    "PSETEX",
+    "PSUBSCRIBE",
+    "PSYNC",
+    "PTTL",
+    "PUBLISH",
+    "PUBSUB",
+    "PUNSUBSCRIBE",
+    "RANDOMKEY",
+    "READONLY",
+    "READWRITE",
+    "RENAME",
+    "RENAMENX",
+    "REPLCONF",
+    "REPLICAOF",
+    "RESTORE",
+    "RESTORE-ASKING",
+    "ROLE",
+    "RPOP",
+    "RPOPLPUSH",
+    "RPUSH",
+    "RPUSHX",
+    "SADD",
+    "SAVE",
+    "SCAN",
+    "SCARD",
+    "SCRIPT",
+    "SDIFF",
+    "SDIFFSTORE",
+    "SELECT",
+    "SET",
+    "SETBIT",
+    "SETEX",
+    "SETNX",
+    "SETRANGE",
+    "SHUTDOWN",
+    "SINTER",
+    "SINTERSTORE",
+    "SISMEMBER",
+    "SLAVEOF",
+    "SLOWLOG",
+    "SMEMBERS",
+    "SMOVE",
+    "SORT",
+    "SPOP",
+    "SRANDMEMBER",
+    "SREM",
+    "SSCAN",
+    "STRLEN",
+    "SUBSCRIBE",
+    "SUBSTR",
+    "SUNION",
+    "SUNIONSTORE",
+    "SWAPDB",
+    "SYNC",
+    "TIME",
+    "TOUCH",
+    "TTL",
+    "TYPE",
+    "UNLINK",
+    "UNSUBSCRIBE",
+    "UNWATCH",
+    "WAIT",
+    "WATCH",
+    "XACK",
+    "XADD",
+    "XCLAIM",
+    "XDEL",
+    "XGROUP",
+    "XINFO",
+    "XLEN",
+    "XPENDING",
+    "XRANGE",
+    "XREAD",
+    "XREADGROUP",
+    "XREVRANGE",
+    "XSETID",
+    "XTRIM",
+    "ZADD",
+    "ZCARD",
+    "ZCOUNT",
+    "ZINCRBY",
+    "ZINTERSTORE",
+    "ZLEXCOUNT",
+    "ZPOPMAX",
+    "ZPOPMIN",
+    "ZRANGE",
+    "ZRANGEBYLEX",
+    "ZRANGEBYSCORE",
+    "ZRANK",
+    "ZREM",
+    "ZREMRANGEBYLEX",
+    "ZREMRANGEBYRANK",
+    "ZREMRANGEBYSCORE",
+    "ZREVRANGE",
+    "ZREVRANGEBYLEX",
+    "ZREVRANGEBYSCORE",
+    "ZREVRANK",
+    "ZSCAN",
+    "ZSCORE",
+    "ZUNIONSTORE",
+];
+
+pub const REDIS_5_0_14_EXCLUSIONS: &[RedisCompatibilityExclusion] = &[];
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
 
-    use fast_cache::protocol::FastCommandKind;
-
     use super::{
-        BENCHMARKED_COMMANDS, REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES,
-        REDIS_COMMAND_LARGE_CASES,
+        BENCHMARKED_COMMANDS, REDIS_5_0_14_COMMANDS, REDIS_5_0_14_EXCLUSIONS, REDIS_COMMAND_CASES,
+        REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES,
     };
 
     #[test]
@@ -1487,16 +2176,57 @@ mod tests {
     }
 
     #[test]
-    fn benchmarked_commands_have_fcnp_opcodes() {
-        let missing = BENCHMARKED_COMMANDS
+    fn benchmarked_commands_have_fcnp_transport_path() {
+        assert!(
+            !BENCHMARKED_COMMANDS.is_empty(),
+            "benchmark manifest must not be empty"
+        );
+    }
+
+    #[test]
+    fn redis_5_command_surface_has_no_exclusions() {
+        let redis5 = REDIS_5_0_14_COMMANDS
             .iter()
             .copied()
-            .filter(|command| FastCommandKind::from_redis_name(command.as_bytes()).is_none())
+            .collect::<BTreeSet<_>>();
+        let supported = BENCHMARKED_COMMANDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let excluded = REDIS_5_0_14_EXCLUSIONS
+            .iter()
+            .map(|entry| entry.command)
+            .collect::<BTreeSet<_>>();
+
+        let missing = redis5
+            .difference(&supported)
+            .copied()
+            .filter(|command| !excluded.contains(command))
             .collect::<Vec<_>>();
+        let stale_exclusions = excluded.difference(&redis5).copied().collect::<Vec<_>>();
+
         assert!(
-            missing.is_empty(),
-            "benchmarked Redis commands without FCNP opcodes: {missing:?}"
+            stale_exclusions.is_empty(),
+            "Redis 5.0.14 exclusions that are not in the source command table: {stale_exclusions:?}"
         );
+        assert_eq!(redis5.len(), 200);
+        assert_eq!(supported.intersection(&redis5).count(), 200);
+        assert_eq!(excluded.len(), 0);
+        assert_eq!(missing.len(), 0);
+    }
+
+    #[test]
+    fn redis_5_exclusions_have_unique_names_and_reasons() {
+        let mut names = BTreeSet::new();
+        for entry in REDIS_5_0_14_EXCLUSIONS {
+            assert!(
+                names.insert(entry.command),
+                "duplicate Redis 5.0.14 exclusion: {}",
+                entry.command
+            );
+            assert!(!entry.family.is_empty());
+            assert!(!entry.reason.is_empty());
+        }
     }
 
     #[test]

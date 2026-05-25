@@ -14,7 +14,7 @@ use crate::server::wire::ServerWire;
 use crate::storage::hash_key_tag_from_hash;
 use crate::storage::{EmbeddedStore, RedisKeyStore, now_millis};
 
-define_redis_command!(Restore, "RESTORE", true);
+define_redis_command!(Restore, "RESTORE", true, aliases: ["RESTORE-ASKING"]);
 
 impl crate::commands::redis::RedisCommand for Restore {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {

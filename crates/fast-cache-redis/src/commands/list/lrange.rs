@@ -2,9 +2,11 @@ use crate::storage::RedisListStore;
 #[cfg(feature = "server")]
 use bytes::BytesMut;
 
+#[cfg(feature = "server")]
+use crate::commands::redis::FastObjectArrayWriter;
 use crate::commands::redis::{
-    FastObjectArrayWriter, define_redis_command, error, finish_object_array_visit,
-    frame_from_result, parse_i64, write_frame, write_object_array_item, wrong_arity,
+    define_redis_command, error, finish_object_array_visit, frame_from_result, parse_i64,
+    write_frame, write_object_array_item, wrong_arity,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]

@@ -47,6 +47,7 @@ const TIER1_COMMANDS: &[&str] = &[
     "COPY",
     "DUMP",
     "RESTORE",
+    "RESTORE-ASKING",
     "OBJECT ENCODING",
     "GETSET",
     "SETNX",
@@ -63,6 +64,7 @@ const TIER1_COMMANDS: &[&str] = &[
     "APPEND",
     "STRLEN",
     "GETRANGE",
+    "SUBSTR",
     "SETRANGE",
     "GETBIT",
     "SETBIT",
@@ -104,6 +106,7 @@ const TIER1_COMMANDS: &[&str] = &[
     "BLPOP",
     "BRPOP",
     "RPOPLPUSH",
+    "BRPOPLPUSH",
     "LMOVE",
     "BLMOVE",
     "LMPOP",
@@ -164,6 +167,9 @@ const TIER1_COMMANDS: &[&str] = &[
     "DISCARD",
     "WATCH",
     "UNWATCH",
+    "EVAL",
+    "EVALSHA",
+    "SCRIPT",
     "INFO",
     "COMMAND",
     "COMMAND COUNT",
@@ -217,6 +223,7 @@ const COVERAGE: &[CommandCoverage] = &[
     supported("COPY"),
     supported("DUMP"),
     supported("RESTORE"),
+    supported("RESTORE-ASKING"),
     supported("OBJECT ENCODING"),
     supported("GETSET"),
     supported("SETNX"),
@@ -233,6 +240,7 @@ const COVERAGE: &[CommandCoverage] = &[
     supported("APPEND"),
     supported("STRLEN"),
     supported("GETRANGE"),
+    supported("SUBSTR"),
     supported("SETRANGE"),
     supported("GETBIT"),
     supported("SETBIT"),
@@ -274,6 +282,7 @@ const COVERAGE: &[CommandCoverage] = &[
     supported("BLPOP"),
     supported("BRPOP"),
     supported("RPOPLPUSH"),
+    supported("BRPOPLPUSH"),
     supported("LMOVE"),
     supported("BLMOVE"),
     supported("LMPOP"),
@@ -334,6 +343,9 @@ const COVERAGE: &[CommandCoverage] = &[
     supported("DISCARD"),
     supported("WATCH"),
     supported("UNWATCH"),
+    supported("EVAL"),
+    supported("EVALSHA"),
+    supported("SCRIPT"),
     supported("INFO"),
     supported("COMMAND"),
     supported("COMMAND COUNT"),
@@ -392,6 +404,6 @@ fn tier1_coverage_counts_are_intentional() {
         .filter(|entry| entry.status == CoverageStatus::Missing)
         .count();
 
-    assert_eq!(supported, 167);
+    assert_eq!(supported, 173);
     assert_eq!(missing, 0);
 }

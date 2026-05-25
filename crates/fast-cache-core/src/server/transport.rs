@@ -1,8 +1,10 @@
 use super::connection::{ConnectionRejector, HandoffConfig};
 #[cfg(feature = "embedded")]
 use super::direct_protocol::{DirectProtocol, SharedRequestBufferContext};
+#[cfg(feature = "embedded")]
+use super::fast_write::FastWriteQueue;
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
-use super::fast_write::{FastWriteBatchIoVec, FastWriteItem, FastWriteQueue};
+use super::fast_write::{FastWriteBatchIoVec, FastWriteItem};
 #[cfg(feature = "embedded")]
 use super::transactions::{TransactionCoordinator, TransactionState};
 use super::*;
@@ -354,6 +356,46 @@ impl MultiDirectConnection {
     where
         S: AsyncRead + AsyncWrite + Unpin + 'static,
     {
+        match TokioResponseWriterMode::configured() {
+            TokioResponseWriterMode::Inline => {
+                Self::handle_inline(
+                    stream,
+                    store,
+                    _permit,
+                    single_threaded,
+                    owned_shard_id,
+                    started_at,
+                    transaction_coordinator,
+                )
+                .await
+            }
+            TokioResponseWriterMode::Split => {
+                Self::handle_split(
+                    stream,
+                    store,
+                    _permit,
+                    single_threaded,
+                    owned_shard_id,
+                    started_at,
+                    transaction_coordinator,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn handle_split<S>(
+        stream: S,
+        store: Arc<EmbeddedStore>,
+        _permit: OwnedSemaphorePermit,
+        single_threaded: bool,
+        owned_shard_id: Option<usize>,
+        started_at: Instant,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + 'static,
+    {
         let (mut read_half, mut write_half) = tokio::io::split(stream);
         let (write_tx, mut write_rx) =
             tokio::sync::mpsc::channel::<bytes::Bytes>(WRITE_HANDOFF_MAX_ITEMS);
@@ -421,6 +463,95 @@ impl MultiDirectConnection {
         drop(write_tx);
         let _ = writer.await;
         result
+    }
+
+    async fn handle_inline<S>(
+        mut stream: S,
+        store: Arc<EmbeddedStore>,
+        _permit: OwnedSemaphorePermit,
+        single_threaded: bool,
+        owned_shard_id: Option<usize>,
+        started_at: Instant,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + 'static,
+    {
+        let mut frame_buffer = HandoffBuffer::with_config(HandoffConfig::buffer());
+        let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
+        let mut fast_write_queue = FastWriteQueue::default();
+        let use_fast_write_queue = store.shard_count() > 1;
+        let mut transaction_state = TransactionState::default();
+
+        loop {
+            let read = frame_buffer
+                .read_available(&mut stream)
+                .await
+                .map_err(|error| {
+                    crate::FastCacheError::Protocol(format!("handoff read error: {error}"))
+                })?;
+            if read == 0 {
+                break;
+            }
+
+            let consumed_total = DirectProtocol::process_shared_request_buffer_with_context(
+                frame_buffer.peek(),
+                &store,
+                &mut write_buffer,
+                use_fast_write_queue.then_some(&mut fast_write_queue),
+                SharedRequestBufferContext {
+                    single_threaded,
+                    owned_shard_id,
+                    started_at,
+                    transaction_coordinator: transaction_coordinator.as_deref(),
+                    transaction_state: &mut transaction_state,
+                },
+            )?;
+
+            if use_fast_write_queue && !fast_write_queue.is_empty() {
+                fast_write_queue.flush_bytes(&mut write_buffer);
+                fast_write_queue.write_pending_tokio(&mut stream).await?;
+                if write_buffer.capacity() < READ_RESERVE_THRESHOLD {
+                    write_buffer.reserve(CONNECTION_BUFFER_CAPACITY);
+                }
+            } else if !write_buffer.is_empty() {
+                stream.write_all(&write_buffer).await?;
+                write_buffer.clear();
+                if write_buffer.capacity() < READ_RESERVE_THRESHOLD {
+                    write_buffer.reserve(CONNECTION_BUFFER_CAPACITY);
+                }
+            }
+            if consumed_total > 0 {
+                frame_buffer.advance(consumed_total).map_err(|error| {
+                    crate::FastCacheError::Protocol(format!("handoff advance error: {error}"))
+                })?;
+            }
+        }
+
+        transaction_state.close(transaction_coordinator.as_deref());
+        Ok(())
+    }
+}
+
+#[cfg(feature = "embedded")]
+#[derive(Clone, Copy)]
+enum TokioResponseWriterMode {
+    Split,
+    Inline,
+}
+
+#[cfg(feature = "embedded")]
+impl TokioResponseWriterMode {
+    fn configured() -> Self {
+        match std::env::var("FAST_CACHE_TOKIO_WRITER_MODE") {
+            Ok(value) if value.eq_ignore_ascii_case("split") => Self::Split,
+            Ok(value)
+                if value.eq_ignore_ascii_case("inline") || value.eq_ignore_ascii_case("direct") =>
+            {
+                Self::Inline
+            }
+            _ => Self::Inline,
+        }
     }
 }
 

@@ -112,6 +112,7 @@ pub enum FastCommandKind {
     LTrim = 170,
     RPopLPush = 171,
     RPushX = 172,
+    BRPopLPush = 173,
     SAdd = 40,
     SRem = 41,
     SIsMember = 42,
@@ -158,6 +159,8 @@ pub enum FastCommandKind {
     Discard = 122,
     Watch = 123,
     Unwatch = 124,
+    RestoreAsking = 125,
+    Substr = 126,
     RespCommand = 200,
     BZMPop = 201,
     BZPopMax = 202,
@@ -257,6 +260,10 @@ pub const FAST_REDIS_COMMAND_OPCODES: &[FastRedisCommandOpcode] = &[
     FastRedisCommandOpcode {
         name: "BRPOP",
         kind: FastCommandKind::BRPop,
+    },
+    FastRedisCommandOpcode {
+        name: "BRPOPLPUSH",
+        kind: FastCommandKind::BRPopLPush,
     },
     FastRedisCommandOpcode {
         name: "BZMPOP",
@@ -361,6 +368,10 @@ pub const FAST_REDIS_COMMAND_OPCODES: &[FastRedisCommandOpcode] = &[
     FastRedisCommandOpcode {
         name: "GETRANGE",
         kind: FastCommandKind::GetRange,
+    },
+    FastRedisCommandOpcode {
+        name: "SUBSTR",
+        kind: FastCommandKind::Substr,
     },
     FastRedisCommandOpcode {
         name: "GETSET",
@@ -573,6 +584,10 @@ pub const FAST_REDIS_COMMAND_OPCODES: &[FastRedisCommandOpcode] = &[
     FastRedisCommandOpcode {
         name: "RESTORE",
         kind: FastCommandKind::Restore,
+    },
+    FastRedisCommandOpcode {
+        name: "RESTORE-ASKING",
+        kind: FastCommandKind::RestoreAsking,
     },
     FastRedisCommandOpcode {
         name: "RPOP",
@@ -951,6 +966,8 @@ impl FastCommandKind {
             122 => Some(Self::Discard),
             123 => Some(Self::Watch),
             124 => Some(Self::Unwatch),
+            125 => Some(Self::RestoreAsking),
+            126 => Some(Self::Substr),
             140 => Some(Self::HExists),
             141 => Some(Self::HGetAll),
             142 => Some(Self::HIncrBy),
@@ -975,6 +992,7 @@ impl FastCommandKind {
             170 => Some(Self::LTrim),
             171 => Some(Self::RPopLPush),
             172 => Some(Self::RPushX),
+            173 => Some(Self::BRPopLPush),
             180 => Some(Self::SDiff),
             181 => Some(Self::SDiffStore),
             182 => Some(Self::SInter),
@@ -1040,6 +1058,7 @@ impl FastCommandKind {
             Self::BLMPop => Some("BLMPOP"),
             Self::BLPop => Some("BLPOP"),
             Self::BRPop => Some("BRPOP"),
+            Self::BRPopLPush => Some("BRPOPLPUSH"),
             Self::BZMPop => Some("BZMPOP"),
             Self::BZPopMax => Some("BZPOPMAX"),
             Self::BZPopMin => Some("BZPOPMIN"),
@@ -1119,6 +1138,7 @@ impl FastCommandKind {
             Self::Rename => Some("RENAME"),
             Self::RenameNx => Some("RENAMENX"),
             Self::Restore => Some("RESTORE"),
+            Self::RestoreAsking => Some("RESTORE-ASKING"),
             Self::RPop => Some("RPOP"),
             Self::RPopLPush => Some("RPOPLPUSH"),
             Self::RPush => Some("RPUSH"),
@@ -1145,6 +1165,7 @@ impl FastCommandKind {
             Self::SRem => Some("SREM"),
             Self::SScan => Some("SSCAN"),
             Self::StrLen => Some("STRLEN"),
+            Self::Substr => Some("SUBSTR"),
             Self::SUnion => Some("SUNION"),
             Self::SUnionStore => Some("SUNIONSTORE"),
             Self::Time => Some("TIME"),
@@ -1238,6 +1259,7 @@ impl FastCommandKind {
             | Self::Rename
             | Self::RenameNx
             | Self::RPopLPush
+            | Self::BRPopLPush
             | Self::LMove
             | Self::BLMove
             | Self::SMove => first_n_route_keys(args, 2),

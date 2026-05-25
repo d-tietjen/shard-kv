@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use fast_cache_benchmarks::redis_command_cases::{
-    REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES,
-    RedisCommandCase,
+    REDIS_5_0_14_COMMANDS, REDIS_5_0_14_EXCLUSIONS, REDIS_COMMAND_CASES,
+    REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES, RedisCommandCase,
 };
 
 type BoxError = Box<dyn Error + Send + Sync>;
@@ -112,6 +112,10 @@ fn add_case(entries: &mut BTreeMap<&'static str, CommandEntry>, case: &RedisComm
 fn render_markdown(entries: &[CommandEntry]) -> String {
     let supported = count_status(entries, CompatStatus::Supported);
     let missing = count_status(entries, CompatStatus::Missing);
+    let redis5_supported = redis_5_supported_commands(entries);
+    let redis5_excluded = redis_5_excluded_commands();
+    let redis5_missing = redis_5_missing_commands(entries);
+    let redis5_extensions = redis_5_extension_commands(entries);
     let benchmark_cases = REDIS_COMMAND_CASES.len()
         + REDIS_COMMAND_LARGE_CASES.len()
         + REDIS_COMMAND_DESTRUCTIVE_CASES.len();
@@ -164,6 +168,98 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     )
     .unwrap();
     writeln!(out).unwrap();
+    writeln!(out, "## Redis 5.0.14 Baseline").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Official baseline: Redis 5.0.14 `redisCommandTable` from <https://github.com/redis/redis/blob/5.0.14/src/server.c>."
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "| Metric | Count |").unwrap();
+    writeln!(out, "| --- | ---: |").unwrap();
+    writeln!(
+        out,
+        "| Redis 5.0.14 command table entries | {} |",
+        REDIS_5_0_14_COMMANDS.len()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| Redis 5.0.14 commands supported and live-benchmarked | {} |",
+        redis5_supported.len()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| Redis 5.0.14 commands explicitly excluded from 0.2.0 | {} |",
+        redis5_excluded.len()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| Redis 5.0.14 commands missing | {} |",
+        redis5_missing.len()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| Supported extensions beyond Redis 5.0.14 | {} |",
+        redis5_extensions.len()
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    if redis5_excluded.is_empty() {
+        writeln!(
+            out,
+            "No Redis 5.0.14 commands are excluded from the compatibility target. Redis 5.0.14 commands that are not supported yet are tracked as missing compatibility work."
+        )
+        .unwrap();
+    } else {
+        writeln!(
+            out,
+            "Explicit exclusions are outside the current compatibility target. Redis 5.0.14 commands that are not supported yet are tracked as missing compatibility work."
+        )
+        .unwrap();
+    }
+    writeln!(out).unwrap();
+    if redis5_missing.is_empty() {
+        writeln!(out, "Missing Redis 5.0.14 commands: none.").unwrap();
+    } else {
+        writeln!(
+            out,
+            "Missing Redis 5.0.14 commands: {}.",
+            join_set_as_code(&redis5_missing)
+        )
+        .unwrap();
+    }
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "Supported extensions beyond Redis 5.0.14: {}.",
+        join_set_as_code(&redis5_extensions)
+    )
+    .unwrap();
+    writeln!(out).unwrap();
+    if redis5_excluded.is_empty() {
+        writeln!(out, "Explicit Redis 5.0.14 exclusions: none.").unwrap();
+    } else {
+        writeln!(out, "### Explicit Redis 5.0.14 Exclusions").unwrap();
+        writeln!(out).unwrap();
+        writeln!(out, "| Command | Family | Reason |").unwrap();
+        writeln!(out, "| --- | --- | --- |").unwrap();
+        for exclusion in REDIS_5_0_14_EXCLUSIONS {
+            writeln!(
+                out,
+                "| `{}` | {} | {} |",
+                exclusion.command,
+                exclusion.family,
+                markdown_cell(exclusion.reason),
+            )
+            .unwrap();
+        }
+    }
+    writeln!(out).unwrap();
     writeln!(out, "## Commands").unwrap();
     writeln!(out).unwrap();
     writeln!(
@@ -194,6 +290,10 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
 fn render_json(entries: &[CommandEntry]) -> String {
     let supported = count_status(entries, CompatStatus::Supported);
     let missing = count_status(entries, CompatStatus::Missing);
+    let redis5_supported = redis_5_supported_commands(entries);
+    let redis5_excluded = redis_5_excluded_commands();
+    let redis5_missing = redis_5_missing_commands(entries);
+    let redis5_extensions = redis_5_extension_commands(entries);
     let benchmark_cases = REDIS_COMMAND_CASES.len()
         + REDIS_COMMAND_LARGE_CASES.len()
         + REDIS_COMMAND_DESTRUCTIVE_CASES.len();
@@ -222,6 +322,67 @@ fn render_json(entries: &[CommandEntry]) -> String {
         REDIS_COMMAND_DESTRUCTIVE_CASES.len()
     )
     .unwrap();
+    writeln!(out, "  }},").unwrap();
+    writeln!(out, "  \"redis_5_0_14\": {{").unwrap();
+    writeln!(
+        out,
+        "    \"source\": \"https://github.com/redis/redis/blob/5.0.14/src/server.c\","
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    \"command_count\": {},",
+        REDIS_5_0_14_COMMANDS.len()
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    \"supported_commands\": {},",
+        redis5_supported.len()
+    )
+    .unwrap();
+    writeln!(out, "    \"excluded_commands\": {},", redis5_excluded.len()).unwrap();
+    writeln!(
+        out,
+        "    \"missing_commands\": [{}],",
+        render_json_string_array(&redis5_missing)
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "    \"extensions_beyond_redis_5\": [{}],",
+        render_json_string_array(&redis5_extensions)
+    )
+    .unwrap();
+    writeln!(out, "    \"exclusions\": [").unwrap();
+    for (index, exclusion) in REDIS_5_0_14_EXCLUSIONS.iter().enumerate() {
+        let comma = if index + 1 == REDIS_5_0_14_EXCLUSIONS.len() {
+            ""
+        } else {
+            ","
+        };
+        writeln!(out, "      {{").unwrap();
+        writeln!(
+            out,
+            "        \"command\": \"{}\",",
+            json_escape(exclusion.command)
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        \"family\": \"{}\",",
+            json_escape(exclusion.family)
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "        \"reason\": \"{}\"",
+            json_escape(exclusion.reason)
+        )
+        .unwrap();
+        writeln!(out, "      }}{comma}").unwrap();
+    }
+    writeln!(out, "    ]").unwrap();
     writeln!(out, "  }},").unwrap();
     writeln!(out, "  \"commands\": [").unwrap();
     for (index, entry) in entries.iter().enumerate() {
@@ -269,6 +430,49 @@ fn count_status(entries: &[CommandEntry], status: CompatStatus) -> usize {
         .count()
 }
 
+fn redis_5_supported_commands(entries: &[CommandEntry]) -> BTreeSet<&'static str> {
+    let supported = entries
+        .iter()
+        .filter(|entry| entry.status == CompatStatus::Supported)
+        .map(|entry| entry.command)
+        .collect::<BTreeSet<_>>();
+    REDIS_5_0_14_COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| supported.contains(command))
+        .collect()
+}
+
+fn redis_5_excluded_commands() -> BTreeSet<&'static str> {
+    REDIS_5_0_14_EXCLUSIONS
+        .iter()
+        .map(|entry| entry.command)
+        .collect()
+}
+
+fn redis_5_missing_commands(entries: &[CommandEntry]) -> BTreeSet<&'static str> {
+    let supported = redis_5_supported_commands(entries);
+    let excluded = redis_5_excluded_commands();
+    REDIS_5_0_14_COMMANDS
+        .iter()
+        .copied()
+        .filter(|command| !supported.contains(command) && !excluded.contains(command))
+        .collect()
+}
+
+fn redis_5_extension_commands(entries: &[CommandEntry]) -> BTreeSet<&'static str> {
+    let redis5 = REDIS_5_0_14_COMMANDS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    entries
+        .iter()
+        .filter(|entry| entry.status == CompatStatus::Supported)
+        .map(|entry| entry.command)
+        .filter(|command| !redis5.contains(command))
+        .collect()
+}
+
 fn notes_for(entry: &CommandEntry) -> String {
     if !entry.notes.is_empty() {
         return entry.notes.to_string();
@@ -282,11 +486,25 @@ fn notes_for(entry: &CommandEntry) -> String {
             join_set(&entry.cases)
         );
     }
+    if entry.family == "scripting" {
+        return format!(
+            "Constrained scripting evaluator: return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. Benchmark cases: {}",
+            join_set(&entry.cases)
+        );
+    }
     format!("Benchmark cases: {}", join_set(&entry.cases))
 }
 
 fn join_set(values: &BTreeSet<&'static str>) -> String {
     values.iter().copied().collect::<Vec<_>>().join(", ")
+}
+
+fn join_set_as_code(values: &BTreeSet<&'static str>) -> String {
+    values
+        .iter()
+        .map(|value| format!("`{value}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn markdown_cell(value: &str) -> String {
@@ -318,13 +536,24 @@ fn json_escape(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompatStatus, build_manifest, count_status};
+    use super::{
+        CompatStatus, build_manifest, count_status, redis_5_extension_commands,
+        redis_5_missing_commands, redis_5_supported_commands,
+    };
 
     #[test]
     fn manifest_counts_are_intentional() {
         let entries = build_manifest();
-        assert_eq!(count_status(&entries, CompatStatus::Supported), 155);
+        assert_eq!(count_status(&entries, CompatStatus::Supported), 222);
         assert_eq!(count_status(&entries, CompatStatus::Missing), 0);
+    }
+
+    #[test]
+    fn redis_5_baseline_counts_are_intentional() {
+        let entries = build_manifest();
+        assert_eq!(redis_5_supported_commands(&entries).len(), 200);
+        assert_eq!(redis_5_missing_commands(&entries).len(), 0);
+        assert_eq!(redis_5_extension_commands(&entries).len(), 22);
     }
 
     #[test]

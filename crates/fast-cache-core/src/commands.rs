@@ -187,6 +187,9 @@ pub mod select;
 
 // Server commands.
 #[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/server/admin.rs"]
+pub mod admin;
+#[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/server/client.rs"]
 pub mod client;
 #[cfg(feature = "redis-compat")]
@@ -210,6 +213,31 @@ pub mod memory;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/server/time.rs"]
 pub mod time;
+
+// Pub/Sub commands.
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/pubsub.rs"]
+pub mod pubsub;
+
+// Scripting commands.
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/scripting.rs"]
+pub mod scripting;
+
+// HyperLogLog commands.
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/hll.rs"]
+pub mod hll;
+
+// Geo commands.
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/geo.rs"]
+pub mod geo;
+
+// Stream commands.
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/stream.rs"]
+pub mod stream;
 
 // Hash commands.
 #[cfg(feature = "redis-compat")]
@@ -274,6 +302,9 @@ pub mod blpop;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/list/brpop.rs"]
 pub mod brpop;
+#[cfg(feature = "redis-compat")]
+#[path = "../../fast-cache-redis/src/commands/list/brpoplpush.rs"]
+pub mod brpoplpush;
 #[cfg(feature = "redis-compat")]
 #[path = "../../fast-cache-redis/src/commands/list/lindex.rs"]
 pub mod lindex;
@@ -656,6 +687,7 @@ pub(crate) trait BorrowedCommandParse<'a>: CommandSpec {
 
 /// Object-safe metadata shared by command implementations.
 pub(crate) trait CommandMetadata: Sync {
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
     fn mutates_value(&self) -> bool;
     fn matches(&self, name: &[u8]) -> bool;
@@ -755,7 +787,67 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     #[cfg(feature = "redis-compat")]
     &echo::COMMAND,
     #[cfg(feature = "redis-compat")]
+    &admin::ASKING_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::BGREWRITEAOF_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::BGSAVE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::CLUSTER_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::DEBUG_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::HOST_WARNING_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::LASTSAVE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::LATENCY_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::LOLWUT_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::MIGRATE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::MODULE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::MONITOR_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::MOVE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::POST_WARNING_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::PSYNC_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::READONLY_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::READWRITE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::REPLCONF_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::REPLICAOF_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::ROLE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::SAVE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::SHUTDOWN_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::SLOWLOG_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::SORT_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::SWAPDB_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::SYNC_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &admin::WAIT_COMMAND,
+    #[cfg(feature = "redis-compat")]
     &command::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &scripting::EVAL_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &scripting::EVALSHA_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &scripting::SCRIPT_COMMAND,
     #[cfg(feature = "redis-compat")]
     &config::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -772,6 +864,72 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     &info::COMMAND,
     #[cfg(feature = "redis-compat")]
     &memory::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &pubsub::PUBLISH_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &pubsub::PUBSUB_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &pubsub::SUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &pubsub::UNSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &pubsub::PSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &pubsub::PUNSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hll::PFADD_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hll::PFCOUNT_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hll::PFMERGE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hll::PFDEBUG_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &hll::PFSELFTEST_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &geo::GEOADD_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &geo::GEODIST_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &geo::GEOHASH_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &geo::GEOPOS_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &geo::GEORADIUS_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &geo::GEORADIUSBYMEMBER_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &geo::GEORADIUS_RO_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &geo::GEORADIUSBYMEMBER_RO_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XACK_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XADD_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XCLAIM_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XDEL_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XGROUP_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XINFO_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XLEN_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XPENDING_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XRANGE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XREAD_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XREADGROUP_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XREVRANGE_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XSETID_COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &stream::XTRIM_COMMAND,
     #[cfg(feature = "redis-compat")]
     &object::COMMAND,
     #[cfg(feature = "redis-compat")]
@@ -904,6 +1062,8 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     &blpop::COMMAND,
     #[cfg(feature = "redis-compat")]
     &brpop::COMMAND,
+    #[cfg(feature = "redis-compat")]
+    &brpoplpush::COMMAND,
     #[cfg(feature = "redis-compat")]
     &blmove::COMMAND,
     #[cfg(feature = "redis-compat")]

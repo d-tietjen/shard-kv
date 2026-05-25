@@ -61,19 +61,21 @@ fi
 
 fc_server_pid=""
 if [[ "$start_fast_cache" == "1" ]]; then
+  server_cmd=("$ws_root/target/release/fast-cache-server")
   if [[ -n "${SERVER_CPUSET:-}" ]] && command -v taskset >/dev/null 2>&1; then
-    env "${server_env[@]}" taskset -c "$SERVER_CPUSET" "$ws_root/target/release/fast-cache-server" \
-      --bind-addr "$fc_addr" \
-      --shard-count "${SHARD_COUNT:-4}" \
-      --disable-persistence \
-      --server-mode direct \
+    server_cmd=(taskset -c "$SERVER_CPUSET" "${server_cmd[@]}")
+  fi
+  server_cmd+=(
+    --bind-addr "$fc_addr"
+    --shard-count "${SHARD_COUNT:-4}"
+    --disable-persistence
+    --server-mode direct
+  )
+  if [[ "${#server_env[@]}" -gt 0 ]]; then
+    env "${server_env[@]}" "${server_cmd[@]}" \
       >/tmp/fast-cache-server.redis-command-matrix.log 2>&1 &
   else
-    env "${server_env[@]}" "$ws_root/target/release/fast-cache-server" \
-      --bind-addr "$fc_addr" \
-      --shard-count "${SHARD_COUNT:-4}" \
-      --disable-persistence \
-      --server-mode direct \
+    "${server_cmd[@]}" \
       >/tmp/fast-cache-server.redis-command-matrix.log 2>&1 &
   fi
   fc_server_pid=$!
@@ -111,13 +113,19 @@ if [[ -n "${FAIL_ON_ERROR:-}" ]]; then
   extra_args+=(--fail-on-error)
 fi
 
-"$ws_root/target/release/redis_command_matrix" \
-  --targets "$targets" \
-  --cases "${CASES:-all}" \
-  --clients "${CLIENTS:-1}" \
-  --key-shards "${KEY_SHARDS:-1}" \
-  --pipeline-depth "${PIPELINE_DEPTH:-1}" \
-  --warmup "${WARMUP:-1}" \
-  --duration "${DURATION:-5}" \
-  --csv "${CSV:-$root/results/redis-command-matrix.csv}" \
-  "${extra_args[@]}"
+matrix_cmd=(
+  "$ws_root/target/release/redis_command_matrix"
+  --targets "$targets"
+  --cases "${CASES:-all}"
+  --clients "${CLIENTS:-1}"
+  --key-shards "${KEY_SHARDS:-1}"
+  --pipeline-depth "${PIPELINE_DEPTH:-1}"
+  --warmup "${WARMUP:-1}"
+  --duration "${DURATION:-5}"
+  --csv "${CSV:-$root/results/redis-command-matrix.csv}"
+)
+if [[ "${#extra_args[@]}" -gt 0 ]]; then
+  matrix_cmd+=("${extra_args[@]}")
+fi
+
+"${matrix_cmd[@]}"

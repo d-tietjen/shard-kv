@@ -527,6 +527,7 @@ fn command_keys<'a>(command: &[u8], args: &'a [&'a [u8]]) -> CommandKeys<'a> {
         || command.eq_ignore_ascii_case(b"RENAME")
         || command.eq_ignore_ascii_case(b"RENAMENX")
         || command.eq_ignore_ascii_case(b"RPOPLPUSH")
+        || command.eq_ignore_ascii_case(b"BRPOPLPUSH")
         || command.eq_ignore_ascii_case(b"LMOVE")
         || command.eq_ignore_ascii_case(b"BLMOVE")
         || command.eq_ignore_ascii_case(b"SMOVE")
@@ -544,6 +545,9 @@ fn command_keys<'a>(command: &[u8], args: &'a [&'a [u8]]) -> CommandKeys<'a> {
     }
     if command.eq_ignore_ascii_case(b"LMPOP") || command.eq_ignore_ascii_case(b"ZMPOP") {
         return counted_keys(args, 0);
+    }
+    if command.eq_ignore_ascii_case(b"EVAL") || command.eq_ignore_ascii_case(b"EVALSHA") {
+        return counted_keys(args, 1);
     }
     if command.eq_ignore_ascii_case(b"BLMPOP") || command.eq_ignore_ascii_case(b"BZMPOP") {
         return counted_keys(args, 1);
@@ -593,6 +597,7 @@ fn is_no_key_command(command: &[u8]) -> bool {
         || command.eq_ignore_ascii_case(b"TIME")
         || command.eq_ignore_ascii_case(b"INFO")
         || command.eq_ignore_ascii_case(b"DBSIZE")
+        || command.eq_ignore_ascii_case(b"SCRIPT")
 }
 
 fn is_all_shard_command(command: &[u8]) -> bool {

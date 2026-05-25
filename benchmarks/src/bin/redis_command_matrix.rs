@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use fast_cache::protocol::{
     FAST_FLAG_REDIS_COMMAND_ARGS, FAST_PROTOCOL_VERSION, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC,
-    FastCommandKind, FastRedisRouteKeys,
+    FastCodec, FastCommand, FastCommandKind, FastRedisRouteKeys, FastRequest,
 };
 use fast_cache_benchmarks::redis_command_cases::{
     REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES,
@@ -1061,12 +1061,23 @@ fn encode_fcnp_command(parts: &[&str], namespace: &KeyNamespace) -> Result<Vec<u
     let Some((command, args)) = rewritten_parts.split_first() else {
         return Err("cannot encode empty FCNP Redis command".into());
     };
-    let kind = FastCommandKind::from_redis_name(command).ok_or_else(|| {
-        format!(
-            "Redis command `{}` does not have an FCNP opcode",
-            String::from_utf8_lossy(command)
-        )
-    })?;
+    let Some(kind) = FastCommandKind::from_redis_name(command) else {
+        let parts = rewritten_parts
+            .iter()
+            .map(Vec::as_slice)
+            .collect::<Vec<_>>();
+        let mut encoded = Vec::new();
+        FastCodec::encode_request(
+            &FastRequest {
+                key_hash: None,
+                route_shard: None,
+                key_tag: None,
+                command: FastCommand::RespCommand { parts },
+            },
+            &mut encoded,
+        );
+        return Ok(encoded);
+    };
 
     let route = fcnp_route_metadata(kind, args, namespace);
     let route_prefix_len = route.map_or(0, |_| 8 + 4 + 8);

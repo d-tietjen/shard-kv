@@ -15,13 +15,26 @@ use super::Get;
 impl RawDirectCommand for Get {
     fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         let RawCommandContext {
-            store, args, out, ..
+            store,
+            args,
+            out,
+            fast_write_queue,
+            single_threaded,
         } = ctx;
         match GetRawArgs::from_args(args.as_slice()) {
-            GetRawArgs::Ready { key } => match store.get(key) {
-                Some(value) => ServerWire::write_resp_blob_string(out, &value),
-                None => out.extend_from_slice(b"$-1\r\n"),
-            },
+            GetRawArgs::Ready { key } => {
+                let mut borrowed_ctx = BorrowedCommandContext {
+                    store,
+                    out,
+                    fast_write_queue,
+                    single_threaded,
+                };
+                if single_threaded {
+                    Get::execute_borrowed_single_threaded(&mut borrowed_ctx, key);
+                } else {
+                    Get::execute_borrowed_shared(&mut borrowed_ctx, key);
+                }
+            }
             GetRawArgs::WrongArity => ServerWire::write_resp_error(
                 out,
                 &format!(

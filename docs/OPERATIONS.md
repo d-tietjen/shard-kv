@@ -63,6 +63,7 @@ Compose exposes the main knobs as environment variables:
 | `FAST_CACHE_DIRECT_SHARD_BASE_PORT` | First direct shard listener port. |
 | `FAST_CACHE_MAX_CONNECTIONS` | Connection limit. |
 | `FAST_CACHE_FEATURES` | Cargo features used by the Docker build. |
+| `FAST_CACHE_TOKIO_WRITER_MODE` | `inline` by default; set `split` to use a separate per-connection writer task. |
 
 ## Persistence
 

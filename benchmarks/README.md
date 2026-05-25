@@ -128,6 +128,20 @@ ops/sec at `88.5 us`, FCNP shared `1,315,982` at `88.2 us`, RESP `833,734`
 at `117.1 us`, Redis `37,123` at `5,150.4 us`, and Valkey `46,436` at
 `4,125.1 us`.
 
+Scripting command spot-check, rerun on `adam` after adding `EVAL`, `EVALSHA`,
+and `SCRIPT` support:
+
+| Mode | Target | Cases | Ops/sec | Mean avg us | Errors |
+| --- | --- | ---: | ---: | ---: | ---: |
+| C1/P1 | fast-cache RESP | 3 | 14,727 | 22.5 | 0 |
+| C1/P1 | Redis | 3 | 6,312 | 52.7 | 0 |
+| C1/P1 | Valkey | 3 | 6,058 | 54.9 | 0 |
+| C1/P1 | Dragonfly | 3 | 5,725 | 58.1 | 0 |
+| C16/P16 | fast-cache RESP | 3 | 184,328 | 76.7 | 0 |
+| C16/P16 | Redis | 3 | 42,200 | 363.1 | 0 |
+| C16/P16 | Valkey | 3 | 41,645 | 368.0 | 0 |
+| C16/P16 | Dragonfly | 3 | 85,832 | 169.0 | 0 |
+
 For fast-cache optimization loops, save the Redis/Valkey/Dragonfly side once
 and reuse those CSVs while only rerunning fast-cache. First capture the external
 reference services:

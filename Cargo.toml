@@ -24,7 +24,7 @@ rust-version = "1.90"
 fast-cache = { path = "crates/fast-cache", version = "0.2.0" }
 fast-cache-core = { path = "crates/fast-cache-core", version = "0.2.0", default-features = false }
 fcnp-client-rs = { path = "crates/fcnp-client-rs", version = "0.2.0" }
-fast-telemetry = "0.3"
+fast-telemetry = "0.4"
 
 clap = { version = "4.5", features = ["derive"] }
 core_affinity = "0.8"
