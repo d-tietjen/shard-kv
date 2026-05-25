@@ -66,6 +66,7 @@ pub struct RedisCommandCase {
     pub parts: RedisCommandParts,
     pub script: RedisCommandSetup,
     pub setup: RedisCommandSetup,
+    pub expect_error: bool,
 }
 
 impl RedisCommandCase {
@@ -99,6 +100,22 @@ macro_rules! case {
             parts: &[$($part),+],
             script: &[],
             setup: &[],
+            expect_error: false,
+        }
+    };
+}
+
+macro_rules! error_case {
+    ($family:ident, $command_name:literal, $case_name:literal, [$($part:literal),+ $(,)?]) => {
+        RedisCommandCase {
+            family: RedisCommandFamily::$family,
+            command_name: $command_name,
+            case_name: $case_name,
+            profile: RedisCommandProfile::Small,
+            parts: &[$($part),+],
+            script: &[],
+            setup: &[],
+            expect_error: true,
         }
     };
 }
@@ -119,6 +136,7 @@ macro_rules! case_with_setup {
             parts: &[$($part),+],
             script: &[],
             setup: &[$(&[$($setup_part),+] as RedisCommandParts),*],
+            expect_error: false,
         }
     };
 }
@@ -139,6 +157,7 @@ macro_rules! case_script {
             parts: &[$($display_part),+],
             script: &[$(&[$($script_part),+] as RedisCommandParts),+],
             setup: &[],
+            expect_error: false,
         }
     };
 }
@@ -159,6 +178,7 @@ macro_rules! destructive_case_script {
             parts: &[$($display_part),+],
             script: &[$(&[$($script_part),+] as RedisCommandParts),+],
             setup: &[],
+            expect_error: false,
         }
     };
 }
@@ -179,6 +199,7 @@ macro_rules! large_case {
             parts: &[$($part),+],
             script: &[],
             setup: &[$(&[$($setup_part),+] as RedisCommandParts),*],
+            expect_error: false,
         }
     };
 }
@@ -265,23 +286,23 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Server, "ASKING", "ASKING", ["ASKING"]),
     case!(Server, "BGREWRITEAOF", "BGREWRITEAOF", ["BGREWRITEAOF"]),
     case!(Server, "BGSAVE", "BGSAVE", ["BGSAVE"]),
-    case!(Server, "CLUSTER", "CLUSTER INFO", ["CLUSTER", "INFO"]),
+    error_case!(Server, "CLUSTER", "CLUSTER INFO", ["CLUSTER", "INFO"]),
     case!(Server, "DEBUG", "DEBUG HELP", ["DEBUG", "HELP"]),
-    case!(Server, "HOST:", "HOST attack warning", ["HOST:"]),
+    error_case!(Server, "HOST:", "HOST attack warning", ["HOST:"]),
     case!(Server, "LASTSAVE", "LASTSAVE", ["LASTSAVE"]),
     case!(Server, "LATENCY", "LATENCY LATEST", ["LATENCY", "LATEST"]),
     case!(Server, "LOLWUT", "LOLWUT", ["LOLWUT"]),
-    case!(
+    error_case!(
         Server,
         "MIGRATE",
         "MIGRATE unsupported",
         ["MIGRATE", "127.0.0.1", "9", "missing", "0", "1"]
     ),
     case!(Server, "MODULE", "MODULE LIST", ["MODULE", "LIST"]),
-    case!(Server, "MONITOR", "MONITOR disabled", ["MONITOR"]),
-    case!(Server, "MOVE", "MOVE same db", ["MOVE", "move-bench", "0"]),
-    case!(Server, "POST", "POST attack warning", ["POST"]),
-    case!(Server, "PSYNC", "PSYNC unsupported", ["PSYNC", "?", "-1"]),
+    error_case!(Server, "MONITOR", "MONITOR disabled", ["MONITOR"]),
+    error_case!(Server, "MOVE", "MOVE same db", ["MOVE", "move-bench", "0"]),
+    error_case!(Server, "POST", "POST attack warning", ["POST"]),
+    error_case!(Server, "PSYNC", "PSYNC unsupported", ["PSYNC", "?", "-1"]),
     case!(Server, "READONLY", "READONLY", ["READONLY"]),
     case!(Server, "READWRITE", "READWRITE", ["READWRITE"]),
     case!(Server, "REPLCONF", "REPLCONF ACK", ["REPLCONF", "ACK", "0"]),
@@ -299,11 +320,11 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(Server, "ROLE", "ROLE", ["ROLE"]),
     case!(Server, "SAVE", "SAVE", ["SAVE"]),
-    case!(Server, "SHUTDOWN", "SHUTDOWN disabled", ["SHUTDOWN"]),
+    error_case!(Server, "SHUTDOWN", "SHUTDOWN disabled", ["SHUTDOWN"]),
     case!(Server, "SLOWLOG", "SLOWLOG LEN", ["SLOWLOG", "LEN"]),
     case!(Server, "SORT", "SORT missing", ["SORT", "sort-missing"]),
     case!(Server, "SWAPDB", "SWAPDB 0 0", ["SWAPDB", "0", "0"]),
-    case!(Server, "SYNC", "SYNC unsupported", ["SYNC"]),
+    error_case!(Server, "SYNC", "SYNC unsupported", ["SYNC"]),
     case!(Server, "WAIT", "WAIT", ["WAIT", "1", "1"]),
     case!(
         PubSub,
@@ -2248,6 +2269,24 @@ mod tests {
                 case.case_name
             );
         }
+    }
+
+    #[test]
+    fn expected_error_cases_are_explicit() {
+        let actual = REDIS_COMMAND_CASES
+            .iter()
+            .chain(REDIS_COMMAND_LARGE_CASES.iter())
+            .chain(REDIS_COMMAND_DESTRUCTIVE_CASES.iter())
+            .filter(|case| case.expect_error)
+            .map(|case| case.command_name)
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            "CLUSTER", "HOST:", "MIGRATE", "MONITOR", "MOVE", "POST", "PSYNC", "SHUTDOWN", "SYNC",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]

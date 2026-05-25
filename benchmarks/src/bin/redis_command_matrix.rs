@@ -185,6 +185,7 @@ impl FixtureScope {
 struct CaseStats {
     ops: u64,
     errors: u64,
+    expected_errors: u64,
     elapsed_ns: u128,
 }
 
@@ -192,6 +193,7 @@ impl CaseStats {
     fn add(&mut self, other: &Self) {
         self.ops = self.ops.saturating_add(other.ops);
         self.errors = self.errors.saturating_add(other.errors);
+        self.expected_errors = self.expected_errors.saturating_add(other.expected_errors);
         self.elapsed_ns = self.elapsed_ns.saturating_add(other.elapsed_ns);
     }
 
@@ -248,8 +250,8 @@ fn main() -> Result<(), BoxError> {
         args.duration,
     );
     println!();
-    println!("| target | family | command | case | ops/sec | avg us | errors |");
-    println!("| --- | --- | --- | --- | ---: | ---: | ---: |");
+    println!("| target | family | command | case | ops/sec | avg us | errors | expected errors |");
+    println!("| --- | --- | --- | --- | ---: | ---: | ---: | ---: |");
 
     let mut csv = match args.csv.as_deref() {
         Some(path) => Some(std::fs::File::create(path)?),
@@ -258,7 +260,7 @@ fn main() -> Result<(), BoxError> {
     if let Some(csv) = csv.as_mut() {
         writeln!(
             csv,
-            "target,family,command,case,clients,key_shards,pipeline_depth,duration_s,ops,ops_per_sec,avg_us,errors,profile"
+            "target,family,command,case,clients,key_shards,pipeline_depth,duration_s,ops,ops_per_sec,avg_us,errors,expected_errors,profile"
         )?;
     }
 
@@ -283,19 +285,20 @@ fn main() -> Result<(), BoxError> {
             }
 
             println!(
-                "| {} | {} | {} | {} | {:.0} | {:.2} | {} |",
+                "| {} | {} | {} | {} | {:.0} | {:.2} | {} | {} |",
                 target.name,
                 case.family.label(),
                 case.command_name,
                 case.case_name,
                 stats.ops_per_sec(duration),
                 stats.avg_us(),
-                stats.errors
+                stats.errors,
+                stats.expected_errors
             );
             if let Some(csv) = csv.as_mut() {
                 writeln!(
                     csv,
-                    "{},{},{},{},{},{},{},{},{},{:.3},{:.3},{},{}",
+                    "{},{},{},{},{},{},{},{},{},{:.3},{:.3},{},{},{}",
                     target.name,
                     case.family.label(),
                     case.command_name,
@@ -308,6 +311,7 @@ fn main() -> Result<(), BoxError> {
                     stats.ops_per_sec(duration),
                     stats.avg_us(),
                     stats.errors,
+                    stats.expected_errors,
                     case.profile.label()
                 )?;
             }
@@ -714,7 +718,11 @@ fn drain_pipeline(
                 .elapsed_ns
                 .saturating_add(started.elapsed().as_nanos());
             if error {
-                case_stats.errors = case_stats.errors.saturating_add(1);
+                if cases[index].expect_error {
+                    case_stats.expected_errors = case_stats.expected_errors.saturating_add(1);
+                } else {
+                    case_stats.errors = case_stats.errors.saturating_add(1);
+                }
             }
         }
     }
@@ -1512,6 +1520,26 @@ mod tests {
             destructive_cases
                 .iter()
                 .all(|case| case.profile.label() == "destructive")
+        );
+    }
+
+    #[test]
+    fn expected_error_cases_remain_in_default_matrix() {
+        let cases = select_cases("all", "").unwrap();
+        let expected_errors = cases
+            .iter()
+            .filter(|case| case.expect_error)
+            .map(|case| case.command_name)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(
+            expected_errors,
+            [
+                "CLUSTER", "HOST:", "MIGRATE", "MONITOR", "MOVE", "POST", "PSYNC", "SHUTDOWN",
+                "SYNC",
+            ]
+            .into_iter()
+            .collect()
         );
     }
 

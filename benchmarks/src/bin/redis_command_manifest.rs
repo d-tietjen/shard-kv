@@ -55,6 +55,7 @@ struct CommandEntry {
     cases: BTreeSet<&'static str>,
     profiles: BTreeSet<&'static str>,
     keyspace_wide: bool,
+    expected_error: bool,
     notes: &'static str,
 }
 
@@ -67,6 +68,7 @@ impl CommandEntry {
             cases: BTreeSet::new(),
             profiles: BTreeSet::new(),
             keyspace_wide: false,
+            expected_error: false,
             notes: "",
         }
     }
@@ -107,6 +109,7 @@ fn add_case(entries: &mut BTreeMap<&'static str, CommandEntry>, case: &RedisComm
     entry.cases.insert(case.case_name);
     entry.profiles.insert(case.profile.label());
     entry.keyspace_wide |= case.is_keyspace_wide();
+    entry.expected_error |= case.expect_error;
 }
 
 fn render_markdown(entries: &[CommandEntry]) -> String {
@@ -119,6 +122,12 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     let benchmark_cases = REDIS_COMMAND_CASES.len()
         + REDIS_COMMAND_LARGE_CASES.len()
         + REDIS_COMMAND_DESTRUCTIVE_CASES.len();
+    let expected_error_cases = REDIS_COMMAND_CASES
+        .iter()
+        .chain(REDIS_COMMAND_LARGE_CASES.iter())
+        .chain(REDIS_COMMAND_DESTRUCTIVE_CASES.iter())
+        .filter(|case| case.expect_error)
+        .count();
     let keyspace_cases = REDIS_COMMAND_CASES
         .iter()
         .chain(REDIS_COMMAND_LARGE_CASES.iter())
@@ -150,6 +159,11 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     writeln!(out, "| Live benchmark cases | {benchmark_cases} |").unwrap();
     writeln!(
         out,
+        "| Expected-error benchmark cases | {expected_error_cases} |"
+    )
+    .unwrap();
+    writeln!(
+        out,
         "| Large-profile cases | {} |",
         REDIS_COMMAND_LARGE_CASES.len()
     )
@@ -164,7 +178,7 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.2.0 compatibility surface."
+        "`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in fast-cache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.2.0 compatibility surface."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -259,32 +273,80 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
             .unwrap();
         }
     }
+    render_semantic_notes(&mut out);
     writeln!(out).unwrap();
     writeln!(out, "## Commands").unwrap();
     writeln!(out).unwrap();
     writeln!(
         out,
-        "| Family | Command | Status | Cases | Profiles | Keyspace Wide | Notes |"
+        "| Family | Command | Status | Cases | Profiles | Keyspace Wide | Expected Error | Notes |"
     )
     .unwrap();
-    writeln!(out, "| --- | --- | --- | ---: | --- | --- | --- |").unwrap();
+    writeln!(out, "| --- | --- | --- | ---: | --- | --- | --- | --- |").unwrap();
     for entry in entries {
         let profiles = join_set(&entry.profiles);
         let notes = notes_for(entry);
         writeln!(
             out,
-            "| {} | `{}` | {} | {} | {} | {} | {} |",
+            "| {} | `{}` | {} | {} | {} | {} | {} | {} |",
             entry.family,
             entry.command,
             entry.status.label(),
             entry.cases.len(),
             markdown_cell(&profiles),
             if entry.keyspace_wide { "yes" } else { "no" },
+            if entry.expected_error { "yes" } else { "no" },
             markdown_cell(&notes),
         )
         .unwrap();
     }
     out
+}
+
+fn render_semantic_notes(out: &mut String) {
+    writeln!(out).unwrap();
+    writeln!(out, "## Semantic Compatibility Notes").unwrap();
+    writeln!(out).unwrap();
+    writeln!(
+        out,
+        "- The manifest tracks live RESP command acceptance and benchmark coverage, not a promise that every edge case, exact error string, or background subsystem is byte-for-byte identical to Redis."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Expected-error commands are part of the compatibility surface in standalone mode. They intentionally return Redis-style errors for disabled cluster, replication, monitor, shutdown, module loading, migration, cross-DB movement, and security-warning paths."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.2.0 compatibility semantics."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Stream coverage includes basic append, length, range, reverse range, delete, trim, set-id, read, and minimal group/readgroup paths. Pending-entry-list, claim, ack, and detailed group/consumer introspection behavior is intentionally lightweight."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Scripting uses a constrained evaluator for return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. It is not a general Lua VM."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- HyperLogLog commands return compatible cardinalities for the covered operations, but fast-cache stores exact sets in its own representation rather than Redis' binary HLL encoding."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Blocking list and sorted-set commands are live-tested on ready or short-timeout paths. Long-lived blocking wakeups across clients need separate proofing before being described as full Redis parity."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- FCNP one-byte opcodes cover the hot command set. Commands outside that compact opcode table use the RESP/FCNP command-name fallback path so the server can still route and execute them."
+    )
+    .unwrap();
 }
 
 fn render_json(entries: &[CommandEntry]) -> String {
@@ -297,10 +359,16 @@ fn render_json(entries: &[CommandEntry]) -> String {
     let benchmark_cases = REDIS_COMMAND_CASES.len()
         + REDIS_COMMAND_LARGE_CASES.len()
         + REDIS_COMMAND_DESTRUCTIVE_CASES.len();
+    let expected_error_cases = REDIS_COMMAND_CASES
+        .iter()
+        .chain(REDIS_COMMAND_LARGE_CASES.iter())
+        .chain(REDIS_COMMAND_DESTRUCTIVE_CASES.iter())
+        .filter(|case| case.expect_error)
+        .count();
 
     let mut out = String::new();
     writeln!(out, "{{").unwrap();
-    writeln!(out, "  \"schema_version\": 1,").unwrap();
+    writeln!(out, "  \"schema_version\": 2,").unwrap();
     writeln!(
         out,
         "  \"source\": \"benchmarks/src/redis_command_cases.rs\","
@@ -310,6 +378,7 @@ fn render_json(entries: &[CommandEntry]) -> String {
     writeln!(out, "    \"supported_commands\": {supported},").unwrap();
     writeln!(out, "    \"missing_commands\": {missing},").unwrap();
     writeln!(out, "    \"benchmark_cases\": {benchmark_cases},").unwrap();
+    writeln!(out, "    \"expected_error_cases\": {expected_error_cases},").unwrap();
     writeln!(
         out,
         "    \"large_cases\": {},",
@@ -404,6 +473,7 @@ fn render_json(entries: &[CommandEntry]) -> String {
         )
         .unwrap();
         writeln!(out, "      \"keyspace_wide\": {},", entry.keyspace_wide).unwrap();
+        writeln!(out, "      \"expected_error\": {},", entry.expected_error).unwrap();
         writeln!(
             out,
             "      \"cases\": [{}],",
@@ -483,6 +553,12 @@ fn notes_for(entry: &CommandEntry) -> String {
     if entry.profiles.contains("destructive") {
         return format!(
             "Destructive perf matrix case; run separately with `CASES=profile:destructive`. Benchmark cases: {}",
+            join_set(&entry.cases)
+        );
+    }
+    if entry.expected_error {
+        return format!(
+            "Expected RESP error reply in standalone compatibility mode. Benchmark cases: {}",
             join_set(&entry.cases)
         );
     }
@@ -570,6 +646,24 @@ mod tests {
                 .iter()
                 .find(|entry| entry.command == "SCAN")
                 .is_some_and(|entry| entry.keyspace_wide)
+        );
+    }
+
+    #[test]
+    fn manifest_marks_expected_error_commands() {
+        let entries = build_manifest();
+        let expected_error = entries
+            .iter()
+            .filter(|entry| entry.expected_error)
+            .map(|entry| entry.command)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            expected_error,
+            [
+                "CLUSTER", "HOST:", "MIGRATE", "MONITOR", "MOVE", "POST", "PSYNC", "SHUTDOWN",
+                "SYNC",
+            ]
         );
     }
 }
