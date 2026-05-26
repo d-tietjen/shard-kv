@@ -1,13 +1,15 @@
+#[cfg(feature = "embedded")]
+use super::commands::{RAW_DIRECT_CATALOG, RawCommandDispatcher, find_primary_raw_command};
 use super::direct_protocol::*;
 use super::transactions::{TransactionCoordinator, TransactionState};
 use super::wire::*;
 use super::*;
 use crate::config::TransactionMode;
 use crate::protocol::FastCommandKind;
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 use crate::storage::RedisObjectResult;
 use crate::storage::{hash_key, hash_key_tag, shift_for, stripe_index};
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 use std::collections::BTreeSet;
 
 struct RespTestHarness;
@@ -30,6 +32,7 @@ impl RespTestHarness {
             &mut out,
             None,
             false,
+            RespProtocolVersion::Resp2,
             Instant::now(),
         );
         out.to_vec()
@@ -40,7 +43,12 @@ impl RespTestHarness {
         commands: &[&[&[u8]]],
         transaction_mode: TransactionMode,
     ) -> Vec<Frame> {
-        Self::exec_resp_sequence_on_owned_shard(store, commands, transaction_mode, None)
+        decode_resp_stream(&Self::exec_resp_sequence_raw_on_owned_shard(
+            store,
+            commands,
+            transaction_mode,
+            None,
+        ))
     }
 
     fn exec_resp_sequence_on_owned_shard(
@@ -49,6 +57,28 @@ impl RespTestHarness {
         transaction_mode: TransactionMode,
         owned_shard_id: Option<usize>,
     ) -> Vec<Frame> {
+        decode_resp_stream(&Self::exec_resp_sequence_raw_on_owned_shard(
+            store,
+            commands,
+            transaction_mode,
+            owned_shard_id,
+        ))
+    }
+
+    fn exec_resp_sequence_raw(
+        store: &EmbeddedStore,
+        commands: &[&[&[u8]]],
+        transaction_mode: TransactionMode,
+    ) -> Vec<u8> {
+        Self::exec_resp_sequence_raw_on_owned_shard(store, commands, transaction_mode, None)
+    }
+
+    fn exec_resp_sequence_raw_on_owned_shard(
+        store: &EmbeddedStore,
+        commands: &[&[&[u8]]],
+        transaction_mode: TransactionMode,
+        owned_shard_id: Option<usize>,
+    ) -> Vec<u8> {
         let mut input = Vec::new();
         for command in commands {
             encode_resp_command(command, &mut input);
@@ -57,6 +87,7 @@ impl RespTestHarness {
         let coordinator =
             TransactionCoordinator::new(store.shard_count(), transaction_mode).map(Arc::new);
         let mut transaction_state = TransactionState::default();
+        let mut resp_protocol = RespProtocolVersion::default();
         let mut out = BytesMut::new();
         let consumed = DirectProtocol::process_shared_request_buffer_with_context(
             &input,
@@ -69,11 +100,12 @@ impl RespTestHarness {
                 started_at: Instant::now(),
                 transaction_coordinator: coordinator.as_deref(),
                 transaction_state: &mut transaction_state,
+                resp_protocol: &mut resp_protocol,
             },
         )
         .expect("request buffer should process");
         assert_eq!(consumed, input.len());
-        decode_resp_stream(&out)
+        out.to_vec()
     }
 
     fn exec_fcnp_resp_sequence(
@@ -96,6 +128,7 @@ impl RespTestHarness {
         let coordinator =
             TransactionCoordinator::new(store.shard_count(), transaction_mode).map(Arc::new);
         let mut transaction_state = TransactionState::default();
+        let mut resp_protocol = RespProtocolVersion::default();
         let mut out = BytesMut::new();
         let consumed = DirectProtocol::process_shared_request_buffer_with_context(
             input,
@@ -108,6 +141,7 @@ impl RespTestHarness {
                 started_at: Instant::now(),
                 transaction_coordinator: coordinator.as_deref(),
                 transaction_state: &mut transaction_state,
+                resp_protocol: &mut resp_protocol,
             },
         )
         .expect("request buffer should process");
@@ -141,6 +175,49 @@ impl RespTestHarness {
             Instant::now(),
         );
         FastCodec::decode_response(&out).unwrap().unwrap().0
+    }
+}
+
+#[test]
+fn resp_direct_parser_accepts_five_digit_bulk_lengths() {
+    let value = vec![b'x'; 65_536];
+    let mut input = Vec::new();
+    input.extend_from_slice(b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$65536\r\n");
+    input.extend_from_slice(&value);
+    input.extend_from_slice(b"\r\n");
+
+    let (consumed, command, args) = DirectProtocol::try_resp_command_parts(&input)
+        .expect("five-digit RESP bulk length should stay on direct parser path");
+
+    assert_eq!(consumed, input.len());
+    assert_eq!(command, b"SET");
+    assert_eq!(args[0], b"key");
+    assert_eq!(args[1], value.as_slice());
+    assert!(DirectProtocol::parse_resp_direct_command(command, args).is_some());
+}
+
+#[cfg(feature = "embedded")]
+#[test]
+fn raw_command_dispatcher_covers_catalog_primary_names_and_aliases() {
+    for command in RAW_DIRECT_CATALOG {
+        let resolved = find_primary_raw_command(command.name().as_bytes())
+            .unwrap_or_else(|| panic!("raw command should dispatch: {}", command.name()));
+        assert_eq!(resolved.name(), command.name());
+    }
+
+    #[cfg(feature = "redis")]
+    for (alias, primary) in [
+        (b"RESTORE-ASKING".as_slice(), "RESTORE"),
+        (b"SLAVEOF".as_slice(), "REPLICAOF"),
+        (b"SUBSTR".as_slice(), "GETRANGE"),
+    ] {
+        let resolved = RawCommandDispatcher::find(alias).unwrap_or_else(|| {
+            panic!(
+                "raw command alias should dispatch: {}",
+                String::from_utf8_lossy(alias)
+            )
+        });
+        assert_eq!(resolved.name(), primary);
     }
 }
 
@@ -237,7 +314,747 @@ fn key_for_shard(store: &EmbeddedStore, shard_id: usize) -> Vec<u8> {
     panic!("unable to find key for shard {shard_id}");
 }
 
-#[cfg(feature = "redis-compat")]
+#[test]
+#[cfg(feature = "redis")]
+fn transaction_command_shards_use_shared_redis_key_specs() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let key_a = key_for_shard(&store, 1);
+    let key_b = key_for_shard(&store, 3);
+    let shards = |parts: &[&[u8]]| {
+        super::transactions::command_shards(&store, parts)
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    };
+
+    assert_eq!(
+        shards(&[
+            b"XREAD",
+            b"COUNT",
+            b"1",
+            b"STREAMS",
+            key_a.as_slice(),
+            key_b.as_slice(),
+            b"0-0",
+            b"0-0",
+        ]),
+        BTreeSet::from([1, 3])
+    );
+    assert_eq!(
+        shards(&[b"PFMERGE", key_a.as_slice(), key_b.as_slice()]),
+        BTreeSet::from([1, 3])
+    );
+    assert_eq!(
+        shards(&[
+            b"EVAL",
+            b"return 1",
+            b"2",
+            key_a.as_slice(),
+            key_b.as_slice(),
+        ]),
+        BTreeSet::from([1, 3])
+    );
+    assert_eq!(
+        shards(&[
+            b"SORT",
+            key_a.as_slice(),
+            b"BY",
+            b"nosort",
+            b"STORE",
+            key_b.as_slice(),
+        ]),
+        BTreeSet::from([1, 3])
+    );
+    assert_eq!(shards(&[b"SCRIPT", b"LOAD", b"return 1"]), BTreeSet::new());
+}
+
+#[cfg(feature = "redis")]
+fn bulk(value: &[u8]) -> Frame {
+    Frame::BlobString(value.to_vec())
+}
+
+#[cfg(feature = "redis")]
+const RESP2_PROTOCOL_COMMANDS: &[&str] = &["DISCARD", "EXEC", "MULTI", "UNWATCH", "WATCH"];
+
+#[cfg(feature = "redis")]
+const RESP2_ALIAS_COMMANDS: &[&str] = &["RESTORE-ASKING", "SLAVEOF", "SUBSTR"];
+
+#[cfg(feature = "redis")]
+fn resp2_part(part: impl AsRef<[u8]>) -> Vec<u8> {
+    part.as_ref().to_vec()
+}
+
+#[cfg(feature = "redis")]
+fn resp2_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
+    macro_rules! commands {
+        ($([$($part:expr),+ $(,)?]),+ $(,)?) => {
+            Some(vec![$(vec![$(resp2_part($part)),+]),+])
+        };
+    }
+
+    match name {
+        "APPEND" => commands!([b"APPEND", b"string", b"value"]),
+        "ASKING" => commands!([b"ASKING"]),
+        "AUTH" => commands!([b"AUTH", b"password"]),
+        "BGREWRITEAOF" => commands!([b"BGREWRITEAOF"]),
+        "BGSAVE" => commands!([b"BGSAVE"]),
+        "BITCOUNT" => commands!([b"SETBIT", b"bits", b"7", b"1"], [b"BITCOUNT", b"bits"]),
+        "BITFIELD" => commands!([
+            b"BITFIELD",
+            b"bf",
+            b"SET",
+            b"u8",
+            b"0",
+            b"1",
+            b"GET",
+            b"u8",
+            b"0"
+        ]),
+        "BITOP" => commands!(
+            [b"SET", b"bit-a", b"\x0f"],
+            [b"SET", b"bit-b", b"\xf0"],
+            [b"BITOP", b"OR", b"bit-out", b"bit-a", b"bit-b"]
+        ),
+        "BITPOS" => commands!([b"SETBIT", b"bits", b"7", b"1"], [b"BITPOS", b"bits", b"1"]),
+        "BLMPOP" => commands!(
+            [b"RPUSH", b"blmpop-list", b"a", b"b"],
+            [
+                b"BLMPOP",
+                b"0.001",
+                b"1",
+                b"blmpop-list",
+                b"LEFT",
+                b"COUNT",
+                b"1"
+            ]
+        ),
+        "BLMOVE" => commands!(
+            [b"RPUSH", b"blmove-src", b"a"],
+            [
+                b"BLMOVE",
+                b"blmove-src",
+                b"blmove-dst",
+                b"LEFT",
+                b"RIGHT",
+                b"0"
+            ]
+        ),
+        "BLPOP" => commands!(
+            [b"RPUSH", b"blpop-list", b"a"],
+            [b"BLPOP", b"blpop-list", b"0"]
+        ),
+        "BRPOP" => commands!(
+            [b"RPUSH", b"brpop-list", b"a"],
+            [b"BRPOP", b"brpop-list", b"0"]
+        ),
+        "BRPOPLPUSH" => commands!(
+            [b"RPUSH", b"brpoplpush-src", b"a"],
+            [b"BRPOPLPUSH", b"brpoplpush-src", b"brpoplpush-dst", b"0"]
+        ),
+        "BZMPOP" => commands!(
+            [b"ZADD", b"bzmpop-z", b"1", b"a"],
+            [
+                b"BZMPOP",
+                b"0.001",
+                b"1",
+                b"bzmpop-z",
+                b"MIN",
+                b"COUNT",
+                b"1"
+            ]
+        ),
+        "BZPOPMAX" => commands!(
+            [b"ZADD", b"bzpopmax-z", b"1", b"a"],
+            [b"BZPOPMAX", b"bzpopmax-z", b"0"]
+        ),
+        "BZPOPMIN" => commands!(
+            [b"ZADD", b"bzpopmin-z", b"1", b"a"],
+            [b"BZPOPMIN", b"bzpopmin-z", b"0"]
+        ),
+        "CLIENT" => commands!([b"CLIENT", b"ID"]),
+        "CLUSTER" => commands!([b"CLUSTER", b"INFO"]),
+        "COMMAND" => commands!(
+            [b"COMMAND", b"COUNT"],
+            [b"COMMAND", b"INFO", b"MULTI"],
+            [b"COMMAND", b"GETKEYS", b"WATCH", b"watched"]
+        ),
+        "CONFIG" => commands!([b"CONFIG", b"GET", b"*"]),
+        "COPY" => commands!(
+            [b"SET", b"copy-src", b"value"],
+            [b"COPY", b"copy-src", b"copy-dst"]
+        ),
+        "DBSIZE" => commands!([b"DBSIZE"]),
+        "DEBUG" => commands!([b"DEBUG", b"HELP"]),
+        "DECR" => commands!([b"DECR", b"counter"]),
+        "DECRBY" => commands!([b"DECRBY", b"counter", b"2"]),
+        "DEL" => commands!([b"SET", b"delete-me", b"value"], [b"DEL", b"delete-me"]),
+        "DISCARD" => commands!([b"MULTI"], [b"DISCARD"]),
+        "DUMP" => commands!([b"SET", b"dump-key", b"value"], [b"DUMP", b"dump-key"]),
+        "ECHO" => commands!([b"ECHO", b"hello"]),
+        "EVAL" => commands!([b"EVAL", b"return 1", b"0"]),
+        "EVALSHA" => commands!(
+            [b"SCRIPT", b"LOAD", b"return 1"],
+            [
+                b"EVALSHA",
+                b"e0e1f9fabfc9d4800c877a703b823ac0578ff8db",
+                b"0"
+            ]
+        ),
+        "EXEC" => commands!([b"MULTI"], [b"SET", b"tx-key", b"value"], [b"EXEC"]),
+        "EXISTS" => commands!(
+            [b"SET", b"exists-key", b"value"],
+            [b"EXISTS", b"exists-key"]
+        ),
+        "EXPIRE" => commands!(
+            [b"SET", b"expire-key", b"value"],
+            [b"EXPIRE", b"expire-key", b"60"]
+        ),
+        "EXPIREAT" => commands!(
+            [b"SET", b"expireat-key", b"value"],
+            [b"EXPIREAT", b"expireat-key", b"4102444800"]
+        ),
+        "EXPIRETIME" => commands!(
+            [b"SET", b"expiretime-key", b"value"],
+            [b"EXPIRE", b"expiretime-key", b"60"],
+            [b"EXPIRETIME", b"expiretime-key"]
+        ),
+        "FLUSHALL" => commands!([b"SET", b"flushall-key", b"value"], [b"FLUSHALL"]),
+        "FLUSHDB" => commands!([b"SET", b"flushdb-key", b"value"], [b"FLUSHDB"]),
+        "GEOADD" => commands!([b"GEOADD", b"geo", b"-73.9857", b"40.7484", b"empire"]),
+        "GEODIST" => commands!(
+            [
+                b"GEOADD",
+                b"geo",
+                b"-73.9857",
+                b"40.7484",
+                b"empire",
+                b"-73.9897",
+                b"40.7411",
+                b"flatiron"
+            ],
+            [b"GEODIST", b"geo", b"empire", b"flatiron", b"km"]
+        ),
+        "GEOHASH" => commands!(
+            [b"GEOADD", b"geo", b"-73.9857", b"40.7484", b"empire"],
+            [b"GEOHASH", b"geo", b"empire"]
+        ),
+        "GEOPOS" => commands!(
+            [b"GEOADD", b"geo", b"-73.9857", b"40.7484", b"empire"],
+            [b"GEOPOS", b"geo", b"empire"]
+        ),
+        "GEORADIUS" => commands!(
+            [b"GEOADD", b"geo", b"-73.9857", b"40.7484", b"empire"],
+            [b"GEORADIUS", b"geo", b"-73.9857", b"40.7484", b"2", b"km"]
+        ),
+        "GEORADIUSBYMEMBER" => commands!(
+            [b"GEOADD", b"geo", b"-73.9857", b"40.7484", b"empire"],
+            [b"GEORADIUSBYMEMBER", b"geo", b"empire", b"2", b"km"]
+        ),
+        "GEORADIUSBYMEMBER_RO" => commands!(
+            [b"GEOADD", b"geo", b"-73.9857", b"40.7484", b"empire"],
+            [b"GEORADIUSBYMEMBER_RO", b"geo", b"empire", b"2", b"km"]
+        ),
+        "GEORADIUS_RO" => commands!(
+            [b"GEOADD", b"geo", b"-73.9857", b"40.7484", b"empire"],
+            [
+                b"GEORADIUS_RO",
+                b"geo",
+                b"-73.9857",
+                b"40.7484",
+                b"2",
+                b"km"
+            ]
+        ),
+        "GET" => commands!([b"SET", b"string", b"value"], [b"GET", b"string"]),
+        "GETBIT" => commands!([b"SETBIT", b"bits", b"7", b"1"], [b"GETBIT", b"bits", b"7"]),
+        "GETDEL" => commands!(
+            [b"SET", b"getdel-key", b"value"],
+            [b"GETDEL", b"getdel-key"]
+        ),
+        "GETEX" => commands!([b"SET", b"getex-key", b"value"], [b"GETEX", b"getex-key"]),
+        "GETRANGE" => commands!(
+            [b"SET", b"range-key", b"value"],
+            [b"GETRANGE", b"range-key", b"0", b"2"]
+        ),
+        "GETSET" => commands!(
+            [b"SET", b"getset-key", b"old"],
+            [b"GETSET", b"getset-key", b"new"]
+        ),
+        "HDEL" => commands!(
+            [b"HSET", b"hash", b"field", b"value"],
+            [b"HDEL", b"hash", b"field"]
+        ),
+        "HEXISTS" => commands!(
+            [b"HSET", b"hash", b"field", b"value"],
+            [b"HEXISTS", b"hash", b"field"]
+        ),
+        "HGET" => commands!(
+            [b"HSET", b"hash", b"field", b"value"],
+            [b"HGET", b"hash", b"field"]
+        ),
+        "HGETALL" => commands!(
+            [b"HSET", b"hash", b"field", b"value"],
+            [b"HGETALL", b"hash"]
+        ),
+        "HINCRBY" => commands!([b"HINCRBY", b"hash", b"field", b"2"]),
+        "HINCRBYFLOAT" => commands!([b"HINCRBYFLOAT", b"hash", b"field", b"1.5"]),
+        "HKEYS" => commands!([b"HSET", b"hash", b"field", b"value"], [b"HKEYS", b"hash"]),
+        "HLEN" => commands!([b"HSET", b"hash", b"field", b"value"], [b"HLEN", b"hash"]),
+        "HMGET" => commands!(
+            [b"HMSET", b"hash", b"f1", b"v1", b"f2", b"v2"],
+            [b"HMGET", b"hash", b"f1", b"f2"]
+        ),
+        "HMSET" => commands!([b"HMSET", b"hash", b"f1", b"v1", b"f2", b"v2"]),
+        "HOST:" => commands!([b"HOST:"]),
+        "HRANDFIELD" => commands!(
+            [b"HSET", b"hash", b"field", b"value"],
+            [b"HRANDFIELD", b"hash"]
+        ),
+        "HSCAN" => commands!(
+            [b"HSET", b"hash", b"field", b"value"],
+            [b"HSCAN", b"hash", b"0"]
+        ),
+        "HSET" => commands!([b"HSET", b"hash", b"field", b"value"]),
+        "HSETNX" => commands!([b"HSETNX", b"hash", b"field", b"value"]),
+        "HSTRLEN" => commands!(
+            [b"HSET", b"hash", b"field", b"value"],
+            [b"HSTRLEN", b"hash", b"field"]
+        ),
+        "HVALS" => commands!([b"HSET", b"hash", b"field", b"value"], [b"HVALS", b"hash"]),
+        "HELLO" => commands!([b"HELLO", b"2"]),
+        "INFO" => commands!([b"INFO"]),
+        "INCR" => commands!([b"INCR", b"counter"]),
+        "INCRBY" => commands!([b"INCRBY", b"counter", b"2"]),
+        "INCRBYFLOAT" => commands!([b"INCRBYFLOAT", b"counter", b"1.5"]),
+        "KEYS" => commands!([b"SET", b"keys-one", b"value"], [b"KEYS", b"*"]),
+        "LASTSAVE" => commands!([b"LASTSAVE"]),
+        "LATENCY" => commands!([b"LATENCY", b"LATEST"]),
+        "LINDEX" => commands!([b"RPUSH", b"list", b"a", b"b"], [b"LINDEX", b"list", b"0"]),
+        "LINSERT" => commands!(
+            [b"RPUSH", b"list", b"a", b"c"],
+            [b"LINSERT", b"list", b"BEFORE", b"c", b"b"]
+        ),
+        "LLEN" => commands!([b"RPUSH", b"list", b"a", b"b"], [b"LLEN", b"list"]),
+        "LMOVE" => commands!(
+            [b"RPUSH", b"lmove-src", b"a", b"b"],
+            [b"LMOVE", b"lmove-src", b"lmove-dst", b"RIGHT", b"LEFT"]
+        ),
+        "LMPOP" => commands!(
+            [b"RPUSH", b"lmpop-list", b"a", b"b"],
+            [b"LMPOP", b"1", b"lmpop-list", b"LEFT", b"COUNT", b"1"]
+        ),
+        "LOLWUT" => commands!([b"LOLWUT"]),
+        "LPOP" => commands!([b"RPUSH", b"list", b"a", b"b"], [b"LPOP", b"list"]),
+        "LPUSH" => commands!([b"LPUSH", b"list", b"a"]),
+        "LPUSHX" => commands!([b"RPUSH", b"list", b"a"], [b"LPUSHX", b"list", b"b"]),
+        "LRANGE" => commands!(
+            [b"RPUSH", b"list", b"a", b"b"],
+            [b"LRANGE", b"list", b"0", b"-1"]
+        ),
+        "LREM" => commands!(
+            [b"RPUSH", b"list", b"a", b"a", b"b"],
+            [b"LREM", b"list", b"0", b"a"]
+        ),
+        "LSET" => commands!([b"RPUSH", b"list", b"a"], [b"LSET", b"list", b"0", b"x"]),
+        "LTRIM" => commands!(
+            [b"RPUSH", b"list", b"a", b"b", b"c"],
+            [b"LTRIM", b"list", b"0", b"1"]
+        ),
+        "MEMORY" => commands!(
+            [b"SET", b"memory-key", b"value"],
+            [b"MEMORY", b"USAGE", b"memory-key"]
+        ),
+        "MGET" => commands!(
+            [b"MSET", b"mget-a", b"1", b"mget-b", b"2"],
+            [b"MGET", b"mget-a", b"mget-b"]
+        ),
+        "MIGRATE" => commands!([b"MIGRATE", b"127.0.0.1", b"6379", b"key", b"0", b"1000"]),
+        "MODULE" => commands!([b"MODULE", b"LIST"]),
+        "MONITOR" => commands!([b"MONITOR"]),
+        "MOVE" => commands!([b"MOVE", b"move-key", b"1"]),
+        "MSET" => commands!([b"MSET", b"mset-a", b"1", b"mset-b", b"2"]),
+        "MSETNX" => commands!([b"MSETNX", b"msetnx-a", b"1", b"msetnx-b", b"2"]),
+        "MULTI" => commands!([b"MULTI"], [b"DISCARD"]),
+        "OBJECT" => commands!(
+            [b"SET", b"object-key", b"value"],
+            [b"OBJECT", b"ENCODING", b"object-key"]
+        ),
+        "PERSIST" => commands!(
+            [b"SET", b"persist-key", b"value"],
+            [b"EXPIRE", b"persist-key", b"60"],
+            [b"PERSIST", b"persist-key"]
+        ),
+        "PEXPIRE" => commands!(
+            [b"SET", b"pexpire-key", b"value"],
+            [b"PEXPIRE", b"pexpire-key", b"60000"]
+        ),
+        "PEXPIREAT" => commands!(
+            [b"SET", b"pexpireat-key", b"value"],
+            [b"PEXPIREAT", b"pexpireat-key", b"4102444800000"]
+        ),
+        "PEXPIRETIME" => commands!(
+            [b"SET", b"pexpiretime-key", b"value"],
+            [b"PEXPIRE", b"pexpiretime-key", b"60000"],
+            [b"PEXPIRETIME", b"pexpiretime-key"]
+        ),
+        "PFADD" => commands!([b"PFADD", b"hll", b"a", b"b"]),
+        "PFCOUNT" => commands!([b"PFADD", b"hll", b"a", b"b"], [b"PFCOUNT", b"hll"]),
+        "PFDEBUG" => commands!([b"PFADD", b"hll", b"a"], [b"PFDEBUG", b"ENCODING", b"hll"]),
+        "PFMERGE" => commands!(
+            [b"PFADD", b"hll", b"a"],
+            [b"PFMERGE", b"hll-merged", b"hll"]
+        ),
+        "PFSELFTEST" => commands!([b"PFSELFTEST"]),
+        "PING" => commands!([b"PING"]),
+        "POST" => commands!([b"POST"]),
+        "PSETEX" => commands!([b"PSETEX", b"psetex-key", b"60000", b"value"]),
+        "PSUBSCRIBE" => commands!([b"PSUBSCRIBE", b"news.*"]),
+        "PSYNC" => commands!([b"PSYNC", b"?", b"-1"]),
+        "PTTL" => commands!([b"SET", b"pttl-key", b"value"], [b"PTTL", b"pttl-key"]),
+        "PUBLISH" => commands!([b"PUBLISH", b"channel", b"message"]),
+        "PUBSUB" => commands!([b"PUBSUB", b"NUMPAT"]),
+        "PUNSUBSCRIBE" => commands!([b"PUNSUBSCRIBE", b"news.*"]),
+        "QUIT" => commands!([b"QUIT"]),
+        "RANDOMKEY" => commands!([b"SET", b"random-key", b"value"], [b"RANDOMKEY"]),
+        "READONLY" => commands!([b"READONLY"]),
+        "READWRITE" => commands!([b"READWRITE"]),
+        "RENAME" => commands!(
+            [b"SET", b"rename-src", b"value"],
+            [b"RENAME", b"rename-src", b"rename-dst"]
+        ),
+        "RENAMENX" => commands!(
+            [b"SET", b"renamenx-src", b"value"],
+            [b"RENAMENX", b"renamenx-src", b"renamenx-dst"]
+        ),
+        "REPLCONF" => commands!([b"REPLCONF", b"ACK", b"0"]),
+        "REPLICAOF" => commands!([b"REPLICAOF", b"NO", b"ONE"]),
+        "RESTORE" => Some(vec![vec![
+            resp2_part(b"RESTORE"),
+            resp2_part(b"restore-key"),
+            resp2_part(b"0"),
+            crate::commands::dump_restore::encode_string_dump_value(b"value"),
+        ]]),
+        "RESTORE-ASKING" => Some(vec![vec![
+            resp2_part(b"RESTORE-ASKING"),
+            resp2_part(b"restore-asking-key"),
+            resp2_part(b"0"),
+            crate::commands::dump_restore::encode_string_dump_value(b"value"),
+        ]]),
+        "ROLE" => commands!([b"ROLE"]),
+        "RPOP" => commands!([b"RPUSH", b"list", b"a", b"b"], [b"RPOP", b"list"]),
+        "RPOPLPUSH" => commands!(
+            [b"RPUSH", b"rpoplpush-src", b"a"],
+            [b"RPOPLPUSH", b"rpoplpush-src", b"rpoplpush-dst"]
+        ),
+        "RPUSH" => commands!([b"RPUSH", b"list", b"a"]),
+        "RPUSHX" => commands!([b"RPUSH", b"list", b"a"], [b"RPUSHX", b"list", b"b"]),
+        "SADD" => commands!([b"SADD", b"set", b"a"]),
+        "SAVE" => commands!([b"SAVE"]),
+        "SCAN" => commands!([b"SCAN", b"0"]),
+        "SCARD" => commands!([b"SADD", b"set", b"a"], [b"SCARD", b"set"]),
+        "SCRIPT" => commands!([b"SCRIPT", b"LOAD", b"return 1"]),
+        "SDIFF" => commands!(
+            [b"SADD", b"set-a", b"a", b"b"],
+            [b"SADD", b"set-b", b"b"],
+            [b"SDIFF", b"set-a", b"set-b"]
+        ),
+        "SDIFFSTORE" => commands!(
+            [b"SADD", b"set-a", b"a", b"b"],
+            [b"SADD", b"set-b", b"b"],
+            [b"SDIFFSTORE", b"set-out", b"set-a", b"set-b"]
+        ),
+        "SELECT" => commands!([b"SELECT", b"0"]),
+        "SET" => commands!([b"SET", b"string", b"value"]),
+        "SETBIT" => commands!([b"SETBIT", b"bits", b"7", b"1"]),
+        "SETEX" => commands!([b"SETEX", b"setex-key", b"60", b"value"]),
+        "SETNX" => commands!([b"SETNX", b"setnx-key", b"value"]),
+        "SETRANGE" => commands!(
+            [b"SET", b"range-key", b"value"],
+            [b"SETRANGE", b"range-key", b"1", b"aa"]
+        ),
+        "SHUTDOWN" => commands!([b"SHUTDOWN"]),
+        "SINTER" => commands!(
+            [b"SADD", b"set-a", b"a"],
+            [b"SADD", b"set-b", b"a"],
+            [b"SINTER", b"set-a", b"set-b"]
+        ),
+        "SINTERSTORE" => commands!(
+            [b"SADD", b"set-a", b"a"],
+            [b"SADD", b"set-b", b"a"],
+            [b"SINTERSTORE", b"set-out", b"set-a", b"set-b"]
+        ),
+        "SISMEMBER" => commands!([b"SADD", b"set", b"a"], [b"SISMEMBER", b"set", b"a"]),
+        "SLAVEOF" => commands!([b"SLAVEOF", b"NO", b"ONE"]),
+        "SLOWLOG" => commands!([b"SLOWLOG", b"LEN"]),
+        "SMEMBERS" => commands!([b"SADD", b"set", b"a"], [b"SMEMBERS", b"set"]),
+        "SMISMEMBER" => commands!([b"SADD", b"set", b"a"], [b"SMISMEMBER", b"set", b"a", b"b"]),
+        "SMOVE" => commands!(
+            [b"SADD", b"set-src", b"a"],
+            [b"SMOVE", b"set-src", b"set-dst", b"a"]
+        ),
+        "SORT" => commands!(
+            [b"RPUSH", b"sort-list", b"3", b"1", b"2"],
+            [b"SORT", b"sort-list"]
+        ),
+        "SPOP" => commands!([b"SADD", b"set", b"a"], [b"SPOP", b"set"]),
+        "SRANDMEMBER" => commands!([b"SADD", b"set", b"a"], [b"SRANDMEMBER", b"set"]),
+        "SREM" => commands!([b"SADD", b"set", b"a"], [b"SREM", b"set", b"a"]),
+        "SSCAN" => commands!([b"SADD", b"set", b"a"], [b"SSCAN", b"set", b"0"]),
+        "STRLEN" => commands!(
+            [b"SET", b"strlen-key", b"value"],
+            [b"STRLEN", b"strlen-key"]
+        ),
+        "SUBSCRIBE" => commands!([b"SUBSCRIBE", b"channel"]),
+        "SUBSTR" => commands!(
+            [b"SET", b"substr-key", b"value"],
+            [b"SUBSTR", b"substr-key", b"0", b"2"]
+        ),
+        "SUNION" => commands!(
+            [b"SADD", b"set-a", b"a"],
+            [b"SADD", b"set-b", b"b"],
+            [b"SUNION", b"set-a", b"set-b"]
+        ),
+        "SUNIONSTORE" => commands!(
+            [b"SADD", b"set-a", b"a"],
+            [b"SADD", b"set-b", b"b"],
+            [b"SUNIONSTORE", b"set-out", b"set-a", b"set-b"]
+        ),
+        "SWAPDB" => commands!([b"SWAPDB", b"0", b"0"]),
+        "SYNC" => commands!([b"SYNC"]),
+        "TIME" => commands!([b"TIME"]),
+        "TOUCH" => commands!([b"SET", b"touch-key", b"value"], [b"TOUCH", b"touch-key"]),
+        "TTL" => commands!([b"SET", b"ttl-key", b"value"], [b"TTL", b"ttl-key"]),
+        "TYPE" => commands!([b"SET", b"type-key", b"value"], [b"TYPE", b"type-key"]),
+        "UNLINK" => commands!(
+            [b"SET", b"unlink-key", b"value"],
+            [b"UNLINK", b"unlink-key"]
+        ),
+        "UNSUBSCRIBE" => commands!([b"UNSUBSCRIBE", b"channel"]),
+        "UNWATCH" => commands!([b"WATCH", b"watched"], [b"UNWATCH"]),
+        "WAIT" => commands!([b"WAIT", b"1", b"1"]),
+        "WATCH" => commands!([b"WATCH", b"watched"]),
+        "XACK" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XGROUP", b"CREATE", b"stream", b"group", b"0-0"],
+            [b"XACK", b"stream", b"group", b"1-0"]
+        ),
+        "XADD" => commands!([b"XADD", b"stream", b"1-0", b"f", b"v"]),
+        "XCLAIM" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XGROUP", b"CREATE", b"stream", b"group", b"0-0"],
+            [b"XCLAIM", b"stream", b"group", b"consumer", b"0", b"1-0"]
+        ),
+        "XDEL" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XDEL", b"stream", b"1-0"]
+        ),
+        "XGROUP" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XGROUP", b"CREATE", b"stream", b"group", b"0-0"]
+        ),
+        "XINFO" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XINFO", b"STREAM", b"stream"]
+        ),
+        "XLEN" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XLEN", b"stream"]
+        ),
+        "XPENDING" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XGROUP", b"CREATE", b"stream", b"group", b"0-0"],
+            [b"XPENDING", b"stream", b"group"]
+        ),
+        "XRANGE" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XRANGE", b"stream", b"-", b"+"]
+        ),
+        "XREAD" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XREAD", b"COUNT", b"1", b"STREAMS", b"stream", b"0-0"]
+        ),
+        "XREADGROUP" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XGROUP", b"CREATE", b"stream", b"group", b"0-0"],
+            [
+                b"XREADGROUP",
+                b"GROUP",
+                b"group",
+                b"consumer",
+                b"COUNT",
+                b"1",
+                b"STREAMS",
+                b"stream",
+                b">"
+            ]
+        ),
+        "XREVRANGE" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XREVRANGE", b"stream", b"+", b"-"]
+        ),
+        "XSETID" => commands!([b"XSETID", b"stream", b"5-0"]),
+        "XTRIM" => commands!(
+            [b"XADD", b"stream", b"1-0", b"f", b"v"],
+            [b"XTRIM", b"stream", b"MAXLEN", b"1"]
+        ),
+        "ZADD" => commands!([b"ZADD", b"zset", b"1", b"a"]),
+        "ZCARD" => commands!([b"ZADD", b"zset", b"1", b"a"], [b"ZCARD", b"zset"]),
+        "ZCOUNT" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZCOUNT", b"zset", b"-inf", b"+inf"]
+        ),
+        "ZDIFF" => commands!(
+            [b"ZADD", b"zset-a", b"1", b"a", b"2", b"b"],
+            [b"ZADD", b"zset-b", b"2", b"b"],
+            [b"ZDIFF", b"2", b"zset-a", b"zset-b"]
+        ),
+        "ZDIFFSTORE" => commands!(
+            [b"ZADD", b"zset-a", b"1", b"a", b"2", b"b"],
+            [b"ZADD", b"zset-b", b"2", b"b"],
+            [b"ZDIFFSTORE", b"zset-out", b"2", b"zset-a", b"zset-b"]
+        ),
+        "ZINCRBY" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZINCRBY", b"zset", b"1", b"a"]
+        ),
+        "ZINTER" => commands!(
+            [b"ZADD", b"zset-a", b"1", b"a"],
+            [b"ZADD", b"zset-b", b"2", b"a"],
+            [b"ZINTER", b"2", b"zset-a", b"zset-b"]
+        ),
+        "ZINTERCARD" => commands!(
+            [b"ZADD", b"zset-a", b"1", b"a"],
+            [b"ZADD", b"zset-b", b"2", b"a"],
+            [b"ZINTERCARD", b"2", b"zset-a", b"zset-b"]
+        ),
+        "ZINTERSTORE" => commands!(
+            [b"ZADD", b"zset-a", b"1", b"a"],
+            [b"ZADD", b"zset-b", b"2", b"a"],
+            [b"ZINTERSTORE", b"zset-out", b"2", b"zset-a", b"zset-b"]
+        ),
+        "ZLEXCOUNT" => commands!(
+            [b"ZADD", b"zset", b"0", b"a", b"0", b"b"],
+            [b"ZLEXCOUNT", b"zset", b"-", b"+"]
+        ),
+        "ZMPOP" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZMPOP", b"1", b"zset", b"MIN", b"COUNT", b"1"]
+        ),
+        "ZMSCORE" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZMSCORE", b"zset", b"a", b"b"]
+        ),
+        "ZPOPMAX" => commands!([b"ZADD", b"zset", b"1", b"a"], [b"ZPOPMAX", b"zset"]),
+        "ZPOPMIN" => commands!([b"ZADD", b"zset", b"1", b"a"], [b"ZPOPMIN", b"zset"]),
+        "ZRANDMEMBER" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZRANDMEMBER", b"zset", b"1"]
+        ),
+        "ZRANGE" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZRANGE", b"zset", b"0", b"-1"]
+        ),
+        "ZRANGEBYLEX" => commands!(
+            [b"ZADD", b"zset", b"0", b"a", b"0", b"b"],
+            [b"ZRANGEBYLEX", b"zset", b"-", b"+"]
+        ),
+        "ZRANGEBYSCORE" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZRANGEBYSCORE", b"zset", b"-inf", b"+inf"]
+        ),
+        "ZRANGESTORE" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZRANGESTORE", b"zset-out", b"zset", b"0", b"-1"]
+        ),
+        "ZRANK" => commands!([b"ZADD", b"zset", b"1", b"a"], [b"ZRANK", b"zset", b"a"]),
+        "ZREM" => commands!([b"ZADD", b"zset", b"1", b"a"], [b"ZREM", b"zset", b"a"]),
+        "ZREMRANGEBYLEX" => commands!(
+            [b"ZADD", b"zset", b"0", b"a", b"0", b"b"],
+            [b"ZREMRANGEBYLEX", b"zset", b"-", b"+"]
+        ),
+        "ZREMRANGEBYRANK" => commands!(
+            [b"ZADD", b"zset", b"1", b"a", b"2", b"b"],
+            [b"ZREMRANGEBYRANK", b"zset", b"0", b"0"]
+        ),
+        "ZREMRANGEBYSCORE" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZREMRANGEBYSCORE", b"zset", b"-inf", b"+inf"]
+        ),
+        "ZREVRANGE" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZREVRANGE", b"zset", b"0", b"-1"]
+        ),
+        "ZREVRANGEBYLEX" => commands!(
+            [b"ZADD", b"zset", b"0", b"a", b"0", b"b"],
+            [b"ZREVRANGEBYLEX", b"zset", b"+", b"-"]
+        ),
+        "ZREVRANGEBYSCORE" => commands!(
+            [b"ZADD", b"zset", b"1", b"a"],
+            [b"ZREVRANGEBYSCORE", b"zset", b"+inf", b"-inf"]
+        ),
+        "ZREVRANK" => commands!([b"ZADD", b"zset", b"1", b"a"], [b"ZREVRANK", b"zset", b"a"]),
+        "ZSCAN" => commands!([b"ZADD", b"zset", b"1", b"a"], [b"ZSCAN", b"zset", b"0"]),
+        "ZSCORE" => commands!([b"ZADD", b"zset", b"1", b"a"], [b"ZSCORE", b"zset", b"a"]),
+        "ZUNION" => commands!(
+            [b"ZADD", b"zset-a", b"1", b"a"],
+            [b"ZADD", b"zset-b", b"2", b"b"],
+            [b"ZUNION", b"2", b"zset-a", b"zset-b"]
+        ),
+        "ZUNIONSTORE" => commands!(
+            [b"ZADD", b"zset-a", b"1", b"a"],
+            [b"ZADD", b"zset-b", b"2", b"b"],
+            [b"ZUNIONSTORE", b"zset-out", b"2", b"zset-a", b"zset-b"]
+        ),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "redis")]
+fn assert_resp2_smoke_case(name: &str, commands: Vec<Vec<Vec<u8>>>) {
+    let store = EmbeddedStore::new(4);
+    let borrowed_commands = commands
+        .iter()
+        .map(|command| command.iter().map(Vec::as_slice).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let command_refs = borrowed_commands
+        .iter()
+        .map(Vec::as_slice)
+        .collect::<Vec<_>>();
+    let raw =
+        RespTestHarness::exec_resp_sequence_raw(&store, &command_refs, TransactionMode::ShardLocal);
+    let frames = decode_resp_stream(&raw);
+    assert_eq!(
+        frames.len(),
+        commands.len(),
+        "RESP2 smoke case {name} returned unexpected frame count: {}",
+        String::from_utf8_lossy(&raw)
+    );
+    for (command, frame) in commands.iter().zip(frames.iter()) {
+        if let Frame::Error(message) = frame {
+            assert_ne!(
+                message,
+                "ERR unsupported command",
+                "RESP2 smoke case {name} hit unsupported dispatch for {}",
+                resp2_command_label(command)
+            );
+            assert!(
+                !message.contains("wrong number of arguments"),
+                "RESP2 smoke case {name} used invalid arity for {}: {message}",
+                resp2_command_label(command)
+            );
+        }
+    }
+}
+
+#[cfg(feature = "redis")]
+fn resp2_command_label(command: &[Vec<u8>]) -> String {
+    command
+        .iter()
+        .map(|part| String::from_utf8_lossy(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(feature = "redis")]
 fn decode_scan_response(raw: &[u8]) -> (u64, Vec<Vec<u8>>) {
     let (frame, consumed) = RespCodec::decode(raw).unwrap().expect("scan response");
     assert_eq!(consumed, raw.len());
@@ -265,7 +1082,7 @@ fn decode_scan_response(raw: &[u8]) -> (u64, Vec<Vec<u8>>) {
     (cursor, values)
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn decode_bulk_array(raw: &[u8]) -> Vec<Vec<u8>> {
     let (frame, consumed) = RespCodec::decode(raw).unwrap().expect("array response");
     assert_eq!(consumed, raw.len());
@@ -281,7 +1098,7 @@ fn decode_bulk_array(raw: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn decode_optional_bulk(raw: &[u8]) -> Option<Vec<u8>> {
     let (frame, consumed) = RespCodec::decode(raw).unwrap().expect("bulk response");
     assert_eq!(consumed, raw.len());
@@ -292,7 +1109,7 @@ fn decode_optional_bulk(raw: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn assert_resp_error_contains(store: &EmbeddedStore, parts: &[&[u8]], expected: &str) {
     let raw = RespTestHarness::exec_resp(store, parts);
     let (frame, consumed) = RespCodec::decode(&raw).unwrap().expect("error response");
@@ -307,7 +1124,140 @@ fn assert_resp_error_contains(store: &EmbeddedStore, parts: &[&[u8]], expected: 
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
+fn raw_resp_hello_two_returns_resp2_array() {
+    let store = EmbeddedStore::new(4);
+    let frames = RespTestHarness::exec_resp_sequence(
+        &store,
+        &[&[b"HELLO", b"2"]],
+        TransactionMode::ShardLocal,
+    );
+
+    match frames.as_slice() {
+        [Frame::Array(items)] => {
+            assert_eq!(items.len(), 14);
+            assert_eq!(items.get(4), Some(&bulk(b"proto")));
+            assert_eq!(items.get(5), Some(&Frame::Integer(2)));
+        }
+        other => panic!("unexpected HELLO 2 response: {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn raw_resp_hello_three_returns_resp3_map() {
+    let store = EmbeddedStore::new(4);
+    let frames = RespTestHarness::exec_resp_sequence(
+        &store,
+        &[&[b"HELLO", b"3"]],
+        TransactionMode::ShardLocal,
+    );
+
+    match frames.as_slice() {
+        [Frame::Map(items)] => {
+            assert_eq!(items.len(), 7);
+            assert_eq!(resp_map_value(items, b"proto"), Some(&Frame::Integer(3)));
+        }
+        other => panic!("unexpected HELLO 3 response: {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn raw_resp_hello_negotiation_persists_for_connection() {
+    let store = EmbeddedStore::new(4);
+    let frames = RespTestHarness::exec_resp_sequence(
+        &store,
+        &[&[b"HELLO", b"3"], &[b"HELLO"]],
+        TransactionMode::ShardLocal,
+    );
+
+    match frames.as_slice() {
+        [Frame::Map(first), Frame::Map(second)] => {
+            assert_eq!(resp_map_value(first, b"proto"), Some(&Frame::Integer(3)));
+            assert_eq!(resp_map_value(second, b"proto"), Some(&Frame::Integer(3)));
+        }
+        other => panic!("unexpected pipelined HELLO response: {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn raw_resp_hello_accepts_auth_and_setname_options() {
+    let store = EmbeddedStore::new(4);
+    let frames = RespTestHarness::exec_resp_sequence(
+        &store,
+        &[
+            &[b"HELLO", b"AUTH", b"default", b"secret"],
+            &[b"HELLO", b"3", b"SETNAME", b"client"],
+        ],
+        TransactionMode::ShardLocal,
+    );
+
+    match frames.as_slice() {
+        [Frame::Array(items), Frame::Map(map)] => {
+            assert_eq!(items.get(4), Some(&bulk(b"proto")));
+            assert_eq!(items.get(5), Some(&Frame::Integer(2)));
+            assert_eq!(resp_map_value(map, b"proto"), Some(&Frame::Integer(3)));
+        }
+        other => panic!("unexpected HELLO option responses: {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn raw_resp_hello_rejects_incomplete_options() {
+    let store = EmbeddedStore::new(4);
+    let frames = RespTestHarness::exec_resp_sequence(
+        &store,
+        &[
+            &[b"HELLO", b"3", b"AUTH", b"default"],
+            &[b"HELLO", b"SETNAME"],
+        ],
+        TransactionMode::ShardLocal,
+    );
+
+    match frames.as_slice() {
+        [Frame::Error(first), Frame::Error(second)] => {
+            assert!(first.contains("syntax"));
+            assert!(second.contains("syntax"));
+        }
+        other => panic!("unexpected HELLO syntax responses: {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn raw_resp3_negotiation_writes_native_nulls() {
+    let store = EmbeddedStore::new(4);
+    let raw = RespTestHarness::exec_resp_sequence_raw(
+        &store,
+        &[
+            &[b"HELLO", b"3"],
+            &[b"GET", b"missing"],
+            &[b"MGET", b"a", b"b"],
+        ],
+        TransactionMode::ShardLocal,
+    );
+
+    let (_, hello_len) = RespCodec::decode(&raw).unwrap().unwrap();
+    assert!(
+        raw[hello_len..].starts_with(b"_\r\n*2\r\n_\r\n_\r\n"),
+        "expected RESP3 nulls after HELLO 3, got {:?}",
+        String::from_utf8_lossy(&raw[hello_len..])
+    );
+}
+
+#[cfg(feature = "redis")]
+fn resp_map_value<'a>(items: &'a [(Frame, Frame)], key: &[u8]) -> Option<&'a Frame> {
+    items.iter().find_map(|(item_key, value)| match item_key {
+        Frame::BlobString(bytes) if bytes == key => Some(value),
+        _ => None,
+    })
+}
+
+#[test]
+#[cfg(feature = "redis")]
 fn raw_resp_dump_restore_round_trips_strings_and_objects() {
     let store = EmbeddedStore::new(4);
 
@@ -490,6 +1440,103 @@ fn raw_resp_dump_restore_round_trips_strings_and_objects() {
 }
 
 #[test]
+#[cfg(feature = "redis")]
+fn raw_resp_restore_validates_idle_time_and_freq_options() {
+    let store = EmbeddedStore::new(4);
+
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"SET", b"restore-options-src", b"value"]),
+        b"+OK\r\n".to_vec()
+    );
+    let payload = decode_optional_bulk(&RespTestHarness::exec_resp(
+        &store,
+        &[b"DUMP", b"restore-options-src"],
+    ))
+    .expect("restore-options-src should exist");
+
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"RESTORE",
+                b"restore-idle",
+                b"0",
+                payload.as_slice(),
+                b"REPLACE",
+                b"IDLETIME",
+                b"0",
+            ],
+        ),
+        b"+OK\r\n".to_vec()
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"RESTORE",
+                b"restore-freq",
+                b"0",
+                payload.as_slice(),
+                b"REPLACE",
+                b"FREQ",
+                b"255",
+            ],
+        ),
+        b"+OK\r\n".to_vec()
+    );
+
+    assert_resp_error_contains(
+        &store,
+        &[
+            b"RESTORE",
+            b"restore-bad-idle",
+            b"0",
+            payload.as_slice(),
+            b"IDLETIME",
+            b"-1",
+        ],
+        "integer",
+    );
+    assert_resp_error_contains(
+        &store,
+        &[
+            b"RESTORE",
+            b"restore-bad-freq",
+            b"0",
+            payload.as_slice(),
+            b"FREQ",
+            b"256",
+        ],
+        "integer",
+    );
+    assert_resp_error_contains(
+        &store,
+        &[
+            b"RESTORE",
+            b"restore-conflict",
+            b"0",
+            payload.as_slice(),
+            b"IDLETIME",
+            b"0",
+            b"FREQ",
+            b"1",
+        ],
+        "syntax",
+    );
+    assert_resp_error_contains(
+        &store,
+        &[
+            b"RESTORE",
+            b"restore-missing-idle",
+            b"0",
+            payload.as_slice(),
+            b"IDLETIME",
+        ],
+        "syntax",
+    );
+}
+
+#[test]
 fn resp_integer_writer_covers_fast_and_fallback_paths() {
     let cases = [
         (-2, b":-2\r\n".as_slice()),
@@ -595,7 +1642,7 @@ fn raw_resp_cache_lifecycle_commands_round_trip() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_redis_backfill_commands_round_trip() {
     let store = EmbeddedStore::new(4);
 
@@ -747,7 +1794,7 @@ fn raw_resp_redis_backfill_commands_round_trip() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_missing_compat_batch_round_trip() {
     let store = EmbeddedStore::new(4);
 
@@ -851,7 +1898,7 @@ fn raw_resp_missing_compat_batch_round_trip() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_expanded_redis_surface_round_trip() {
     let store = EmbeddedStore::new(4);
     let bulk = |value: &[u8]| Frame::BlobString(value.to_vec());
@@ -1316,7 +2363,57 @@ fn raw_resp_expanded_redis_surface_round_trip() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
+fn raw_resp2_supported_command_surface_has_smoke_coverage() {
+    let mut expected = crate::commands::CATALOG
+        .iter()
+        .map(|command| command.name())
+        .collect::<BTreeSet<_>>();
+    expected.extend(RESP2_PROTOCOL_COMMANDS.iter().copied());
+    expected.extend(RESP2_ALIAS_COMMANDS.iter().copied());
+
+    let command_list = decode_bulk_array(&RespTestHarness::exec_resp(
+        &EmbeddedStore::new(4),
+        &[b"COMMAND", b"LIST"],
+    ))
+    .into_iter()
+    .map(|name| String::from_utf8(name).expect("COMMAND LIST name should be utf8"))
+    .collect::<BTreeSet<_>>();
+    let expected_command_list = expected
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        command_list, expected_command_list,
+        "COMMAND LIST must expose every supported RESP2 command"
+    );
+
+    let missing = expected
+        .iter()
+        .copied()
+        .filter(|name| resp2_smoke_commands(name).is_none())
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "missing RESP2 smoke coverage for: {}",
+        missing.join(", ")
+    );
+
+    for alias in RESP2_ALIAS_COMMANDS {
+        assert!(
+            crate::commands::CommandCatalog::find(alias.as_bytes()).is_some(),
+            "RESP2 alias {alias} should be accepted by the command catalog"
+        );
+    }
+
+    for name in expected {
+        let commands = resp2_smoke_commands(name).expect("coverage was checked above");
+        assert_resp2_smoke_case(name, commands);
+    }
+}
+
+#[test]
+#[cfg(feature = "redis")]
 fn raw_resp_redis_backfill_error_paths_round_trip() {
     let store = EmbeddedStore::new(4);
 
@@ -1425,10 +2522,42 @@ fn raw_resp_redis_backfill_error_paths_round_trip() {
         &[b"ZREMRANGEBYLEX", b"z", b"bad-bound", b"+"],
         "not valid",
     );
+    assert_resp_error_contains(&store, &[b"XRANGE", b"stream", b"-"], "wrong number");
+    assert_resp_error_contains(
+        &store,
+        &[b"XRANGE", b"stream", b"-", b"+", b"BAD"],
+        "syntax",
+    );
+    assert_resp_error_contains(
+        &store,
+        &[b"XRANGE", b"stream", b"-", b"+", b"COUNT", b"bad"],
+        "integer",
+    );
+    assert_resp_error_contains(&store, &[b"XREAD", b"COUNT"], "syntax");
+    assert_resp_error_contains(&store, &[b"XREAD", b"BLOCK"], "syntax");
+    assert_resp_error_contains(
+        &store,
+        &[b"XREAD", b"COUNT", b"bad", b"STREAMS", b"stream", b"0-0"],
+        "integer",
+    );
+    assert_resp_error_contains(&store, &[b"XREAD", b"STREAMS", b"stream"], "Unbalanced");
+    assert_resp_error_contains(&store, &[b"XREADGROUP", b"GROUP"], "wrong number");
+    assert_resp_error_contains(&store, &[b"XREADGROUP", b"GROUP", b"g", b"c"], "syntax");
+    assert_resp_error_contains(&store, &[b"ZMPOP"], "wrong number");
+    assert_resp_error_contains(&store, &[b"ZMPOP", b"0", b"z", b"MIN"], "numkeys");
+    assert_resp_error_contains(&store, &[b"ZMPOP", b"1", b"z", b"MIDDLE"], "syntax");
+    assert_resp_error_contains(&store, &[b"ZMPOP", b"1", b"z", b"MIN", b"COUNT"], "syntax");
+    assert_resp_error_contains(
+        &store,
+        &[b"ZMPOP", b"1", b"z", b"MIN", b"COUNT", b"0"],
+        "count",
+    );
+    assert_resp_error_contains(&store, &[b"BZMPOP", b"bad", b"1", b"z", b"MIN"], "timeout");
+    assert_resp_error_contains(&store, &[b"BZMPOP", b"-1", b"1", b"z", b"MIN"], "negative");
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_missing_compat_batch_error_paths_round_trip() {
     let store = EmbeddedStore::new(4);
 
@@ -1493,7 +2622,7 @@ fn raw_resp_missing_compat_batch_error_paths_round_trip() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_bit_commands_round_trip() {
     let store = EmbeddedStore::new(4);
 
@@ -1620,7 +2749,7 @@ fn raw_resp_bit_commands_round_trip() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_bit_commands_error_paths_round_trip() {
     let store = EmbeddedStore::new(4);
 
@@ -1660,7 +2789,7 @@ fn raw_resp_bit_commands_error_paths_round_trip() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn raw_resp_transactions_queue_and_exec_in_order() {
     let store = EmbeddedStore::new(4);
@@ -1687,7 +2816,7 @@ fn raw_resp_transactions_queue_and_exec_in_order() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn raw_resp_transactions_discard_queued_commands() {
     let store = EmbeddedStore::new(4);
@@ -1706,7 +2835,7 @@ fn raw_resp_transactions_discard_queued_commands() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn raw_resp_watch_unwatch_and_exec_conflicts() {
     let store = EmbeddedStore::new(4);
@@ -1720,6 +2849,7 @@ fn raw_resp_watch_unwatch_and_exec_conflicts() {
         &store,
         &[b"WATCH", b"watched"],
         &mut out,
+        RespProtocolVersion::Resp2,
     ));
     store.set(b"watched".to_vec(), b"outside".to_vec(), None);
     assert!(transaction_state.handle_resp_command(
@@ -1727,18 +2857,21 @@ fn raw_resp_watch_unwatch_and_exec_conflicts() {
         &store,
         &[b"MULTI"],
         &mut out,
+        RespProtocolVersion::Resp2,
     ));
     assert!(transaction_state.handle_resp_command(
         Some(&coordinator),
         &store,
         &[b"SET", b"watched", b"inside"],
         &mut out,
+        RespProtocolVersion::Resp2,
     ));
     assert!(transaction_state.handle_resp_command(
         Some(&coordinator),
         &store,
         &[b"EXEC"],
         &mut out,
+        RespProtocolVersion::Resp2,
     ));
 
     assert_eq!(
@@ -1769,7 +2902,7 @@ fn raw_resp_watch_unwatch_and_exec_conflicts() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn raw_resp_scripting_commands_round_trip() {
     let store = EmbeddedStore::new(4);
@@ -1859,7 +2992,7 @@ fn raw_resp_scripting_commands_round_trip() {
     assert!(matches!(&frames[0], Frame::Error(message) if message.contains("NOSCRIPT")));
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn raw_resp_transactions_unknown_command_aborts_exec() {
     let store = EmbeddedStore::new(4);
@@ -1884,7 +3017,7 @@ fn raw_resp_transactions_unknown_command_aborts_exec() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn raw_resp_transactions_can_be_disabled() {
     let store = EmbeddedStore::new(4);
@@ -1896,7 +3029,7 @@ fn raw_resp_transactions_can_be_disabled() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn raw_resp_shard_local_transactions_reject_cross_shard_exec() {
     let store = EmbeddedStore::new(4);
@@ -1930,7 +3063,7 @@ fn raw_resp_shard_local_transactions_reject_cross_shard_exec() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn raw_resp_coordinated_transactions_allow_cross_shard_exec() {
     let store = EmbeddedStore::new(4);
@@ -1967,7 +3100,7 @@ fn raw_resp_coordinated_transactions_allow_cross_shard_exec() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn fcnp_resp_transactions_queue_and_exec_in_order() {
     let store = EmbeddedStore::new(4);
@@ -1991,7 +3124,7 @@ fn fcnp_resp_transactions_queue_and_exec_in_order() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn fcnp_typed_command_inside_transaction_aborts_exec() {
     let store = EmbeddedStore::new(4);
@@ -2041,7 +3174,7 @@ fn fcnp_resp_command_wraps_redis_reply_bytes() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_scan_walks_with_cursor_and_count() {
     let store = EmbeddedStore::new(4);
     for key in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
@@ -2070,7 +3203,7 @@ fn raw_resp_scan_walks_with_cursor_and_count() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_scan_match_still_bounds_examined_keys() {
     let store = EmbeddedStore::new(4);
     for index in 0..16 {
@@ -2088,7 +3221,7 @@ fn raw_resp_scan_match_still_bounds_examined_keys() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_scan_type_string_excludes_object_keys() {
     let store = EmbeddedStore::new(4);
     store.set(b"s".to_vec(), b"v".to_vec(), None);
@@ -2105,7 +3238,7 @@ fn raw_resp_scan_type_string_excludes_object_keys() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_scan_type_object_walks_objects_with_cursor() {
     let store = EmbeddedStore::new(4);
     assert_eq!(
@@ -2149,7 +3282,7 @@ fn raw_resp_scan_type_object_walks_objects_with_cursor() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_keys_streams_string_and_object_keys() {
     let store = EmbeddedStore::new(4);
     store.set(b"str:one".to_vec(), b"v".to_vec(), None);
@@ -2173,7 +3306,7 @@ fn raw_resp_keys_streams_string_and_object_keys() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn raw_resp_object_streaming_commands_round_trip() {
     let store = EmbeddedStore::new(4);
 
@@ -2382,7 +3515,7 @@ fn raw_resp_object_streaming_commands_round_trip() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn fcnp_resp_scan_and_shard_scan_return_resp_bytes() {
     let store = EmbeddedStore::new(4);
     store.set(b"k".to_vec(), b"v".to_vec(), None);
@@ -2680,7 +3813,7 @@ fn fcnp_owned_shard_fast_path_handles_tagged_get_set_del() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn fcnp_owned_shard_port_accepts_typed_object_opcodes() {
     let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
     let owned_shard = 2;
@@ -2779,7 +3912,7 @@ fn resp_owned_shard_port_accepts_routed_redis_commands() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn resp_owned_shard_port_handles_dump_restore_fast_path() {
     let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
     let owned_shard = 2;
@@ -2823,7 +3956,7 @@ fn resp_owned_shard_port_handles_dump_restore_fast_path() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn fcnp_owned_shard_port_accepts_opcode_redis_commands() {
     let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
     let owned_shard = 2;
@@ -2881,7 +4014,7 @@ fn fcnp_owned_shard_port_accepts_opcode_redis_commands() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn fcnp_redis_opcode_hot_arrays_use_fast_array_responses() {
     let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
     let owned_shard = 2;
@@ -2992,10 +4125,52 @@ fn fcnp_redis_opcode_hot_arrays_use_fast_array_responses() {
             Some(b"2".to_vec())
         ])
     );
+
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::ZRangeByScore,
+        vec![
+            zset_key.as_slice(),
+            b"-inf".as_slice(),
+            b"+inf".as_slice(),
+            b"WITHSCORES".as_slice(),
+        ],
+    );
+    assert_eq!(
+        response,
+        FastResponse::Array(vec![
+            Some(b"one".to_vec()),
+            Some(b"1".to_vec()),
+            Some(b"two".to_vec()),
+            Some(b"2".to_vec())
+        ])
+    );
+
+    let response = exec_fcnp_redis_opcode_on_owned_shard(
+        &store,
+        owned_shard,
+        FastCommandKind::ZRevRangeByScore,
+        vec![
+            zset_key.as_slice(),
+            b"+inf".as_slice(),
+            b"-inf".as_slice(),
+            b"WITHSCORES".as_slice(),
+        ],
+    );
+    assert_eq!(
+        response,
+        FastResponse::Array(vec![
+            Some(b"two".to_vec()),
+            Some(b"2".to_vec()),
+            Some(b"one".to_vec()),
+            Some(b"1".to_vec())
+        ])
+    );
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn fcnp_redis_opcode_command_uses_cached_fast_responses() {
     let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
     let owned_shard = 0;
@@ -3042,7 +4217,7 @@ fn fcnp_redis_opcode_command_uses_cached_fast_responses() {
 }
 
 #[test]
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn fcnp_owned_shard_port_rejects_misrouted_opcode_redis_commands() {
     let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
     let owned_shard = 0;

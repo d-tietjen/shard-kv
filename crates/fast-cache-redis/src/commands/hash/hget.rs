@@ -4,7 +4,7 @@ use bytes::BytesMut;
 
 use crate::commands::redis::{define_redis_command, object_result};
 #[cfg(feature = "server")]
-use crate::commands::redis::{finish_object_bulk_visit, write_frame, wrong_arity};
+use crate::commands::redis::{finish_object_bulk_visit, write_frame, write_resp_null, wrong_arity};
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
@@ -26,7 +26,7 @@ impl crate::commands::redis::RedisCommand for HGet {
                 let outcome = store.object_read_hashed_visit(hash_key(key), key, |bucket| {
                     bucket.hget_visit(key, field, |value| match value {
                         Some(value) => ServerWire::write_resp_blob_string(out, value),
-                        None => out.extend_from_slice(b"$-1\r\n"),
+                        None => write_resp_null(out),
                     })
                 });
                 finish_object_bulk_visit(out, outcome);

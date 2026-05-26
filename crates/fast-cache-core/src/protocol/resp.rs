@@ -9,8 +9,21 @@ pub enum Frame {
     BlobString(Vec<u8>),
     Integer(i64),
     Array(Vec<Frame>),
+    Map(Vec<(Frame, Frame)>),
+    Set(Vec<Frame>),
+    Push(Vec<Frame>),
     Null,
     Boolean(bool),
+    Double(String),
+    BigNumber(String),
+    VerbatimString {
+        format: String,
+        value: Vec<u8>,
+    },
+    Attribute {
+        attributes: Vec<(Frame, Frame)>,
+        data: Box<Frame>,
+    },
     Error(String),
 }
 
@@ -80,11 +93,71 @@ impl RespCodec {
                     Self::encode(item, out);
                 }
             }
+            Frame::Map(items) => {
+                let mut buf = itoa::Buffer::new();
+                out.push(b'%');
+                out.extend_from_slice(buf.format(items.len()).as_bytes());
+                out.extend_from_slice(b"\r\n");
+                for (key, value) in items {
+                    Self::encode(key, out);
+                    Self::encode(value, out);
+                }
+            }
+            Frame::Set(items) => {
+                let mut buf = itoa::Buffer::new();
+                out.push(b'~');
+                out.extend_from_slice(buf.format(items.len()).as_bytes());
+                out.extend_from_slice(b"\r\n");
+                for item in items {
+                    Self::encode(item, out);
+                }
+            }
+            Frame::Push(items) => {
+                let mut buf = itoa::Buffer::new();
+                out.push(b'>');
+                out.extend_from_slice(buf.format(items.len()).as_bytes());
+                out.extend_from_slice(b"\r\n");
+                for item in items {
+                    Self::encode(item, out);
+                }
+            }
             Frame::Null => {
                 out.extend_from_slice(b"_\r\n");
             }
             Frame::Boolean(value) => {
                 out.extend_from_slice(if *value { b"#t\r\n" } else { b"#f\r\n" });
+            }
+            Frame::Double(value) => {
+                out.push(b',');
+                out.extend_from_slice(value.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Frame::BigNumber(value) => {
+                out.push(b'(');
+                out.extend_from_slice(value.as_bytes());
+                out.extend_from_slice(b"\r\n");
+            }
+            Frame::VerbatimString { format, value } => {
+                let len = format.len() + 1 + value.len();
+                let mut buf = itoa::Buffer::new();
+                out.push(b'=');
+                out.extend_from_slice(buf.format(len).as_bytes());
+                out.extend_from_slice(b"\r\n");
+                out.extend_from_slice(format.as_bytes());
+                out.push(b':');
+                out.extend_from_slice(value);
+                out.extend_from_slice(b"\r\n");
+            }
+            Frame::Attribute { attributes, data } => {
+                let mut buf = itoa::Buffer::new();
+                out.push(b'|');
+                out.extend_from_slice(buf.format(attributes.len()).as_bytes());
+                out.extend_from_slice(b"\r\n");
+                for (key, value) in attributes {
+                    Self::encode(key, out);
+                    Self::encode(value, out);
+                }
+                Self::encode(data, out);
             }
             Frame::Error(message) => {
                 out.push(b'-');
@@ -126,6 +199,7 @@ impl RespCodec {
                 }
                 Ok(CommandFrame { parts: output })
             }
+            Frame::Attribute { data, .. } => Self::as_command(*data),
             other => Err(FastCacheError::Protocol(format!(
                 "expected command array, got {other:?}"
             ))),
@@ -308,11 +382,19 @@ fn parse_frame(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
     match buffer[offset] {
         b'+' => parse_simple_string(buffer, offset),
         b'-' => parse_error(buffer, offset),
+        b'!' => parse_blob_error(buffer, offset),
         b':' => parse_integer(buffer, offset),
         b'$' => parse_blob_string(buffer, offset),
         b'*' => parse_array(buffer, offset),
+        b'%' => parse_map(buffer, offset),
+        b'~' => parse_set(buffer, offset),
+        b'>' => parse_push(buffer, offset),
         b'_' => parse_null(buffer, offset),
         b'#' => parse_boolean(buffer, offset),
+        b',' => parse_double(buffer, offset),
+        b'(' => parse_big_number(buffer, offset),
+        b'=' => parse_verbatim_string(buffer, offset),
+        b'|' => parse_attribute(buffer, offset),
         other => Err(FastCacheError::Protocol(format!(
             "unsupported RESP prefix byte: {other:#x}"
         ))),
@@ -331,6 +413,32 @@ fn parse_error(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
         return Ok(None);
     };
     Ok(Some((Frame::Error(line.to_string()), consumed + 1)))
+}
+
+fn parse_blob_error(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+    let Some((length, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
+        return Ok(None);
+    };
+    if length < 0 {
+        return Err(FastCacheError::Protocol(
+            "RESP3 blob errors cannot be null".into(),
+        ));
+    }
+    let length = length as usize;
+    let start = offset + 1 + header_consumed;
+    let end = start + length;
+    if buffer.len() < end + 2 {
+        return Ok(None);
+    }
+    if &buffer[end..end + 2] != b"\r\n" {
+        return Err(FastCacheError::Protocol(
+            "blob error missing CRLF terminator".into(),
+        ));
+    }
+    let message = std::str::from_utf8(&buffer[start..end])
+        .map_err(|error| FastCacheError::Protocol(format!("invalid utf8 in RESP error: {error}")))?
+        .to_string();
+    Ok(Some((Frame::Error(message), (end + 2) - offset)))
 }
 
 fn parse_integer(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
@@ -384,6 +492,72 @@ fn parse_array(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
     Ok(Some((Frame::Array(items), cursor - offset)))
 }
 
+fn parse_map(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+    let Some((count, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
+        return Ok(None);
+    };
+    if count < 0 {
+        return Err(FastCacheError::Protocol("RESP3 maps cannot be null".into()));
+    }
+    let count = count as usize;
+    let mut cursor = offset + 1 + header_consumed;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let Some((key, consumed)) = parse_frame(buffer, cursor)? else {
+            return Ok(None);
+        };
+        cursor += consumed;
+        let Some((value, consumed)) = parse_frame(buffer, cursor)? else {
+            return Ok(None);
+        };
+        cursor += consumed;
+        items.push((key, value));
+    }
+    Ok(Some((Frame::Map(items), cursor - offset)))
+}
+
+fn parse_set(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+    let Some((count, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
+        return Ok(None);
+    };
+    if count < 0 {
+        return Err(FastCacheError::Protocol("RESP3 sets cannot be null".into()));
+    }
+    let count = count as usize;
+    let mut cursor = offset + 1 + header_consumed;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let Some((frame, consumed)) = parse_frame(buffer, cursor)? else {
+            return Ok(None);
+        };
+        items.push(frame);
+        cursor += consumed;
+    }
+    Ok(Some((Frame::Set(items), cursor - offset)))
+}
+
+fn parse_push(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+    let Some((count, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
+        return Ok(None);
+    };
+    if count < 0 {
+        return Err(FastCacheError::Protocol(
+            "RESP3 pushes cannot be null".into(),
+        ));
+    }
+    let count = count as usize;
+    let mut cursor = offset + 1 + header_consumed;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let Some((frame, consumed)) = parse_frame(buffer, cursor)? else {
+            return Ok(None);
+        };
+        items.push(frame);
+        cursor += consumed;
+    }
+    Ok(Some((Frame::Push(items), cursor - offset)))
+}
+
 fn parse_null(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
     if buffer.len() < offset + 3 {
         return Ok(None);
@@ -411,6 +585,129 @@ fn parse_boolean(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
         return Err(FastCacheError::Protocol("invalid boolean frame".into()));
     }
     Ok(Some((Frame::Boolean(value), 4)))
+}
+
+fn parse_double(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+    let Some((line, consumed)) = parse_line(&buffer[offset + 1..])? else {
+        return Ok(None);
+    };
+    if !matches!(line, "inf" | "+inf" | "-inf" | "nan") {
+        line.parse::<f64>().map_err(|error| {
+            FastCacheError::Protocol(format!("invalid RESP3 double value: {error}"))
+        })?;
+    }
+    Ok(Some((Frame::Double(line.to_string()), consumed + 1)))
+}
+
+fn parse_big_number(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+    let Some((line, consumed)) = parse_line(&buffer[offset + 1..])? else {
+        return Ok(None);
+    };
+    let digits = match line.as_bytes().first() {
+        Some(b'+') | Some(b'-') => &line.as_bytes()[1..],
+        _ => line.as_bytes(),
+    };
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return Err(FastCacheError::Protocol(
+            "invalid RESP3 big number value".into(),
+        ));
+    }
+    Ok(Some((Frame::BigNumber(line.to_string()), consumed + 1)))
+}
+
+fn parse_verbatim_string(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+    let Some((length, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
+        return Ok(None);
+    };
+    if length < 4 {
+        return Err(FastCacheError::Protocol(
+            "RESP3 verbatim string must include a format prefix".into(),
+        ));
+    }
+    let length = length as usize;
+    let start = offset + 1 + header_consumed;
+    let end = start + length;
+    if buffer.len() < end + 2 {
+        return Ok(None);
+    }
+    if &buffer[end..end + 2] != b"\r\n" {
+        return Err(FastCacheError::Protocol(
+            "verbatim string missing CRLF terminator".into(),
+        ));
+    }
+    let payload = &buffer[start..end];
+    let colon = payload
+        .iter()
+        .position(|byte| *byte == b':')
+        .ok_or_else(|| {
+            FastCacheError::Protocol("RESP3 verbatim string missing format separator".into())
+        })?;
+    if colon != 3 {
+        return Err(FastCacheError::Protocol(
+            "RESP3 verbatim string format must be exactly 3 bytes".into(),
+        ));
+    }
+    let format = std::str::from_utf8(&payload[..colon])
+        .map_err(|error| {
+            FastCacheError::Protocol(format!("invalid utf8 in RESP3 verbatim format: {error}"))
+        })?
+        .to_string();
+    Ok(Some((
+        Frame::VerbatimString {
+            format,
+            value: payload[colon + 1..].to_vec(),
+        },
+        (end + 2) - offset,
+    )))
+}
+
+fn parse_attribute(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+    let Some((Frame::Map(attributes), consumed)) = parse_map_with_prefix(buffer, offset, b'|')?
+    else {
+        return Ok(None);
+    };
+    let cursor = offset + consumed;
+    let Some((data, data_consumed)) = parse_frame(buffer, cursor)? else {
+        return Ok(None);
+    };
+    Ok(Some((
+        Frame::Attribute {
+            attributes,
+            data: Box::new(data),
+        },
+        consumed + data_consumed,
+    )))
+}
+
+fn parse_map_with_prefix(
+    buffer: &[u8],
+    offset: usize,
+    prefix: u8,
+) -> Result<Option<(Frame, usize)>> {
+    debug_assert_eq!(buffer[offset], prefix);
+    let Some((count, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
+        return Ok(None);
+    };
+    if count < 0 {
+        return Err(FastCacheError::Protocol(
+            "RESP3 attributes cannot be null".into(),
+        ));
+    }
+    let count = count as usize;
+    let mut cursor = offset + 1 + header_consumed;
+    let mut items = Vec::with_capacity(count);
+    for _ in 0..count {
+        let Some((key, consumed)) = parse_frame(buffer, cursor)? else {
+            return Ok(None);
+        };
+        cursor += consumed;
+        let Some((value, consumed)) = parse_frame(buffer, cursor)? else {
+            return Ok(None);
+        };
+        cursor += consumed;
+        items.push((key, value));
+    }
+    Ok(Some((Frame::Map(items), cursor - offset)))
 }
 
 fn parse_line(buffer: &[u8]) -> Result<Option<(&str, usize)>> {
@@ -570,8 +867,17 @@ impl fmt::Display for Frame {
             Frame::BlobString(value) => write!(f, "{}", String::from_utf8_lossy(value)),
             Frame::Integer(value) => write!(f, "{value}"),
             Frame::Array(value) => write!(f, "{value:?}"),
+            Frame::Map(value) => write!(f, "{value:?}"),
+            Frame::Set(value) => write!(f, "{value:?}"),
+            Frame::Push(value) => write!(f, "{value:?}"),
             Frame::Null => write!(f, "null"),
             Frame::Boolean(value) => write!(f, "{value}"),
+            Frame::Double(value) => write!(f, "{value}"),
+            Frame::BigNumber(value) => write!(f, "{value}"),
+            Frame::VerbatimString { format, value } => {
+                write!(f, "{format}:{}", String::from_utf8_lossy(value))
+            }
+            Frame::Attribute { data, .. } => write!(f, "{data}"),
             Frame::Error(value) => write!(f, "ERR {value}"),
         }
     }

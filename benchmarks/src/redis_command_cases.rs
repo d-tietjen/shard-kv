@@ -330,32 +330,32 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         PubSub,
         "PUBLISH",
         "PUBLISH no subscribers",
-        ["PUBLISH", "bench-channel", "payload"]
+        ["PUBLISH", "$key:bench-channel", "payload"]
     ),
     case!(PubSub, "PUBSUB", "PUBSUB NUMPAT", ["PUBSUB", "NUMPAT"]),
     case!(
         PubSub,
         "SUBSCRIBE",
         "SUBSCRIBE ack",
-        ["SUBSCRIBE", "bench-channel"]
+        ["SUBSCRIBE", "$key:bench-channel"]
     ),
     case!(
         PubSub,
         "UNSUBSCRIBE",
         "UNSUBSCRIBE ack",
-        ["UNSUBSCRIBE", "bench-channel"]
+        ["UNSUBSCRIBE", "$key:bench-channel"]
     ),
     case!(
         PubSub,
         "PSUBSCRIBE",
         "PSUBSCRIBE ack",
-        ["PSUBSCRIBE", "bench-*"]
+        ["PSUBSCRIBE", "$key:bench-*"]
     ),
     case!(
         PubSub,
         "PUNSUBSCRIBE",
         "PUNSUBSCRIBE ack",
-        ["PUNSUBSCRIBE", "bench-*"]
+        ["PUNSUBSCRIBE", "$key:bench-*"]
     ),
     case_script!(
         Transaction,
@@ -2168,7 +2168,7 @@ mod tests {
 
     use super::{
         BENCHMARKED_COMMANDS, REDIS_5_0_14_COMMANDS, REDIS_5_0_14_EXCLUSIONS, REDIS_COMMAND_CASES,
-        REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES,
+        REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES, RedisCommandFamily,
     };
 
     #[test]
@@ -2287,6 +2287,23 @@ mod tests {
         .collect::<BTreeSet<_>>();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn pubsub_benchmark_channels_are_worker_scoped() {
+        for case in REDIS_COMMAND_CASES
+            .iter()
+            .filter(|case| case.family == RedisCommandFamily::PubSub)
+        {
+            for part in case.parts.iter().skip(1) {
+                if part.starts_with("bench-") {
+                    panic!(
+                        "{} uses unscoped pubsub channel/pattern `{part}`",
+                        case.case_name
+                    );
+                }
+            }
+        }
     }
 
     #[test]

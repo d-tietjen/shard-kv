@@ -24,7 +24,7 @@ use crate::storage::FlatMap;
 use crate::storage::{BorrowedCommand, Bytes, EngineHandle, now_millis};
 #[cfg(feature = "embedded")]
 use crate::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStore};
-#[cfg(all(feature = "embedded", feature = "redis-compat"))]
+#[cfg(all(feature = "embedded", feature = "redis"))]
 use crate::storage::{RedisObjectReadOutcome, RedisObjectResult, WRONGTYPE_MESSAGE};
 
 pub(crate) mod commands;

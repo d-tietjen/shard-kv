@@ -2,10 +2,10 @@ use super::{EmbeddedRouteMode, EmbeddedStore, PackedSessionWrite};
 use crate::config::EvictionPolicy;
 #[cfg(feature = "telemetry")]
 use crate::storage::CacheTelemetry;
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 use crate::storage::RedisZSetStore;
 use crate::storage::hash_key;
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 use crate::storage::{RedisObjectResult, RedisStringLookup};
 use std::collections::BTreeMap;
 #[cfg(feature = "telemetry")]
@@ -44,7 +44,7 @@ fn visit_string_keys_and_entries_do_not_require_snapshots() {
     assert_eq!(first_key_only.len(), 1);
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn redis_objects_enforce_wrongtype_and_set_overwrite() {
     let store = EmbeddedStore::new(4);
@@ -74,7 +74,7 @@ fn redis_objects_enforce_wrongtype_and_set_overwrite() {
     assert!(!store.exists(b"user:1"));
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn redis_list_set_and_zset_semantics() {
     let store = EmbeddedStore::new(4);
@@ -194,7 +194,7 @@ fn redis_list_set_and_zset_semantics() {
     );
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[test]
 fn redis_segmented_list_semantics_cross_inline_boundary() {
     let store = EmbeddedStore::new(4);

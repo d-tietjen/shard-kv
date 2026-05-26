@@ -23,7 +23,7 @@ Add the embedded database to a Rust project:
 
 ```toml
 [dependencies]
-fast-cache = "0.1"
+fast-cache = "0.2"
 ```
 
 ```rust
@@ -55,7 +55,7 @@ layered surfaces: `FastMap` for cloneable embedded use, `FastCache` as the
 cache-flavored alias, `embedded::ShardedEngine` for the full sharded core used
 by server mode, `embedded::LocalEmbeddedStore` for pinned owner-local workers,
 the optional `server` feature for RESP/FCNP access from other processes, and
-`redis-compat` when Redis/Valkey data-type semantics are required.
+`redis` when Redis/Valkey data-type semantics are required.
 
 For callers that need raw in-place mutation, the opt-in
 `mutable-value-slices` feature adds `value_mut_no_ttl()` to embedded mutation
@@ -151,7 +151,7 @@ docker compose up --build fast-cache
 - Embedded Rust APIs for direct in-process use.
 - TCP server APIs: RESP command frames and FCNP for Rust clients that can route
   directly to shard-owned server ports. Redis/Valkey compatibility is enabled
-  with `redis-compat`.
+  with `redis`.
 
 Current benchmark artifacts are standalone Linux runs. Throughput rows
 disable latency sampling so the harness can measure ceiling throughput; latency
@@ -198,7 +198,8 @@ holding the requested rate:
 | 1M ops/s | 0.439 vCPU | 0.531 vCPU | 0.909 vCPU |
 | 2M ops/s | 0.843 vCPU | 0.975 vCPU | saturated at 1.23M |
 
-See
+See [Redis Head-to-Head Benchmarks](benchmarks/REDIS_HEAD_TO_HEAD_BENCHMARKS.md)
+for the curated 1-vCPU and 16-vCPU summary, and
 [fast-cache vs Redis, Valkey, and Dragonfly over TCP](benchmarks/FAST_CACHE_VS_REDIS_TCP.md)
 for the full TCP matrix, fixed-shape rows, pipeline sweeps, caveats, and
 artifact paths.
@@ -261,7 +262,8 @@ This repository now contains the open source crate surface:
 - `CHANGELOG.md` and `docs/RELEASE_0_2_READINESS.md` for release notes,
   validation commands, and known compatibility limits.
 - `docs/REDIS_COMPATIBILITY.md`, generated from the live command matrix
-  registry, for the supported, partial, and missing Redis command surface.
+  registry, for supported commands, expected-error standalone behavior, and
+  any missing Redis command coverage.
 - `scripts/proof-gate.sh` and focused checks under `scripts/` for local and CI
   validation of docs, feature flags, and release proofs.
 
@@ -278,9 +280,9 @@ Public product surfaces:
 | `default` | Embedded, sharded Rust API. Equivalent to `sharded`. |
 | `embedded` | Minimal in-process cache API. |
 | `sharded` | Embedded sharded storage and owner-local APIs; implies `embedded`. |
-| `redis-compat` | Redis/Valkey object types, command families, and wrong-type behavior without server networking. |
+| `redis` | Redis/Valkey object types, command families, and wrong-type behavior without server networking. |
 | `server` | RESP/FCNP `fast-cache-server` runtime without the full Redis compatibility catalog. |
-| `redis-server` | Redis/Valkey-compatible server build; implies `server` and `redis-compat`. |
+| `redis-server` | Redis/Valkey-compatible server build; implies `server` and `redis`. |
 
 Runtime integrations:
 
@@ -305,7 +307,10 @@ Tokio direct mode writes responses inline by default, avoiding a per-connection
 writer task for Redis-style request/response traffic. Set
 `FAST_CACHE_TOKIO_WRITER_MODE=split` to restore the split read/write handoff
 for deployments that prefer full-duplex connection overlap. Monoio still uses
-`bytes-handoff` for connection read buffering. With `FAST_CACHE_DIRECT_SHARD_PORTS=1`,
+`bytes-handoff` for connection read buffering. Its server driver defaults to
+`FAST_CACHE_MONOIO_DRIVER=auto`: io_uring for one worker, legacy poll for
+multi-worker socket runs; set `FAST_CACHE_MONOIO_DRIVER=legacy|io_uring` to
+force either path. With `FAST_CACHE_DIRECT_SHARD_PORTS=1`,
 the server also binds one listener per shard, starting at
 `FAST_CACHE_DIRECT_SHARD_BASE_PORT` or the fanout port + 1, so direct clients
 can route while fanout RESP/FCNP stays available. WAL TCP export and native

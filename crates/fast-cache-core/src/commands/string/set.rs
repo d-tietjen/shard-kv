@@ -96,10 +96,9 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedSet<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        let value = self.value;
-        let ttl_ms = self.ttl_ms;
-        Box::pin(async move { Set::execute_engine_frame(ctx, key, value, ttl_ms).await })
+        Box::pin(
+            async move { Set::execute_engine_frame(ctx, self.key, self.value, self.ttl_ms).await },
+        )
     }
 
     #[cfg(feature = "server")]
@@ -110,19 +109,20 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedSet<'a> {
 
     #[cfg(feature = "server")]
     fn execute_borrowed(&self, ctx: BorrowedCommandContext<'_, '_, '_>) {
-        match ctx.single_threaded && !ctx.store.has_redis_objects() {
-            true => {
-                // SAFETY: forwarded from caller's single-worker contract.
-                unsafe {
-                    ctx.store
-                        .set_single_threaded(self.key, self.value, self.ttl_ms)
-                };
-            }
-            false => {
+        #[cfg(feature = "unsafe")]
+        if ctx.single_threaded && !ctx.store.has_redis_objects() {
+            // SAFETY: forwarded from caller's single-worker contract.
+            unsafe {
                 ctx.store
-                    .set(self.key.to_vec(), self.value.to_vec(), self.ttl_ms);
-            }
+                    .set_single_threaded(self.key, self.value, self.ttl_ms)
+            };
+            ctx.out.extend_from_slice(b"+OK\r\n");
+            return;
         }
+        #[cfg(not(feature = "unsafe"))]
+        let _ = ctx.single_threaded;
+        ctx.store
+            .set(self.key.to_vec(), self.value.to_vec(), self.ttl_ms);
         ctx.out.extend_from_slice(b"+OK\r\n");
     }
 

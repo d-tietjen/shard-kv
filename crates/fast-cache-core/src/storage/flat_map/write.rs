@@ -16,7 +16,7 @@ impl FlatMap {
         self.set_slice_hashed(hash_key(key), key, value, expire_at_ms, now_ms);
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     pub(crate) fn transform_value_hashed_no_ttl<R, E>(
         &mut self,
         hash: u64,

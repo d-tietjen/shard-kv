@@ -44,46 +44,45 @@ floating helper methods.
 
 ## Compatibility Staging
 
-Redis/Valkey compatibility is documented by upstream server version and by claim
-strength. The current implementation should be described as a Redis-compatible
-cache-command profile, not full Redis server parity. It implements strings,
-generic key commands, hashes, lists, sets, sorted sets, connection handshake
-helpers, and lightweight server metadata.
+Redis/Valkey compatibility is documented by upstream server version and by
+claim strength. For 0.2.0, `docs/REDIS_COMPATIBILITY.md` is the source of
+truth: it is generated from the live command benchmark registry and currently
+tracks every Redis 5.0.14 command as supported, with standalone-only
+expected-error behavior called out explicitly.
 
-The current command surface is closest to a Redis 6.2+ cache profile because it
-includes post-Redis-5 commands and command forms such as `GETDEL`, `BLMOVE`,
-`HRANDFIELD`, `SMISMEMBER`, `ZRANGESTORE`, `ZDIFFSTORE`, unified `ZRANGE
-BYSCORE`, and `ZADD GT`. As new commands land, prefer moving the documented
-compatibility target up the Redis/Valkey version tree while preserving behavior
-for older commands.
+The command surface also includes selected post-Redis-5 cache commands and
+forms such as `GETDEL`, `GETEX`, `BLMOVE`, `BLMPOP`, `BZMPOP`, `COPY`,
+`HRANDFIELD`, `SMISMEMBER`, `ZRANGESTORE`, `ZDIFF`, `ZDIFFSTORE`, `ZINTER`,
+`ZINTERCARD`, `ZMPOP`, `ZMSCORE`, `ZRANDMEMBER`, and `ZUNION`.
 
-Do not call a profile "full" until all commands in that upstream version either
-pass differential tests or are explicitly documented as intentionally
-unsupported. Major gaps before a full Redis 5 claim:
+Do not describe this as byte-for-byte Redis server parity. The compatibility
+claim is a Redis/Valkey-compatible cache-command profile with live RESP command
+coverage. Important 0.2.0 caveats:
 
-- Streams: `XADD`, `XREAD`, consumer groups, pending entry management, trimming,
-  and stream range commands.
-- Pub/Sub: `PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE`, unsubscribe commands, and
-  `PUBSUB` introspection.
-- Optimistic locking: `WATCH` and `UNWATCH` are implemented for direct
-  Redis-compatible transactions with snapshot-based conflict detection.
-  Version-accurate invalidation for values changed away and back remains a
-  compatibility gap. `MULTI`, `EXEC`, and `DISCARD` are implemented for the
-  direct Redis-compatible ingress; shard-local transactions are the default and
-  coordinated cross-shard transactions are an explicit server configuration
-  mode.
-- Scripting: `EVAL`, `EVALSHA`, `SCRIPT *`, deterministic write behavior, and
-  script cache semantics.
-- HyperLogLog and geospatial families: `PF*` and `GEO*`.
-- Additional generic key commands: `SORT`, `MIGRATE`, and database movement.
-- Server and connection compatibility beyond lightweight stubs: `COMMAND` /
-  `CONFIG` shapes, `CLIENT` subcommands, `MONITOR`, `SLOWLOG`, `ROLE`,
-  `REPLICAOF`, persistence/admin commands, and accurate `INFO` sections.
-- Real blocking semantics for commands currently handled as immediate
-  best-effort operations, especially list and sorted-set blocking pops.
-- RESP compatibility details: RESP2/RESP3 edge cases, inline request behavior,
-  exact error strings, command metadata, and differential tests against the
-  target upstream version.
+- Expected-error standalone commands, including disabled cluster, replication,
+  monitor, module, migration, cross-DB, shutdown, and security-warning paths,
+  intentionally return Redis-style errors rather than implementing those
+  background subsystems.
+- `WATCH` and `UNWATCH` use snapshot-based conflict detection. Version-accurate
+  invalidation for values changed away and back remains a known gap.
+- Scripting uses a constrained evaluator for return values, `KEYS`/`ARGV`,
+  `tonumber`, and `redis.call`/`redis.pcall` over supported commands; it is not
+  a general Lua VM.
+- Stream support covers basic append, read, range, trim, ID, and lightweight
+  group/readgroup behavior. Full pending-entry-list and consumer-group parity
+  remains intentionally lightweight.
+- Pub/Sub support covers publish-without-subscribers, subscription and
+  unsubscribe acknowledgements, and empty introspection. Persistent subscriber
+  fanout is not part of the 0.2.0 semantics.
+- HyperLogLog commands return compatible cardinalities for covered operations,
+  but use an exact internal representation rather than Redis' binary HLL
+  encoding.
+- Blocking list and sorted-set commands are live-tested on ready and
+  short-timeout paths. Long-lived blocking wakeups across clients require
+  separate proofing before being described as full Redis parity.
+- RESP2/RESP3 support is covered by protocol tests and command smoke tests, but
+  exact error wording and obscure inline-frame edge cases should still be
+  checked against the target upstream version before expanding public claims.
 
 ## Formal Semantics
 
@@ -182,8 +181,7 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedExample<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        Box::pin(async move { Example::execute_engine_frame(ctx, key).await })
+        Box::pin(async move { Example::execute_engine_frame(ctx, self.key).await })
     }
 
     #[cfg(feature = "server")]

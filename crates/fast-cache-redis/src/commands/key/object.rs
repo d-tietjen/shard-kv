@@ -1,6 +1,8 @@
 use bytes::BytesMut;
 
-use crate::commands::redis::{bulk, define_redis_command, error, write_frame, wrong_arity};
+use crate::commands::redis::{
+    bulk, define_redis_command, error, write_frame, write_resp_null, wrong_arity,
+};
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
@@ -28,7 +30,7 @@ impl crate::commands::redis::RedisCommand for Object {
             [subcommand, key] if subcommand.eq_ignore_ascii_case(b"ENCODING") => {
                 match store.object_encoding(key) {
                     Some(encoding) => ServerWire::write_resp_blob_string(out, encoding.as_bytes()),
-                    None => out.extend_from_slice(b"$-1\r\n"),
+                    None => write_resp_null(out),
                 }
             }
             [_, _] => ServerWire::write_resp_error(out, "ERR syntax error"),

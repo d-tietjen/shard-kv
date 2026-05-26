@@ -8,16 +8,16 @@ cd "$root"
 
 cargo check -p fast-cache-core --no-default-features --features embedded
 cargo check -p fast-cache-core --no-default-features --features sharded
-cargo check -p fast-cache-core --no-default-features --features redis-compat
+cargo check -p fast-cache-core --no-default-features --features redis
 cargo check -p fast-cache-core --no-default-features --features redis-server
 
 cargo check -p fast-cache --no-default-features --features embedded
 cargo check -p fast-cache --no-default-features --features sharded
-cargo check -p fast-cache --no-default-features --features redis-compat
+cargo check -p fast-cache --no-default-features --features redis
 cargo check -p fast-cache --no-default-features --features server
 cargo check -p fast-cache --no-default-features --features redis-server
 
-cargo check -p fast-cache-redis --no-default-features --features redis-compat
+cargo check -p fast-cache-redis --no-default-features --features redis
 cargo check -p fast-cache-redis --all-features
 
 if cargo tree -p fast-cache --no-default-features --features embedded | grep -q 'fast-cache-redis'; then

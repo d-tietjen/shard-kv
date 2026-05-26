@@ -6,7 +6,7 @@ use crate::server::commands::{
 };
 use crate::server::wire::ServerWire;
 use crate::storage::hash_key;
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 use crate::storage::{RedisStringLookup, WRONGTYPE_MESSAGE};
 
 use super::Get;
@@ -20,6 +20,7 @@ impl RawDirectCommand for Get {
             out,
             fast_write_queue,
             single_threaded,
+            resp_protocol,
         } = ctx;
         match GetRawArgs::from_args(args.as_slice()) {
             GetRawArgs::Ready { key } => {
@@ -28,12 +29,14 @@ impl RawDirectCommand for Get {
                     out,
                     fast_write_queue,
                     single_threaded,
+                    resp_protocol,
                 };
+                #[cfg(feature = "unsafe")]
                 if single_threaded {
                     Get::execute_borrowed_single_threaded(&mut borrowed_ctx, key);
-                } else {
-                    Get::execute_borrowed_shared(&mut borrowed_ctx, key);
+                    return;
                 }
+                Get::execute_borrowed_shared(&mut borrowed_ctx, key);
             }
             GetRawArgs::WrongArity => ServerWire::write_resp_error(
                 out,
@@ -50,23 +53,39 @@ impl RawDirectCommand for Get {
             GetRawArgs::Ready { key } => {
                 let key_hash = hash_key(key);
                 let out = &mut *ctx.out;
-                let found = if ctx.single_threaded {
-                    // SAFETY: forwarded from the connection worker's single-threaded contract.
-                    unsafe {
-                        ctx.store
-                            .with_shared_value_bytes_route_hashed_single_threaded(
-                                key_hash,
-                                key,
-                                |value| {
-                                    if let Some(queue) = ctx.fast_write_queue.as_mut() {
-                                        queue.push_fast_value(out, value);
-                                    } else {
-                                        ServerWire::write_fast_value(out, value.as_ref());
-                                    }
-                                },
-                            )
+                #[cfg(feature = "unsafe")]
+                let found = match ctx.single_threaded {
+                    true => {
+                        // SAFETY: forwarded from the connection worker's single-threaded contract.
+                        unsafe {
+                            ctx.store
+                                .with_shared_value_bytes_route_hashed_single_threaded(
+                                    key_hash,
+                                    key,
+                                    |value| {
+                                        if let Some(queue) = ctx.fast_write_queue.as_mut() {
+                                            queue.push_fast_value(out, value);
+                                        } else {
+                                            ServerWire::write_fast_value(out, value.as_ref());
+                                        }
+                                    },
+                                )
+                        }
                     }
-                } else {
+                    false => {
+                        ctx.store
+                            .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+                                if let Some(queue) = ctx.fast_write_queue.as_mut() {
+                                    queue.push_fast_value(out, value);
+                                } else {
+                                    ServerWire::write_fast_value(out, value.as_ref());
+                                }
+                            })
+                    }
+                };
+                #[cfg(not(feature = "unsafe"))]
+                let found = {
+                    let _ = ctx.single_threaded;
                     ctx.store
                         .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
                             if let Some(queue) = ctx.fast_write_queue.as_mut() {
@@ -109,12 +128,13 @@ impl<'a> GetRawArgs<'a> {
 
 #[cfg(feature = "server")]
 impl Get {
+    #[cfg(feature = "unsafe")]
     #[inline(always)]
     pub(super) fn execute_borrowed_single_threaded(
         ctx: &mut BorrowedCommandContext<'_, '_, '_>,
         key: &[u8],
     ) {
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         if ctx.store.has_redis_objects() {
             Self::write_resp_string_lookup(ctx, key);
             return;
@@ -135,7 +155,7 @@ impl Get {
         };
         match hit {
             true => {}
-            false => ctx.out.extend_from_slice(b"$-1\r\n"),
+            false => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
         }
     }
 
@@ -144,7 +164,7 @@ impl Get {
         ctx: &mut BorrowedCommandContext<'_, '_, '_>,
         key: &[u8],
     ) {
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         if ctx.store.has_redis_objects() {
             Self::write_resp_string_lookup(ctx, key);
             return;
@@ -161,11 +181,11 @@ impl Get {
         };
         match hit {
             true => {}
-            false => ctx.out.extend_from_slice(b"$-1\r\n"),
+            false => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
         }
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     #[inline(always)]
     fn write_resp_string_lookup(ctx: &mut BorrowedCommandContext<'_, '_, '_>, key: &[u8]) {
         let lookup = if let Some(queue) = ctx.fast_write_queue.as_mut() {
@@ -180,7 +200,7 @@ impl Get {
         };
         match lookup {
             RedisStringLookup::Hit => {}
-            RedisStringLookup::Miss => ctx.out.extend_from_slice(b"$-1\r\n"),
+            RedisStringLookup::Miss => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
             RedisStringLookup::WrongType => {
                 ServerWire::write_resp_error(ctx.out, WRONGTYPE_MESSAGE)
             }
@@ -209,7 +229,7 @@ impl FastDirectCommand for Get {
     fn execute_fast(&self, mut ctx: FastCommandContext<'_, '_>, command: FastCommand<'_>) {
         match command {
             FastCommand::Get { key } => {
-                #[cfg(feature = "redis-compat")]
+                #[cfg(feature = "redis")]
                 if ctx.store.has_redis_objects() {
                     match ctx.store.get_string_value_into(key, |value| {
                         ServerWire::write_fast_value(ctx.out, value)
@@ -240,10 +260,23 @@ impl Get {
         let out = &mut *ctx.out;
         match (ctx.key_hash, ctx.single_threaded) {
             (Some(key_hash), true) => {
-                // SAFETY: caller only enables this when exactly one worker can
-                // access the store.
-                unsafe {
-                    store.with_value_bytes_route_hashed_single_threaded(key_hash, key, |value| {
+                #[cfg(feature = "unsafe")]
+                {
+                    // SAFETY: caller only enables this when exactly one worker can
+                    // access the store.
+                    unsafe {
+                        store.with_value_bytes_route_hashed_single_threaded(
+                            key_hash,
+                            key,
+                            |value| {
+                                ServerWire::write_fast_value(out, value);
+                            },
+                        )
+                    }
+                }
+                #[cfg(not(feature = "unsafe"))]
+                {
+                    store.with_value_bytes_route_hashed(key_hash, key, |value| {
                         ServerWire::write_fast_value(out, value);
                     })
                 }

@@ -1371,20 +1371,29 @@ fn route_keys_before_last_arg<'a>(args: &[&'a [u8]]) -> FastRedisRouteKeys<'a> {
 }
 
 fn counted_route_keys<'a>(args: &[&'a [u8]], numkeys_index: usize) -> FastRedisRouteKeys<'a> {
-    let Some(raw_numkeys) = args.get(numkeys_index) else {
-        return FastRedisRouteKeys::AllShards;
-    };
-    let Some(numkeys) = std::str::from_utf8(raw_numkeys)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-    else {
-        return FastRedisRouteKeys::AllShards;
-    };
-    let key_start = numkeys_index + 1;
-    if numkeys == 0 || args.len() < key_start + numkeys {
-        return FastRedisRouteKeys::AllShards;
+    match counted_key_span(args, numkeys_index) {
+        Some(keys) => FastRedisRouteKeys::Keys(keys.to_vec()),
+        None => FastRedisRouteKeys::AllShards,
     }
-    FastRedisRouteKeys::Keys(args.iter().skip(key_start).take(numkeys).copied().collect())
+}
+
+fn counted_key_span<'args, 'value>(
+    args: &'args [&'value [u8]],
+    numkeys_index: usize,
+) -> Option<&'args [&'value [u8]]> {
+    let numkeys = args
+        .get(numkeys_index)
+        .and_then(|raw| parse_ascii_usize(raw))?;
+    let key_start = numkeys_index.checked_add(1)?;
+    let key_end = key_start.checked_add(numkeys)?;
+    match numkeys {
+        0 => None,
+        _ => args.get(key_start..key_end),
+    }
+}
+
+fn parse_ascii_usize(raw: &[u8]) -> Option<usize> {
+    std::str::from_utf8(raw).ok()?.parse().ok()
 }
 
 fn zaggregate_store_route_keys<'a>(args: &[&'a [u8]]) -> FastRedisRouteKeys<'a> {

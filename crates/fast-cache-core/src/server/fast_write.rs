@@ -120,7 +120,7 @@ impl FastWriteQueue {
     }
 
     #[inline(always)]
-    fn drain_iovec_batch(&mut self, max_iovecs: usize) -> Vec<FastWriteItem> {
+    pub(super) fn drain_iovec_batch(&mut self, max_iovecs: usize) -> Vec<FastWriteItem> {
         let mut take = 0usize;
         let mut iovecs = 0usize;
         for item in &self.items {

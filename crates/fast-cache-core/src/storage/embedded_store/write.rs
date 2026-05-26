@@ -14,7 +14,7 @@ impl EmbeddedStore {
         let key = key.into();
         let route = self.route_key(&key);
         let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -43,7 +43,7 @@ impl EmbeddedStore {
             .map
             .set_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
         shard.enforce_memory_limit(now_ms);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
     }
 
@@ -90,7 +90,7 @@ impl EmbeddedStore {
             true => route,
             false => self.route_key(key),
         };
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -120,7 +120,7 @@ impl EmbeddedStore {
             .map
             .set_bytes_hashed(route.key_hash, key, value, None, 0);
         shard.enforce_memory_limit(0);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
         after_write();
     }
@@ -141,7 +141,7 @@ impl EmbeddedStore {
             true => route,
             false => self.route_key(key),
         };
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -171,7 +171,7 @@ impl EmbeddedStore {
             .map
             .set_bytes_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
         shard.enforce_memory_limit(now_ms);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
         after_write();
     }
@@ -190,7 +190,7 @@ impl EmbeddedStore {
         }
         shard.map.set_hashed(route.key_hash, key, value, None, 0);
         shard.enforce_memory_limit(0);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
     }
 
@@ -205,7 +205,7 @@ impl EmbeddedStore {
             .map
             .set_slice_hashed(route.key_hash, key, value, None, 0);
         shard.enforce_memory_limit(0);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
     }
 
@@ -227,7 +227,7 @@ impl EmbeddedStore {
                 .set_slice_hashed(key_hash, key, value.as_ref(), None, 0);
         }
         shard.enforce_memory_limit(0);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
     }
 
@@ -248,7 +248,7 @@ impl EmbeddedStore {
                 .set_slice_hashed(session_prefix, key_hash, key, value.as_ref());
         }
         shard.enforce_memory_limit(0);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
     }
 
@@ -277,7 +277,7 @@ impl EmbeddedStore {
         }
         shard.session_slots.replace_session_slab(packed);
         shard.enforce_memory_limit(0);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
     }
 
@@ -299,7 +299,7 @@ impl EmbeddedStore {
             .map
             .set_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
         shard.enforce_memory_limit(now_ms);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
     }
 
@@ -324,7 +324,7 @@ impl EmbeddedStore {
             if batch.is_empty() {
                 continue;
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             if self.objects.shard_has_objects(shard_id) {
                 for (key, value, key_hash) in batch {
                     let mut bucket = self.objects.write_bucket(shard_id, key_hash);
@@ -357,7 +357,7 @@ impl EmbeddedStore {
                     .set_hashed(key_hash, key, value, expire_at_ms, now_ms);
             }
             shard.enforce_memory_limit(now_ms);
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             self.refresh_string_key_count(shard_id, &shard);
         }
     }

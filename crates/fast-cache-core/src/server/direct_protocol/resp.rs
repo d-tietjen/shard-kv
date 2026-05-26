@@ -90,6 +90,7 @@ impl RespDirectCommand<'_> {
         out: &mut BytesMut,
         fast_write_queue: Option<&mut FastWriteQueue>,
         single_threaded: bool,
+        resp_protocol: RespProtocolVersion,
         _started_at: Instant,
     ) {
         self.handler.execute(RawCommandContext {
@@ -98,6 +99,7 @@ impl RespDirectCommand<'_> {
             out,
             fast_write_queue,
             single_threaded,
+            resp_protocol,
         });
     }
 
@@ -115,6 +117,7 @@ impl RespDirectCommand<'_> {
             out,
             fast_write_queue,
             single_threaded,
+            resp_protocol: RespProtocolVersion::Resp2,
         });
     }
 }
@@ -128,9 +131,17 @@ impl DirectProtocol {
         out: &mut BytesMut,
         fast_write_queue: Option<&mut FastWriteQueue>,
         single_threaded: bool,
+        resp_protocol: RespProtocolVersion,
         started_at: Instant,
     ) {
-        command.execute(store, out, fast_write_queue, single_threaded, started_at);
+        command.execute(
+            store,
+            out,
+            fast_write_queue,
+            single_threaded,
+            resp_protocol,
+            started_at,
+        );
     }
 
     #[cfg(feature = "embedded")]

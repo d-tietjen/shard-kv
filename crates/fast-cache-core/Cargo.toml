@@ -39,7 +39,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(creusot)"] }
 default = ["sharded"]
 embedded = []
 sharded = ["embedded"]
-redis-compat = ["embedded"]
+redis = ["embedded"]
 server = [
     "sharded",
     "dep:bytes-handoff",
@@ -48,7 +48,7 @@ server = [
     "dep:socket2",
     "dep:tracing-subscriber",
 ]
-redis-server = ["server", "redis-compat"]
+redis-server = ["server", "redis"]
 
 # Runtime and platform integrations.
 monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
@@ -117,9 +117,13 @@ name = "redis_tier1_coverage_test"
 path = "tests/redis_tier1_coverage_test.rs"
 
 [[test]]
+name = "protocol_test"
+path = "tests/protocol_test.rs"
+
+[[test]]
 name = "fuzz_harness_test"
 path = "tests/fuzz_harness_test.rs"
-required-features = ["redis-compat"]
+required-features = ["redis"]
 
 [[test]]
 name = "redis_compat_differential_test"

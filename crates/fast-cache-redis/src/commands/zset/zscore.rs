@@ -3,7 +3,7 @@ use crate::storage::RedisZSetStore;
 use bytes::BytesMut;
 
 use crate::commands::redis::{
-    define_redis_command, object_result, write_frame, wrong_arity, wrongtype,
+    define_redis_command, object_result, write_frame, write_resp_null, wrong_arity, wrongtype,
 };
 use crate::commands::zset_shared::write_resp_score;
 use crate::protocol::Frame;
@@ -21,7 +21,7 @@ impl crate::commands::redis::RedisCommand for ZScore {
         match args {
             [key, member] => match store.zscore_value(key, member) {
                 Ok(Some(score)) => write_resp_score(out, score),
-                Ok(None) | Err(RedisObjectError::MissingKey) => out.extend_from_slice(b"$-1\r\n"),
+                Ok(None) | Err(RedisObjectError::MissingKey) => write_resp_null(out),
                 Err(RedisObjectError::WrongType) => write_frame(out, &wrongtype()),
             },
             _ => write_frame(out, &wrong_arity("ZSCORE")),

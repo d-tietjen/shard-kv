@@ -81,10 +81,9 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedSetEx<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        let ttl_ms = self.ttl_ms;
-        let value = self.value;
-        Box::pin(async move { SetEx::execute_engine_frame(ctx, key, ttl_ms, value).await })
+        Box::pin(async move {
+            SetEx::execute_engine_frame(ctx, self.key, self.ttl_ms, self.value).await
+        })
     }
 
     #[cfg(feature = "server")]

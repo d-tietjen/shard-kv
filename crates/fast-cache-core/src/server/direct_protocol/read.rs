@@ -26,7 +26,8 @@ impl DirectProtocol {
 }
 
 /// Reads `$<digits>\r\n` and returns (digits_value, total_consumed_incl_dollar).
-/// Only handles 1-4 digit lengths (covers values up to 9999 bytes).
+/// Keeps the common 1-4 digit path branch-light, with a bounded tail for
+/// larger RESP bulk strings that should still stay on the direct server path.
 impl DirectProtocol {
     #[inline(always)]
     pub(in crate::server) fn read_short_int_header(buf: &[u8]) -> Option<(usize, usize)> {
@@ -38,7 +39,7 @@ impl DirectProtocol {
     }
 }
 
-/// Reads `<digits>\r\n` and returns (value, consumed). 1-4 digits.
+/// Reads `<digits>\r\n` and returns (value, consumed).
 impl DirectProtocol {
     #[inline(always)]
     pub(in crate::server) fn read_short_int_header_no_dollar(buf: &[u8]) -> Option<(usize, usize)> {
@@ -73,6 +74,22 @@ impl DirectProtocol {
         let d3 = (b3 - b'0') as usize;
         if buf.len() >= 6 && buf[4] == b'\r' && buf[5] == b'\n' {
             return Some((d0 * 1000 + d1 * 100 + d2 * 10 + d3, 6));
+        }
+        let mut value = d0 * 1000 + d1 * 100 + d2 * 10 + d3;
+        let mut index = 4;
+        while index < 10 {
+            let byte = *buf.get(index)?;
+            if byte == b'\r' {
+                if buf.get(index + 1).copied() == Some(b'\n') {
+                    return Some((value, index + 2));
+                }
+                return None;
+            }
+            if !byte.is_ascii_digit() {
+                return None;
+            }
+            value = value * 10 + (byte - b'0') as usize;
+            index += 1;
         }
         None
     }

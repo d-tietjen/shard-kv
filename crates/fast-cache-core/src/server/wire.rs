@@ -2,6 +2,39 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::*;
 
+#[cfg(feature = "embedded")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RespProtocolVersion {
+    Resp2,
+    Resp3,
+}
+
+#[cfg(feature = "embedded")]
+impl Default for RespProtocolVersion {
+    fn default() -> Self {
+        Self::Resp2
+    }
+}
+
+#[cfg(feature = "embedded")]
+impl RespProtocolVersion {
+    pub(crate) fn from_hello_argument(arg: &[u8]) -> Option<Self> {
+        match arg {
+            b"2" => Some(Self::Resp2),
+            b"3" => Some(Self::Resp3),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn number(self) -> i64 {
+        match self {
+            Self::Resp2 => 2,
+            Self::Resp3 => 3,
+        }
+    }
+}
+
 pub(crate) struct ServerWire;
 
 #[allow(dead_code)]
@@ -206,7 +239,7 @@ impl ServerWire {
         );
     }
 
-    #[cfg(all(feature = "embedded", feature = "redis-compat"))]
+    #[cfg(all(feature = "embedded", feature = "redis"))]
     #[inline(always)]
     pub(super) fn finish_fast_object_read(
         out: &mut BytesMut,
@@ -231,7 +264,7 @@ impl ServerWire {
         }
     }
 
-    #[cfg(all(feature = "embedded", feature = "redis-compat"))]
+    #[cfg(all(feature = "embedded", feature = "redis"))]
     pub(super) fn write_fast_redis_object_result(out: &mut BytesMut, result: RedisObjectResult) {
         match result {
             RedisObjectResult::Simple("OK") => ServerWire::write_fast_ok(out),
@@ -628,7 +661,32 @@ impl ServerWire {
     }
 
     #[cfg(feature = "embedded")]
-    pub(super) fn write_resp_hello(out: &mut BytesMut) {
+    #[inline(always)]
+    pub(super) fn write_resp_map_header(out: &mut BytesMut, len: usize) {
+        out.extend_from_slice(b"%");
+        let mut len_buf = itoa::Buffer::new();
+        out.extend_from_slice(len_buf.format(len).as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+
+    #[cfg(feature = "embedded")]
+    pub(crate) fn write_resp_null(out: &mut BytesMut, protocol: RespProtocolVersion) {
+        match protocol {
+            RespProtocolVersion::Resp2 => out.extend_from_slice(b"$-1\r\n"),
+            RespProtocolVersion::Resp3 => out.extend_from_slice(b"_\r\n"),
+        }
+    }
+
+    #[cfg(feature = "embedded")]
+    pub(crate) fn write_resp_hello(out: &mut BytesMut, protocol: RespProtocolVersion) {
+        match protocol {
+            RespProtocolVersion::Resp2 => ServerWire::write_resp2_hello(out),
+            RespProtocolVersion::Resp3 => ServerWire::write_resp3_hello(out),
+        }
+    }
+
+    #[cfg(feature = "embedded")]
+    fn write_resp2_hello(out: &mut BytesMut) {
         ServerWire::write_resp_array_header(out, 14);
         ServerWire::write_resp_blob_string(out, b"server");
         ServerWire::write_resp_blob_string(out, b"fast-cache");
@@ -636,6 +694,25 @@ impl ServerWire {
         ServerWire::write_resp_blob_string(out, env!("CARGO_PKG_VERSION").as_bytes());
         ServerWire::write_resp_blob_string(out, b"proto");
         ServerWire::write_resp_integer(out, 2);
+        ServerWire::write_resp_blob_string(out, b"id");
+        ServerWire::write_resp_integer(out, 0);
+        ServerWire::write_resp_blob_string(out, b"mode");
+        ServerWire::write_resp_blob_string(out, b"standalone");
+        ServerWire::write_resp_blob_string(out, b"role");
+        ServerWire::write_resp_blob_string(out, b"master");
+        ServerWire::write_resp_blob_string(out, b"modules");
+        ServerWire::write_resp_array_header(out, 0);
+    }
+
+    #[cfg(feature = "embedded")]
+    fn write_resp3_hello(out: &mut BytesMut) {
+        ServerWire::write_resp_map_header(out, 7);
+        ServerWire::write_resp_blob_string(out, b"server");
+        ServerWire::write_resp_blob_string(out, b"fast-cache");
+        ServerWire::write_resp_blob_string(out, b"version");
+        ServerWire::write_resp_blob_string(out, env!("CARGO_PKG_VERSION").as_bytes());
+        ServerWire::write_resp_blob_string(out, b"proto");
+        ServerWire::write_resp_integer(out, RespProtocolVersion::Resp3.number());
         ServerWire::write_resp_blob_string(out, b"id");
         ServerWire::write_resp_integer(out, 0);
         ServerWire::write_resp_blob_string(out, b"mode");
@@ -660,7 +737,7 @@ impl ServerWire {
         ServerWire::write_resp_blob_string(out, micros.format(now.subsec_micros()).as_bytes());
     }
 
-    #[cfg(all(feature = "embedded", feature = "redis-compat"))]
+    #[cfg(all(feature = "embedded", feature = "redis"))]
     #[inline(always)]
     pub(super) fn write_redis_object_result(out: &mut BytesMut, result: RedisObjectResult) {
         match result {

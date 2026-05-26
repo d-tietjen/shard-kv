@@ -2,7 +2,7 @@ use bytes::BytesMut;
 
 use crate::commands::redis::{
     bulk, define_redis_command, eq_ignore_ascii_case, error, frame_from_result, write_frame,
-    wrong_arity, wrongtype,
+    write_resp_null, wrong_arity, wrongtype,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
@@ -118,7 +118,7 @@ pub(crate) fn write_move_between_lists_resp(
 ) {
     match store.redis_type(source) {
         "none" => {
-            out.extend_from_slice(b"$-1\r\n");
+            write_resp_null(out);
             return;
         }
         "list" => {}
@@ -153,9 +153,9 @@ pub(crate) fn write_move_between_lists_resp(
                 _ => ServerWire::write_resp_blob_string(out, &value),
             }
         }
-        RedisObjectResult::Bulk(None) => out.extend_from_slice(b"$-1\r\n"),
+        RedisObjectResult::Bulk(None) => write_resp_null(out),
         RedisObjectResult::WrongType => write_frame(out, &wrongtype()),
-        _ => out.extend_from_slice(b"$-1\r\n"),
+        _ => write_resp_null(out),
     }
 }
 

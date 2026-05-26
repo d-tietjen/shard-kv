@@ -76,8 +76,7 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedGet<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        Box::pin(async move { Get::execute_engine_frame(ctx, key).await })
+        Box::pin(async move { Get::execute_engine_frame(ctx, self.key).await })
     }
 
     #[cfg(feature = "server")]
@@ -90,11 +89,14 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedGet<'a> {
 
     #[cfg(feature = "server")]
     fn execute_borrowed(&self, mut ctx: BorrowedCommandContext<'_, '_, '_>) {
+        #[cfg(feature = "unsafe")]
         if ctx.single_threaded {
             Get::execute_borrowed_single_threaded(&mut ctx, self.key);
-        } else {
-            Get::execute_borrowed_shared(&mut ctx, self.key);
+            return;
         }
+        #[cfg(not(feature = "unsafe"))]
+        let _ = ctx.single_threaded;
+        Get::execute_borrowed_shared(&mut ctx, self.key);
     }
 
     #[cfg(feature = "server")]

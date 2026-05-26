@@ -36,7 +36,7 @@ impl FlatMap {
         shared_bytes_as_unique_slice_mut(&mut entry.value)
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     #[inline(always)]
     pub(crate) fn update_value_hashed_no_ttl<R>(
         &mut self,

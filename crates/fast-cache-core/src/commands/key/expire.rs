@@ -89,9 +89,9 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedExpire<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        let expire_at_ms = relative_expire_at_ms(self.ttl_ms);
-        Box::pin(async move { Expire::execute_engine_frame(ctx, key, expire_at_ms).await })
+        Box::pin(async move {
+            Expire::execute_engine_frame(ctx, self.key, relative_expire_at_ms(self.ttl_ms)).await
+        })
     }
 
     #[cfg(feature = "server")]

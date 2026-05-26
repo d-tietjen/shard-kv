@@ -40,6 +40,13 @@ fn fast_request<'a>(command: FastCommand<'a>, key: Option<&'a [u8]>) -> FastRequ
     }
 }
 
+fn resp_map_value<'a>(items: &'a [(Frame, Frame)], key: &[u8]) -> Option<&'a Frame> {
+    items.iter().find_map(|(item_key, value)| match item_key {
+        Frame::BlobString(bytes) if bytes == key => Some(value),
+        _ => None,
+    })
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tcp_server_handles_resp_commands() {
     let temp_dir = tempfile::TempDir::new().unwrap();
@@ -99,7 +106,10 @@ async fn tcp_server_handles_resp_commands() {
         Frame::Integer(0)
     );
     match send_command(&mut stream, &[b"HELLO", b"3"]).await {
-        Frame::Array(items) => assert_eq!(items.len(), 14),
+        Frame::Map(items) => {
+            assert_eq!(items.len(), 7);
+            assert_eq!(resp_map_value(&items, b"proto"), Some(&Frame::Integer(3)));
+        }
         other => panic!("unexpected HELLO response: {other:?}"),
     }
     match send_command(&mut stream, &[b"TIME"]).await {

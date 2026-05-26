@@ -57,14 +57,6 @@ pub(super) enum SetCondition {
 
 #[cfg(feature = "server")]
 impl SetCondition {
-    pub(super) fn allows(self, exists: bool) -> bool {
-        match self {
-            Self::Always => true,
-            Self::Nx => !exists,
-            Self::Xx => exists,
-        }
-    }
-
     fn merge(self, next: Self) -> Option<Self> {
         match (self, next) {
             (Self::Always, condition) => Some(condition),

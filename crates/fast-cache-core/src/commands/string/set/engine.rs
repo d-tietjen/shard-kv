@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use bytes::Bytes as SharedBytes;
 
 use crate::commands::parsing::CommandArity;
@@ -50,13 +52,16 @@ impl Set {
         out: &mut Vec<u8>,
     ) -> Result<()> {
         CommandArity::<Self>::at_least(frame.parts.len(), 3, "key and value")?;
-        let options =
-            StorageSetOptions::parse(frame.parts[3..].iter().map(|range| &owner[range.clone()]))?;
+        let options = StorageSetOptions::parse(
+            frame.parts[3..]
+                .iter()
+                .map(|range| span_slice(&owner, range)),
+        )?;
         Self::store_spanned_value(
             ctx,
             owner,
-            frame.parts[1].clone(),
-            frame.parts[2].clone(),
+            copy_span(&frame.parts[1]),
+            copy_span(&frame.parts[2]),
             options.ttl_ms,
         )
         .await?;
@@ -121,7 +126,7 @@ impl Set {
         value_range: std::ops::Range<usize>,
         ttl_ms: Option<u64>,
     ) -> Result<()> {
-        let key = &owner[key_range.clone()];
+        let key = &owner[key_range.start..key_range.end];
         let key_hash = hash_key(key);
         let shard = ctx.route_key_hash(key_hash);
         let expire_at_ms = ttl_ms.map(|ttl| now_millis().saturating_add(ttl));
@@ -143,4 +148,12 @@ impl Set {
             )),
         }
     }
+}
+
+fn span_slice<'a>(owner: &'a SharedBytes, range: &Range<usize>) -> &'a [u8] {
+    &owner[range.start..range.end]
+}
+
+fn copy_span(range: &Range<usize>) -> Range<usize> {
+    range.start..range.end
 }

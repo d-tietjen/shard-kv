@@ -267,7 +267,7 @@ pub(crate) fn write_zrank_like_resp(
     match args {
         [key, member] => match store.zrank_value(key, member, rev) {
             Ok(Some(rank)) => ServerWire::write_resp_integer(out, rank as i64),
-            Ok(None) | Err(RedisObjectError::MissingKey) => out.extend_from_slice(b"$-1\r\n"),
+            Ok(None) | Err(RedisObjectError::MissingKey) => write_resp_null(out),
             Err(RedisObjectError::WrongType) => write_frame(out, &wrongtype()),
         },
         _ => write_frame(out, &wrong_arity(if rev { "ZREVRANK" } else { "ZRANK" })),
@@ -310,61 +310,161 @@ struct ZMpopArgs<'a> {
     count: usize,
 }
 
+#[derive(Clone, Copy)]
+enum ZMpopCommand {
+    Blocking,
+    NonBlocking,
+}
+
+impl ZMpopCommand {
+    fn from_blocking(blocking: bool) -> Self {
+        match blocking {
+            true => Self::Blocking,
+            false => Self::NonBlocking,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Blocking => "BZMPOP",
+            Self::NonBlocking => "ZMPOP",
+        }
+    }
+
+    fn minimum_arity(self) -> usize {
+        match self {
+            Self::Blocking => 4,
+            Self::NonBlocking => 3,
+        }
+    }
+
+    fn validate_arity(self, args: &[&[u8]]) -> std::result::Result<(), Frame> {
+        match args.len() >= self.minimum_arity() {
+            true => Ok(()),
+            false => Err(wrong_arity(self.name())),
+        }
+    }
+
+    fn without_timeout<'a>(
+        self,
+        args: &'a [&'a [u8]],
+    ) -> std::result::Result<&'a [&'a [u8]], Frame> {
+        match self {
+            Self::NonBlocking => Ok(args),
+            Self::Blocking => {
+                let (timeout, rest) = args.split_first().ok_or_else(|| wrong_arity(self.name()))?;
+                validate_zmpop_timeout(timeout)?;
+                Ok(rest)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ZMpopDirection {
+    Min,
+    Max,
+}
+
+impl ZMpopDirection {
+    const NAMES: &'static [(&'static [u8], Self)] = &[(b"MIN", Self::Min), (b"MAX", Self::Max)];
+
+    fn from_name(name: &[u8]) -> Option<Self> {
+        Self::NAMES.iter().find_map(|(candidate, direction)| {
+            crate::commands::redis::eq_ignore_ascii_case(name, candidate).then_some(*direction)
+        })
+    }
+
+    fn pops_max(self) -> bool {
+        match self {
+            Self::Min => false,
+            Self::Max => true,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ZMpopOption {
+    Count,
+}
+
+impl ZMpopOption {
+    const NAMES: &'static [(&'static [u8], Self)] = &[(b"COUNT", Self::Count)];
+
+    fn from_name(name: &[u8]) -> Option<Self> {
+        Self::NAMES.iter().find_map(|(candidate, option)| {
+            crate::commands::redis::eq_ignore_ascii_case(name, candidate).then_some(*option)
+        })
+    }
+}
+
 fn parse_zmpop_args<'a>(
     args: &'a [&'a [u8]],
     blocking: bool,
 ) -> std::result::Result<ZMpopArgs<'a>, Frame> {
-    let name = if blocking { "BZMPOP" } else { "ZMPOP" };
-    let offset = usize::from(blocking);
-    if args.len() < offset + 3 {
-        return Err(wrong_arity(name));
-    }
-    if blocking {
-        let Ok(timeout) = parse_f64(args[0]) else {
-            return Err(error("ERR timeout is not a float or out of range"));
-        };
-        if timeout < 0.0 {
-            return Err(error("ERR timeout is negative"));
-        }
-    }
-    let Ok(numkeys) = parse_usize(args[offset]) else {
-        return Err(error("ERR value is not an integer or out of range"));
-    };
-    if numkeys == 0 {
-        return Err(error("ERR numkeys should be greater than 0"));
-    }
-    let direction_index = offset + 1 + numkeys;
-    if args.len() <= direction_index {
-        return Err(error("ERR syntax error"));
-    }
-    let max = match args[direction_index] {
-        value if crate::commands::redis::eq_ignore_ascii_case(value, b"MIN") => false,
-        value if crate::commands::redis::eq_ignore_ascii_case(value, b"MAX") => true,
-        _ => return Err(error("ERR syntax error")),
-    };
-    let mut count = 1usize;
-    let mut index = direction_index + 1;
-    while index < args.len() {
-        if crate::commands::redis::eq_ignore_ascii_case(args[index], b"COUNT")
-            && index + 1 < args.len()
-        {
-            let Ok(parsed) = parse_usize(args[index + 1]) else {
-                return Err(error("ERR value is not an integer or out of range"));
-            };
-            if parsed == 0 {
-                return Err(error("ERR count should be greater than 0"));
-            }
-            count = parsed;
-            index += 2;
-            continue;
-        }
-        return Err(error("ERR syntax error"));
-    }
+    let command = ZMpopCommand::from_blocking(blocking);
+    command.validate_arity(args)?;
+    let args = command.without_timeout(args)?;
+    let (keys, direction, options) = split_zmpop_key_direction(args)?;
+    let direction = ZMpopDirection::from_name(direction).ok_or_else(zmpop_syntax_error)?;
+    let count = parse_zmpop_options(options)?;
     Ok(ZMpopArgs {
-        keys: &args[offset + 1..direction_index],
-        max,
+        keys,
+        max: direction.pops_max(),
         count,
     })
+}
+
+fn validate_zmpop_timeout(timeout: &[u8]) -> std::result::Result<(), Frame> {
+    let timeout =
+        parse_f64(timeout).map_err(|_| error("ERR timeout is not a float or out of range"))?;
+    match timeout < 0.0 {
+        true => Err(error("ERR timeout is negative")),
+        false => Ok(()),
+    }
+}
+
+fn split_zmpop_key_direction<'a>(
+    args: &'a [&'a [u8]],
+) -> std::result::Result<(&'a [&'a [u8]], &'a [u8], &'a [&'a [u8]]), Frame> {
+    let (numkeys, rest) = args.split_first().ok_or_else(zmpop_syntax_error)?;
+    let numkeys = parse_nonzero_zmpop_usize(numkeys, "ERR numkeys should be greater than 0")?;
+    let (direction, options) = rest
+        .get(numkeys..)
+        .and_then(|remaining| remaining.split_first())
+        .ok_or_else(zmpop_syntax_error)?;
+    let keys = rest.get(..numkeys).ok_or_else(zmpop_syntax_error)?;
+    Ok((keys, *direction, options))
+}
+
+fn parse_zmpop_options(mut args: &[&[u8]]) -> std::result::Result<usize, Frame> {
+    let mut count = 1;
+    while let Some((name, rest)) = args.split_first() {
+        match ZMpopOption::from_name(name).ok_or_else(zmpop_syntax_error)? {
+            ZMpopOption::Count => {
+                let (value, tail) = rest.split_first().ok_or_else(zmpop_syntax_error)?;
+                count = parse_nonzero_zmpop_usize(value, "ERR count should be greater than 0")?;
+                args = tail;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn parse_nonzero_zmpop_usize(
+    value: &[u8],
+    zero_error: &'static str,
+) -> std::result::Result<usize, Frame> {
+    let value =
+        parse_usize(value).map_err(|_| error("ERR value is not an integer or out of range"))?;
+    match value {
+        0 => Err(error(zero_error)),
+        value => Ok(value),
+    }
+}
+
+fn zmpop_syntax_error() -> Frame {
+    error("ERR syntax error")
 }
 
 fn zmpop_entries_frame(values: Vec<Option<Vec<u8>>>) -> Frame {

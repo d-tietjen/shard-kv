@@ -805,7 +805,15 @@ fn frame_to_arg(frame: Frame) -> Result<Vec<u8>, String> {
         Frame::Integer(value) => Ok(value.to_string().into_bytes()),
         Frame::Null => Err("ERR Lua redis() command arguments must be strings or integers".into()),
         Frame::Error(message) => Err(message),
-        Frame::Array(_) | Frame::Boolean(_) => {
+        Frame::Array(_)
+        | Frame::Map(_)
+        | Frame::Set(_)
+        | Frame::Push(_)
+        | Frame::Boolean(_)
+        | Frame::Double(_)
+        | Frame::BigNumber(_)
+        | Frame::VerbatimString { .. }
+        | Frame::Attribute { .. } => {
             Err("ERR Lua redis() command arguments must be strings or integers".into())
         }
     }

@@ -167,7 +167,7 @@ impl EmbeddedStore {
                     // encoding, so stored value buffers are not cloned while SET
                     // mutates them.
                     unsafe { shard.map.set_slice_hashed_no_ttl_hot(key_hash, key, value) };
-                    #[cfg(feature = "redis-compat")]
+                    #[cfg(feature = "redis")]
                     self.refresh_string_key_count(0, shard);
                     return;
                 }
@@ -181,7 +181,7 @@ impl EmbeddedStore {
                 shard
                     .map
                     .set_slice_hashed(key_hash, key, value, expire_at_ms, now_ms);
-                #[cfg(feature = "redis-compat")]
+                #[cfg(feature = "redis")]
                 self.refresh_string_key_count(0, shard);
                 return;
             }
@@ -199,7 +199,7 @@ impl EmbeddedStore {
             shard
                 .map
                 .set_slice_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             self.refresh_string_key_count(route.shard_id, shard);
         }
     }
@@ -238,7 +238,7 @@ impl EmbeddedStore {
                     .map
                     .set_slice_hashed_tagged_no_ttl_hot(key_hash, key_tag, key, value)
             };
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             self.refresh_string_key_count(0, shard);
         }
     }
@@ -344,7 +344,7 @@ impl EmbeddedStore {
             shard_id: self.route_hash(key_hash),
             key_hash,
         };
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -377,7 +377,7 @@ impl EmbeddedStore {
             .map
             .set_slice_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
         shard.enforce_memory_limit(now_ms);
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
     }
 
@@ -1050,7 +1050,7 @@ impl EmbeddedStore {
         if shard_id >= self.shards.len() {
             return false;
         }
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(shard_id) {
             return false;
         }
@@ -1095,7 +1095,7 @@ impl EmbeddedStore {
             if shard_id >= self.shards.len() {
                 return false;
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             if self.objects.shard_has_objects(shard_id) {
                 return false;
             }
@@ -1134,7 +1134,7 @@ impl EmbeddedStore {
         if shard_id >= self.shards.len() {
             return false;
         }
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(shard_id) {
             return false;
         }
@@ -1165,7 +1165,7 @@ impl EmbeddedStore {
                 shard.set_session_slice_hashed_no_ttl(&session_prefix, key_hash, key, value);
             }
         }
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.refresh_string_key_count(shard_id, &shard);
         true
     }
@@ -1195,7 +1195,7 @@ impl EmbeddedStore {
             if shard_id >= self.shards.len() {
                 return false;
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             if self.objects.shard_has_objects(shard_id) {
                 return false;
             }
@@ -1231,7 +1231,7 @@ impl EmbeddedStore {
                     shard.set_session_slice_hashed_no_ttl(&session_prefix, key_hash, key, value);
                 }
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             self.refresh_string_key_count(shard_id, shard);
             true
         }
@@ -1497,7 +1497,11 @@ impl EmbeddedStore {
             .map(<[u8]>::to_vec)
     }
 
-    fn get_ref_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Option<EmbeddedRef<'_>> {
+    pub(super) fn get_ref_routed(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+    ) -> Option<EmbeddedRef<'_>> {
         if uses_flat_key_storage(self.route_mode, key) {
             let guard = self.shards[route.shard_id].read();
             let value = if guard.map.has_no_ttl_entries() {

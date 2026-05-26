@@ -11,7 +11,7 @@ This page is the short operational contract for running `fast-cache-server` in
 | Server | `cargo install fast-cache --features server --locked` | RESP/FCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo install fast-cache --features redis-server --locked` | Redis/Valkey-compatible command and object behavior. |
 
-`redis-server` implies both `server` and `redis-compat`. Embedded-only builds
+`redis-server` implies both `server` and `redis`. Embedded-only builds
 are expected not to compile the Redis compatibility source package; guard this
 with `./scripts/check-feature-matrix.sh`.
 

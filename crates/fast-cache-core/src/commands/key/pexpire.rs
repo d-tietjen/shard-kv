@@ -85,10 +85,8 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedPExpire<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        let expire_at_ms = relative_expire_at_ms(self.ttl_ms);
         Box::pin(async move {
-            Expire::execute_engine_integer(ctx, key, expire_at_ms)
+            Expire::execute_engine_integer(ctx, self.key, relative_expire_at_ms(self.ttl_ms))
                 .await
                 .map(Frame::Integer)
         })

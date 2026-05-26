@@ -1,9 +1,19 @@
+#[cfg(feature = "server")]
+use bytes::BytesMut;
+
 use crate::commands::redis::{
     array_bulk, bulk, eq_ignore_ascii_case, error, int, parse_f64, parse_usize, wrong_arity,
     wrongtype,
 };
+#[cfg(feature = "server")]
+use crate::commands::redis::{write_frame, write_resp_array_header, write_resp_null};
 use crate::protocol::Frame;
-use crate::storage::{EmbeddedStore, RedisObjectError, RedisObjectResult, RedisZSetStore};
+#[cfg(feature = "server")]
+use crate::server::wire::ServerWire;
+use crate::storage::{
+    EmbeddedStore, RedisObjectError, RedisObjectReadOutcome, RedisObjectResult,
+    RedisObjectZSetRangeItem, RedisZSetStore,
+};
 
 const GEO_LAT_MIN: f64 = -85.051_128_78;
 const GEO_LAT_MAX: f64 = 85.051_128_78;
@@ -46,93 +56,79 @@ define_geo_command!(
 
 impl crate::commands::redis::RedisCommand for GeoAdd {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        if args.len() < 4 || !(args.len() - 1).is_multiple_of(3) {
-            return wrong_arity("GEOADD");
-        }
-        let key = args[0];
-        let mut entries = Vec::with_capacity((args.len() - 1) / 3);
-        for chunk in args[1..].chunks_exact(3) {
-            let (Ok(lon), Ok(lat)) = (parse_f64(chunk[0]), parse_f64(chunk[1])) else {
-                return error("ERR invalid longitude,latitude pair");
-            };
-            let Some(score) = encode_geo_score(lon, lat) else {
-                return error("ERR invalid longitude,latitude pair");
-            };
-            entries.push((score, chunk[2]));
-        }
-        let mut inserted = 0;
-        for (score, member) in entries {
-            match store.zadd(key, score, member) {
-                RedisObjectResult::Integer(value) => inserted += value,
-                RedisObjectResult::WrongType => return wrongtype(),
-                _ => {}
-            }
-        }
-        int(inserted)
+        geoadd_update(store, args)
+            .map(int)
+            .unwrap_or_else(|frame| frame)
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_geo_result(out, geoadd_update(store, args), |out, inserted| {
+            ServerWire::write_resp_integer(out, inserted);
+        });
     }
 }
 
 impl crate::commands::redis::RedisCommand for GeoDist {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let (key, left, right, unit) = match args {
-            [key, left, right] => (*key, *left, *right, b"m".as_slice()),
-            [key, left, right, unit] => (*key, *left, *right, *unit),
-            _ => return wrong_arity("GEODIST"),
-        };
-        let Some(unit) = GeoUnit::parse(unit) else {
-            return error("ERR unsupported unit provided. please use M, KM, FT, MI");
-        };
-        let left = match member_position(store, key, left) {
-            Ok(Some(position)) => position,
-            Ok(None) => return Frame::Null,
-            Err(frame) => return frame,
-        };
-        let right = match member_position(store, key, right) {
-            Ok(Some(position)) => position,
-            Ok(None) => return Frame::Null,
-            Err(frame) => return frame,
-        };
-        bulk(format_float(unit.from_meters(distance_m(left, right))).into_bytes())
+        match geodist_value(store, args) {
+            Ok(Some(value)) => bulk(value.into_bytes()),
+            Ok(None) => Frame::Null,
+            Err(frame) => frame,
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        match geodist_value(store, args) {
+            Ok(Some(value)) => ServerWire::write_resp_blob_string(out, value.as_bytes()),
+            Ok(None) => write_resp_null(out),
+            Err(frame) => write_frame(out, &frame),
+        }
     }
 }
 
 impl crate::commands::redis::RedisCommand for GeoHash {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let [key, members @ ..] = args else {
-            return wrong_arity("GEOHASH");
-        };
-        if members.is_empty() {
-            return wrong_arity("GEOHASH");
+        match geohash_scores(store, args) {
+            Ok(scores) => Frame::Array(
+                scores
+                    .into_iter()
+                    .map(|score| score.map_or(Frame::Null, |score| bulk(geohash_string(score))))
+                    .collect(),
+            ),
+            Err(frame) => frame,
         }
-        let mut out = Vec::with_capacity(members.len());
-        for member in members {
-            match member_score(store, key, member) {
-                Ok(Some(score)) => out.push(bulk(geohash_string(score))),
-                Ok(None) => out.push(Frame::Null),
-                Err(frame) => return frame,
-            }
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        match geohash_scores(store, args) {
+            Ok(scores) => write_geohash_scores_resp(out, &scores),
+            Err(frame) => write_frame(out, &frame),
         }
-        Frame::Array(out)
     }
 }
 
 impl crate::commands::redis::RedisCommand for GeoPos {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let [key, members @ ..] = args else {
-            return wrong_arity("GEOPOS");
-        };
-        if members.is_empty() {
-            return wrong_arity("GEOPOS");
+        match geopos_positions(store, args) {
+            Ok(positions) => Frame::Array(
+                positions
+                    .into_iter()
+                    .map(|position| position.map_or(Frame::Null, coord_frame))
+                    .collect(),
+            ),
+            Err(frame) => frame,
         }
-        let mut out = Vec::with_capacity(members.len());
-        for member in members {
-            match member_position(store, key, member) {
-                Ok(Some(position)) => out.push(coord_frame(position)),
-                Ok(None) => out.push(Frame::Null),
-                Err(frame) => return frame,
-            }
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        match geopos_positions(store, args) {
+            Ok(positions) => write_geopos_positions_resp(out, &positions),
+            Err(frame) => write_frame(out, &frame),
         }
-        Frame::Array(out)
     }
 }
 
@@ -140,11 +136,21 @@ impl crate::commands::redis::RedisCommand for GeoRadius {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         georadius(store, args, false, false)
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_georadius_resp(store, args, false, false, out);
+    }
 }
 
 impl crate::commands::redis::RedisCommand for GeoRadiusRo {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         georadius(store, args, false, true)
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_georadius_resp(store, args, false, true, out);
     }
 }
 
@@ -152,11 +158,21 @@ impl crate::commands::redis::RedisCommand for GeoRadiusByMember {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         georadius(store, args, true, false)
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_georadius_resp(store, args, true, false, out);
+    }
 }
 
 impl crate::commands::redis::RedisCommand for GeoRadiusByMemberRo {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         georadius(store, args, true, true)
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_georadius_resp(store, args, true, true, out);
     }
 }
 
@@ -220,24 +236,193 @@ struct GeoHit {
     distance_m: f64,
 }
 
+fn geoadd_update(store: &EmbeddedStore, args: &[&[u8]]) -> Result<i64, Frame> {
+    if args.len() < 4 || !(args.len() - 1).is_multiple_of(3) {
+        return Err(wrong_arity("GEOADD"));
+    }
+    let key = args[0];
+    let mut entries = Vec::with_capacity((args.len() - 1) / 3);
+    for chunk in args[1..].chunks_exact(3) {
+        let (Ok(lon), Ok(lat)) = (parse_f64(chunk[0]), parse_f64(chunk[1])) else {
+            return Err(error("ERR invalid longitude,latitude pair"));
+        };
+        let Some(score) = encode_geo_score(lon, lat) else {
+            return Err(error("ERR invalid longitude,latitude pair"));
+        };
+        entries.push((score, chunk[2]));
+    }
+    let mut inserted = 0;
+    for (score, member) in entries {
+        match store.zadd(key, score, member) {
+            RedisObjectResult::Integer(value) => inserted += value,
+            RedisObjectResult::WrongType => return Err(wrongtype()),
+            _ => {}
+        }
+    }
+    Ok(inserted)
+}
+
+fn geodist_value(store: &EmbeddedStore, args: &[&[u8]]) -> Result<Option<String>, Frame> {
+    let (key, left, right, unit) = match args {
+        [key, left, right] => (*key, *left, *right, b"m".as_slice()),
+        [key, left, right, unit] => (*key, *left, *right, *unit),
+        _ => return Err(wrong_arity("GEODIST")),
+    };
+    let Some(unit) = GeoUnit::parse(unit) else {
+        return Err(error(
+            "ERR unsupported unit provided. please use M, KM, FT, MI",
+        ));
+    };
+    let left = match member_position(store, key, left) {
+        Ok(Some(position)) => position,
+        Ok(None) => return Ok(None),
+        Err(frame) => return Err(frame),
+    };
+    let right = match member_position(store, key, right) {
+        Ok(Some(position)) => position,
+        Ok(None) => return Ok(None),
+        Err(frame) => return Err(frame),
+    };
+    Ok(Some(format_float(
+        unit.from_meters(distance_m(left, right)),
+    )))
+}
+
+fn geohash_scores(store: &EmbeddedStore, args: &[&[u8]]) -> Result<Vec<Option<f64>>, Frame> {
+    let [key, members @ ..] = args else {
+        return Err(wrong_arity("GEOHASH"));
+    };
+    if members.is_empty() {
+        return Err(wrong_arity("GEOHASH"));
+    }
+    let mut scores = Vec::with_capacity(members.len());
+    for member in members {
+        scores.push(member_score(store, key, member)?);
+    }
+    Ok(scores)
+}
+
+fn geopos_positions(store: &EmbeddedStore, args: &[&[u8]]) -> Result<Vec<Option<Position>>, Frame> {
+    let [key, members @ ..] = args else {
+        return Err(wrong_arity("GEOPOS"));
+    };
+    if members.is_empty() {
+        return Err(wrong_arity("GEOPOS"));
+    }
+    let mut positions = Vec::with_capacity(members.len());
+    for member in members {
+        positions.push(member_position(store, key, member)?);
+    }
+    Ok(positions)
+}
+
 fn georadius(store: &EmbeddedStore, args: &[&[u8]], by_member: bool, read_only: bool) -> Frame {
+    match georadius_result(store, args, by_member, read_only) {
+        Ok(GeoRadiusResult::Empty) => Frame::Array(Vec::new()),
+        Ok(GeoRadiusResult::Stored(count)) => int(count as i64),
+        Ok(GeoRadiusResult::Hits {
+            hits,
+            unit,
+            options,
+        }) => radius_response(hits, unit, &options),
+        Err(frame) => frame,
+    }
+}
+
+enum GeoRadiusResult<'a> {
+    Empty,
+    Stored(usize),
+    Hits {
+        hits: Vec<GeoHit>,
+        unit: GeoUnit,
+        options: GeoRadiusOptions<'a>,
+    },
+}
+
+struct GeoRadiusQuery<'a> {
+    key: &'a [u8],
+    center: Position,
+    radius_m: f64,
+    unit: GeoUnit,
+    options: GeoRadiusOptions<'a>,
+}
+
+enum GeoRadiusQueryResult<'a> {
+    Empty,
+    Query(GeoRadiusQuery<'a>),
+}
+
+fn georadius_result<'a>(
+    store: &EmbeddedStore,
+    args: &'a [&'a [u8]],
+    by_member: bool,
+    read_only: bool,
+) -> Result<GeoRadiusResult<'a>, Frame> {
+    let query = match georadius_query(store, args, by_member, read_only)? {
+        GeoRadiusQueryResult::Empty => return Ok(GeoRadiusResult::Empty),
+        GeoRadiusQueryResult::Query(query) => query,
+    };
+    let mut hits = match geo_hits(store, query.key, query.center, query.radius_m) {
+        Ok(hits) => hits,
+        Err(frame) => return Err(frame),
+    };
+    match query.options.sort {
+        SortOrder::Asc => hits.sort_by(|left, right| left.distance_m.total_cmp(&right.distance_m)),
+        SortOrder::Desc => {
+            hits.sort_by(|left, right| right.distance_m.total_cmp(&left.distance_m));
+        }
+        SortOrder::None => {}
+    }
+    if let Some(count) = query.options.count {
+        hits.truncate(count);
+    }
+    if let Some((dest, store_dist)) = query.options.store {
+        store.delete(dest);
+        for hit in &hits {
+            let score = if store_dist {
+                query.unit.from_meters(hit.distance_m)
+            } else {
+                hit.score
+            };
+            let result = store.zadd(dest, score, &hit.member);
+            if matches!(result, RedisObjectResult::WrongType) {
+                return Err(wrongtype());
+            }
+        }
+        return Ok(GeoRadiusResult::Stored(hits.len()));
+    }
+    Ok(GeoRadiusResult::Hits {
+        hits,
+        unit: query.unit,
+        options: query.options,
+    })
+}
+
+fn georadius_query<'a>(
+    store: &EmbeddedStore,
+    args: &'a [&'a [u8]],
+    by_member: bool,
+    read_only: bool,
+) -> Result<GeoRadiusQueryResult<'a>, Frame> {
     let min_len = if by_member { 4 } else { 5 };
     if args.len() < min_len {
-        return wrong_arity(if by_member {
+        return Err(wrong_arity(if by_member {
             "GEORADIUSBYMEMBER"
         } else {
             "GEORADIUS"
-        });
+        }));
     }
     let key = args[0];
     let (center, radius, unit, option_start) = if by_member {
         let center = match member_position(store, key, args[1]) {
             Ok(Some(position)) => position,
-            Ok(None) => return Frame::Array(Vec::new()),
-            Err(frame) => return frame,
+            Ok(None) => return Ok(GeoRadiusQueryResult::Empty),
+            Err(frame) => return Err(frame),
         };
         let (Ok(radius), Some(unit)) = (parse_f64(args[2]), GeoUnit::parse(args[3])) else {
-            return error("ERR unsupported unit provided. please use M, KM, FT, MI");
+            return Err(error(
+                "ERR unsupported unit provided. please use M, KM, FT, MI",
+            ));
         };
         (center, radius, unit, 4)
     } else {
@@ -247,47 +432,217 @@ fn georadius(store: &EmbeddedStore, args: &[&[u8]], by_member: bool, read_only: 
             parse_f64(args[3]),
             GeoUnit::parse(args[4]),
         ) else {
-            return error("ERR invalid longitude,latitude pair or radius");
+            return Err(error("ERR invalid longitude,latitude pair or radius"));
         };
         let Some(score) = encode_geo_score(lon, lat) else {
-            return error("ERR invalid longitude,latitude pair");
+            return Err(error("ERR invalid longitude,latitude pair"));
         };
         (decode_geo_score(score), radius, unit, 5)
     };
     let options = match parse_radius_options(&args[option_start..], read_only) {
         Ok(options) => options,
-        Err(frame) => return frame,
+        Err(frame) => return Err(frame),
     };
-    let mut hits = match geo_hits(store, key, center, unit.to_meters(radius)) {
-        Ok(hits) => hits,
-        Err(frame) => return frame,
-    };
-    match options.sort {
-        SortOrder::Asc => hits.sort_by(|left, right| left.distance_m.total_cmp(&right.distance_m)),
-        SortOrder::Desc => {
-            hits.sort_by(|left, right| right.distance_m.total_cmp(&left.distance_m));
+    Ok(GeoRadiusQueryResult::Query(GeoRadiusQuery {
+        key,
+        center,
+        radius_m: unit.to_meters(radius),
+        unit,
+        options,
+    }))
+}
+
+#[cfg(feature = "server")]
+fn write_geo_result<T>(
+    out: &mut BytesMut,
+    result: Result<T, Frame>,
+    write_ok: impl FnOnce(&mut BytesMut, T),
+) {
+    match result {
+        Ok(value) => write_ok(out, value),
+        Err(frame) => write_frame(out, &frame),
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_geohash_scores_resp(out: &mut BytesMut, scores: &[Option<f64>]) {
+    write_resp_array_header(out, scores.len());
+    for score in scores {
+        match score {
+            Some(score) => {
+                let hash = geohash_string(*score);
+                ServerWire::write_resp_blob_string(out, &hash);
+            }
+            None => write_resp_null(out),
         }
-        SortOrder::None => {}
     }
-    if let Some(count) = options.count {
-        hits.truncate(count);
+}
+
+#[cfg(feature = "server")]
+fn write_geopos_positions_resp(out: &mut BytesMut, positions: &[Option<Position>]) {
+    write_resp_array_header(out, positions.len());
+    for position in positions {
+        match position {
+            Some(position) => write_coord_resp(out, *position),
+            None => write_resp_null(out),
+        }
     }
-    if let Some((dest, store_dist)) = options.store {
-        store.delete(dest);
-        for hit in &hits {
-            let score = if store_dist {
-                unit.from_meters(hit.distance_m)
-            } else {
-                hit.score
-            };
-            let result = store.zadd(dest, score, &hit.member);
-            if matches!(result, RedisObjectResult::WrongType) {
-                return wrongtype();
+}
+
+#[cfg(feature = "server")]
+fn write_georadius_resp(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    by_member: bool,
+    read_only: bool,
+    out: &mut BytesMut,
+) {
+    if try_write_georadius_streaming_resp(store, args, by_member, read_only, out) {
+        return;
+    }
+    match georadius_result(store, args, by_member, read_only) {
+        Ok(GeoRadiusResult::Empty) => write_resp_array_header(out, 0),
+        Ok(GeoRadiusResult::Stored(count)) => ServerWire::write_resp_integer(out, count as i64),
+        Ok(GeoRadiusResult::Hits {
+            hits,
+            unit,
+            options,
+        }) => write_radius_response_resp(out, &hits, unit, &options),
+        Err(frame) => write_frame(out, &frame),
+    }
+}
+
+#[cfg(feature = "server")]
+fn try_write_georadius_streaming_resp(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    by_member: bool,
+    read_only: bool,
+    out: &mut BytesMut,
+) -> bool {
+    let query = match georadius_query(store, args, by_member, read_only) {
+        Ok(GeoRadiusQueryResult::Empty) => {
+            write_resp_array_header(out, 0);
+            return true;
+        }
+        Ok(GeoRadiusQueryResult::Query(query)) => query,
+        Err(frame) => {
+            write_frame(out, &frame);
+            return true;
+        }
+    };
+    if query.options.sort != SortOrder::None
+        || query.options.count.is_some()
+        || query.options.store.is_some()
+    {
+        return false;
+    }
+    write_radius_scan_resp(
+        store,
+        query.key,
+        query.center,
+        query.radius_m,
+        query.unit,
+        &query.options,
+        out,
+    );
+    true
+}
+
+#[cfg(feature = "server")]
+fn write_radius_scan_resp(
+    store: &EmbeddedStore,
+    key: &[u8],
+    center: Position,
+    radius_m: f64,
+    unit: GeoUnit,
+    options: &GeoRadiusOptions<'_>,
+    out: &mut BytesMut,
+) {
+    let mut items = BytesMut::new();
+    let mut count = 0usize;
+    match store.zrange_entries_visit(key, 0, -1, false, |item| match item {
+        RedisObjectZSetRangeItem::Begin(total) => items.reserve(total.min(64).saturating_mul(16)),
+        RedisObjectZSetRangeItem::Entry { member, score } => {
+            let position = decode_geo_score(score);
+            let distance_m = distance_m(center, position);
+            if distance_m <= radius_m {
+                count += 1;
+                write_radius_hit_resp(
+                    &mut items, member, score, position, distance_m, unit, options,
+                );
             }
         }
-        return int(hits.len() as i64);
+    }) {
+        RedisObjectReadOutcome::Written => {
+            write_resp_array_header(out, count);
+            out.extend_from_slice(&items);
+        }
+        RedisObjectReadOutcome::Missing => write_resp_array_header(out, 0),
+        RedisObjectReadOutcome::WrongType => write_frame(out, &wrongtype()),
     }
-    radius_response(hits, unit, &options)
+}
+
+#[cfg(feature = "server")]
+fn write_radius_response_resp(
+    out: &mut BytesMut,
+    hits: &[GeoHit],
+    unit: GeoUnit,
+    options: &GeoRadiusOptions<'_>,
+) {
+    write_resp_array_header(out, hits.len());
+    for hit in hits {
+        write_radius_hit_resp(
+            out,
+            &hit.member,
+            hit.score,
+            hit.position,
+            hit.distance_m,
+            unit,
+            options,
+        );
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_radius_hit_resp(
+    out: &mut BytesMut,
+    member: &[u8],
+    score: f64,
+    position: Position,
+    distance_m: f64,
+    unit: GeoUnit,
+    options: &GeoRadiusOptions<'_>,
+) {
+    if !(options.with_coord || options.with_dist || options.with_hash) {
+        ServerWire::write_resp_blob_string(out, member);
+        return;
+    }
+    let len = 1
+        + usize::from(options.with_dist)
+        + usize::from(options.with_hash)
+        + usize::from(options.with_coord);
+    write_resp_array_header(out, len);
+    ServerWire::write_resp_blob_string(out, member);
+    if options.with_dist {
+        let distance = format_float(unit.from_meters(distance_m));
+        ServerWire::write_resp_blob_string(out, distance.as_bytes());
+    }
+    if options.with_hash {
+        ServerWire::write_resp_integer(out, score as i64);
+    }
+    if options.with_coord {
+        write_coord_resp(out, position);
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_coord_resp(out: &mut BytesMut, position: Position) {
+    write_resp_array_header(out, 2);
+    let lon = format_float(position.lon);
+    ServerWire::write_resp_blob_string(out, lon.as_bytes());
+    let lat = format_float(position.lat);
+    ServerWire::write_resp_blob_string(out, lat.as_bytes());
 }
 
 fn parse_radius_options<'a>(
@@ -362,25 +717,26 @@ fn geo_hits(
     center: Position,
     radius_m: f64,
 ) -> Result<Vec<GeoHit>, Frame> {
-    let entries = match store.zentries(key) {
-        Ok(entries) => entries,
-        Err(RedisObjectError::MissingKey) => Vec::new(),
-        Err(RedisObjectError::WrongType) => return Err(wrongtype()),
-    };
     let mut hits = Vec::new();
-    for (member, score) in entries {
-        let position = decode_geo_score(score);
-        let distance_m = distance_m(center, position);
-        if distance_m <= radius_m {
-            hits.push(GeoHit {
-                member,
-                score,
-                position,
-                distance_m,
-            });
+    match store.zrange_entries_visit(key, 0, -1, false, |item| match item {
+        RedisObjectZSetRangeItem::Begin(count) => hits.reserve(count.min(64)),
+        RedisObjectZSetRangeItem::Entry { member, score } => {
+            let position = decode_geo_score(score);
+            let distance_m = distance_m(center, position);
+            if distance_m <= radius_m {
+                hits.push(GeoHit {
+                    member: member.to_vec(),
+                    score,
+                    position,
+                    distance_m,
+                });
+            }
         }
+    }) {
+        RedisObjectReadOutcome::Written => Ok(hits),
+        RedisObjectReadOutcome::Missing => Ok(Vec::new()),
+        RedisObjectReadOutcome::WrongType => Err(wrongtype()),
     }
-    Ok(hits)
 }
 
 fn radius_response(hits: Vec<GeoHit>, unit: GeoUnit, options: &GeoRadiusOptions<'_>) -> Frame {

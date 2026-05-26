@@ -7,6 +7,8 @@ use super::fast_write::FastWriteQueue;
 use super::fast_write::{FastWriteBatchIoVec, FastWriteItem};
 #[cfg(feature = "embedded")]
 use super::transactions::{TransactionCoordinator, TransactionState};
+#[cfg(feature = "embedded")]
+use super::wire::RespProtocolVersion;
 use super::*;
 
 pub(super) struct MultiDirectAddress;
@@ -414,6 +416,7 @@ impl MultiDirectConnection {
         // remaining capacity for the next batch (zero-realloc steady state).
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
         let mut transaction_state = TransactionState::default();
+        let mut resp_protocol = RespProtocolVersion::default();
 
         let read_loop = async {
             loop {
@@ -438,6 +441,7 @@ impl MultiDirectConnection {
                         started_at,
                         transaction_coordinator: transaction_coordinator.as_deref(),
                         transaction_state: &mut transaction_state,
+                        resp_protocol: &mut resp_protocol,
                     },
                 )?;
 
@@ -482,6 +486,7 @@ impl MultiDirectConnection {
         let mut fast_write_queue = FastWriteQueue::default();
         let use_fast_write_queue = store.shard_count() > 1;
         let mut transaction_state = TransactionState::default();
+        let mut resp_protocol = RespProtocolVersion::default();
 
         loop {
             let read = frame_buffer
@@ -505,6 +510,7 @@ impl MultiDirectConnection {
                     started_at,
                     transaction_coordinator: transaction_coordinator.as_deref(),
                     transaction_state: &mut transaction_state,
+                    resp_protocol: &mut resp_protocol,
                 },
             )?;
 
@@ -585,6 +591,7 @@ pub(super) struct MonoioMultiDirectWorker;
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
 pub(super) struct MonoioWorkerConfig {
     pub(super) worker_id: usize,
+    pub(super) worker_count: usize,
     pub(super) fanout_bind_addr: SocketAddr,
     pub(super) direct_bind_addr: Option<SocketAddr>,
     pub(super) core_id: Option<core_affinity::CoreId>,
@@ -602,6 +609,7 @@ impl MonoioMultiDirectWorker {
     ) {
         let MonoioWorkerConfig {
             worker_id,
+            worker_count,
             fanout_bind_addr,
             direct_bind_addr,
             core_id,
@@ -625,7 +633,11 @@ impl MonoioMultiDirectWorker {
             transaction_coordinator,
         };
 
-        match MonoioDriverMode::configured() {
+        let driver_mode = MonoioDriverMode::configured(worker_count);
+        tracing::info!(
+            "monoio worker {worker_id}: using {driver_mode:?} driver ({worker_count} workers)"
+        );
+        match driver_mode {
             MonoioDriverMode::IoUring => {
                 let mut runtime = match monoio::RuntimeBuilder::<monoio::IoUringDriver>::new()
                     .with_entries(MonoioDriverMode::runtime_entries())
@@ -752,16 +764,26 @@ enum MonoioDriverMode {
 
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
 impl MonoioDriverMode {
-    fn configured() -> Self {
+    fn configured(worker_count: usize) -> Self {
         match std::env::var("FAST_CACHE_MONOIO_DRIVER") {
+            Ok(value) if value.eq_ignore_ascii_case("auto") => Self::default_for(worker_count),
             Ok(value) if value.eq_ignore_ascii_case("legacy") => Self::Legacy,
             Ok(value) if value.eq_ignore_ascii_case("iouring") => Self::IoUring,
             Ok(value) if value.eq_ignore_ascii_case("io_uring") => Self::IoUring,
             Ok(value) => {
-                tracing::warn!("unknown FAST_CACHE_MONOIO_DRIVER={value}; using io_uring");
-                Self::IoUring
+                tracing::warn!("unknown FAST_CACHE_MONOIO_DRIVER={value}; using auto");
+                Self::default_for(worker_count)
             }
-            Err(_) => Self::IoUring,
+            Err(_) => Self::default_for(worker_count),
+        }
+    }
+
+    #[inline(always)]
+    fn default_for(worker_count: usize) -> Self {
+        if worker_count > 1 {
+            Self::Legacy
+        } else {
+            Self::IoUring
         }
     }
 
@@ -1010,6 +1032,7 @@ impl MonoioRequestDrain {
         started_at: Instant,
         transaction_coordinator: Option<&TransactionCoordinator>,
         transaction_state: &mut TransactionState,
+        resp_protocol: &mut RespProtocolVersion,
     ) -> std::result::Result<usize, MonoioDrainError> {
         let consumed = DirectProtocol::process_shared_request_buffer_with_context(
             cursor.remaining(),
@@ -1022,6 +1045,7 @@ impl MonoioRequestDrain {
                 started_at,
                 transaction_coordinator,
                 transaction_state,
+                resp_protocol,
             },
         )
         .map_err(MonoioDrainError::protocol)?;
@@ -1111,6 +1135,7 @@ impl MonoioMultiDirectConnection {
         let mut frame_buffer = HandoffBuffer::with_config(HandoffConfig::buffer());
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
         let mut transaction_state = TransactionState::default();
+        let mut resp_protocol = RespProtocolVersion::default();
 
         loop {
             match frame_buffer
@@ -1125,6 +1150,7 @@ impl MonoioMultiDirectConnection {
                         started_at,
                         transaction_coordinator.as_deref(),
                         &mut transaction_state,
+                        &mut resp_protocol,
                     )
                 })
                 .await
@@ -1168,6 +1194,7 @@ impl MonoioMultiDirectConnection {
         let mut frame_buffer = HandoffBuffer::with_config(HandoffConfig::buffer());
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
         let mut transaction_state = TransactionState::default();
+        let mut resp_protocol = RespProtocolVersion::default();
 
         loop {
             match frame_buffer
@@ -1182,6 +1209,7 @@ impl MonoioMultiDirectConnection {
                         started_at,
                         transaction_coordinator.as_deref(),
                         &mut transaction_state,
+                        &mut resp_protocol,
                     )
                 })
                 .await
@@ -1218,6 +1246,7 @@ impl MonoioMultiDirectConnection {
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
         let mut fast_write_queue = FastWriteQueue::default();
         let mut transaction_state = TransactionState::default();
+        let mut resp_protocol = RespProtocolVersion::default();
 
         loop {
             match frame_buffer
@@ -1232,6 +1261,7 @@ impl MonoioMultiDirectConnection {
                         started_at,
                         transaction_coordinator.as_deref(),
                         &mut transaction_state,
+                        &mut resp_protocol,
                     )
                 })
                 .await

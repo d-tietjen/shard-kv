@@ -27,14 +27,14 @@ impl EmbeddedStore {
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice();
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             let string_key_counts = Self::empty_string_key_counts(shard_count);
             Self {
                 shards,
-                #[cfg(feature = "redis-compat")]
+                #[cfg(feature = "redis")]
                 string_key_counts,
                 shift,
-                #[cfg(feature = "redis-compat")]
+                #[cfg(feature = "redis")]
                 objects: RedisObjectStore::new(shard_count),
                 route_mode,
             }
@@ -73,14 +73,14 @@ impl EmbeddedStore {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         let string_key_counts = Self::empty_string_key_counts(shard_count);
         Self {
             shards,
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             string_key_counts,
             shift,
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             objects: RedisObjectStore::new(shard_count),
             route_mode,
             metrics,
@@ -93,7 +93,7 @@ impl EmbeddedStore {
         self.shards.len()
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     fn empty_string_key_counts(shard_count: usize) -> Box<[CachePadded<AtomicUsize>]> {
         (0..shard_count)
             .map(|_| CachePadded::new(AtomicUsize::new(0)))
@@ -101,13 +101,13 @@ impl EmbeddedStore {
             .into_boxed_slice()
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     #[inline(always)]
     pub(crate) fn string_key_count_hint(&self, shard_id: usize) -> usize {
         self.string_key_counts[shard_id].load(Ordering::Acquire)
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     #[inline(always)]
     pub(crate) fn refresh_string_key_count(&self, shard_id: usize, shard: &EmbeddedShard) {
         self.string_key_counts[shard_id].store(shard.map.len(), Ordering::Release);
@@ -123,11 +123,11 @@ impl EmbeddedStore {
                 shard.map.len().saturating_add(shard.session_slots.len())
             })
             .sum::<usize>();
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         {
             len + self.objects.object_count()
         }
-        #[cfg(not(feature = "redis-compat"))]
+        #[cfg(not(feature = "redis"))]
         {
             len
         }
@@ -148,7 +148,7 @@ impl EmbeddedStore {
     pub fn visit_string_keys(&self, mut visitor: impl FnMut(&[u8]) -> bool) {
         let now_ms = now_millis();
         for shard_id in 0..self.shards.len() {
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             if self.string_key_count_hint(shard_id) == 0 {
                 continue;
             }
@@ -176,19 +176,19 @@ impl EmbeddedStore {
     }
 
     /// Returns an unsorted snapshot of currently live Redis-visible keys.
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     pub(crate) fn key_snapshot_unsorted(&self) -> Vec<Bytes> {
         self.key_snapshot_unsorted_at(now_millis())
     }
 
     fn key_snapshot_unsorted_at(&self, now_ms: u64) -> Vec<Bytes> {
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         {
             let mut keys = self.string_key_snapshot_unsorted_at(now_ms);
             keys.extend(self.objects.keys(now_ms));
             keys
         }
-        #[cfg(not(feature = "redis-compat"))]
+        #[cfg(not(feature = "redis"))]
         {
             self.string_key_snapshot_unsorted_at(now_ms)
         }
@@ -197,7 +197,7 @@ impl EmbeddedStore {
     fn string_key_snapshot_unsorted_at(&self, now_ms: u64) -> Vec<Bytes> {
         let mut keys = Vec::new();
         for shard_id in 0..self.shards.len() {
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             if self.string_key_count_hint(shard_id) == 0 {
                 continue;
             }
@@ -260,7 +260,7 @@ impl EmbeddedStore {
     }
 
     /// Returns true when Redis/Valkey object storage currently has live keys.
-    #[cfg(not(feature = "redis-compat"))]
+    #[cfg(not(feature = "redis"))]
     #[inline(always)]
     pub fn has_redis_objects(&self) -> bool {
         false

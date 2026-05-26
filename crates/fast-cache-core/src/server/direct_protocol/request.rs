@@ -15,6 +15,7 @@ impl DirectProtocol {
         started_at: Instant,
     ) -> Result<usize> {
         let mut transaction_state = TransactionState::default();
+        let mut resp_protocol = RespProtocolVersion::default();
         Self::process_shared_request_buffer_with_context(
             buf,
             store,
@@ -26,6 +27,7 @@ impl DirectProtocol {
                 started_at,
                 transaction_coordinator: None,
                 transaction_state: &mut transaction_state,
+                resp_protocol: &mut resp_protocol,
             },
         )
     }
@@ -48,6 +50,7 @@ impl DirectProtocol {
             started_at: context.started_at,
             transaction_coordinator: context.transaction_coordinator,
             transaction_state: context.transaction_state,
+            resp_protocol: context.resp_protocol,
             consumed_total: 0,
         }
         .process()
@@ -61,6 +64,7 @@ pub(in crate::server) struct SharedRequestBufferContext<'tx> {
     pub(in crate::server) started_at: Instant,
     pub(in crate::server) transaction_coordinator: Option<&'tx TransactionCoordinator>,
     pub(in crate::server) transaction_state: &'tx mut TransactionState,
+    pub(in crate::server) resp_protocol: &'tx mut RespProtocolVersion,
 }
 
 #[cfg(feature = "embedded")]
@@ -74,6 +78,7 @@ struct SharedRequestBufferProcessor<'buf, 'store, 'out, 'queue, 'tx> {
     started_at: Instant,
     transaction_coordinator: Option<&'tx TransactionCoordinator>,
     transaction_state: &'tx mut TransactionState,
+    resp_protocol: &'tx mut RespProtocolVersion,
     consumed_total: usize,
 }
 
@@ -159,7 +164,9 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
             return Ok(Some(RequestBufferStep::Pending));
         };
         match &request.command {
-            FastCommand::RespCommand { parts } if is_fcnp_scan_shard(parts) => {
+            FastCommand::RespCommand { parts }
+                if FcnpScanCommand::from_parts(parts) == Some(FcnpScanCommand::ScanShard) =>
+            {
                 match fcnp_scan_shard_matches(parts, owned_shard_id) {
                     true => {
                         let _transaction_guard = self
@@ -378,15 +385,15 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
     fn process_fast_resp_transaction(&mut self, request: &FastRequest<'buf>) -> bool {
         match &request.command {
             FastCommand::RespCommand { parts } => self.process_fast_transaction_parts(parts),
-            FastCommand::RedisCommand { kind, args } => {
-                let Some(command) = kind.redis_name() else {
-                    return false;
-                };
-                let mut parts = Vec::with_capacity(args.len() + 1);
-                parts.push(command.as_bytes());
-                parts.extend(args.iter().copied());
-                self.process_fast_transaction_parts(&parts)
-            }
+            FastCommand::RedisCommand { kind, args } => match kind.redis_name() {
+                Some(command) => {
+                    let mut parts = Vec::with_capacity(args.len() + 1);
+                    parts.push(command.as_bytes());
+                    parts.extend(args.iter().copied());
+                    self.process_fast_transaction_parts(&parts)
+                }
+                None => false,
+            },
             _ => false,
         }
     }
@@ -398,6 +405,7 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
             self.store,
             parts,
             self.write_buffer,
+            *self.resp_protocol,
         ) {
             self.write_buffer.truncate(start);
             return false;
@@ -416,10 +424,22 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
         else {
             return self.process_borrowed_resp(slice);
         };
+
+        if self.can_execute_resp_direct_without_parts(command_name)
+            && let Some(command) =
+                DirectProtocol::parse_resp_direct_command(command_name, args.clone())
+        {
+            self.execute_resp_direct_without_parts(command);
+            return Ok(RequestBufferStep::Consumed(consumed));
+        }
+
         let mut parts = crate::protocol::BorrowedCommandParts::new();
         parts.push(command_name);
         parts.extend(args.iter().copied());
 
+        if self.handle_resp_hello(&parts) {
+            return Ok(RequestBufferStep::Consumed(consumed));
+        }
         if self.reject_unsupported_owned_resp_transaction(&parts) {
             return Ok(RequestBufferStep::Consumed(consumed));
         }
@@ -432,6 +452,7 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
             self.store,
             &parts,
             self.write_buffer,
+            *self.resp_protocol,
         ) {
             return Ok(RequestBufferStep::Consumed(consumed));
         }
@@ -446,6 +467,30 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
                 Ok(RequestBufferStep::Consumed(consumed))
             }
         }
+    }
+
+    #[inline(always)]
+    fn can_execute_resp_direct_without_parts(&self, command_name: &[u8]) -> bool {
+        self.owned_shard_id.is_none()
+            && !command_name.eq_ignore_ascii_case(b"HELLO")
+            && !self.transaction_state.is_active()
+            && RespTransactionCommand::from_name(command_name).is_none()
+            && self
+                .transaction_coordinator
+                .is_none_or(|coordinator| !coordinator.has_active_transactions())
+    }
+
+    fn execute_resp_direct_without_parts(&mut self, command: RespDirectCommand<'buf>) {
+        self.materialize_on_mutation(command.mutates_value());
+        DirectProtocol::shared_execute_resp_direct_cmd_into(
+            self.store,
+            command,
+            self.write_buffer,
+            self.fast_write_queue.as_deref_mut(),
+            self.single_threaded,
+            *self.resp_protocol,
+            self.started_at,
+        );
     }
 
     fn execute_resp_direct_with_parts(
@@ -468,6 +513,7 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
             self.write_buffer,
             self.fast_write_queue.as_deref_mut(),
             self.single_threaded,
+            *self.resp_protocol,
             self.started_at,
         );
     }
@@ -484,6 +530,9 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
     fn process_borrowed_resp(&mut self, slice: &'buf [u8]) -> Result<RequestBufferStep> {
         match RespCodec::decode_command(slice)? {
             Some((frame, consumed)) => {
+                if self.handle_resp_hello(&frame.parts) {
+                    return Ok(RequestBufferStep::Consumed(consumed));
+                }
                 if self.reject_unsupported_owned_resp_transaction(&frame.parts) {
                     return Ok(RequestBufferStep::Consumed(consumed));
                 }
@@ -499,6 +548,7 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
                     self.store,
                     &frame.parts,
                     self.write_buffer,
+                    *self.resp_protocol,
                 ) {
                     return Ok(RequestBufferStep::Consumed(consumed));
                 }
@@ -506,6 +556,33 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
                 Ok(RequestBufferStep::Consumed(consumed))
             }
             None => Ok(RequestBufferStep::Pending),
+        }
+    }
+
+    fn handle_resp_hello(&mut self, parts: &[&[u8]]) -> bool {
+        match parts.split_first() {
+            Some((command, args)) if command.eq_ignore_ascii_case(b"HELLO") => {
+                match parse_hello_protocol(args) {
+                    Ok(Some(protocol)) => {
+                        *self.resp_protocol = protocol;
+                        ServerWire::write_resp_hello(self.write_buffer, protocol);
+                    }
+                    Ok(None) => {
+                        ServerWire::write_resp_hello(self.write_buffer, *self.resp_protocol)
+                    }
+                    Err(HelloParseError::UnsupportedProtocol) => {
+                        ServerWire::write_resp_error(
+                            self.write_buffer,
+                            "NOPROTO unsupported protocol version",
+                        );
+                    }
+                    Err(HelloParseError::Syntax) => {
+                        ServerWire::write_resp_error(self.write_buffer, "ERR syntax error");
+                    }
+                }
+                true
+            }
+            _ => false,
         }
     }
 
@@ -538,6 +615,7 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
                         command,
                         self.write_buffer,
                         self.fast_write_queue.as_deref_mut(),
+                        *self.resp_protocol,
                         self.started_at,
                     );
                 }
@@ -547,6 +625,7 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
                 command,
                 self.write_buffer,
                 self.fast_write_queue.as_deref_mut(),
+                *self.resp_protocol,
                 self.started_at,
             ),
         }
@@ -558,20 +637,19 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
     }
 
     fn reject_unsupported_owned_resp_transaction(&mut self, parts: &[&[u8]]) -> bool {
-        if self.owned_shard_id.is_none() {
-            return false;
+        match (self.owned_shard_id, parts.first().copied()) {
+            (Some(_), Some(command))
+                if self.transaction_state.is_active()
+                    || RespTransactionCommand::from_name(command).is_some() =>
+            {
+                ServerWire::write_resp_error(
+                    self.write_buffer,
+                    "ERR transactions are not supported on direct shard RESP ports",
+                );
+                true
+            }
+            _ => false,
         }
-        let Some(command) = parts.first().copied() else {
-            return false;
-        };
-        if self.transaction_state.is_active() || is_resp_transaction_command(command) {
-            ServerWire::write_resp_error(
-                self.write_buffer,
-                "ERR transactions are not supported on direct shard RESP ports",
-            );
-            return true;
-        }
-        false
     }
 
     fn resp_parts_match_owned_shard(&self, parts: &[&[u8]]) -> bool {
@@ -584,11 +662,71 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
     }
 }
 
-fn is_fcnp_scan_shard(parts: &[&[u8]]) -> bool {
-    parts.first().is_some_and(|command| {
-        command.eq_ignore_ascii_case(b"FCNP.SCANSHARD")
-            || command.eq_ignore_ascii_case(b"FCNP.SCAN.SHARD")
-    })
+#[cfg(feature = "embedded")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelloParseError {
+    UnsupportedProtocol,
+    Syntax,
+}
+
+#[cfg(feature = "embedded")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelloOption {
+    Auth,
+    SetName,
+}
+
+#[cfg(feature = "embedded")]
+impl HelloOption {
+    const NAMES: &'static [(&'static [u8], Self)] =
+        &[(b"AUTH", Self::Auth), (b"SETNAME", Self::SetName)];
+
+    fn from_name(name: &[u8]) -> Option<Self> {
+        Self::NAMES
+            .iter()
+            .find_map(|(candidate, option)| name.eq_ignore_ascii_case(candidate).then_some(*option))
+    }
+
+    fn argument_count(self) -> usize {
+        match self {
+            Self::Auth => 2,
+            Self::SetName => 1,
+        }
+    }
+}
+
+#[cfg(feature = "embedded")]
+fn parse_hello_protocol(
+    args: &[&[u8]],
+) -> std::result::Result<Option<RespProtocolVersion>, HelloParseError> {
+    let (protocol, options) = split_hello_protocol_arg(args)?;
+    validate_hello_options(options)?;
+    Ok(protocol)
+}
+
+#[cfg(feature = "embedded")]
+fn split_hello_protocol_arg<'args, 'value>(
+    args: &'args [&'value [u8]],
+) -> std::result::Result<(Option<RespProtocolVersion>, &'args [&'value [u8]]), HelloParseError> {
+    match args.split_first() {
+        Some((first, rest)) if HelloOption::from_name(first).is_none() => {
+            let protocol = RespProtocolVersion::from_hello_argument(first)
+                .ok_or(HelloParseError::UnsupportedProtocol)?;
+            Ok((Some(protocol), rest))
+        }
+        _ => Ok((None, args)),
+    }
+}
+
+#[cfg(feature = "embedded")]
+fn validate_hello_options(mut args: &[&[u8]]) -> std::result::Result<(), HelloParseError> {
+    while let Some((name, rest)) = args.split_first() {
+        let option = HelloOption::from_name(name).ok_or(HelloParseError::Syntax)?;
+        args = rest
+            .get(option.argument_count()..)
+            .ok_or(HelloParseError::Syntax)?;
+    }
+    Ok(())
 }
 
 fn fcnp_scan_shard_matches(parts: &[&[u8]], owned_shard_id: usize) -> bool {
@@ -597,14 +735,6 @@ fn fcnp_scan_shard_matches(parts: &[&[u8]], owned_shard_id: usize) -> bool {
         .and_then(|raw| std::str::from_utf8(raw).ok())
         .and_then(|raw| raw.parse::<usize>().ok())
         == Some(owned_shard_id)
-}
-
-fn is_resp_transaction_command(command: &[u8]) -> bool {
-    command.eq_ignore_ascii_case(b"MULTI")
-        || command.eq_ignore_ascii_case(b"EXEC")
-        || command.eq_ignore_ascii_case(b"DISCARD")
-        || command.eq_ignore_ascii_case(b"WATCH")
-        || command.eq_ignore_ascii_case(b"UNWATCH")
 }
 
 #[cfg(feature = "embedded")]

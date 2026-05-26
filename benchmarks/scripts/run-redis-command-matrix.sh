@@ -23,6 +23,7 @@
 #   START_FAST_CACHE=0
 #   DOCKER=0
 #   DOCKER_SERVICES="redis valkey dragonfly"
+#   DOCKER_CPUSET=0
 #   SERVER_DIRECT_SHARD_PORTS=1
 #   FAST_CACHE_DIRECT_SHARD_BASE_PORT=6384
 
@@ -57,6 +58,11 @@ if [[ "${DOCKER:-1}" == "1" ]]; then
   # shellcheck disable=SC2206
   docker_services=(${DOCKER_SERVICES:-redis valkey})
   docker compose -f "$root/docker/compose.yml" up -d "${docker_services[@]}"
+  if [[ -n "${DOCKER_CPUSET:-}" ]]; then
+    for service in "${docker_services[@]}"; do
+      docker update --cpuset-cpus "$DOCKER_CPUSET" "bench-$service" >/dev/null
+    done
+  fi
 fi
 
 fc_server_pid=""

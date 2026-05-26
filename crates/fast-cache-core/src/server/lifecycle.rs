@@ -343,6 +343,20 @@ impl FastCacheServer {
         if use_monoio {
             tracing::info!("multi-direct: using monoio workers");
         }
+        let available_workers = std::thread::available_parallelism()
+            .map(|available| available.get())
+            .unwrap_or(shard_count)
+            .clamp(1, shard_count);
+        let worker_count = if direct_shard_ports {
+            shard_count
+        } else {
+            std::env::var("FAST_CACHE_WORKER_COUNT")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .map(|value| value.min(shard_count))
+                .unwrap_or(available_workers)
+        };
         let direct_base_port = direct_shard_ports
             .then(|| MultiDirectAddress::direct_base_port(bind_addr, shard_count))
             .transpose()?;
@@ -357,8 +371,8 @@ impl FastCacheServer {
         }
 
         let mut worker_txs: Vec<flume::Sender<std::net::TcpStream>> =
-            Vec::with_capacity(shard_count);
-        let mut handles = Vec::with_capacity(shard_count);
+            Vec::with_capacity(worker_count);
+        let mut handles = Vec::with_capacity(worker_count);
 
         // Resolve available CPU cores so each worker can be pinned to one.
         // If we have fewer cores than workers, fall back to round-robin.
@@ -369,14 +383,14 @@ impl FastCacheServer {
         } else {
             tracing::info!(
                 "multi-direct: pinning {} workers across {} available cores",
-                shard_count,
+                worker_count,
                 core_ids.len()
             );
         }
 
-        let single_threaded = shard_count == 1 && cfg!(feature = "unsafe");
+        let single_threaded = worker_count == 1 && cfg!(feature = "unsafe");
         let started_at = Instant::now();
-        for worker_id in 0..shard_count {
+        for worker_id in 0..worker_count {
             // The channel is only used by the legacy fanout acceptor. Shard-port
             // workers bind and accept inside their own pinned worker thread.
             let (tx, rx) = flume::bounded::<std::net::TcpStream>(256);
@@ -404,6 +418,7 @@ impl FastCacheServer {
                         MonoioMultiDirectWorker::run(
                             MonoioWorkerConfig {
                                 worker_id,
+                                worker_count,
                                 fanout_bind_addr: bind_addr,
                                 direct_bind_addr,
                                 core_id,
@@ -472,7 +487,7 @@ impl FastCacheServer {
                 } else {
                     ""
                 },
-                shard_count
+                worker_count
             );
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutdown requested");
@@ -487,7 +502,7 @@ impl FastCacheServer {
         tracing::info!(
             "fast-cache listening on {} (multi-direct, {} workers)",
             bind_addr,
-            shard_count
+            worker_count
         );
 
         let shutdown = async {

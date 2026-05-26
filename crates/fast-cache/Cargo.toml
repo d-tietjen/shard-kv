@@ -21,12 +21,12 @@ exclude = [".DS_Store"]
 default = ["sharded"]
 embedded = ["fast_cache_core/embedded"]
 sharded = ["embedded", "fast_cache_core/sharded"]
-redis-compat = [
+redis = [
     "embedded",
-    "fast_cache_core/redis-compat",
+    "fast_cache_core/redis",
 ]
 server = ["sharded", "fast_cache_core/server", "dep:clap", "dep:tokio"]
-redis-server = ["server", "redis-compat", "fast_cache_core/redis-server"]
+redis-server = ["server", "redis", "fast_cache_core/redis-server"]
 monoio = ["server", "fast_cache_core/monoio"]
 cuda = ["sharded", "fast_cache_core/cuda"]
 telemetry = ["embedded", "fast_cache_core/telemetry"]

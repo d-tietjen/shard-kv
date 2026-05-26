@@ -17,7 +17,7 @@ This note tracks what must be true before tagging `v0.2.0`.
 ## Known Limits
 
 - Redis source has moved out of core, but core still path-includes it behind
-  `redis-compat`. A later release should replace that bridge with a normal
+  `redis`. A later release should replace that bridge with a normal
   extension dependency boundary.
 - Redis tier-1 compatibility now has explicit coverage for every command in the
   0.2.0 surface, including `DUMP` and `RESTORE`.
@@ -35,6 +35,11 @@ Run these before tagging:
 ```bash
 ./scripts/proof-gate.sh release
 ```
+
+Run the gate from a clean tree. `cargo package` intentionally rejects dirty
+publishable crate files unless `--allow-dirty` is passed, and the release gate
+does not pass that override. Use `--allow-dirty` only as a local diagnostic to
+check package contents before the final commit.
 
 The pure `--no-default-features` build is intentionally unsupported for 0.2.0
 and should fail with a single compile error telling users to enable `embedded`
@@ -79,6 +84,9 @@ The latest Adam proof artifacts from 2026-05-24 are:
 
 For publishable claims, rerun the full Linux benchmark matrices from
 `benchmarks/README.md` on a pinned host and update only curated writeups.
+The curated command and transport summary for 0.2.0 is
+`benchmarks/REDIS_HEAD_TO_HEAD_BENCHMARKS.md`; raw result bundles stay ignored
+under `benchmarks/results/`.
 
 For full local command-path proofing, include all Redis command families and
 fail on harness errors:
@@ -119,3 +127,6 @@ The publishable crates are `fcnp-client-rs`, `fast-cache-core`, and
 `fast-cache`. Dry-run and publish `fcnp-client-rs` and `fast-cache-core`
 first; then dry-run and publish `fast-cache` after `fast-cache-core` is
 available from the registry.
+
+`fast-cache` depends on `fast-cache-core` by registry version for packaging, so
+its dry run will fail before `fast-cache-core v0.2.0` has been published.

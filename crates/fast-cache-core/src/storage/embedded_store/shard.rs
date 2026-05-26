@@ -1,5 +1,5 @@
 use crate::config::EvictionPolicy;
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 use crate::storage::Bytes;
 use crate::storage::FlatMap;
 
@@ -80,7 +80,7 @@ impl EmbeddedShard {
         self.map.value_mut_hashed_no_ttl(hash, key)
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     #[inline(always)]
     pub(crate) fn update_value_hashed_no_ttl<R>(
         &mut self,
@@ -91,7 +91,7 @@ impl EmbeddedShard {
         self.map.update_value_hashed_no_ttl(hash, key, update)
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     #[inline(always)]
     pub(crate) fn transform_value_hashed_no_ttl<R, E>(
         &mut self,

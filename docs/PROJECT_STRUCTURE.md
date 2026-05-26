@@ -90,7 +90,8 @@ New contributors should be able to answer the first set of questions from:
 - `docs/RELEASE_0_2_READINESS.md`: current 0.2.0 proof, benchmark, and known
   limitation checklist.
 - `docs/REDIS_COMPATIBILITY.md`: generated Redis command compatibility
-  manifest based on the live command matrix registry.
+  manifest based on the live command matrix registry, including supported
+  commands, expected-error standalone behavior, and missing-command tracking.
 - `docs/PROOF_GATES.md`: local and CI proof gates.
 - `docs/OPERATIONS.md`: server build, startup, configuration, and benchmark
   artifact guidance.

@@ -11,8 +11,8 @@ Use a current stable Rust toolchain that satisfies the workspace
 cargo fmt --all -- --check
 cargo test --workspace
 cargo test -p fast-cache-core --features unsafe
-cargo test -p fast-cache-core --features redis-compat
-cargo check -p fast-cache --features redis-compat
+cargo test -p fast-cache-core --features redis
+cargo check -p fast-cache --features redis
 cargo check -p fast-cache --features redis-server
 cargo check -p fast-cache-redis --all-features
 cargo doc -p fast-cache-core --no-deps --all-features

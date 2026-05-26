@@ -69,8 +69,7 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedPersist<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        Box::pin(async move { Persist::execute_engine_frame(ctx, key).await })
+        Box::pin(async move { Persist::execute_engine_frame(ctx, self.key).await })
     }
 
     #[cfg(feature = "server")]

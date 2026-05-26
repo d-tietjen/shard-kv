@@ -74,11 +74,8 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedPSetEx<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        let ttl_ms = self.ttl_ms;
-        let value = self.value;
         Box::pin(async move {
-            SetEx::store_value(ctx, key, ttl_ms, value)
+            SetEx::store_value(ctx, self.key, self.ttl_ms, self.value)
                 .await
                 .map(|_| Frame::SimpleString("OK".into()))
         })

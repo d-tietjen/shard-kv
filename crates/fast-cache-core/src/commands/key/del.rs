@@ -88,8 +88,7 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedDel<'a> {
     where
         'a: 'b,
     {
-        let keys = self.keys.clone();
-        Box::pin(async move { Del::execute_engine_frame(ctx, keys.as_slice()).await })
+        Box::pin(async move { Del::execute_engine_frame(ctx, self.keys.as_slice()).await })
     }
 
     #[cfg(feature = "server")]

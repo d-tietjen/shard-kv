@@ -51,7 +51,9 @@ pub(crate) trait EmbeddedStringWrite {
 enum EmbeddedStringWriteTarget {
     RedisObjectFallback,
     PrehashedShared(u64),
+    #[cfg(feature = "unsafe")]
     PrehashedSingleThreaded(u64),
+    #[cfg(feature = "unsafe")]
     SingleThreaded,
     OwnedFallback,
 }
@@ -59,12 +61,22 @@ enum EmbeddedStringWriteTarget {
 impl EmbeddedStringWriteTarget {
     #[inline(always)]
     fn decoded(has_redis_objects: bool, key_hash: Option<u64>, single_threaded: bool) -> Self {
+        #[cfg(feature = "unsafe")]
         match (has_redis_objects, key_hash, single_threaded) {
             (true, _, _) => Self::RedisObjectFallback,
             (false, Some(key_hash), true) => Self::PrehashedSingleThreaded(key_hash),
             (false, Some(key_hash), false) => Self::PrehashedShared(key_hash),
             (false, None, true) => Self::SingleThreaded,
             (false, None, false) => Self::OwnedFallback,
+        }
+        #[cfg(not(feature = "unsafe"))]
+        {
+            let _ = single_threaded;
+            match (has_redis_objects, key_hash) {
+                (true, _) => Self::RedisObjectFallback,
+                (false, Some(key_hash)) => Self::PrehashedShared(key_hash),
+                (false, None) => Self::OwnedFallback,
+            }
         }
     }
 
@@ -75,12 +87,22 @@ impl EmbeddedStringWriteTarget {
         key_hash: u64,
         single_threaded: bool,
     ) -> Self {
+        #[cfg(feature = "unsafe")]
         match (has_redis_objects, route_hash_is_key_hash, single_threaded) {
             (true, _, _) => Self::RedisObjectFallback,
             (false, true, true) => Self::PrehashedSingleThreaded(key_hash),
             (false, true, false) => Self::PrehashedShared(key_hash),
             (false, false, true) => Self::SingleThreaded,
             (false, false, false) => Self::OwnedFallback,
+        }
+        #[cfg(not(feature = "unsafe"))]
+        {
+            let _ = single_threaded;
+            match (has_redis_objects, route_hash_is_key_hash) {
+                (true, _) => Self::RedisObjectFallback,
+                (false, true) => Self::PrehashedShared(key_hash),
+                (false, false) => Self::OwnedFallback,
+            }
         }
     }
 
@@ -93,11 +115,13 @@ impl EmbeddedStringWriteTarget {
             Self::PrehashedShared(key_hash) => {
                 store.set_slice_prehashed(key_hash, key, value, ttl_ms);
             }
+            #[cfg(feature = "unsafe")]
             Self::PrehashedSingleThreaded(key_hash) => {
                 // SAFETY: callers only select this target when exactly one
                 // worker can access the store.
                 unsafe { store.set_single_threaded_hashed(key_hash, key, value, ttl_ms) };
             }
+            #[cfg(feature = "unsafe")]
             Self::SingleThreaded => {
                 // SAFETY: callers only select this target when exactly one
                 // worker can access the store.

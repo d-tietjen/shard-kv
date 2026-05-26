@@ -30,6 +30,7 @@ impl DirectProtocol {
         command: BorrowedCommand<'_>,
         out: &mut BytesMut,
         fast_write_queue: Option<&mut FastWriteQueue>,
+        resp_protocol: RespProtocolVersion,
         _started_at: Instant,
     ) {
         command.execute_borrowed(BorrowedCommandContext {
@@ -37,6 +38,7 @@ impl DirectProtocol {
             out,
             fast_write_queue,
             single_threaded: true,
+            resp_protocol,
         });
     }
 }
@@ -49,6 +51,7 @@ impl DirectProtocol {
         command: BorrowedCommand<'_>,
         out: &mut BytesMut,
         fast_write_queue: Option<&mut FastWriteQueue>,
+        resp_protocol: RespProtocolVersion,
         _started_at: Instant,
     ) {
         command.execute_borrowed(BorrowedCommandContext {
@@ -56,6 +59,7 @@ impl DirectProtocol {
             out,
             fast_write_queue,
             single_threaded: false,
+            resp_protocol,
         });
     }
 }

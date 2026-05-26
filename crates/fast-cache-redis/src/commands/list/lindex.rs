@@ -1,6 +1,6 @@
 use crate::commands::redis::{
     define_redis_command, error, finish_object_bulk_visit, frame_from_result, parse_i64,
-    write_frame, wrong_arity,
+    write_frame, write_resp_null, wrong_arity,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
@@ -33,7 +33,7 @@ impl crate::commands::redis::RedisCommand for LIndex {
                 };
                 let outcome = store.lindex_visit(key, index, |value| match value {
                     Some(value) => ServerWire::write_resp_blob_string(out, value),
-                    None => out.extend_from_slice(b"$-1\r\n"),
+                    None => write_resp_null(out),
                 });
                 finish_object_bulk_visit(out, outcome);
             }

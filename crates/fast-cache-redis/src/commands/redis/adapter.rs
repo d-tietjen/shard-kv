@@ -6,7 +6,7 @@ use smallvec::SmallVec;
 
 use super::dispatch::{dispatch, route_key_for_command, route_key_for_owned_command};
 #[cfg(feature = "server")]
-use super::frame::{write_fast_frame, write_frame};
+use super::frame::{with_resp_protocol, write_fast_frame, write_frame};
 use crate::commands::CommandSpec;
 use crate::protocol::{FastCommand, Frame};
 #[cfg(feature = "server")]
@@ -15,7 +15,7 @@ use crate::server::commands::{
     RawCommandContext, RawDirectCommand,
 };
 #[cfg(feature = "server")]
-use crate::server::wire::ServerWire;
+use crate::server::wire::{RespProtocolVersion, ServerWire};
 use crate::storage::{Command, EmbeddedStore, EngineCommandContext, EngineFrameFuture};
 use crate::{FastCacheError, Result};
 
@@ -97,7 +97,9 @@ pub(crate) trait RedisCommand: CommandSpec + Send + Sync + 'static {
     #[inline(always)]
     fn write_fast(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
         let start = ServerWire::begin_fast_value(out);
-        Self::write_resp(store, args, out);
+        with_resp_protocol(RespProtocolVersion::Resp2, || {
+            Self::write_resp(store, args, out);
+        });
         ServerWire::finish_fast_value(out, start);
     }
 
@@ -179,7 +181,9 @@ where
 
     #[cfg(feature = "server")]
     fn execute_borrowed(&self, ctx: BorrowedCommandContext<'_, '_, '_>) {
-        C::write_resp(ctx.store, &self.args, ctx.out);
+        with_resp_protocol(ctx.resp_protocol, || {
+            C::write_resp(ctx.store, &self.args, ctx.out);
+        });
     }
 
     #[cfg(feature = "server")]
@@ -228,7 +232,9 @@ where
     C: RedisCommand,
 {
     fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
-        C::write_resp(ctx.store, &ctx.args, ctx.out);
+        with_resp_protocol(ctx.resp_protocol, || {
+            C::write_resp(ctx.store, &ctx.args, ctx.out);
+        });
     }
 
     fn execute_fast(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {

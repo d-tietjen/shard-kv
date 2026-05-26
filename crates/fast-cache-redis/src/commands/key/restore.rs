@@ -4,8 +4,8 @@ use crate::commands::dump_restore::{
     DumpRestoreValue, decode_dump_payload, decode_string_dump_payload_slice,
 };
 use crate::commands::redis::{
-    define_redis_command, eq_ignore_ascii_case, error, parse_i64, simple, write_frame,
-    write_resp_simple_string, wrong_arity,
+    define_redis_command, error, parse_i64, simple, write_frame, write_resp_simple_string,
+    wrong_arity,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
@@ -48,14 +48,17 @@ impl crate::commands::redis::RedisCommand for Restore {
         owned_shard_id: usize,
         out: &mut BytesMut,
     ) -> bool {
-        let Some(result) = restore_key_owned_shard(store, args, owned_shard_id) else {
-            return false;
-        };
-        match result {
-            Ok(()) => write_resp_simple_string(out, "OK"),
-            Err(error) => write_restore_error(out, error),
+        match restore_key_owned_shard(store, args, owned_shard_id) {
+            Some(Ok(())) => {
+                write_resp_simple_string(out, "OK");
+                true
+            }
+            Some(Err(error)) => {
+                write_restore_error(out, error);
+                true
+            }
+            None => false,
         }
-        true
     }
 }
 
@@ -75,6 +78,60 @@ struct RestoreOptions {
     absttl: bool,
     idletime: bool,
     freq: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreOption {
+    Replace,
+    AbsTtl,
+    IdleTime,
+    Freq,
+}
+
+impl RestoreOption {
+    const NAMES: &'static [(&'static [u8], Self)] = &[
+        (b"REPLACE", Self::Replace),
+        (b"ABSTTL", Self::AbsTtl),
+        (b"IDLETIME", Self::IdleTime),
+        (b"FREQ", Self::Freq),
+    ];
+
+    fn from_name(name: &[u8]) -> Option<Self> {
+        Self::NAMES
+            .iter()
+            .find_map(|(candidate, option)| name.eq_ignore_ascii_case(candidate).then_some(*option))
+    }
+
+    fn apply<'args, 'value>(
+        self,
+        parsed: &mut RestoreOptions,
+        rest: &'args [&'value [u8]],
+    ) -> Result<&'args [&'value [u8]], RestoreError> {
+        match self {
+            Self::Replace => {
+                parsed.replace = true;
+                Ok(rest)
+            }
+            Self::AbsTtl => {
+                parsed.absttl = true;
+                Ok(rest)
+            }
+            Self::IdleTime => {
+                validate_idle_or_freq_available(parsed)?;
+                let (value, rest) = rest.split_first().ok_or(RestoreError::Syntax)?;
+                validate_idle_time_value(value)?;
+                parsed.idletime = true;
+                Ok(rest)
+            }
+            Self::Freq => {
+                validate_idle_or_freq_available(parsed)?;
+                let (value, rest) = rest.split_first().ok_or(RestoreError::Syntax)?;
+                validate_freq_value(value)?;
+                parsed.freq = true;
+                Ok(rest)
+            }
+        }
+    }
 }
 
 fn restore_key(store: &EmbeddedStore, args: &[&[u8]]) -> Result<(), RestoreError> {
@@ -197,44 +254,31 @@ fn write_restore_error(out: &mut BytesMut, error: RestoreError) {
 
 fn parse_options(options: &[&[u8]]) -> Result<RestoreOptions, RestoreError> {
     let mut parsed = RestoreOptions::default();
-    let mut cursor = 0;
-    while cursor < options.len() {
-        let option = options[cursor];
-        if eq_ignore_ascii_case(option, b"REPLACE") {
-            parsed.replace = true;
-            cursor += 1;
-        } else if eq_ignore_ascii_case(option, b"ABSTTL") {
-            parsed.absttl = true;
-            cursor += 1;
-        } else if eq_ignore_ascii_case(option, b"IDLETIME") {
-            if parsed.freq || parsed.idletime {
-                return Err(RestoreError::Syntax);
-            }
-            let Some(value) = options.get(cursor + 1) else {
-                return Err(RestoreError::Syntax);
-            };
-            let value = parse_i64(value).map_err(|_| RestoreError::InvalidIdleOrFreq)?;
-            if value < 0 {
-                return Err(RestoreError::InvalidIdleOrFreq);
-            }
-            parsed.idletime = true;
-            cursor += 2;
-        } else if eq_ignore_ascii_case(option, b"FREQ") {
-            if parsed.idletime || parsed.freq {
-                return Err(RestoreError::Syntax);
-            }
-            let Some(value) = options.get(cursor + 1) else {
-                return Err(RestoreError::Syntax);
-            };
-            let value = parse_i64(value).map_err(|_| RestoreError::InvalidIdleOrFreq)?;
-            if !(0..=255).contains(&value) {
-                return Err(RestoreError::InvalidIdleOrFreq);
-            }
-            parsed.freq = true;
-            cursor += 2;
-        } else {
-            return Err(RestoreError::Syntax);
-        }
+    let mut rest = options;
+    while let Some((name, tail)) = rest.split_first() {
+        let option = RestoreOption::from_name(name).ok_or(RestoreError::Syntax)?;
+        rest = option.apply(&mut parsed, tail)?;
     }
     Ok(parsed)
+}
+
+fn validate_idle_or_freq_available(options: &RestoreOptions) -> Result<(), RestoreError> {
+    match (options.idletime, options.freq) {
+        (false, false) => Ok(()),
+        _ => Err(RestoreError::Syntax),
+    }
+}
+
+fn validate_idle_time_value(value: &[u8]) -> Result<(), RestoreError> {
+    match parse_i64(value).map_err(|_| RestoreError::InvalidIdleOrFreq)? {
+        value if value >= 0 => Ok(()),
+        _ => Err(RestoreError::InvalidIdleOrFreq),
+    }
+}
+
+fn validate_freq_value(value: &[u8]) -> Result<(), RestoreError> {
+    match parse_i64(value).map_err(|_| RestoreError::InvalidIdleOrFreq)? {
+        value if (0..=255).contains(&value) => Ok(()),
+        _ => Err(RestoreError::InvalidIdleOrFreq),
+    }
 }

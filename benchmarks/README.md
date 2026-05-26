@@ -338,8 +338,10 @@ Redis, Valkey, and Dragonfly. The current Linux baseline uses:
 
 Cells are `ops/sec @ measured server vCPU`.
 
-For the fuller TCP report, including the standalone pipeline sweep and the
-2026-05-18 Redis/Valkey/Dragonfly matrix, see
+For the curated 1-vCPU and 16-vCPU Redis head-to-head summary, see
+[Redis Head-to-Head Benchmarks](REDIS_HEAD_TO_HEAD_BENCHMARKS.md). For the
+fuller TCP report, including the standalone pipeline sweep and the 2026-05-18
+Redis/Valkey/Dragonfly matrix, see
 [fast-cache vs Redis, Valkey, and Dragonfly over TCP](FAST_CACHE_VS_REDIS_TCP.md).
 
 For an embedded Rust cache comparison, see
@@ -590,13 +592,18 @@ shard ports in safe mode. Add `SERVER_UNSAFE=1` to the same run to enable the
 owned-shard lock-bypass hot path where supported.
 
 Monoio runtime experiments can be passed through the same helper. Use
-`FAST_CACHE_MONOIO_DRIVER=legacy|io_uring` to compare monoio drivers,
+`FAST_CACHE_MONOIO_DRIVER=auto|legacy|io_uring` to compare monoio drivers,
 `FAST_CACHE_MONOIO_SAFE_WRITER=inline|split|writev` to compare safe writer
 paths, and `FAST_CACHE_TCP_BUFFER_BYTES=<bytes>` for socket buffer sweeps. The
 `writev` safe writer keeps command execution unchanged, but lets GET responses
 reuse the queued response path so larger FCNP/RESP values can be written as
 header plus stored `Bytes` payload instead of always materializing a contiguous
 response buffer.
+
+The server monoio default is `auto`: one worker uses the io_uring driver, while
+multi-worker runs use monoio's legacy socket driver. Adam profiling showed the
+legacy driver avoids enough per-request `io_uring_enter` cost to improve the
+16-worker RESP hot mix, while io_uring remains faster for the one-worker shape.
 
 The non-command streaming paths are opt-in separately on Linux. Use
 `FAST_CACHE_WAL_TCP_USE_MONOIO=1` to run the TCP WAL exporter on monoio, and

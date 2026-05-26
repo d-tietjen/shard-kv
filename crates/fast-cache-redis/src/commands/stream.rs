@@ -1,10 +1,20 @@
 use std::cmp::Ordering;
 
+#[cfg(feature = "server")]
+use bytes::BytesMut;
+
 use crate::commands::redis::{
     array_bulk, bulk, eq_ignore_ascii_case, error, int, optional_string_value, parse_u64,
     parse_usize, simple, wrong_arity, wrongtype,
 };
+#[cfg(feature = "server")]
+use crate::commands::redis::{
+    write_frame, write_resp_array_header, write_resp_null, write_resp_simple_string,
+    write_resp_wrong_arity,
+};
 use crate::protocol::Frame;
+#[cfg(feature = "server")]
+use crate::server::wire::ServerWire;
 use crate::storage::{EmbeddedStore, RedisStringStore, now_millis};
 
 const STREAM_PREFIX: &[u8] = b"FC:STREAM:v1\0";
@@ -44,74 +54,89 @@ define_stream_command!(XTrim, XTRIM_COMMAND, "XTRIM", true);
 
 impl crate::commands::redis::RedisCommand for XAdd {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        if args.len() < 4 {
-            return wrong_arity("XADD");
-        }
-        let key = args[0];
-        let mut index = 1;
-        let mut trim = None;
+        xadd_update(store, args)
+            .map(|id| bulk(id.to_string().into_bytes()))
+            .unwrap_or_else(|frame| frame)
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_stream_result(out, xadd_update(store, args), write_stream_id_bulk_resp);
+    }
+}
+
+fn xadd_update(store: &EmbeddedStore, args: &[&[u8]]) -> Result<StreamId, Frame> {
+    if args.len() < 4 {
+        return Err(wrong_arity("XADD"));
+    }
+    let key = args[0];
+    let mut index = 1;
+    let mut trim = None;
+    if args
+        .get(index)
+        .is_some_and(|arg| eq_ignore_ascii_case(arg, b"MAXLEN"))
+    {
+        index += 1;
+        let mut approximate = false;
         if args
             .get(index)
-            .is_some_and(|arg| eq_ignore_ascii_case(arg, b"MAXLEN"))
+            .is_some_and(|arg| eq_ignore_ascii_case(arg, b"~"))
+        {
+            approximate = true;
+            index += 1;
+        } else if args
+            .get(index)
+            .is_some_and(|arg| eq_ignore_ascii_case(arg, b"="))
         {
             index += 1;
-            let mut approximate = false;
-            if args
-                .get(index)
-                .is_some_and(|arg| eq_ignore_ascii_case(arg, b"~"))
-            {
-                approximate = true;
-                index += 1;
-            } else if args
-                .get(index)
-                .is_some_and(|arg| eq_ignore_ascii_case(arg, b"="))
-            {
-                index += 1;
-            }
-            let Some(count) = args.get(index) else {
-                return error("ERR syntax error");
-            };
-            let Ok(count) = parse_usize(count) else {
-                return error("ERR value is not an integer or out of range");
-            };
-            trim = Some(StreamTrim {
-                max_len: count,
-                approximate,
-            });
-            index += 1;
         }
-        let Some(id_arg) = args.get(index) else {
-            return wrong_arity("XADD");
+        let Some(count) = args.get(index) else {
+            return Err(error("ERR syntax error"));
         };
+        let Ok(count) = parse_usize(count) else {
+            return Err(error("ERR value is not an integer or out of range"));
+        };
+        trim = Some(StreamTrim {
+            max_len: count,
+            approximate,
+        });
         index += 1;
-        if index >= args.len() || (args.len() - index) % 2 != 0 {
-            return wrong_arity("XADD");
-        }
-        let fields = args[index..]
-            .chunks_exact(2)
-            .map(|chunk| (chunk[0].to_vec(), chunk[1].to_vec()))
-            .collect::<Vec<_>>();
-        let result = store.transform_string_value_no_ttl(
-            key,
-            |existing| {
-                if let Some((id, value)) = try_fast_append_stream(existing, id_arg, &fields, trim)?
-                {
-                    return Ok((bulk(id.to_string().into_bytes()), value));
-                }
-                let mut stream = decode_stream(existing)?;
-                let id = next_stream_id(stream.last_id, id_arg)?;
-                let frame = bulk(id.to_string().into_bytes());
-                stream.entries.push(StreamEntry { id, fields });
-                stream.last_id = id;
-                if let Some(trim) = trim {
-                    trim_stream(&mut stream, trim.max_len);
-                }
-                Ok((frame, encode_stream(&stream)))
-            },
-            wrongtype,
-        );
-        result.unwrap_or_else(|frame| frame)
     }
+    let Some(id_arg) = args.get(index) else {
+        return Err(wrong_arity("XADD"));
+    };
+    index += 1;
+    if index >= args.len() || (args.len() - index) % 2 != 0 {
+        return Err(wrong_arity("XADD"));
+    }
+    let fields = args[index..]
+        .chunks_exact(2)
+        .map(|chunk| (chunk[0], chunk[1]))
+        .collect::<Vec<_>>();
+    let result = store.transform_string_value_no_ttl(
+        key,
+        |existing| {
+            if let Some((id, value)) = try_fast_append_stream(existing, id_arg, &fields, trim)? {
+                return Ok((id, value));
+            }
+            let mut stream = decode_stream(existing)?;
+            let id = next_stream_id(stream.last_id, id_arg)?;
+            stream.entries.push(StreamEntry {
+                id,
+                fields: fields
+                    .iter()
+                    .map(|(field, value)| ((*field).to_vec(), (*value).to_vec()))
+                    .collect(),
+            });
+            stream.last_id = id;
+            if let Some(trim) = trim {
+                trim_stream(&mut stream, trim.max_len);
+            }
+            Ok((id, encode_stream(&stream)))
+        },
+        wrongtype,
+    );
+    result
 }
 
 impl crate::commands::redis::RedisCommand for XLen {
@@ -124,11 +149,26 @@ impl crate::commands::redis::RedisCommand for XLen {
             _ => wrong_arity("XLEN"),
         }
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        match args {
+            [key] => write_stream_result(out, load_stream_len(store, key), |out, len| {
+                ServerWire::write_resp_integer(out, len as i64);
+            }),
+            _ => write_resp_wrong_arity(out, "XLEN"),
+        }
+    }
 }
 
 impl crate::commands::redis::RedisCommand for XRange {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         xrange(store, args, false)
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_xrange_resp(store, args, false, out);
     }
 }
 
@@ -136,51 +176,80 @@ impl crate::commands::redis::RedisCommand for XRevRange {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         xrange(store, args, true)
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_xrange_resp(store, args, true, out);
+    }
 }
 
 impl crate::commands::redis::RedisCommand for XDel {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let [key, ids @ ..] = args else {
-            return wrong_arity("XDEL");
-        };
-        if ids.is_empty() {
-            return wrong_arity("XDEL");
-        }
-        with_stream_mut(store, key, |stream| {
-            let ids = ids
-                .iter()
-                .map(|raw| parse_stream_id(raw))
-                .collect::<Result<Vec<_>, _>>()?;
-            let before = stream.entries.len();
-            stream.entries.retain(|entry| !ids.contains(&entry.id));
-            Ok(int(before.saturating_sub(stream.entries.len()) as i64))
-        })
-        .unwrap_or_else(|frame| frame)
+        xdel_update(store, args)
+            .map(|deleted| int(deleted as i64))
+            .unwrap_or_else(|frame| frame)
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_stream_result(out, xdel_update(store, args), |out, deleted| {
+            ServerWire::write_resp_integer(out, deleted as i64);
+        });
+    }
+}
+
+fn xdel_update(store: &EmbeddedStore, args: &[&[u8]]) -> Result<usize, Frame> {
+    let [key, ids @ ..] = args else {
+        return Err(wrong_arity("XDEL"));
+    };
+    if ids.is_empty() {
+        return Err(wrong_arity("XDEL"));
+    }
+    with_stream_mut(store, key, |stream| {
+        let ids = ids
+            .iter()
+            .map(|raw| parse_stream_id(raw))
+            .collect::<Result<Vec<_>, _>>()?;
+        let before = stream.entries.len();
+        stream.entries.retain(|entry| !ids.contains(&entry.id));
+        Ok(before.saturating_sub(stream.entries.len()))
+    })
 }
 
 impl crate::commands::redis::RedisCommand for XTrim {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        if args.len() < 3 || !eq_ignore_ascii_case(args[1], b"MAXLEN") {
-            return wrong_arity("XTRIM");
-        }
-        let count_index = if args.get(2).is_some_and(|arg| *arg == b"~") {
-            3
-        } else {
-            2
-        };
-        let Some(count) = args.get(count_index) else {
-            return wrong_arity("XTRIM");
-        };
-        let Ok(max_len) = parse_usize(count) else {
-            return error("ERR value is not an integer or out of range");
-        };
-        with_stream_mut(store, args[0], |stream| {
-            let removed = trim_stream(stream, max_len);
-            Ok(int(removed as i64))
-        })
-        .unwrap_or_else(|frame| frame)
+        xtrim_update(store, args)
+            .map(|removed| int(removed as i64))
+            .unwrap_or_else(|frame| frame)
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_stream_result(out, xtrim_update(store, args), |out, removed| {
+            ServerWire::write_resp_integer(out, removed as i64);
+        });
+    }
+}
+
+fn xtrim_update(store: &EmbeddedStore, args: &[&[u8]]) -> Result<usize, Frame> {
+    if args.len() < 3 || !eq_ignore_ascii_case(args[1], b"MAXLEN") {
+        return Err(wrong_arity("XTRIM"));
+    }
+    let count_index = if args.get(2).is_some_and(|arg| *arg == b"~") {
+        3
+    } else {
+        2
+    };
+    let Some(count) = args.get(count_index) else {
+        return Err(wrong_arity("XTRIM"));
+    };
+    let Ok(max_len) = parse_usize(count) else {
+        return Err(error("ERR value is not an integer or out of range"));
+    };
+    with_stream_mut(store, args[0], |stream| {
+        let removed = trim_stream(stream, max_len);
+        Ok(removed)
+    })
 }
 
 impl crate::commands::redis::RedisCommand for XSetId {
@@ -196,17 +265,40 @@ impl crate::commands::redis::RedisCommand for XSetId {
             _ => wrong_arity("XSETID"),
         }
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        match args {
+            [key, id] => {
+                match parse_stream_id(id).and_then(|id| set_stream_last_id_result(store, key, id)) {
+                    Ok(()) => write_resp_simple_string(out, "OK"),
+                    Err(frame) => write_frame(out, &frame),
+                }
+            }
+            _ => write_resp_wrong_arity(out, "XSETID"),
+        }
+    }
 }
 
 impl crate::commands::redis::RedisCommand for XRead {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         xread(store, args, false)
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_xread_resp(store, args, false, out);
+    }
 }
 
 impl crate::commands::redis::RedisCommand for XReadGroup {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         xread(store, args, true)
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_xread_resp(store, args, true, out);
     }
 }
 
@@ -246,6 +338,11 @@ impl crate::commands::redis::RedisCommand for XGroup {
             ]),
             _ => error("ERR unknown XGROUP subcommand or wrong number of arguments"),
         }
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_xgroup_resp(store, args, out);
     }
 }
 
@@ -291,6 +388,11 @@ impl crate::commands::redis::RedisCommand for XInfo {
             _ => error("ERR unknown XINFO subcommand or wrong number of arguments"),
         }
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_xinfo_resp(store, args, out);
+    }
 }
 
 impl crate::commands::redis::RedisCommand for XPending {
@@ -307,6 +409,22 @@ impl crate::commands::redis::RedisCommand for XPending {
             _ => wrong_arity("XPENDING"),
         }
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(_store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        match args {
+            [_key, _group] => {
+                write_resp_array_header(out, 4);
+                ServerWire::write_resp_integer(out, 0);
+                write_resp_null(out);
+                write_resp_null(out);
+                write_resp_array_header(out, 0);
+            }
+            [_key, _group, _start, _end, _count] => write_resp_array_header(out, 0),
+            [_key, _group, _start, _end, _count, _consumer] => write_resp_array_header(out, 0),
+            _ => write_resp_wrong_arity(out, "XPENDING"),
+        }
+    }
 }
 
 impl crate::commands::redis::RedisCommand for XClaim {
@@ -317,6 +435,15 @@ impl crate::commands::redis::RedisCommand for XClaim {
             Frame::Array(Vec::new())
         }
     }
+
+    #[cfg(feature = "server")]
+    fn write_resp(_store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        if args.len() < 5 {
+            write_resp_wrong_arity(out, "XCLAIM");
+        } else {
+            write_resp_array_header(out, 0);
+        }
+    }
 }
 
 impl crate::commands::redis::RedisCommand for XAck {
@@ -325,6 +452,15 @@ impl crate::commands::redis::RedisCommand for XAck {
             wrong_arity("XACK")
         } else {
             int(0)
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(_store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        if args.len() < 3 {
+            write_resp_wrong_arity(out, "XACK");
+        } else {
+            ServerWire::write_resp_integer(out, 0);
         }
     }
 }
@@ -379,40 +515,71 @@ struct StreamTrim {
     approximate: bool,
 }
 
-fn xrange(store: &EmbeddedStore, args: &[&[u8]], rev: bool) -> Frame {
-    if args.len() < 3 {
-        return wrong_arity(if rev { "XREVRANGE" } else { "XRANGE" });
-    }
-    let key = args[0];
-    let start = match parse_range_bound(args[1], false) {
-        Ok(id) => id,
-        Err(frame) => return frame,
-    };
-    let end = match parse_range_bound(args[2], true) {
-        Ok(id) => id,
-        Err(frame) => return frame,
-    };
-    let mut count = None;
-    if args.len() > 3 {
-        if args.len() != 5 || !eq_ignore_ascii_case(args[3], b"COUNT") {
-            return error("ERR syntax error");
+#[derive(Debug, Clone, Copy)]
+enum StreamRangeCommand {
+    Range,
+    RevRange,
+}
+
+impl StreamRangeCommand {
+    fn from_rev(rev: bool) -> Self {
+        match rev {
+            true => Self::RevRange,
+            false => Self::Range,
         }
-        let Ok(parsed) = parse_usize(args[4]) else {
-            return error("ERR value is not an integer or out of range");
-        };
-        count = Some(parsed);
     }
-    match load_stream(store, key) {
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Range => "XRANGE",
+            Self::RevRange => "XREVRANGE",
+        }
+    }
+
+    fn reverse(self) -> bool {
+        matches!(self, Self::RevRange)
+    }
+}
+
+struct StreamRangeArgs<'a> {
+    key: &'a [u8],
+    start: StreamId,
+    end: StreamId,
+    count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamRangeOption {
+    Count,
+}
+
+impl StreamRangeOption {
+    const NAMES: &'static [(&'static [u8], Self)] = &[(b"COUNT", Self::Count)];
+
+    fn from_name(name: &[u8]) -> Option<Self> {
+        Self::NAMES.iter().find_map(|(candidate, option)| {
+            eq_ignore_ascii_case(name, candidate).then_some(*option)
+        })
+    }
+}
+
+fn xrange(store: &EmbeddedStore, args: &[&[u8]], rev: bool) -> Frame {
+    let command = StreamRangeCommand::from_rev(rev);
+    let parsed = match parse_stream_range_args(args, command) {
+        Ok(parsed) => parsed,
+        Err(frame) => return frame,
+    };
+    match load_stream(store, parsed.key) {
         Ok(stream) => {
             let mut entries = stream
                 .entries
                 .iter()
-                .filter(|entry| entry.id >= start && entry.id <= end)
+                .filter(|entry| entry.id >= parsed.start && entry.id <= parsed.end)
                 .collect::<Vec<_>>();
-            if rev {
+            if command.reverse() {
                 entries.reverse();
             }
-            if let Some(count) = count {
+            if let Some(count) = parsed.count {
                 entries.truncate(count);
             }
             Frame::Array(entries.into_iter().map(entry_frame).collect())
@@ -421,67 +588,120 @@ fn xrange(store: &EmbeddedStore, args: &[&[u8]], rev: bool) -> Frame {
     }
 }
 
-fn xread(store: &EmbeddedStore, args: &[&[u8]], group: bool) -> Frame {
-    let mut index = 0;
-    if group {
-        if args.len() < 3 || !eq_ignore_ascii_case(args[0], b"GROUP") {
-            return wrong_arity("XREADGROUP");
+fn parse_stream_range_args<'a>(
+    args: &'a [&'a [u8]],
+    command: StreamRangeCommand,
+) -> Result<StreamRangeArgs<'a>, Frame> {
+    let [key, start, end, options @ ..] = args else {
+        return Err(wrong_arity(command.name()));
+    };
+    Ok(StreamRangeArgs {
+        key: *key,
+        start: parse_range_bound(start, false)?,
+        end: parse_range_bound(end, true)?,
+        count: parse_stream_range_options(options)?,
+    })
+}
+
+fn parse_stream_range_options(options: &[&[u8]]) -> Result<Option<usize>, Frame> {
+    match options {
+        [] => Ok(None),
+        [name, value] if StreamRangeOption::from_name(name) == Some(StreamRangeOption::Count) => {
+            parse_usize(value)
+                .map(Some)
+                .map_err(|_| error("ERR value is not an integer or out of range"))
         }
-        index = 3;
+        _ => Err(error("ERR syntax error")),
     }
-    let mut count = None;
-    while index < args.len() {
-        if eq_ignore_ascii_case(args[index], b"COUNT") {
-            let Some(raw) = args.get(index + 1) else {
-                return error("ERR syntax error");
-            };
-            let Ok(parsed) = parse_usize(raw) else {
-                return error("ERR value is not an integer or out of range");
-            };
-            count = Some(parsed);
-            index += 2;
-        } else if eq_ignore_ascii_case(args[index], b"BLOCK") {
-            index += 2;
-        } else {
-            break;
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamReadCommand {
+    Read,
+    ReadGroup,
+}
+
+impl StreamReadCommand {
+    fn from_group(group: bool) -> Self {
+        match group {
+            true => Self::ReadGroup,
+            false => Self::Read,
         }
     }
-    if index >= args.len() || !eq_ignore_ascii_case(args[index], b"STREAMS") {
-        return error("ERR syntax error");
-    }
-    let rest = &args[index + 1..];
-    if rest.is_empty() || rest.len() % 2 != 0 {
-        return error("ERR Unbalanced XREAD list of streams");
-    }
-    let key_count = rest.len() / 2;
-    let (keys, ids) = rest.split_at(key_count);
-    let mut streams = Vec::new();
-    for (key, raw_id) in keys.iter().zip(ids.iter()) {
-        let after = if group && *raw_id == b">" {
-            StreamId { ms: 0, seq: 0 }
-        } else if *raw_id == b"$" {
-            continue;
-        } else {
-            match parse_stream_id(raw_id) {
-                Ok(id) => id,
-                Err(frame) => return frame,
+
+    fn without_group_prefix<'a>(self, args: &'a [&'a [u8]]) -> Result<&'a [&'a [u8]], Frame> {
+        match self {
+            Self::Read => Ok(args),
+            Self::ReadGroup
+                if args.len() < 3
+                    || !args
+                        .first()
+                        .is_some_and(|arg| eq_ignore_ascii_case(arg, b"GROUP")) =>
+            {
+                Err(wrong_arity("XREADGROUP"))
             }
-        };
-        let stream = match load_stream(store, key) {
+            Self::ReadGroup => Ok(&args[3..]),
+        }
+    }
+
+    fn cursor_from_raw(self, raw_id: &[u8]) -> Result<Option<StreamId>, Frame> {
+        match (self, raw_id) {
+            (Self::ReadGroup, b">") => Ok(Some(StreamId { ms: 0, seq: 0 })),
+            (_, b"$") => Ok(None),
+            _ => parse_stream_id(raw_id).map(Some),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamReadOption {
+    Count,
+    Block,
+}
+
+impl StreamReadOption {
+    const NAMES: &'static [(&'static [u8], Self)] =
+        &[(b"COUNT", Self::Count), (b"BLOCK", Self::Block)];
+
+    fn from_name(name: &[u8]) -> Option<Self> {
+        Self::NAMES.iter().find_map(|(candidate, option)| {
+            eq_ignore_ascii_case(name, candidate).then_some(*option)
+        })
+    }
+}
+
+struct StreamReadArgs<'a> {
+    count: Option<usize>,
+    streams: Vec<StreamReadStream<'a>>,
+}
+
+struct StreamReadStream<'a> {
+    key: &'a [u8],
+    after: StreamId,
+}
+
+fn xread(store: &EmbeddedStore, args: &[&[u8]], group: bool) -> Frame {
+    let parsed = match parse_stream_read_args(args, StreamReadCommand::from_group(group)) {
+        Ok(parsed) => parsed,
+        Err(frame) => return frame,
+    };
+    let mut streams = Vec::new();
+    for request in parsed.streams {
+        let stream = match load_stream(store, request.key) {
             Ok(stream) => stream,
             Err(frame) => return frame,
         };
         let mut entries = stream
             .entries
             .iter()
-            .filter(|entry| entry.id > after)
+            .filter(|entry| entry.id > request.after)
             .collect::<Vec<_>>();
-        if let Some(count) = count {
+        if let Some(count) = parsed.count {
             entries.truncate(count);
         }
         if !entries.is_empty() {
             streams.push(Frame::Array(vec![
-                bulk((*key).to_vec()),
+                bulk(request.key.to_vec()),
                 Frame::Array(entries.into_iter().map(entry_frame).collect()),
             ]));
         }
@@ -493,11 +713,301 @@ fn xread(store: &EmbeddedStore, args: &[&[u8]], group: bool) -> Frame {
     }
 }
 
-fn with_stream_mut(
+#[cfg(feature = "server")]
+fn write_stream_result<T>(
+    out: &mut BytesMut,
+    result: Result<T, Frame>,
+    write_ok: impl FnOnce(&mut BytesMut, T),
+) {
+    match result {
+        Ok(value) => write_ok(out, value),
+        Err(frame) => write_frame(out, &frame),
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_xrange_resp(store: &EmbeddedStore, args: &[&[u8]], rev: bool, out: &mut BytesMut) {
+    let command = StreamRangeCommand::from_rev(rev);
+    let parsed = match parse_stream_range_args(args, command) {
+        Ok(parsed) => parsed,
+        Err(frame) => {
+            write_frame(out, &frame);
+            return;
+        }
+    };
+    match load_stream(store, parsed.key) {
+        Ok(stream) => {
+            let mut entries = stream
+                .entries
+                .iter()
+                .filter(|entry| entry.id >= parsed.start && entry.id <= parsed.end)
+                .collect::<Vec<_>>();
+            if command.reverse() {
+                entries.reverse();
+            }
+            if let Some(count) = parsed.count {
+                entries.truncate(count);
+            }
+            write_resp_array_header(out, entries.len());
+            for entry in entries {
+                write_stream_entry_resp(out, entry);
+            }
+        }
+        Err(frame) => write_frame(out, &frame),
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_xread_resp(store: &EmbeddedStore, args: &[&[u8]], group: bool, out: &mut BytesMut) {
+    let parsed = match parse_stream_read_args(args, StreamReadCommand::from_group(group)) {
+        Ok(parsed) => parsed,
+        Err(frame) => {
+            write_frame(out, &frame);
+            return;
+        }
+    };
+    let mut streams = Vec::new();
+    for request in parsed.streams {
+        let stream = match load_stream(store, request.key) {
+            Ok(stream) => stream,
+            Err(frame) => {
+                write_frame(out, &frame);
+                return;
+            }
+        };
+        let mut entries = stream
+            .entries
+            .into_iter()
+            .filter(|entry| entry.id > request.after)
+            .collect::<Vec<_>>();
+        if let Some(count) = parsed.count {
+            entries.truncate(count);
+        }
+        if !entries.is_empty() {
+            streams.push((request.key, entries));
+        }
+    }
+    if streams.is_empty() {
+        write_resp_null(out);
+        return;
+    }
+    write_resp_array_header(out, streams.len());
+    for (key, entries) in streams {
+        write_resp_array_header(out, 2);
+        ServerWire::write_resp_blob_string(out, key);
+        write_resp_array_header(out, entries.len());
+        for entry in &entries {
+            write_stream_entry_resp(out, entry);
+        }
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_xgroup_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+    match args {
+        [sub, key, _group, id, tail @ ..] if eq_ignore_ascii_case(sub, b"CREATE") => {
+            let mkstream = tail
+                .iter()
+                .any(|arg| eq_ignore_ascii_case(arg, b"MKSTREAM"));
+            if mkstream || store.exists(key) {
+                match parse_stream_id(id).and_then(|id| set_stream_last_id_result(store, key, id)) {
+                    Ok(()) => write_resp_simple_string(out, "OK"),
+                    Err(frame) => write_frame(out, &frame),
+                }
+            } else {
+                ServerWire::write_resp_error(
+                    out,
+                    "ERR The XGROUP subcommand requires the key to exist",
+                );
+            }
+        }
+        [sub, key, _group, id] if eq_ignore_ascii_case(sub, b"SETID") => {
+            match parse_stream_id(id).and_then(|id| set_stream_last_id_result(store, key, id)) {
+                Ok(()) => write_resp_simple_string(out, "OK"),
+                Err(frame) => write_frame(out, &frame),
+            }
+        }
+        [sub, _key, _group] if eq_ignore_ascii_case(sub, b"DESTROY") => {
+            ServerWire::write_resp_integer(out, 0);
+        }
+        [sub, _key, _group, _consumer] if eq_ignore_ascii_case(sub, b"DELCONSUMER") => {
+            ServerWire::write_resp_integer(out, 0);
+        }
+        [sub, _key, _group, _consumer] if eq_ignore_ascii_case(sub, b"CREATECONSUMER") => {
+            ServerWire::write_resp_integer(out, 1);
+        }
+        [sub] if eq_ignore_ascii_case(sub, b"HELP") => write_bulk_array_resp(
+            out,
+            &[
+                b"XGROUP CREATE key group id [MKSTREAM]",
+                b"XGROUP SETID key group id",
+                b"XGROUP DESTROY key group",
+            ],
+        ),
+        _ => ServerWire::write_resp_error(
+            out,
+            "ERR unknown XGROUP subcommand or wrong number of arguments",
+        ),
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_xinfo_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+    match args {
+        [sub, key] if eq_ignore_ascii_case(sub, b"STREAM") => match load_stream(store, key) {
+            Ok(stream) => write_xinfo_stream_resp(out, &stream),
+            Err(frame) => write_frame(out, &frame),
+        },
+        [sub, _key] if eq_ignore_ascii_case(sub, b"GROUPS") => write_resp_array_header(out, 0),
+        [sub, _key, _group] if eq_ignore_ascii_case(sub, b"CONSUMERS") => {
+            write_resp_array_header(out, 0);
+        }
+        [sub] if eq_ignore_ascii_case(sub, b"HELP") => write_bulk_array_resp(
+            out,
+            &[
+                b"XINFO STREAM key",
+                b"XINFO GROUPS key",
+                b"XINFO CONSUMERS key group",
+            ],
+        ),
+        _ => ServerWire::write_resp_error(
+            out,
+            "ERR unknown XINFO subcommand or wrong number of arguments",
+        ),
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_xinfo_stream_resp(out: &mut BytesMut, stream: &StreamState) {
+    write_resp_array_header(out, 14);
+    ServerWire::write_resp_blob_string(out, b"length");
+    ServerWire::write_resp_integer(out, stream.entries.len() as i64);
+    ServerWire::write_resp_blob_string(out, b"radix-tree-keys");
+    ServerWire::write_resp_integer(out, 0);
+    ServerWire::write_resp_blob_string(out, b"radix-tree-nodes");
+    ServerWire::write_resp_integer(out, 0);
+    ServerWire::write_resp_blob_string(out, b"groups");
+    ServerWire::write_resp_integer(out, 0);
+    ServerWire::write_resp_blob_string(out, b"last-generated-id");
+    write_stream_id_bulk_resp(out, stream.last_id);
+    ServerWire::write_resp_blob_string(out, b"first-entry");
+    match stream.entries.first() {
+        Some(entry) => write_stream_entry_resp(out, entry),
+        None => write_resp_null(out),
+    }
+    ServerWire::write_resp_blob_string(out, b"last-entry");
+    match stream.entries.last() {
+        Some(entry) => write_stream_entry_resp(out, entry),
+        None => write_resp_null(out),
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_stream_entry_resp(out: &mut BytesMut, entry: &StreamEntry) {
+    write_resp_array_header(out, 2);
+    write_stream_id_bulk_resp(out, entry.id);
+    write_resp_array_header(out, entry.fields.len().saturating_mul(2));
+    for (field, value) in &entry.fields {
+        ServerWire::write_resp_blob_string(out, field);
+        ServerWire::write_resp_blob_string(out, value);
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_stream_id_bulk_resp(out: &mut BytesMut, id: StreamId) {
+    let mut ms_buf = itoa::Buffer::new();
+    let ms = ms_buf.format(id.ms).as_bytes();
+    let mut seq_buf = itoa::Buffer::new();
+    let seq = seq_buf.format(id.seq).as_bytes();
+    let mut len_buf = itoa::Buffer::new();
+    let len = len_buf.format(ms.len() + 1 + seq.len()).as_bytes();
+
+    out.extend_from_slice(b"$");
+    out.extend_from_slice(len);
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(ms);
+    out.extend_from_slice(b"-");
+    out.extend_from_slice(seq);
+    out.extend_from_slice(b"\r\n");
+}
+
+#[cfg(feature = "server")]
+fn write_bulk_array_resp(out: &mut BytesMut, values: &[&[u8]]) {
+    write_resp_array_header(out, values.len());
+    for value in values {
+        ServerWire::write_resp_blob_string(out, value);
+    }
+}
+
+fn parse_stream_read_args<'a>(
+    args: &'a [&'a [u8]],
+    command: StreamReadCommand,
+) -> Result<StreamReadArgs<'a>, Frame> {
+    let args = command.without_group_prefix(args)?;
+    let (count, args) = parse_stream_read_options(args)?;
+    let args = strip_streams_keyword(args)?;
+    Ok(StreamReadArgs {
+        count,
+        streams: parse_stream_read_streams(args, command)?,
+    })
+}
+
+fn parse_stream_read_options<'a>(
+    mut args: &'a [&'a [u8]],
+) -> Result<(Option<usize>, &'a [&'a [u8]]), Frame> {
+    let mut count = None;
+    while let Some((name, rest)) = args.split_first() {
+        let Some(option) = StreamReadOption::from_name(name) else {
+            break;
+        };
+        let (value, tail) = rest
+            .split_first()
+            .ok_or_else(|| error("ERR syntax error"))?;
+        match option {
+            StreamReadOption::Count => {
+                count = Some(
+                    parse_usize(value)
+                        .map_err(|_| error("ERR value is not an integer or out of range"))?,
+                );
+            }
+            StreamReadOption::Block => {}
+        }
+        args = tail;
+    }
+    Ok((count, args))
+}
+
+fn strip_streams_keyword<'a>(args: &'a [&'a [u8]]) -> Result<&'a [&'a [u8]], Frame> {
+    match args.split_first() {
+        Some((keyword, rest)) if eq_ignore_ascii_case(keyword, b"STREAMS") => Ok(rest),
+        _ => Err(error("ERR syntax error")),
+    }
+}
+
+fn parse_stream_read_streams<'a>(
+    args: &'a [&'a [u8]],
+    command: StreamReadCommand,
+) -> Result<Vec<StreamReadStream<'a>>, Frame> {
+    if args.is_empty() || args.len() % 2 != 0 {
+        return Err(error("ERR Unbalanced XREAD list of streams"));
+    }
+    let key_count = args.len() / 2;
+    let (keys, ids) = args.split_at(key_count);
+    keys.iter()
+        .zip(ids.iter())
+        .filter_map(|(key, raw_id)| match command.cursor_from_raw(raw_id) {
+            Ok(Some(after)) => Some(Ok(StreamReadStream { key: *key, after })),
+            Ok(None) => None,
+            Err(frame) => Some(Err(frame)),
+        })
+        .collect()
+}
+
+fn with_stream_mut<R>(
     store: &EmbeddedStore,
     key: &[u8],
-    mutate: impl FnOnce(&mut StreamState) -> Result<Frame, Frame>,
-) -> Result<Frame, Frame> {
+    mutate: impl FnOnce(&mut StreamState) -> Result<R, Frame>,
+) -> Result<R, Frame> {
     store.transform_string_value_no_ttl(
         key,
         |existing| {
@@ -512,7 +1022,7 @@ fn with_stream_mut(
 fn try_fast_append_stream(
     existing: Option<&[u8]>,
     id_arg: &[u8],
-    fields: &[(Vec<u8>, Vec<u8>)],
+    fields: &[(&[u8], &[u8])],
     trim: Option<StreamTrim>,
 ) -> Result<Option<(StreamId, Vec<u8>)>, Frame> {
     let header = match existing {
@@ -531,7 +1041,7 @@ fn try_fast_append_stream(
         return Ok(None);
     }
 
-    let entry_len = encoded_entry_len(fields);
+    let entry_len = encoded_borrowed_entry_len(fields);
     let mut out = match existing {
         Some(value) => {
             let mut out = Vec::with_capacity(value.len().saturating_add(entry_len));
@@ -552,18 +1062,17 @@ fn try_fast_append_stream(
     };
     write_stream_last_id(&mut out, id);
     write_u32_at(&mut out, ENTRY_COUNT_OFFSET, next_count);
-    append_encoded_entry(&mut out, id, fields);
+    append_encoded_borrowed_entry(&mut out, id, fields);
     Ok(Some((id, out)))
 }
 
 fn trim_requires_rebuild(trim: Option<StreamTrim>, next_len: usize) -> bool {
-    let Some(trim) = trim else {
-        return false;
-    };
-    if next_len <= trim.max_len {
-        return false;
+    match trim {
+        Some(trim) if next_len > trim.max_len => {
+            !trim.approximate || next_len > approximate_trim_threshold(trim.max_len)
+        }
+        _ => false,
     }
-    !trim.approximate || next_len > approximate_trim_threshold(trim.max_len)
 }
 
 fn approximate_trim_threshold(max_len: usize) -> usize {
@@ -575,41 +1084,51 @@ fn approximate_trim_threshold(max_len: usize) -> usize {
 }
 
 fn set_stream_last_id(store: &EmbeddedStore, key: &[u8], id: StreamId) -> Frame {
-    store
-        .transform_string_value_no_ttl(
-            key,
-            |existing| {
-                let out = match existing {
-                    Some(value) => {
-                        let mut out = value.to_vec();
-                        parse_stream_header(&out)?;
-                        write_stream_last_id(&mut out, id);
-                        out
-                    }
-                    None => {
-                        let mut out = Vec::with_capacity(STREAM_HEADER_LEN);
-                        write_stream_header(
-                            &mut out,
-                            StreamHeader {
-                                last_id: id,
-                                entry_count: 0,
-                            },
-                        );
-                        out
-                    }
-                };
-                Ok((simple("OK"), out))
-            },
-            wrongtype,
-        )
+    set_stream_last_id_result(store, key, id)
+        .map(|()| simple("OK"))
         .unwrap_or_else(|frame| frame)
 }
 
+fn set_stream_last_id_result(store: &EmbeddedStore, key: &[u8], id: StreamId) -> Result<(), Frame> {
+    store.transform_string_value_no_ttl(
+        key,
+        |existing| {
+            let out = match existing {
+                Some(value) => {
+                    let mut out = value.to_vec();
+                    parse_stream_header(&out)?;
+                    write_stream_last_id(&mut out, id);
+                    out
+                }
+                None => {
+                    let mut out = Vec::with_capacity(STREAM_HEADER_LEN);
+                    write_stream_header(
+                        &mut out,
+                        StreamHeader {
+                            last_id: id,
+                            entry_count: 0,
+                        },
+                    );
+                    out
+                }
+            };
+            Ok(((), out))
+        },
+        wrongtype,
+    )
+}
+
 fn load_stream_len(store: &EmbeddedStore, key: &[u8]) -> Result<usize, Frame> {
-    match optional_string_value(store, key, true) {
-        Ok(Some(value)) => parse_stream_header(&value).map(|header| header.entry_count as usize),
-        Ok(None) => Ok(0),
-        Err(frame) => Err(frame),
+    let mut parsed = None;
+    match store.get_string_value_into(key, |value| {
+        parsed =
+            Some(parse_stream_header(value.as_ref()).map(|header| header.entry_count as usize));
+    }) {
+        crate::storage::RedisStringLookup::Hit => {
+            parsed.expect("hit callback records stream parse result")
+        }
+        crate::storage::RedisStringLookup::Miss => Ok(0),
+        crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
     }
 }
 
@@ -693,7 +1212,26 @@ fn encoded_entry_len(fields: &[(Vec<u8>, Vec<u8>)]) -> usize {
     })
 }
 
+fn encoded_borrowed_entry_len(fields: &[(&[u8], &[u8])]) -> usize {
+    fields.iter().fold(8 + 8 + 4, |len, (field, value)| {
+        len.saturating_add(4)
+            .saturating_add(field.len())
+            .saturating_add(4)
+            .saturating_add(value.len())
+    })
+}
+
 fn append_encoded_entry(out: &mut Vec<u8>, id: StreamId, fields: &[(Vec<u8>, Vec<u8>)]) {
+    out.extend_from_slice(&id.ms.to_le_bytes());
+    out.extend_from_slice(&id.seq.to_le_bytes());
+    out.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+    for (field, value) in fields {
+        write_bytes(field, out);
+        write_bytes(value, out);
+    }
+}
+
+fn append_encoded_borrowed_entry(out: &mut Vec<u8>, id: StreamId, fields: &[(&[u8], &[u8])]) {
     out.extend_from_slice(&id.ms.to_le_bytes());
     out.extend_from_slice(&id.seq.to_le_bytes());
     out.extend_from_slice(&(fields.len() as u32).to_le_bytes());

@@ -232,7 +232,7 @@ impl FlatMap {
             .collect()
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     pub(crate) fn scan_keys_visit(
         &self,
         offset: usize,

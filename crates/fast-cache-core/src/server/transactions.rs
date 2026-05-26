@@ -6,15 +6,47 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use smallvec::SmallVec;
 
 use crate::config::TransactionMode;
-use crate::protocol::{BorrowedCommandParts, FastCommand, FastRequest};
+use crate::protocol::{
+    BorrowedCommandParts, FastCommand, FastCommandKind, FastRedisRouteKeys, FastRequest,
+};
 use crate::storage::{BorrowedCommand, EmbeddedRouteMode, EmbeddedStore};
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 use crate::storage::{RedisKeyStore, RedisObjectValue};
 
 use super::commands::BorrowedCommandContext;
-use super::wire::ServerWire;
+use super::direct_protocol::FcnpScanCommand;
+use super::wire::{RespProtocolVersion, ServerWire};
 
 const CROSSSLOT_ERROR: &str = "CROSSSLOT Keys in request don't hash to the same shard";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RespTransactionCommand {
+    #[cfg(feature = "redis")]
+    Watch,
+    #[cfg(feature = "redis")]
+    Unwatch,
+    Multi,
+    Discard,
+    Exec,
+}
+
+impl RespTransactionCommand {
+    const NAMES: &'static [(&'static [u8], Self)] = &[
+        #[cfg(feature = "redis")]
+        (b"WATCH", Self::Watch),
+        #[cfg(feature = "redis")]
+        (b"UNWATCH", Self::Unwatch),
+        (b"MULTI", Self::Multi),
+        (b"DISCARD", Self::Discard),
+        (b"EXEC", Self::Exec),
+    ];
+
+    pub(super) fn from_name(name: &[u8]) -> Option<Self> {
+        Self::NAMES.iter().find_map(|(candidate, command)| {
+            name.eq_ignore_ascii_case(candidate).then_some(*command)
+        })
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct TransactionCoordinator {
@@ -91,7 +123,7 @@ impl TransactionCoordinator {
         debug_assert!(previous > 0, "transaction coordinator underflow");
     }
 
-    fn has_active_transactions(&self) -> bool {
+    pub(super) fn has_active_transactions(&self) -> bool {
         self.active_transactions.load(Ordering::Acquire) != 0
     }
 
@@ -113,7 +145,13 @@ impl TransactionCoordinator {
         }
     }
 
-    fn execute(&self, store: &EmbeddedStore, commands: &[QueuedCommand], out: &mut BytesMut) {
+    fn execute(
+        &self,
+        store: &EmbeddedStore,
+        commands: &[QueuedCommand],
+        out: &mut BytesMut,
+        resp_protocol: RespProtocolVersion,
+    ) {
         let shards = transaction_shards(store, commands);
         if self.mode == TransactionMode::ShardLocal && shards.len() > 1 {
             ServerWire::write_resp_error(out, CROSSSLOT_ERROR);
@@ -130,6 +168,7 @@ impl TransactionCoordinator {
                     out,
                     fast_write_queue: None,
                     single_threaded: false,
+                    resp_protocol,
                 }),
                 Err(error) => ServerWire::write_resp_error(out, &format!("ERR {error}")),
             }
@@ -159,7 +198,7 @@ pub(super) struct TransactionState {
     dirty: bool,
     active: bool,
     counted_active: bool,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     watched: Vec<WatchedKey>,
 }
 
@@ -180,42 +219,41 @@ impl TransactionState {
         store: &EmbeddedStore,
         parts: &[&[u8]],
         out: &mut BytesMut,
+        resp_protocol: RespProtocolVersion,
     ) -> bool {
-        let Some(command) = parts.first().copied() else {
-            return false;
-        };
-
-        #[cfg(feature = "redis-compat")]
+        match parts
+            .first()
+            .copied()
+            .and_then(RespTransactionCommand::from_name)
         {
-            if command.eq_ignore_ascii_case(b"WATCH") {
+            #[cfg(feature = "redis")]
+            Some(RespTransactionCommand::Watch) => {
                 self.watch(coordinator, store, parts, out);
-                return true;
+                true
             }
-            if command.eq_ignore_ascii_case(b"UNWATCH") {
+            #[cfg(feature = "redis")]
+            Some(RespTransactionCommand::Unwatch) => {
                 self.unwatch(coordinator, parts, out);
-                return true;
+                true
             }
+            Some(RespTransactionCommand::Multi) => {
+                self.multi(coordinator, parts, out);
+                true
+            }
+            Some(RespTransactionCommand::Discard) => {
+                self.discard(coordinator, parts, out);
+                true
+            }
+            Some(RespTransactionCommand::Exec) => {
+                self.exec(coordinator, store, parts, out, resp_protocol);
+                true
+            }
+            None if self.active => {
+                self.queue_command(parts, out);
+                true
+            }
+            None => false,
         }
-
-        if command.eq_ignore_ascii_case(b"MULTI") {
-            self.multi(coordinator, parts, out);
-            return true;
-        }
-        if command.eq_ignore_ascii_case(b"DISCARD") {
-            self.discard(coordinator, parts, out);
-            return true;
-        }
-        if command.eq_ignore_ascii_case(b"EXEC") {
-            self.exec(coordinator, store, parts, out);
-            return true;
-        }
-
-        if !self.active {
-            return false;
-        }
-
-        self.queue_command(parts, out);
-        true
     }
 
     fn multi(
@@ -269,6 +307,7 @@ impl TransactionState {
         store: &EmbeddedStore,
         parts: &[&[u8]],
         out: &mut BytesMut,
+        resp_protocol: RespProtocolVersion,
     ) {
         if parts.len() != 1 {
             write_wrong_arity(out, "exec");
@@ -286,7 +325,7 @@ impl TransactionState {
             );
             return;
         }
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         if self.watched_keys_changed(store) {
             self.clear(coordinator);
             write_null_array(out);
@@ -300,9 +339,9 @@ impl TransactionState {
         };
         let queued = std::mem::take(&mut self.queued);
         self.active = false;
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.watched.clear();
-        coordinator.execute(store, &queued, out);
+        coordinator.execute(store, &queued, out, resp_protocol);
         self.finish_counted_transaction(Some(coordinator));
     }
 
@@ -328,7 +367,7 @@ impl TransactionState {
         self.queued.clear();
         self.dirty = false;
         self.active = false;
-        #[cfg(feature = "redis-compat")]
+        #[cfg(feature = "redis")]
         self.watched.clear();
     }
 
@@ -341,7 +380,7 @@ impl TransactionState {
         }
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     fn watch(
         &mut self,
         coordinator: Option<&TransactionCoordinator>,
@@ -371,7 +410,7 @@ impl TransactionState {
         }
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     fn unwatch(
         &mut self,
         coordinator: Option<&TransactionCoordinator>,
@@ -388,7 +427,7 @@ impl TransactionState {
         }
     }
 
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     fn watched_keys_changed(&self, store: &EmbeddedStore) -> bool {
         self.watched
             .iter()
@@ -396,14 +435,14 @@ impl TransactionState {
     }
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[derive(Debug)]
 struct WatchedKey {
     key: Vec<u8>,
     snapshot: WatchedSnapshot,
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[derive(Debug, Clone, PartialEq)]
 enum WatchedSnapshot {
     Missing,
@@ -411,7 +450,7 @@ enum WatchedSnapshot {
     Object(RedisObjectValue),
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 impl WatchedSnapshot {
     fn capture(store: &EmbeddedStore, key: &[u8]) -> Self {
         if let Some(value) = store.get_value_bytes(key) {
@@ -453,15 +492,25 @@ pub(super) fn command_shards(store: &EmbeddedStore, parts: &[&[u8]]) -> Vec<usiz
     let Some((command, args)) = parts.split_first() else {
         return Vec::new();
     };
-    if is_fcnp_scan_shard_command(command) {
+    if FcnpScanCommand::from_name(command) == Some(FcnpScanCommand::ScanShard) {
         return fcnp_scan_shard(store, args);
     }
-    let keys = command_keys(command, args);
+    route_keys_to_shards(store, command_route_keys(command, args))
+}
+
+fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'_>) -> Vec<usize> {
+    match &request.command {
+        FastCommand::RespCommand { parts } => return command_shards(store, parts),
+        command => route_keys_to_shards(store, command.route_keys()),
+    }
+}
+
+fn route_keys_to_shards(store: &EmbeddedStore, route_keys: FastRedisRouteKeys<'_>) -> Vec<usize> {
     let mut shards = BTreeSet::new();
-    match keys {
-        CommandKeys::None => {}
-        CommandKeys::AllShards => shards.extend(0..store.shard_count()),
-        CommandKeys::Keys(keys) => {
+    match route_keys {
+        FastRedisRouteKeys::None => {}
+        FastRedisRouteKeys::AllShards => shards.extend(0..store.shard_count()),
+        FastRedisRouteKeys::Keys(keys) => {
             for key in keys {
                 shards.insert(store.route_key(key).shard_id);
             }
@@ -470,155 +519,22 @@ pub(super) fn command_shards(store: &EmbeddedStore, parts: &[&[u8]]) -> Vec<usiz
     shards.into_iter().collect()
 }
 
-fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'_>) -> Vec<usize> {
-    let mut shards = BTreeSet::new();
-    match &request.command {
-        FastCommand::RespCommand { parts } => return command_shards(store, parts),
-        FastCommand::RedisCommand { kind, args } => {
-            if let Some(command) = kind.redis_name() {
-                let mut parts = Vec::with_capacity(args.len() + 1);
-                parts.push(command.as_bytes());
-                parts.extend(args.iter().copied());
-                return command_shards(store, &parts);
-            }
-        }
-        FastCommand::MGet { keys } => {
-            shards.extend(keys.iter().map(|key| store.route_key(key).shard_id));
-        }
-        FastCommand::MSet { items } => {
-            shards.extend(items.iter().map(|(key, _)| store.route_key(key).shard_id));
-        }
-        command => {
-            if let Some(key) = command.route_key() {
-                shards.insert(store.route_key(key).shard_id);
-            }
-        }
+fn command_route_keys<'a>(command: &[u8], args: &'a [&'a [u8]]) -> FastRedisRouteKeys<'a> {
+    if FcnpScanCommand::from_name(command) == Some(FcnpScanCommand::Scan) {
+        return FastRedisRouteKeys::AllShards;
     }
-    shards.into_iter().collect()
-}
-
-enum CommandKeys<'a> {
-    None,
-    AllShards,
-    Keys(SmallVec<[&'a [u8]; 8]>),
-}
-
-fn command_keys<'a>(command: &[u8], args: &'a [&'a [u8]]) -> CommandKeys<'a> {
-    if is_no_key_command(command) {
-        return CommandKeys::None;
+    if let Some(kind) = FastCommandKind::from_redis_name(command) {
+        return kind.redis_route_keys(args);
     }
-    if is_all_shard_command(command) {
-        return CommandKeys::AllShards;
-    }
-    if command.eq_ignore_ascii_case(b"DEL")
-        || command.eq_ignore_ascii_case(b"UNLINK")
-        || command.eq_ignore_ascii_case(b"TOUCH")
-        || command.eq_ignore_ascii_case(b"MGET")
-        || command.eq_ignore_ascii_case(b"SUNION")
-        || command.eq_ignore_ascii_case(b"SINTER")
-        || command.eq_ignore_ascii_case(b"SDIFF")
-    {
-        return CommandKeys::Keys(args.iter().copied().collect());
-    }
-    if command.eq_ignore_ascii_case(b"MSET") || command.eq_ignore_ascii_case(b"MSETNX") {
-        return every_nth_key(args, 0, 2);
-    }
-    if command.eq_ignore_ascii_case(b"COPY")
-        || command.eq_ignore_ascii_case(b"RENAME")
-        || command.eq_ignore_ascii_case(b"RENAMENX")
-        || command.eq_ignore_ascii_case(b"RPOPLPUSH")
-        || command.eq_ignore_ascii_case(b"BRPOPLPUSH")
-        || command.eq_ignore_ascii_case(b"LMOVE")
-        || command.eq_ignore_ascii_case(b"BLMOVE")
-        || command.eq_ignore_ascii_case(b"SMOVE")
-    {
-        return first_n_keys(args, 2);
-    }
-    if command.eq_ignore_ascii_case(b"OBJECT") {
-        return first_n_keys(args.get(1..).unwrap_or_default(), 1);
-    }
-    if command.eq_ignore_ascii_case(b"MEMORY") {
-        return first_n_keys(args.get(1..).unwrap_or_default(), 1);
-    }
-    if command.eq_ignore_ascii_case(b"BITOP") {
-        return CommandKeys::Keys(args.iter().skip(1).copied().collect());
-    }
-    if command.eq_ignore_ascii_case(b"LMPOP") || command.eq_ignore_ascii_case(b"ZMPOP") {
-        return counted_keys(args, 0);
-    }
-    if command.eq_ignore_ascii_case(b"EVAL") || command.eq_ignore_ascii_case(b"EVALSHA") {
-        return counted_keys(args, 1);
-    }
-    if command.eq_ignore_ascii_case(b"BLMPOP") || command.eq_ignore_ascii_case(b"BZMPOP") {
-        return counted_keys(args, 1);
-    }
-    if command.eq_ignore_ascii_case(b"BLPOP")
-        || command.eq_ignore_ascii_case(b"BRPOP")
-        || command.eq_ignore_ascii_case(b"BZPOPMIN")
-        || command.eq_ignore_ascii_case(b"BZPOPMAX")
-    {
-        return keys_before_last_arg(args);
-    }
-    if command.eq_ignore_ascii_case(b"SUNIONSTORE")
-        || command.eq_ignore_ascii_case(b"SINTERSTORE")
-        || command.eq_ignore_ascii_case(b"SDIFFSTORE")
-    {
-        return first_and_tail_keys(args, 0, 1);
-    }
-    if command.eq_ignore_ascii_case(b"ZUNIONSTORE")
-        || command.eq_ignore_ascii_case(b"ZINTERSTORE")
-        || command.eq_ignore_ascii_case(b"ZDIFFSTORE")
-    {
-        return zaggregate_store_keys(args);
-    }
-    if command.eq_ignore_ascii_case(b"ZUNION")
-        || command.eq_ignore_ascii_case(b"ZINTER")
-        || command.eq_ignore_ascii_case(b"ZDIFF")
-        || command.eq_ignore_ascii_case(b"ZINTERCARD")
-    {
-        return counted_keys(args, 0);
-    }
-    if command.eq_ignore_ascii_case(b"ZRANGESTORE") {
-        return first_n_keys(args, 2);
-    }
-    first_n_keys(args, 1)
-}
-
-fn is_no_key_command(command: &[u8]) -> bool {
-    command.eq_ignore_ascii_case(b"PING")
-        || command.eq_ignore_ascii_case(b"AUTH")
-        || command.eq_ignore_ascii_case(b"HELLO")
-        || command.eq_ignore_ascii_case(b"SELECT")
-        || command.eq_ignore_ascii_case(b"QUIT")
-        || command.eq_ignore_ascii_case(b"ECHO")
-        || command.eq_ignore_ascii_case(b"COMMAND")
-        || command.eq_ignore_ascii_case(b"CONFIG")
-        || command.eq_ignore_ascii_case(b"CLIENT")
-        || command.eq_ignore_ascii_case(b"TIME")
-        || command.eq_ignore_ascii_case(b"INFO")
-        || command.eq_ignore_ascii_case(b"DBSIZE")
-        || command.eq_ignore_ascii_case(b"SCRIPT")
-}
-
-fn is_all_shard_command(command: &[u8]) -> bool {
-    command.eq_ignore_ascii_case(b"KEYS")
-        || command.eq_ignore_ascii_case(b"SCAN")
-        || command.eq_ignore_ascii_case(b"RANDOMKEY")
-        || command.eq_ignore_ascii_case(b"FLUSHDB")
-        || command.eq_ignore_ascii_case(b"FLUSHALL")
-        || command.eq_ignore_ascii_case(b"FCNP.SCAN")
-}
-
-fn is_fcnp_scan_shard_command(command: &[u8]) -> bool {
-    command.eq_ignore_ascii_case(b"FCNP.SCANSHARD")
-        || command.eq_ignore_ascii_case(b"FCNP.SCAN.SHARD")
+    supplemental_command_key_spec(command)
+        .map(|spec| spec.route_keys(args))
+        .unwrap_or_else(|| first_n_route_keys(args, 1))
 }
 
 fn fcnp_scan_shard(store: &EmbeddedStore, args: &[&[u8]]) -> Vec<usize> {
     match args
         .first()
-        .and_then(|raw| std::str::from_utf8(raw).ok())
-        .and_then(|raw| raw.parse::<usize>().ok())
+        .and_then(|raw| parse_ascii_usize(raw))
         .filter(|shard_id| *shard_id < store.shard_count())
     {
         Some(shard_id) => vec![shard_id],
@@ -626,67 +542,178 @@ fn fcnp_scan_shard(store: &EmbeddedStore, args: &[&[u8]]) -> Vec<usize> {
     }
 }
 
-fn first_n_keys<'a>(args: &'a [&'a [u8]], count: usize) -> CommandKeys<'a> {
-    CommandKeys::Keys(args.iter().take(count).copied().collect())
+#[derive(Clone, Copy)]
+enum SupplementalCommandKeySpec {
+    None,
+    AllShards,
+    AllArgs,
+    At(usize),
+    Counted { numkeys_index: usize },
+    StreamRead,
+    Sort,
 }
 
-fn every_nth_key<'a>(args: &'a [&'a [u8]], start: usize, step: usize) -> CommandKeys<'a> {
-    CommandKeys::Keys(args.iter().skip(start).step_by(step).copied().collect())
-}
-
-fn first_and_tail_keys<'a>(
-    args: &'a [&'a [u8]],
-    first_count: usize,
-    tail_start: usize,
-) -> CommandKeys<'a> {
-    let mut keys = SmallVec::new();
-    keys.extend(args.iter().take(first_count).copied());
-    keys.extend(args.iter().skip(tail_start).copied());
-    CommandKeys::Keys(keys)
-}
-
-fn keys_before_last_arg<'a>(args: &'a [&'a [u8]]) -> CommandKeys<'a> {
-    CommandKeys::Keys(
-        args.iter()
-            .take(args.len().saturating_sub(1))
-            .copied()
-            .collect(),
-    )
-}
-
-fn counted_keys<'a>(args: &'a [&'a [u8]], numkeys_index: usize) -> CommandKeys<'a> {
-    let Some(raw_numkeys) = args.get(numkeys_index) else {
-        return CommandKeys::AllShards;
-    };
-    let Ok(numkeys) = std::str::from_utf8(raw_numkeys)
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .ok_or(())
-    else {
-        return CommandKeys::AllShards;
-    };
-    let key_start = numkeys_index + 1;
-    if numkeys == 0 || args.len() < key_start + numkeys {
-        return CommandKeys::AllShards;
+impl SupplementalCommandKeySpec {
+    fn route_keys<'a>(self, args: &'a [&'a [u8]]) -> FastRedisRouteKeys<'a> {
+        match self {
+            Self::None => FastRedisRouteKeys::None,
+            Self::AllShards => FastRedisRouteKeys::AllShards,
+            Self::AllArgs => all_route_keys(args),
+            Self::At(index) => args
+                .get(index)
+                .copied()
+                .map(|key| FastRedisRouteKeys::Keys(vec![key]))
+                .unwrap_or(FastRedisRouteKeys::None),
+            Self::Counted { numkeys_index } => counted_route_keys(args, numkeys_index),
+            Self::StreamRead => stream_read_route_keys(args),
+            Self::Sort => sort_route_keys(args),
+        }
     }
-    CommandKeys::Keys(args.iter().skip(key_start).take(numkeys).copied().collect())
 }
 
-fn zaggregate_store_keys<'a>(args: &'a [&'a [u8]]) -> CommandKeys<'a> {
-    if args.len() < 2 {
-        return first_n_keys(args, 1);
+struct SupplementalCommandKeyEntry {
+    names: &'static [&'static [u8]],
+    spec: SupplementalCommandKeySpec,
+}
+
+const SUPPLEMENTAL_COMMAND_KEY_SPECS: &[SupplementalCommandKeyEntry] = &[
+    SupplementalCommandKeyEntry {
+        names: &[
+            b"ASKING",
+            b"BGREWRITEAOF",
+            b"BGSAVE",
+            b"CLUSTER",
+            b"DEBUG",
+            b"HOST:",
+            b"LASTSAVE",
+            b"LATENCY",
+            b"LOLWUT",
+            b"MODULE",
+            b"MONITOR",
+            b"POST",
+            b"PSUBSCRIBE",
+            b"PSYNC",
+            b"PUBSUB",
+            b"PUNSUBSCRIBE",
+            b"READONLY",
+            b"READWRITE",
+            b"REPLCONF",
+            b"REPLICAOF",
+            b"ROLE",
+            b"SAVE",
+            b"SCRIPT",
+            b"SHUTDOWN",
+            b"SLAVEOF",
+            b"SLOWLOG",
+            b"SUBSCRIBE",
+            b"SYNC",
+            b"UNSUBSCRIBE",
+            b"WAIT",
+        ],
+        spec: SupplementalCommandKeySpec::None,
+    },
+    SupplementalCommandKeyEntry {
+        names: &[b"EVAL", b"EVALSHA"],
+        spec: SupplementalCommandKeySpec::Counted { numkeys_index: 1 },
+    },
+    SupplementalCommandKeyEntry {
+        names: &[b"MIGRATE", b"SWAPDB"],
+        spec: SupplementalCommandKeySpec::AllShards,
+    },
+    SupplementalCommandKeyEntry {
+        names: &[b"PFCOUNT", b"PFMERGE"],
+        spec: SupplementalCommandKeySpec::AllArgs,
+    },
+    SupplementalCommandKeyEntry {
+        names: &[b"PFDEBUG", b"XGROUP", b"XINFO"],
+        spec: SupplementalCommandKeySpec::At(1),
+    },
+    SupplementalCommandKeyEntry {
+        names: &[b"PFSELFTEST", b"PUBLISH"],
+        spec: SupplementalCommandKeySpec::None,
+    },
+    SupplementalCommandKeyEntry {
+        names: &[b"XREAD", b"XREADGROUP"],
+        spec: SupplementalCommandKeySpec::StreamRead,
+    },
+    SupplementalCommandKeyEntry {
+        names: &[b"SORT"],
+        spec: SupplementalCommandKeySpec::Sort,
+    },
+];
+
+fn supplemental_command_key_spec(command: &[u8]) -> Option<SupplementalCommandKeySpec> {
+    SUPPLEMENTAL_COMMAND_KEY_SPECS
+        .iter()
+        .find(|entry| {
+            entry
+                .names
+                .iter()
+                .any(|name| command.eq_ignore_ascii_case(name))
+        })
+        .map(|entry| entry.spec)
+}
+
+fn all_route_keys<'a>(args: &'a [&'a [u8]]) -> FastRedisRouteKeys<'a> {
+    FastRedisRouteKeys::Keys(args.to_vec())
+}
+
+fn first_n_route_keys<'a>(args: &'a [&'a [u8]], count: usize) -> FastRedisRouteKeys<'a> {
+    FastRedisRouteKeys::Keys(args.iter().take(count).copied().collect())
+}
+
+fn counted_route_keys<'a>(args: &'a [&'a [u8]], numkeys_index: usize) -> FastRedisRouteKeys<'a> {
+    match counted_key_span(args, numkeys_index) {
+        Some(keys) => FastRedisRouteKeys::Keys(keys.to_vec()),
+        None => FastRedisRouteKeys::AllShards,
     }
-    let Ok(numkeys) = std::str::from_utf8(args[1])
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .ok_or(())
+}
+
+fn counted_key_span<'a>(args: &'a [&'a [u8]], numkeys_index: usize) -> Option<&'a [&'a [u8]]> {
+    let numkeys = args
+        .get(numkeys_index)
+        .and_then(|raw| parse_ascii_usize(raw))?;
+    let key_start = numkeys_index.checked_add(1)?;
+    let key_end = key_start.checked_add(numkeys)?;
+    match numkeys {
+        0 => None,
+        _ => args.get(key_start..key_end),
+    }
+}
+
+fn parse_ascii_usize(raw: &[u8]) -> Option<usize> {
+    std::str::from_utf8(raw).ok()?.parse().ok()
+}
+
+fn stream_read_route_keys<'a>(args: &'a [&'a [u8]]) -> FastRedisRouteKeys<'a> {
+    let Some(streams_index) = args
+        .iter()
+        .position(|arg| arg.eq_ignore_ascii_case(b"STREAMS"))
     else {
-        return CommandKeys::AllShards;
+        return FastRedisRouteKeys::AllShards;
     };
-    let mut keys = SmallVec::new();
-    keys.push(args[0]);
-    keys.extend(args.iter().skip(2).take(numkeys).copied());
-    CommandKeys::Keys(keys)
+    let stream_args = &args[streams_index + 1..];
+    if stream_args.len() < 2 || stream_args.len() % 2 != 0 {
+        return FastRedisRouteKeys::AllShards;
+    }
+    let key_count = stream_args.len() / 2;
+    FastRedisRouteKeys::Keys(stream_args.iter().take(key_count).copied().collect())
+}
+
+fn sort_route_keys<'a>(args: &'a [&'a [u8]]) -> FastRedisRouteKeys<'a> {
+    let Some(source) = args.first().copied() else {
+        return FastRedisRouteKeys::None;
+    };
+    let mut keys = vec![source];
+    let mut index = 1;
+    while index + 1 < args.len() {
+        if args[index].eq_ignore_ascii_case(b"STORE") {
+            keys.push(args[index + 1]);
+            break;
+        }
+        index += 1;
+    }
+    FastRedisRouteKeys::Keys(keys)
 }
 
 fn write_simple_string(out: &mut BytesMut, value: &str) {
@@ -695,7 +722,7 @@ fn write_simple_string(out: &mut BytesMut, value: &str) {
     out.extend_from_slice(b"\r\n");
 }
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 fn write_null_array(out: &mut BytesMut) {
     out.extend_from_slice(b"*-1\r\n");
 }

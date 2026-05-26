@@ -5,7 +5,7 @@ use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use rblock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(feature = "telemetry")]
 use std::sync::Arc;
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "telemetry")]
 use std::time::Instant;
@@ -16,7 +16,7 @@ use crate::storage::{
 };
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 use crate::storage::{
     RedisObjectArrayItem, RedisObjectBucket, RedisObjectError, RedisObjectReadOutcome,
     RedisObjectResult, RedisObjectStore, RedisObjectValue, RedisObjectWriteAttempt,
@@ -28,11 +28,11 @@ use crate::storage::{ShardStatsSnapshot, TierStatsSnapshot};
 mod batch;
 mod batch_results;
 mod core;
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[path = "../../../fast-cache-redis/src/storage/embedded_store/key_scan.rs"]
 mod key_scan;
 mod lifecycle;
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 #[path = "../../../fast-cache-redis/src/storage/embedded_store/objects.rs"]
 mod objects;
 mod owned;
@@ -43,9 +43,9 @@ mod shard;
 mod views;
 mod write;
 
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 pub(crate) use key_scan::{DEFAULT_SCAN_COUNT, RedisKeyScanType};
-#[cfg(feature = "redis-compat")]
+#[cfg(feature = "redis")]
 pub(crate) use objects::{
     RedisHashStore, RedisKeyStore, RedisListStore, RedisObjectStoreAccess, RedisSetStore,
     RedisStringStore, RedisZSetStore,
@@ -79,14 +79,14 @@ pub use views::{
 /// `EmbeddedStore` is internally sharded and can be shared across threads. It
 /// offers byte-string key/value methods, TTL management, batch reads and
 /// writes, and session-oriented packed transfer APIs. Redis/Valkey object
-/// helpers are available with the `redis-compat` feature.
+/// helpers are available with the `redis` feature.
 #[derive(Debug)]
 pub struct EmbeddedStore {
     shards: Box<[CachePadded<RwLock<EmbeddedShard>>]>,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     string_key_counts: Box<[CachePadded<AtomicUsize>]>,
     shift: u32,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     objects: RedisObjectStore,
     route_mode: EmbeddedRouteMode,
     #[cfg(feature = "telemetry")]

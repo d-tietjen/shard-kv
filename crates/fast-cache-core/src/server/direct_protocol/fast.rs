@@ -153,6 +153,7 @@ impl DirectProtocol {
                     out,
                     fast_write_queue: None,
                     single_threaded,
+                    resp_protocol: RespProtocolVersion::Resp2,
                 });
                 ServerWire::finish_fast_value(out, start);
             }
@@ -172,17 +173,13 @@ impl DirectProtocol {
         single_threaded: bool,
         started_at: Instant,
     ) {
-        #[cfg(feature = "redis-compat")]
-        if command.eq_ignore_ascii_case(b"FCNP.SCAN") {
-            crate::commands::redis::write_fcnp_scan_fast_response(store, args, out);
-            return;
-        }
-        #[cfg(feature = "redis-compat")]
-        if command.eq_ignore_ascii_case(b"FCNP.SCANSHARD")
-            || command.eq_ignore_ascii_case(b"FCNP.SCAN.SHARD")
-        {
-            crate::commands::redis::write_fcnp_scan_shard_fast_response(store, args, out);
-            return;
+        #[cfg(feature = "redis")]
+        match FcnpScanCommand::from_name(command) {
+            Some(command) => {
+                command.write_fast_response(store, args, out);
+                return;
+            }
+            None => {}
         }
         let mut direct_args = RespDirectArgs::new();
         direct_args.extend(args.iter().copied());
@@ -195,6 +192,7 @@ impl DirectProtocol {
                     out,
                     None,
                     single_threaded,
+                    RespProtocolVersion::Resp2,
                     started_at,
                 );
                 ServerWire::finish_fast_value(out, start);
@@ -229,19 +227,21 @@ impl DirectProtocol {
         single_threaded: bool,
         started_at: Instant,
     ) -> bool {
-        let Some(decoded) = DirectProtocol::decoded_fast_redis_command(command) else {
-            return false;
-        };
-        let args = decoded.args.iter().map(Vec::as_slice).collect::<Vec<_>>();
-        DirectProtocol::execute_fast_redis_parts(
-            store,
-            decoded.command,
-            &args,
-            out,
-            single_threaded,
-            started_at,
-        );
-        true
+        match DirectProtocol::decoded_fast_redis_command(command) {
+            Some(decoded) => {
+                let args = decoded.args.iter().map(Vec::as_slice).collect::<Vec<_>>();
+                DirectProtocol::execute_fast_redis_parts(
+                    store,
+                    decoded.command,
+                    &args,
+                    out,
+                    single_threaded,
+                    started_at,
+                );
+                true
+            }
+            None => false,
+        }
     }
 }
 

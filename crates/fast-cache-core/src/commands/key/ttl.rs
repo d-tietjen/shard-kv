@@ -73,8 +73,7 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedTtl<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        Box::pin(async move { Ttl::execute_engine_frame(ctx, key).await })
+        Box::pin(async move { Ttl::execute_engine_frame(ctx, self.key).await })
     }
 
     #[cfg(feature = "server")]

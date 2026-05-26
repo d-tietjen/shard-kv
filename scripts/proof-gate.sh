@@ -26,8 +26,8 @@ quick() {
 
 redis() {
   quick
-  cargo test -p fast-cache-core --features redis-compat
-  cargo test -p fast-cache-core --features redis-compat,server raw_resp_
+  cargo test -p fast-cache-core --features redis
+  cargo test -p fast-cache-core --features redis,server raw_resp_
   FAST_CACHE_COMPAT_SERVER_BIN="${FAST_CACHE_COMPAT_SERVER_BIN:-redis-server}" \
     cargo test -p fast-cache-core --features redis-server \
     --test redis_compat_differential_test -- --nocapture

@@ -583,7 +583,9 @@ fn run_worker(
             Instant::now() + warmup,
             None,
         )?;
-        // Warmup can stop between stateful command pairs, so reset before timing.
+        // Warmup can stop between stateful command pairs, so reconnect before
+        // timing to clear connection-local state such as Pub/Sub subscriptions.
+        conn = BenchConn::connect(target.protocol, &addr)?;
         run_setup(&mut conn, cases, &suffixes, fixture_scope)?;
     }
 

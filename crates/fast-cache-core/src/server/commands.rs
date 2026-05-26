@@ -1,4 +1,5 @@
 use super::direct_protocol::*;
+use super::wire::RespProtocolVersion;
 use super::*;
 
 #[cfg(feature = "embedded")]
@@ -13,6 +14,7 @@ pub(crate) struct RawCommandContext<'store, 'args, 'out, 'queue> {
     pub(crate) out: &'out mut BytesMut,
     pub(crate) fast_write_queue: Option<&'queue mut FastWriteQueue>,
     pub(crate) single_threaded: bool,
+    pub(crate) resp_protocol: RespProtocolVersion,
 }
 
 #[cfg(feature = "embedded")]
@@ -30,6 +32,7 @@ pub(crate) trait RawDirectCommand: crate::commands::CommandMetadata {
             out,
             fast_write_queue: None,
             single_threaded: false,
+            resp_protocol: RespProtocolVersion::Resp2,
         });
         crate::server::wire::ServerWire::finish_fast_value(out, start);
     }
@@ -52,6 +55,7 @@ pub(crate) struct BorrowedCommandContext<'store, 'out, 'queue> {
     pub(crate) out: &'out mut BytesMut,
     pub(crate) fast_write_queue: Option<&'queue mut FastWriteQueue>,
     pub(crate) single_threaded: bool,
+    pub(crate) resp_protocol: RespProtocolVersion,
 }
 
 #[cfg(feature = "embedded")]
@@ -328,7 +332,7 @@ pub(super) struct FastCommandDispatcher;
 pub(super) struct DirectFastCommandDispatcher;
 
 #[cfg(feature = "embedded")]
-static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
+pub(super) static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::get::COMMAND,
     &crate::commands::set::COMMAND,
     &crate::commands::del::COMMAND,
@@ -337,282 +341,634 @@ static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::pttl::COMMAND,
     &crate::commands::expire::COMMAND,
     &crate::commands::pexpire::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::expireat::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::pexpireat::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::expiretime::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::pexpiretime::COMMAND,
     &crate::commands::persist::COMMAND,
     &crate::commands::getex::COMMAND,
     &crate::commands::setex::COMMAND,
     &crate::commands::psetex::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::ASKING_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::BGREWRITEAOF_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::BGSAVE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::CLUSTER_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::DEBUG_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::HOST_WARNING_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::LASTSAVE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::LATENCY_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::LOLWUT_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::MIGRATE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::MODULE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::MONITOR_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::MOVE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::POST_WARNING_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::PSYNC_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::READONLY_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::READWRITE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::REPLCONF_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::REPLICAOF_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::ROLE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::SAVE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::SHUTDOWN_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::SLOWLOG_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::SORT_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::SWAPDB_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::SYNC_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::admin::WAIT_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::command::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::scripting::EVAL_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::scripting::EVALSHA_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::scripting::SCRIPT_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::keys::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::scan::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::object::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::touch::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::randomkey::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::flush::FLUSHDB_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::flush::FLUSHALL_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::memory::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::pubsub::PUBLISH_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::pubsub::PUBSUB_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::pubsub::SUBSCRIBE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::pubsub::UNSUBSCRIBE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::pubsub::PSUBSCRIBE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::pubsub::PUNSUBSCRIBE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hll::PFADD_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hll::PFCOUNT_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hll::PFMERGE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hll::PFDEBUG_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hll::PFSELFTEST_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::geo::GEOADD_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::geo::GEODIST_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::geo::GEOHASH_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::geo::GEOPOS_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::geo::GEORADIUS_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::geo::GEORADIUSBYMEMBER_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::geo::GEORADIUS_RO_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::geo::GEORADIUSBYMEMBER_RO_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XACK_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XADD_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XCLAIM_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XDEL_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XGROUP_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XINFO_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XLEN_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XPENDING_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XRANGE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XREAD_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XREADGROUP_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XREVRANGE_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XSETID_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::stream::XTRIM_COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::copy::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::dump::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::restore::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::rename::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::renamenx::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::unlink::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::strlen::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::getrange::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::getbit::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::setbit::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::bitcount::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::bitpos::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::bitop::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::bitfield::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::setnx::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::mget::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hstrlen::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hget::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hlen::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hmset::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hmget::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hkeys::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hvals::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hgetall::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::hscan::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::lrange::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::llen::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::lindex::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::rpoplpush::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::brpoplpush::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::lmove::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::blmove::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::lmpop::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::blmpop::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::scard::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::smembers::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::sscan::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::srandmember::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::smismember::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zunion::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zinter::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zdiff::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zintercard::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zrandmember::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zrange::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
+    &crate::commands::zrangebyscore::COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::zrevrange::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zscore::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zcount::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zrevrangebyscore::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zrangebylex::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zrevrangebylex::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zlexcount::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zremrangebyrank::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zremrangebyscore::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zremrangebylex::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zrank::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zrevrank::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zscan::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::zmpop::COMMAND,
-    #[cfg(feature = "redis-compat")]
+    #[cfg(feature = "redis")]
     &crate::commands::bzmpop::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_3: &[&dyn RawDirectCommand] = &[
+    &crate::commands::get::COMMAND,
+    &crate::commands::set::COMMAND,
+    &crate::commands::del::COMMAND,
+    &crate::commands::ttl::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_4: &[&dyn RawDirectCommand] = &[
+    &crate::commands::pttl::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::MOVE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::POST_WARNING_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::ROLE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::SAVE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::SORT_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::SYNC_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::WAIT_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::scripting::EVAL_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::keys::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::scan::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::mget::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hget::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hlen::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::llen::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::copy::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::dump::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XACK_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XADD_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XDEL_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XLEN_COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_5: &[&dyn RawDirectCommand] = &[
+    &crate::commands::getex::COMMAND,
+    &crate::commands::setex::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::DEBUG_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::HOST_WARNING_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::PSYNC_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::touch::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hscan::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hmget::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hmset::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hkeys::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hvals::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::bitop::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::setnx::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::lmove::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::lmpop::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::scard::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::sscan::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zdiff::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zrank::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zscan::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zmpop::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hll::PFADD_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XINFO_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XREAD_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XTRIM_COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_6: &[&dyn RawDirectCommand] = &[
+    &crate::commands::exists::COMMAND,
+    &crate::commands::expire::COMMAND,
+    &crate::commands::psetex::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::ASKING_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::BGSAVE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::LOLWUT_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::MODULE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::SWAPDB_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::scripting::SCRIPT_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::object::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::memory::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::PUBSUB_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEOADD_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEOPOS_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XCLAIM_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XGROUP_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XRANGE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XSETID_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::rename::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::unlink::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::strlen::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::getbit::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::setbit::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::bitpos::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::lrange::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::lindex::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::blmove::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::blmpop::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zunion::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zinter::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zrange::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zscore::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zcount::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::bzmpop::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_7: &[&dyn RawDirectCommand] = &[
+    &crate::commands::pexpire::COMMAND,
+    &crate::commands::persist::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::CLUSTER_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::LATENCY_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::MIGRATE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::MONITOR_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::SLOWLOG_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::command::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::scripting::EVALSHA_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::flush::FLUSHDB_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::PUBLISH_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hll::PFCOUNT_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hll::PFMERGE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hll::PFDEBUG_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEODIST_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEOHASH_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::restore::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hstrlen::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hgetall::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_8: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::expireat::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::LASTSAVE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::READONLY_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::REPLCONF_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::SHUTDOWN_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::flush::FLUSHALL_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XPENDING_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::renamenx::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::getrange::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::bitcount::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::bitfield::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::smembers::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zrevrank::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_9: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::pexpireat::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::READWRITE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::REPLICAOF_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::randomkey::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::SUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEORADIUS_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XREVRANGE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::rpoplpush::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zrevrange::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zlexcount::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_10: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::expiretime::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::PSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hll::PFSELFTEST_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XREADGROUP_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::brpoplpush::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::smismember::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zintercard::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_11: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::pexpiretime::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::UNSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::srandmember::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zrandmember::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zrangebylex::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_12: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::BGREWRITEAOF_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::PUNSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEORADIUS_RO_COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_13: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::zrangebyscore::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_14: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::zrevrangebylex::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zremrangebylex::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_15: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::zremrangebyrank::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_16: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::zrevrangebyscore::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::zremrangebyscore::COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_17: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEORADIUSBYMEMBER_COMMAND,
+];
+
+#[cfg(feature = "embedded")]
+static RAW_DIRECT_LEN_20: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEORADIUSBYMEMBER_RO_COMMAND,
 ];
 
 #[cfg(feature = "embedded")]
@@ -750,25 +1106,116 @@ impl FastCommandDispatcher {
         out: &mut BytesMut,
         single_threaded: bool,
     ) -> bool {
-        let Some(command) = Self::find(&request.command) else {
-            return false;
-        };
-        command.execute_fast(
-            FastCommandContext {
-                store,
-                key_hash: request.key_hash,
-                out,
-                single_threaded,
-            },
-            request.command,
-        );
-        true
+        match Self::find(&request.command) {
+            Some(command) => {
+                command.execute_fast(
+                    FastCommandContext {
+                        store,
+                        key_hash: request.key_hash,
+                        out,
+                        single_threaded,
+                    },
+                    request.command,
+                );
+                true
+            }
+            None => false,
+        }
     }
+}
+
+#[cfg(feature = "embedded")]
+#[inline(always)]
+fn find_hot_raw_command(command: &[u8]) -> Option<&'static dyn RawDirectCommand> {
+    match command.len() {
+        3 if command.eq_ignore_ascii_case(b"GET") => Some(&crate::commands::get::COMMAND),
+        3 if command.eq_ignore_ascii_case(b"SET") => Some(&crate::commands::set::COMMAND),
+        3 if command.eq_ignore_ascii_case(b"DEL") => Some(&crate::commands::del::COMMAND),
+        3 if command.eq_ignore_ascii_case(b"TTL") => Some(&crate::commands::ttl::COMMAND),
+        4 if command.eq_ignore_ascii_case(b"PTTL") => Some(&crate::commands::pttl::COMMAND),
+        5 if command.eq_ignore_ascii_case(b"GETEX") => Some(&crate::commands::getex::COMMAND),
+        6 if command.eq_ignore_ascii_case(b"EXISTS") => Some(&crate::commands::exists::COMMAND),
+        6 if command.eq_ignore_ascii_case(b"EXPIRE") => Some(&crate::commands::expire::COMMAND),
+        7 if command.eq_ignore_ascii_case(b"PEXPIRE") => Some(&crate::commands::pexpire::COMMAND),
+        7 if command.eq_ignore_ascii_case(b"PERSIST") => Some(&crate::commands::persist::COMMAND),
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"PING") => Some(&crate::commands::ping::COMMAND),
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"ECHO") => Some(&crate::commands::echo::COMMAND),
+        #[cfg(feature = "redis")]
+        6 if command.eq_ignore_ascii_case(b"PUBSUB") => {
+            Some(&crate::commands::pubsub::PUBSUB_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        7 if command.eq_ignore_ascii_case(b"PUBLISH") => {
+            Some(&crate::commands::pubsub::PUBLISH_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        9 if command.eq_ignore_ascii_case(b"SUBSCRIBE") => {
+            Some(&crate::commands::pubsub::SUBSCRIBE_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        10 if command.eq_ignore_ascii_case(b"PSUBSCRIBE") => {
+            Some(&crate::commands::pubsub::PSUBSCRIBE_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        11 if command.eq_ignore_ascii_case(b"UNSUBSCRIBE") => {
+            Some(&crate::commands::pubsub::UNSUBSCRIBE_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        12 if command.eq_ignore_ascii_case(b"PUNSUBSCRIBE") => {
+            Some(&crate::commands::pubsub::PUNSUBSCRIBE_COMMAND)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "embedded")]
+#[inline(always)]
+pub(super) fn find_primary_raw_command(command: &[u8]) -> Option<&'static dyn RawDirectCommand> {
+    let bucket = match command.len() {
+        3 => RAW_DIRECT_LEN_3,
+        4 => RAW_DIRECT_LEN_4,
+        5 => RAW_DIRECT_LEN_5,
+        6 => RAW_DIRECT_LEN_6,
+        7 => RAW_DIRECT_LEN_7,
+        8 => RAW_DIRECT_LEN_8,
+        9 => RAW_DIRECT_LEN_9,
+        10 => RAW_DIRECT_LEN_10,
+        11 => RAW_DIRECT_LEN_11,
+        12 => RAW_DIRECT_LEN_12,
+        13 => RAW_DIRECT_LEN_13,
+        14 => RAW_DIRECT_LEN_14,
+        15 => RAW_DIRECT_LEN_15,
+        16 => RAW_DIRECT_LEN_16,
+        17 => RAW_DIRECT_LEN_17,
+        20 => RAW_DIRECT_LEN_20,
+        _ => return None,
+    };
+    find_raw_command_in_bucket(command, bucket)
+}
+
+#[cfg(feature = "embedded")]
+#[inline(always)]
+fn find_raw_command_in_bucket(
+    command: &[u8],
+    bucket: &[&'static dyn RawDirectCommand],
+) -> Option<&'static dyn RawDirectCommand> {
+    bucket
+        .iter()
+        .copied()
+        .find(|candidate| candidate.name().as_bytes().eq_ignore_ascii_case(command))
 }
 
 #[cfg(feature = "embedded")]
 impl RawCommandDispatcher {
     pub(super) fn find(command: &[u8]) -> Option<&'static dyn RawDirectCommand> {
+        if let Some(command) = find_hot_raw_command(command) {
+            return Some(command);
+        }
+        if let Some(command) = find_primary_raw_command(command) {
+            return Some(command);
+        }
         RAW_DIRECT_CATALOG
             .iter()
             .copied()
@@ -792,197 +1239,201 @@ impl RawCommandDispatcher {
             crate::protocol::FastCommandKind::GetEx => Some(&crate::commands::getex::COMMAND),
             crate::protocol::FastCommandKind::SetEx => Some(&crate::commands::setex::COMMAND),
             crate::protocol::FastCommandKind::PSetEx => Some(&crate::commands::psetex::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ExpireAt => Some(&crate::commands::expireat::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::PExpireAt => {
                 Some(&crate::commands::pexpireat::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ExpireTime => {
                 Some(&crate::commands::expiretime::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::PExpireTime => {
                 Some(&crate::commands::pexpiretime::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Command => Some(&crate::commands::command::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Keys => Some(&crate::commands::keys::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Scan => Some(&crate::commands::scan::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Object => Some(&crate::commands::object::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Touch => Some(&crate::commands::touch::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::RandomKey => {
                 Some(&crate::commands::randomkey::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::FlushDb => {
                 Some(&crate::commands::flush::FLUSHDB_COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::FlushAll => {
                 Some(&crate::commands::flush::FLUSHALL_COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Memory => Some(&crate::commands::memory::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Copy => Some(&crate::commands::copy::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Dump => Some(&crate::commands::dump::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Restore => Some(&crate::commands::restore::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::RestoreAsking => {
                 Some(&crate::commands::restore::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Rename => Some(&crate::commands::rename::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::RenameNx => Some(&crate::commands::renamenx::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Unlink => Some(&crate::commands::unlink::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::StrLen => Some(&crate::commands::strlen::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::GetRange => Some(&crate::commands::getrange::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::Substr => Some(&crate::commands::getrange::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::GetBit => Some(&crate::commands::getbit::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::SetBit => Some(&crate::commands::setbit::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BitCount => Some(&crate::commands::bitcount::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BitPos => Some(&crate::commands::bitpos::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BitOp => Some(&crate::commands::bitop::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BitField => Some(&crate::commands::bitfield::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::SetNx => Some(&crate::commands::setnx::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::MGet => Some(&crate::commands::mget::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::HStrLen => Some(&crate::commands::hstrlen::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::HGet => Some(&crate::commands::hget::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::HLen => Some(&crate::commands::hlen::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::HMSet => Some(&crate::commands::hmset::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::HMGet => Some(&crate::commands::hmget::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::HKeys => Some(&crate::commands::hkeys::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::HVals => Some(&crate::commands::hvals::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::HGetAll => Some(&crate::commands::hgetall::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::HScan => Some(&crate::commands::hscan::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::LRange => Some(&crate::commands::lrange::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::LLen => Some(&crate::commands::llen::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::LIndex => Some(&crate::commands::lindex::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::RPopLPush => {
                 Some(&crate::commands::rpoplpush::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BRPopLPush => {
                 Some(&crate::commands::brpoplpush::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::LMove => Some(&crate::commands::lmove::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BLMove => Some(&crate::commands::blmove::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::LMPop => Some(&crate::commands::lmpop::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BLMPop => Some(&crate::commands::blmpop::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::SCard => Some(&crate::commands::scard::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::SMembers => Some(&crate::commands::smembers::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::SScan => Some(&crate::commands::sscan::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::SRandMember => {
                 Some(&crate::commands::srandmember::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::SMIsMember => {
                 Some(&crate::commands::smismember::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZUnion => Some(&crate::commands::zunion::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZInter => Some(&crate::commands::zinter::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZDiff => Some(&crate::commands::zdiff::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZInterCard => {
                 Some(&crate::commands::zintercard::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRandMember => {
                 Some(&crate::commands::zrandmember::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRange => Some(&crate::commands::zrange::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRevRange => {
                 Some(&crate::commands::zrevrange::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZScore => Some(&crate::commands::zscore::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZCount => Some(&crate::commands::zcount::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::ZRangeByScore => {
+                Some(&crate::commands::zrangebyscore::COMMAND)
+            }
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRevRangeByScore => {
                 Some(&crate::commands::zrevrangebyscore::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRangeByLex => {
                 Some(&crate::commands::zrangebylex::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRevRangeByLex => {
                 Some(&crate::commands::zrevrangebylex::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZLexCount => {
                 Some(&crate::commands::zlexcount::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRemRangeByRank => {
                 Some(&crate::commands::zremrangebyrank::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRemRangeByScore => {
                 Some(&crate::commands::zremrangebyscore::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRemRangeByLex => {
                 Some(&crate::commands::zremrangebylex::COMMAND)
             }
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRank => Some(&crate::commands::zrank::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZRevRank => Some(&crate::commands::zrevrank::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZScan => Some(&crate::commands::zscan::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ZMPop => Some(&crate::commands::zmpop::COMMAND),
-            #[cfg(feature = "redis-compat")]
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BZMPop => Some(&crate::commands::bzmpop::COMMAND),
             _ => None,
         }

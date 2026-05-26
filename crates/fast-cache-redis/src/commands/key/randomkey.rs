@@ -1,6 +1,8 @@
 use bytes::BytesMut;
 
-use crate::commands::redis::{bulk, define_redis_command, write_frame, wrong_arity};
+use crate::commands::redis::{
+    bulk, define_redis_command, write_frame, write_resp_null, wrong_arity,
+};
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
@@ -27,7 +29,7 @@ impl crate::commands::redis::RedisCommand for RandomKey {
         }
         match random_key_bytes(store) {
             Some(key) => ServerWire::write_resp_blob_string(out, &key),
-            None => out.extend_from_slice(b"$-1\r\n"),
+            None => write_resp_null(out),
         }
     }
 }

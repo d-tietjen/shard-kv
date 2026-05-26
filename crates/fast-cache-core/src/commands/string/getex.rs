@@ -104,9 +104,9 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedGetEx<'a> {
     where
         'a: 'b,
     {
-        let key = self.key;
-        let expiration = self.expiration.to_engine();
-        Box::pin(async move { GetEx::execute_engine_frame(ctx, key, expiration).await })
+        Box::pin(async move {
+            GetEx::execute_engine_frame(ctx, self.key, self.expiration.to_engine()).await
+        })
     }
 
     #[cfg(feature = "server")]
@@ -121,7 +121,7 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedGetEx<'a> {
     fn execute_borrowed(&self, ctx: BorrowedCommandContext<'_, '_, '_>) {
         match Self::execute_embedded(ctx.store, self.key, self.expiration, now_millis()) {
             Some(value) => ServerWire::write_resp_blob_string(ctx.out, &value),
-            None => ctx.out.extend_from_slice(b"$-1\r\n"),
+            None => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
         }
     }
 
@@ -289,7 +289,7 @@ impl RawDirectCommand for GetEx {
             Some((key, expiration)) => {
                 match BorrowedGetEx::execute_embedded(ctx.store, key, expiration, now_millis()) {
                     Some(value) => ServerWire::write_resp_blob_string(ctx.out, &value),
-                    None => ctx.out.extend_from_slice(b"$-1\r\n"),
+                    None => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
                 }
             }
             None => ServerWire::write_resp_error(ctx.out, "ERR syntax error"),

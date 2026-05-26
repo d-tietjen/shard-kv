@@ -12,12 +12,12 @@ readme = "README.md"
 publish = false
 
 [features]
-default = ["redis-compat"]
+default = ["redis"]
 embedded = ["fast_cache_core/embedded"]
 sharded = ["embedded", "fast_cache_core/sharded"]
-redis-compat = ["embedded", "fast_cache_core/redis-compat"]
+redis = ["embedded", "fast_cache_core/redis"]
 server = ["sharded", "fast_cache_core/server"]
-redis-server = ["server", "redis-compat", "fast_cache_core/redis-server"]
+redis-server = ["server", "redis", "fast_cache_core/redis-server"]
 
 [dependencies]
 fast_cache_core = { package = "fast-cache-core", path = "../fast-cache-core", version = "0.2.0", default-features = false }

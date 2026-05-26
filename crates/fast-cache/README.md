@@ -10,7 +10,7 @@ the shared core engine.
 
 ```toml
 [dependencies]
-fast-cache = "0.1"
+fast-cache = "0.2"
 ```
 
 ```rust

@@ -8,21 +8,25 @@ use crate::server::wire::ServerWire;
 use crate::storage::{EmbeddedStore, hash_key};
 
 use super::Set;
-use super::options::SetOptions;
+use super::options::{SetCondition, SetOptions};
 use super::storage::EmbeddedStringWrite;
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Set {
     fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         let RawCommandContext {
-            store, args, out, ..
+            store,
+            args,
+            out,
+            resp_protocol,
+            ..
         } = ctx;
         match SetRawArgs::from_args(store, args.as_slice()) {
             SetRawArgs::Ready { key, value, ttl_ms } => {
                 store.set_slice_prehashed(hash_key(key), key, value, ttl_ms);
                 out.extend_from_slice(b"+OK\r\n");
             }
-            SetRawArgs::Null => out.extend_from_slice(b"$-1\r\n"),
+            SetRawArgs::Null => ServerWire::write_resp_null(out, resp_protocol),
             SetRawArgs::WrongArity => ServerWire::write_resp_error(
                 out,
                 &format!(
@@ -51,6 +55,11 @@ enum SetRawArgs<'a> {
 impl<'a> SetRawArgs<'a> {
     fn from_args(store: &EmbeddedStore, args: &'a [&'a [u8]]) -> Self {
         match args {
+            [key, value] => Self::Ready {
+                key,
+                value,
+                ttl_ms: None,
+            },
             [key, value, rest @ ..] => match SetOptions::parse(rest) {
                 Some(options) => Self::from_options(store, key, value, options),
                 None => Self::Syntax,
@@ -65,7 +74,12 @@ impl<'a> SetRawArgs<'a> {
         value: &'a [u8],
         options: SetOptions,
     ) -> Self {
-        match options.condition.allows(store.exists(key)) {
+        let allowed = match options.condition {
+            SetCondition::Always => true,
+            SetCondition::Nx => !store.exists(key),
+            SetCondition::Xx => store.exists(key),
+        };
+        match allowed {
             true => Self::Ready {
                 key,
                 value,

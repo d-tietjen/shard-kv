@@ -379,7 +379,8 @@ impl EngineHandle {
         if frame.parts.is_empty() {
             return Err(FastCacheError::Command("empty command".into()));
         }
-        let name = String::from_utf8_lossy(&owner[frame.parts[0].clone()]).into_owned();
+        let name_span = &frame.parts[0];
+        let name = String::from_utf8_lossy(&owner[name_span.start..name_span.end]).into_owned();
         if let Some(result) = EngineCommandCatalog::execute_resp_spanned(
             EngineCommandContext::new(self),
             frame,

@@ -5,7 +5,9 @@ use crate::commands::dump_restore::write_string_dump_resp;
 use crate::commands::dump_restore::{
     DumpRestoreValue, encode_dump_value, encode_string_dump_value,
 };
-use crate::commands::redis::{bulk, define_redis_command, write_frame, wrong_arity};
+use crate::commands::redis::{
+    bulk, define_redis_command, write_frame, write_resp_null, wrong_arity,
+};
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
@@ -56,7 +58,7 @@ fn write_dump_resp(store: &EmbeddedStore, key: &[u8], out: &mut BytesMut) {
         .map(|value| encode_dump_value(&DumpRestoreValue::Object(value)))
     {
         Some(payload) => ServerWire::write_resp_blob_string(out, &payload),
-        None => out.extend_from_slice(b"$-1\r\n"),
+        None => write_resp_null(out),
     }
 }
 

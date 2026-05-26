@@ -83,8 +83,7 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedExists<'a> {
     where
         'a: 'b,
     {
-        let keys = self.keys.clone();
-        Box::pin(async move { Exists::execute_engine_frame(ctx, keys.as_slice()).await })
+        Box::pin(async move { Exists::execute_engine_frame(ctx, self.keys.as_slice()).await })
     }
 
     #[cfg(feature = "server")]

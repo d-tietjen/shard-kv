@@ -3,7 +3,7 @@
 `fast-cache` is an embedded-first, in-memory key-value database. The default
 crate build exposes a Rust API for direct in-process use. The optional `server`
 feature builds `fast-cache-server` as a RESP/FCNP TCP server with WAL and
-snapshot persistence, and `redis-compat` adds Redis/Valkey data-type semantics
+snapshot persistence, and `redis` adds Redis/Valkey data-type semantics
 as an extension for embedded or server deployments.
 
 The default build uses conservative safe memory paths. Reviewed lower-overhead
@@ -235,7 +235,7 @@ Session-oriented methods include `batch_set_session_owned_no_ttl`,
 `batch_get_session_view`, `batch_get_session_packed`,
 `prepare_point_key`, and their routed or prehashed variants.
 
-With `redis-compat`, Redis object helpers are exposed on
+With `redis`, Redis object helpers are exposed on
 [`storage::EmbeddedStore`] for hashes, lists, sets, and sorted sets. They use
 Redis-style wrong-type behavior through [`storage::RedisObjectResult`]. The
 public method families are `hset`/`hget` and related hash methods,
@@ -281,9 +281,11 @@ printf '*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n' | nc 127.0.0.1 6380
 printf '*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n' | nc 127.0.0.1 6380
 ```
 
-The current server command catalog implements the redesigned string-key hot
-path for `GET` and `SET`. Additional RESP commands should be added through the
-per-command module pattern in `src/commands/README.md` so parser, storage, and
+The `server` feature exposes the base RESP/FCNP cache-command surface. The
+`redis-server` feature enables the Redis/Valkey compatibility catalog, object
+types, command metadata, RESP2/RESP3 negotiation, and Redis-style error
+behavior. Additional commands should be added through the per-command module
+pattern in `src/commands/README.md` so parser, storage, routing, and
 direct-server behavior stay local to the command.
 
 ## Configuration
@@ -381,9 +383,9 @@ Public product surfaces:
 | `default` | Embedded, sharded Rust API. Equivalent to `sharded`. |
 | `embedded` | Minimal in-process cache API. |
 | `sharded` | Embedded sharded storage and owner-local APIs; implies `embedded`. |
-| `redis-compat` | Redis/Valkey object types, command families, and wrong-type behavior without server networking. |
+| `redis` | Redis/Valkey object types, command families, and wrong-type behavior without server networking. |
 | `server` | RESP/FCNP `fast-cache-server` runtime without the full Redis compatibility catalog. |
-| `redis-server` | Redis/Valkey-compatible server build; implies `server` and `redis-compat`. |
+| `redis-server` | Redis/Valkey-compatible server build; implies `server` and `redis`. |
 
 Runtime integrations:
 
@@ -408,7 +410,10 @@ Tokio direct mode writes responses inline by default, avoiding a per-connection
 writer task for Redis-style request/response traffic. Set
 `FAST_CACHE_TOKIO_WRITER_MODE=split` to restore the split read/write handoff
 for deployments that prefer full-duplex connection overlap. Monoio still uses
-`bytes-handoff` for connection read buffering. With `FAST_CACHE_DIRECT_SHARD_PORTS=1`,
+`bytes-handoff` for connection read buffering. Its server driver defaults to
+`FAST_CACHE_MONOIO_DRIVER=auto`: io_uring for one worker, legacy poll for
+multi-worker socket runs; set `FAST_CACHE_MONOIO_DRIVER=legacy|io_uring` to
+force either path. With `FAST_CACHE_DIRECT_SHARD_PORTS=1`,
 the server also binds one listener per shard, starting at
 `FAST_CACHE_DIRECT_SHARD_BASE_PORT` or the fanout port + 1, so direct clients
 can route while fanout RESP/FCNP stays available. Monoio writer experiments are

@@ -1,11 +1,43 @@
 use bytes::BytesMut;
+#[cfg(feature = "server")]
+use std::cell::Cell;
 
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
-use crate::server::wire::ServerWire;
+use crate::server::wire::{RespProtocolVersion, ServerWire};
 use crate::storage::{EmbeddedStore, RedisObjectResult};
 
 use super::parse::format_score;
+
+#[cfg(feature = "server")]
+thread_local! {
+    static CURRENT_RESP_PROTOCOL: Cell<RespProtocolVersion> =
+        const { Cell::new(RespProtocolVersion::Resp2) };
+}
+
+#[cfg(feature = "server")]
+struct RespProtocolScope {
+    previous: RespProtocolVersion,
+}
+
+#[cfg(feature = "server")]
+impl Drop for RespProtocolScope {
+    fn drop(&mut self) {
+        CURRENT_RESP_PROTOCOL.set(self.previous);
+    }
+}
+
+#[cfg(feature = "server")]
+pub(crate) fn with_resp_protocol<T>(protocol: RespProtocolVersion, f: impl FnOnce() -> T) -> T {
+    let previous = CURRENT_RESP_PROTOCOL.replace(protocol);
+    let _scope = RespProtocolScope { previous };
+    f()
+}
+
+#[cfg(feature = "server")]
+fn current_resp_protocol() -> RespProtocolVersion {
+    CURRENT_RESP_PROTOCOL.get()
+}
 
 pub(crate) fn object_result(
     name: &str,
@@ -136,7 +168,15 @@ pub(super) fn write_fast_frame(out: &mut BytesMut, frame: &Frame) {
         Frame::Integer(value) => ServerWire::write_fast_integer(out, *value),
         Frame::Null => ServerWire::write_fast_null(out),
         Frame::Error(message) => ServerWire::write_fast_error(out, message),
-        Frame::Array(_) | Frame::Boolean(_) => {
+        Frame::Array(_)
+        | Frame::Map(_)
+        | Frame::Set(_)
+        | Frame::Push(_)
+        | Frame::Boolean(_)
+        | Frame::Double(_)
+        | Frame::BigNumber(_)
+        | Frame::VerbatimString { .. }
+        | Frame::Attribute { .. } => {
             let mut resp = BytesMut::new();
             write_frame(&mut resp, frame);
             ServerWire::write_fast_value(out, &resp);
@@ -160,9 +200,68 @@ pub(crate) fn write_frame(out: &mut BytesMut, frame: &Frame) {
                 write_frame(out, item);
             }
         }
-        Frame::Null => out.extend_from_slice(b"$-1\r\n"),
+        Frame::Map(items) => {
+            out.extend_from_slice(b"%");
+            let mut len_buf = itoa::Buffer::new();
+            out.extend_from_slice(len_buf.format(items.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
+            for (key, value) in items {
+                write_frame(out, key);
+                write_frame(out, value);
+            }
+        }
+        Frame::Set(items) => {
+            out.extend_from_slice(b"~");
+            let mut len_buf = itoa::Buffer::new();
+            out.extend_from_slice(len_buf.format(items.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
+            for item in items {
+                write_frame(out, item);
+            }
+        }
+        Frame::Push(items) => {
+            out.extend_from_slice(b">");
+            let mut len_buf = itoa::Buffer::new();
+            out.extend_from_slice(len_buf.format(items.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
+            for item in items {
+                write_frame(out, item);
+            }
+        }
+        Frame::Null => ServerWire::write_resp_null(out, current_resp_protocol()),
         Frame::Boolean(value) => {
             out.extend_from_slice(if *value { b"#t\r\n" } else { b"#f\r\n" });
+        }
+        Frame::Double(value) => {
+            out.extend_from_slice(b",");
+            out.extend_from_slice(value.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+        Frame::BigNumber(value) => {
+            out.extend_from_slice(b"(");
+            out.extend_from_slice(value.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+        Frame::VerbatimString { format, value } => {
+            let mut len_buf = itoa::Buffer::new();
+            out.extend_from_slice(b"=");
+            out.extend_from_slice(len_buf.format(format.len() + 1 + value.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(format.as_bytes());
+            out.extend_from_slice(b":");
+            out.extend_from_slice(value);
+            out.extend_from_slice(b"\r\n");
+        }
+        Frame::Attribute { attributes, data } => {
+            out.extend_from_slice(b"|");
+            let mut len_buf = itoa::Buffer::new();
+            out.extend_from_slice(len_buf.format(attributes.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
+            for (key, value) in attributes {
+                write_frame(out, key);
+                write_frame(out, value);
+            }
+            write_frame(out, data);
         }
         Frame::Error(message) => ServerWire::write_resp_error(out, message),
     }
@@ -203,7 +302,7 @@ pub(crate) fn write_result_resp(out: &mut BytesMut, result: RedisObjectResult) {
 #[cfg(feature = "server")]
 #[inline(always)]
 pub(crate) fn write_resp_null(out: &mut BytesMut) {
-    out.extend_from_slice(b"$-1\r\n");
+    ServerWire::write_resp_null(out, current_resp_protocol());
 }
 
 #[cfg(feature = "server")]
