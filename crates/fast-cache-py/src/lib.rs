@@ -1742,7 +1742,7 @@ impl StoreCore {
                     let group_keys = group.iter().map(|(_, key)| key.clone()).collect::<Vec<_>>();
                     let results = store.workers[worker_id]
                         .run_store(move |inner| inner.batch_get(group_keys));
-                    for ((index, _), value) in group.into_iter().zip(results.into_iter()) {
+                    for ((index, _), value) in group.into_iter().zip(results) {
                         values[index] = value;
                     }
                 }
