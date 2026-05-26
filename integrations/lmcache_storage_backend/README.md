@@ -5,14 +5,13 @@ persistence layer.
 
 ## Install
 
-```bash
-pip install ./integrations/lmcache_storage_backend
-```
-
-Install the matching `fast_cache` PyO3 wheel first:
+Install LMCache, build the matching `fast_cache` PyO3 extension into the active
+Python environment, and install the plugin package:
 
 ```bash
+pip install lmcache
 maturin develop --release -m crates/fast-cache-py/Cargo.toml --features extension-module
+pip install ./integrations/lmcache_storage_backend
 ```
 
 ## LMCache config
@@ -53,11 +52,92 @@ extra_config:
   storage_plugin.fast_cache.fcnp_addr: 127.0.0.1:6500
 ```
 
+Start a local FCNP fanout server for TCP mode with:
+
+```bash
+cargo run --release -p fast-cache --features server --bin fast-cache-server -- \
+  --server-mode direct \
+  --disable-persistence \
+  --bind-addr 127.0.0.1:6500 \
+  --shard-count 4
+```
+
+For Linux direct-shard experiments, expose shard-owned ports as well:
+
+```bash
+FAST_CACHE_DIRECT_SHARD_PORTS=1 \
+FAST_CACHE_DIRECT_SHARD_BASE_PORT=6501 \
+cargo run --release -p fast-cache --features server --bin fast-cache-server -- \
+  --server-mode direct \
+  --disable-persistence \
+  --bind-addr 127.0.0.1:6500 \
+  --shard-count 4
+```
+
 `client_architecture` remains available as a lower-level compatibility and
 benchmark knob. Use `shared` for multi-threaded benchmark clients with arbitrary
 keys, `local_embedded` for caller-owned local routing, `fcnp_tcp` for the Rust
 FCNP/TCP adapter, and `fcnp_tcp_python` to force the pure-Python socket adapter
 for debugging or regression checks.
+
+## Smoke test
+
+```bash
+python - <<'PY'
+from fast_cache_lmcache_backend.backend import FastCacheStorageBackend
+
+config = type("Cfg", (), {"extra_config": {
+    "storage_plugin.fast_cache.cores": 4,
+    "storage_plugin.fast_cache.connection": "embedded",
+    "storage_plugin.fast_cache.enable_metrics": False,
+}})()
+
+backend = FastCacheStorageBackend(config=config)
+print(type(backend).__name__)
+PY
+```
+
+## Benchmarks
+
+The LMCache harness drives the real LMCache plugin contract with LMCache
+`CacheEngineKey` and `BytesBufferMemoryObj` types:
+
+```bash
+python benchmarks/python/fc_lmcache_bench.py \
+  --connection embedded \
+  --value-size 1048576 \
+  --mix get \
+  --vcpu-budget 4 \
+  --clients 16 \
+  --key-count 1024 \
+  --latency-sample-rate 0 \
+  --warmup 2 \
+  --duration 10 \
+  --csv benchmarks/results/lmcache.csv
+```
+
+For FCNP/TCP, start the server first and switch the harness connection:
+
+```bash
+python benchmarks/python/fc_lmcache_bench.py \
+  --connection tcp \
+  --fcnp-addr 127.0.0.1:6500 \
+  --value-size 1048576 \
+  --mix 80-20 \
+  --vcpu-budget 4 \
+  --clients 16 \
+  --key-count 1024 \
+  --latency-sample-rate 0 \
+  --warmup 2 \
+  --duration 10 \
+  --csv benchmarks/results/lmcache.csv
+```
+
+Pass `--with-local-cpu` to try LMCache's built-in `LocalCPUBackend` on the same
+workload when the installed LMCache version exposes a constructible local CPU
+backend. The published head-to-head report currently compares fast-cache
+embedded LMCache and fast-cache FCNP/TCP LMCache against Redis TCP:
+[`benchmarks/LMCACHE_VS_REDIS.md`](../../benchmarks/LMCACHE_VS_REDIS.md).
 
 ## Notes
 
@@ -68,3 +148,6 @@ for debugging or regression checks.
 - `fcnp_tcp_python` keeps the earlier pure-Python socket adapter available for
   comparison.
 - Falls back to allocator-backed `MemoryObj` for KV-cache formats when LMCache's GPU connector expects `memory_obj.tensor`.
+- Real CUDA/GPU-direct proof runs are separate from this LMCache storage plugin
+  benchmark. Use the runtime connector tests and host-specific CUDA benchmark
+  gates for GPU transfer claims.

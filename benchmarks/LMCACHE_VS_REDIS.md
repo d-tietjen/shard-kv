@@ -12,6 +12,20 @@ storage plugin API, either in-process or over fast-cache's native FCNP/TCP
 protocol. Redis uses RESP/TCP over loopback. Treat this as a practical
 integration comparison, not a pure engine microbenchmark.
 
+## Current Coverage
+
+This is the curated LMCache head-to-head artifact currently in the repository.
+It covers fast-cache as an LMCache storage plugin against Redis TCP for
+`64 KiB`, `256 KiB`, and `1 MiB` payloads. It does not yet include:
+
+- LMCache's built-in `LocalCPUBackend` as a published baseline. The harness can
+  attempt this with `--with-local-cpu`, but the original run could not construct
+  that backend on LMCache `0.4.4`.
+- A `5 MiB` LMCache-specific saturation run. The local Apple M5 Max rerun below
+  still uses the published `64 KiB`, `256 KiB`, and `1 MiB` sizes.
+- CUDA or GPU-direct transfer claims. Those belong to the runtime connector
+  proof gates, not this storage-plugin benchmark.
+
 ## Setup
 
 | Setting | Value |
@@ -51,6 +65,93 @@ requires allocator or metadata state for that backend constructor.
 | Redis TCP | 1 MiB SET | 4.206 | 16 clients, pipeline 1 | 0.998 |
 | Redis TCP | 1 MiB 80/20 | 2.685 | 16 clients, pipeline 1 | 1.001 |
 | Redis TCP | 256 KiB SET | 3.621 | 16 clients, pipeline 1 | 0.998 |
+
+## Local Apple M5 Max Rerun
+
+Local rerun on May 26, 2026 on an Apple M5 Max with 18 CPU cores and 128 GiB
+memory. The fast-cache shard budget was set to `16` because embedded shard
+counts must be powers of two. LMCache `0.4.5` was installed from source with
+`NO_CUDA_EXT=1`, using its Python non-CUDA fallback. Redis ran locally through
+Homebrew on `127.0.0.1:6390`.
+
+The Redis vCPU column in the raw CSVs is client-process CPU on macOS, not Redis
+server CPU, because the Linux external PID sampler is unavailable locally. Use
+this table for payload bandwidth comparisons, not CPU-normalized claims. The
+FCNP/TCP SET rows in the table below were captured before the Rust-side LMCache
+PUT helpers were added to the FCNP Python store. Keep them as regression
+evidence, not as the current optimized SET result.
+
+Raw CSVs:
+
+- [`lmcache-embedded.csv`](reference/lmcache-m5-local-20260526/lmcache-embedded.csv)
+- [`lmcache-fcnp-tcp.csv`](reference/lmcache-m5-local-20260526/lmcache-fcnp-tcp.csv)
+- [`redis-tcp.csv`](reference/lmcache-m5-local-20260526/redis-tcp.csv)
+
+| Value | Mix | Embedded GB/s | Embedded shape | FCNP/TCP GB/s | FCNP shape | Redis GB/s | Redis shape | Embedded vs Redis | FCNP/TCP vs Redis |
+| --- | --- | ---: | --- | ---: | --- | ---: | --- | ---: | ---: |
+| 64 KiB | GET | 9.397 | C64 | 4.336 | C16 | 6.621 | P64 | 1.42x | 0.65x |
+| 64 KiB | SET | 10.159 | C64 | 0.291 | C16 | 4.338 | P16 | 2.34x | 0.07x |
+| 64 KiB | 80/20 | 9.287 | C64 | 1.043 | C16 | 5.526 | P64 | 1.68x | 0.19x |
+| 256 KiB | GET | 32.418 | C64 | 9.826 | C16 | 7.423 | P64 | 4.37x | 1.32x |
+| 256 KiB | SET | 31.482 | C64 | 0.311 | C32 | 9.722 | P16 | 3.24x | 0.03x |
+| 256 KiB | 80/20 | 29.235 | C64 | 1.396 | C64 | 8.657 | P16 | 3.38x | 0.16x |
+| 1 MiB | GET | 77.130 | C64 | 14.970 | C16 | 9.389 | P1 | 8.21x | 1.59x |
+| 1 MiB | SET | 104.971 | C64 | 0.253 | C16 | 11.282 | P16 | 9.30x | 0.02x |
+| 1 MiB | 80/20 | 90.147 | C32 | 0.401 | C16 | 9.467 | P1 | 9.52x | 0.04x |
+
+## Local FCNP/TCP SET Path Optimization Probe
+
+After the local Apple M5 Max rerun, `fast_cache.FcnpStore` was updated to expose
+the LMCache prepared PUT helpers, pipeline multi-item `batch_set` calls, and
+stream encoded byte payloads directly into the FCNP writer. This keeps LMCache
+PUT record encoding in Rust instead of falling back to Python
+`_encode_memory_obj(...)` plus one generic `batch_set` loop.
+
+Raw CSVs:
+
+- [`fcnp-set-batch1-after.csv`](reference/lmcache-m5-set-path-20260526/fcnp-set-batch1-after.csv)
+- [`fcnp-set-batch16-after.csv`](reference/lmcache-m5-set-path-20260526/fcnp-set-batch16-after.csv)
+
+| Value | Mix | Clients | Op batch | FCNP/TCP GB/s | Previous local FCNP/TCP GB/s | Redis local GB/s | FCNP/TCP vs Redis |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 MiB | SET | 16 | 1 | 12.724 | 0.253 | 11.282 | 1.13x |
+| 1 MiB | SET | 16 | 16 | 8.823 | 0.253 | 11.282 | 0.78x |
+
+For 1 MiB values, `op-batch-size=1` remained the best local shape. Larger
+batches reduce Python-side scheduling overhead, but they also bunch very large
+writes onto each worker connection, so the socket copy and server receive path
+become the limiter sooner.
+
+## Local FCNP/TCP Op-Rate Probe
+
+The same machine also ran a small-value `64 B` probe to separate raw FCNP/TCP
+capacity from LMCache Python plugin overhead. Raw FCNP was measured with the
+Rust saturation harness against the fanout port and shard-owned direct ports.
+LMCache was measured through `FastCacheStorageBackend` over `fast_cache.FcnpStore`.
+
+Raw CSVs:
+
+- [`fcnp-raw-64b.csv`](reference/lmcache-m5-oplimit-20260526/fcnp-raw-64b.csv)
+- [`lmcache-fcnp-64b.csv`](reference/lmcache-m5-oplimit-20260526/lmcache-fcnp-64b.csv)
+
+| Path | Mix | Clients | Pipeline / op batch | Ops/sec |
+| --- | --- | ---: | ---: | ---: |
+| Raw FCNP fanout | GET | 16 | 1 | 192,140 |
+| Raw FCNP fanout | GET | 16 | 64 | 8,849,835 |
+| Raw FCNP fanout | SET | 16 | 64 | 6,467,487 |
+| Raw FCNP fanout | SET | 256 | 64 | 8,523,650 |
+| Raw FCNP shard-direct | GET | 16 | 64 | 8,810,884 |
+| Raw FCNP shard-direct | SET | 64 | 64 | 8,386,538 |
+| LMCache FCNP | GET | 16 | 1 | 54,600 |
+| LMCache FCNP | GET | 16 | 16 | 168,060 |
+| LMCache FCNP | SET | 16 | 1 | 43,964 |
+| LMCache FCNP | SET | 16 | 64 | 230,008 |
+
+The raw TCP path is therefore not the current op-rate ceiling; with request
+pipelining it is already in the `6.5M-8.9M ops/sec` range for tiny values on
+this local run. The LMCache path is bounded by Python key/object work,
+MemoryObj reconstruction, and the plugin call shape before it reaches the raw
+FCNP socket limit.
 
 ## Best By Value Size
 
@@ -200,6 +301,39 @@ aggregate shape for 1 MiB values.
 | 1 MiB | SET | 16 | 4 | 5.238 | 9.956 | 3.993 |
 | 1 MiB | 80/20 | 16 | 4 | 4.665 | 3.007 | 1.894 |
 
+## Local Raw FCNP GB/s Ceiling Probe
+
+Local Apple M5 Max raw FCNP runs were added to separate the FCNP transport
+ceiling from LMCache plugin/Python object overhead. The server was started in
+direct mode with 16 shards, a fanout listener at `127.0.0.1:6500`, and direct
+shard ports at `127.0.0.1:6501-6516`. The `fc-server-fcnp-direct` backend
+routes workers to the direct shard ports and filters each worker to keys owned
+by that shard.
+
+Raw CSVs are stored under
+`benchmarks/reference/lmcache-m5-gbps-limit-20260526/`.
+
+| Route | Clients | Pipeline | Mix | GB/s | Server vCPU |
+| --- | ---: | ---: | --- | ---: | ---: |
+| Fanout | 32 | 1 | GET | 13.322 | 1.606 |
+| Fanout | 32 | 1 | SET | 14.094 | 2.121 |
+| Fanout | 64 | 1 | GET | 11.560 | 1.361 |
+| Fanout | 64 | 1 | SET | 12.176 | 1.674 |
+| Direct shard | 32 | 1 | GET | 13.146 | 1.598 |
+| Direct shard | 32 | 1 | SET | 13.972 | 2.158 |
+| Direct shard | 64 | 1 | GET | 11.042 | 1.319 |
+| Direct shard | 64 | 1 | SET | 12.039 | 1.668 |
+
+The broader no-server-CPU sweep observed a best 1 MiB fanout row of
+`15.623 GB/s` for SET at 32 clients and a best direct-shard row of
+`15.431 GB/s` for SET at 32 clients. Direct shard routing is therefore working,
+but it did not raise the local large-value loopback ceiling. Pipeline depths
+above `1` generally reduced 1 MiB throughput, which points to byte movement
+through loopback/TCP and user-space buffers rather than fanout dispatch as the
+main limit. Values above 4 MiB currently need a server limit change before they
+are valid FCNP/TCP benchmark cases because the request handoff buffer is capped
+at 4 MiB.
+
 ## FCNP/TCP Linux Perf Profile
 
 Linux `perf` was run on server against the 1 MiB, 16-client, no-batch FCNP/TCP
@@ -234,6 +368,10 @@ and then restored. Reports are stored under
 - Same-operation FCNP/TCP batches did not raise the 1 MiB aggregate ceiling;
   batch size `1` was still best for 16 clients. The bottleneck is therefore not
   simply request/response latency.
+- Raw FCNP direct-shard routing is implemented and benchmarked. On the local M5
+  Max loopback run it matched fanout for large 1 MiB payloads but did not exceed
+  it, so direct shard routing is more likely to help small-operation routing and
+  client-side shard affinity than to unlock more single-host TCP GB/s.
 - `perf` shows the current TCP ceiling is dominated by kernel TCP page-frag
   allocation and copy paths (`clear_page_rep`, `rep_movs_alternative`) plus
   Python/user-space reconstruction. The next large TCP step likely needs a

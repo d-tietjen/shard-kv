@@ -17,6 +17,33 @@ Both drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `fc-lmcache`
 emit rows in the same schema.
 
+## Published Coverage
+
+Use this table to decide whether a claim already has a curated head-to-head
+artifact or still needs a fresh run.
+
+| Comparison | Curated artifact | Coverage | Status |
+| --- | --- | --- | --- |
+| fast-cache vs Redis / Valkey / Dragonfly TCP | [`FAST_CACHE_VS_REDIS_TCP.md`](FAST_CACHE_VS_REDIS_TCP.md) | Saturation matrix across value sizes, mixes, clients, and pipeline depths | Publishable for TCP throughput claims. |
+| fast-cache vs Redis command-by-command | [`REDIS_HEAD_TO_HEAD_BENCHMARKS.md`](REDIS_HEAD_TO_HEAD_BENCHMARKS.md) | Redis 5.0 compatibility surface and saved per-command rows | Compatibility coverage is complete; some saved head-to-head cells are marked `n/a` where that exact shape has not been rerun. |
+| fast-cache embedded vs Moka | [`FAST_CACHE_VS_MOKA_EMBEDDED.md`](FAST_CACHE_VS_MOKA_EMBEDDED.md) | Embedded owner-local fast-cache against `moka::sync::Cache` | Publishable for this embedded comparison. |
+| Embedded release matrix | [`FAST_CACHE_EMBEDDED_RELEASE.md`](FAST_CACHE_EMBEDDED_RELEASE.md) | Direct, shared, TTL, LRU, and selected Rust-cache baselines | Publishable as a release proof, not a single competitor-only report. |
+| LMCache plugin vs Redis TCP | [`LMCACHE_VS_REDIS.md`](LMCACHE_VS_REDIS.md) | fast-cache LMCache embedded and FCNP/TCP against Redis TCP | Publishable for the recorded Linux run; rerun before making new M5 or 5MiB LMCache claims. |
+| Local hardware memory ceiling | [`FAST_CACHE_MEMORY_WRITE_COST.md`](FAST_CACHE_MEMORY_WRITE_COST.md) | Pure read, pure write, and copy/materialization probes | Use as the denominator for hardware-scaled bandwidth claims. |
+
+Known gaps before saying "all caching solutions":
+
+- No curated, current LMCache `LocalCPUBackend` head-to-head row is published;
+  the harness can try it with `--with-local-cpu` when the installed LMCache
+  version exposes a constructible local CPU backend.
+- The benchmark harness supports `dashmap`, `lru`, and `rwlock-hashmap`, but
+  only Moka and selected embedded release rows have polished standalone
+  writeups.
+- GPU/direct-runtime claims need separate CUDA-capable proof runs; the LMCache
+  plugin report is CPU/LMCache storage API focused.
+- The new 5MiB local memory ceiling is documented, but LMCache and Redis
+  head-to-head runs have not yet been repeated at 5MiB.
+
 ## Redis Command Matrix
 
 `redis_command_matrix` runs a deterministic RESP command script and reports
@@ -285,25 +312,28 @@ cargo run --release -p fast-cache-benchmarks --features monoio \
   --clients 16 --shards 16 --duration 10
 ```
 
-## Memory Write Cost
+## Memory Bandwidth Ceiling
 
-`memory_write_cost` isolates value materialization and memory write strategies
-from cache lookup and eviction policy work. It is useful when investigating
-large-value SET throughput on Linux:
+`memory_write_cost` isolates local memory movement from cache lookup, eviction,
+protocol, and routing work. Use it to establish the machine ceiling before
+interpreting large-value fast-cache GB/s. The product claim should be framed as
+percentage of hardware ceiling reached, not one universal GB/s number.
 
 ```bash
-CPUSET=0 VALUE_SIZES=4096,16384,65536,1048576 \
+MODES=read-scan,read-scan-neon,write-fill \
+  VALUE_SIZES=524288,1048576,2097152,3145728,4194304,5242880 \
+  THREADS=1 CPUSET=0 \
   ./scripts/run-memory-write-bench.sh
 ```
 
-The benchmark compares reusable slice copies, fresh `Bytes` allocation,
-`Vec -> Bytes`, pooled `Bytes::try_into_mut` reuse, aligned destination copies,
-and x86 non-temporal SSE2/AVX2 stores when available. Current server results show
-that manual non-temporal stores are slower than normal cached copies for these
-cache workloads, while reusable buffers remove most of the fresh-allocation
-cost. The current server note is published in
-[fast-cache Memory Write Cost](FAST_CACHE_MEMORY_WRITE_COST.md). Use the CSV
-artifact from this bench before changing the storage value write path.
+Use `read-scan` for read-only/zero-copy paths, `read-scan-neon` as the Apple
+Silicon vector-load cross-check, `write-fill` for write-only paths, and the copy
+modes for materialized reads. Sweep `THREADS` sequentially to find the host
+maximum; do not run competing ceiling jobs at the same time. On macOS, set
+`MACOS_QOS=1` to request high-priority benchmark worker threads. The current
+note is published in
+[fast-cache Memory Bandwidth Ceiling](FAST_CACHE_MEMORY_WRITE_COST.md). Use the
+CSV artifact from this bench before changing the storage value movement path.
 
 ## Backends
 

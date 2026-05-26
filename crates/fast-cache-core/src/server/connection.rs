@@ -4,12 +4,24 @@ pub(super) struct HandoffConfig;
 
 impl HandoffConfig {
     pub(super) fn buffer() -> HandoffBufferConfig {
-        HandoffBufferConfig::new(HANDOFF_BUFFER_MAX).with_read_reserve(READ_CHUNK_SIZE)
+        HandoffBufferConfig::new(configured_handoff_buffer_max()).with_read_reserve(READ_CHUNK_SIZE)
     }
 
     pub(super) fn write() -> WriteHandoffConfig {
         WriteHandoffConfig::new(WRITE_HANDOFF_MAX_ITEMS, WRITE_HANDOFF_MAX_PENDING_BYTES)
     }
+}
+
+fn configured_handoff_buffer_max() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("FAST_CACHE_HANDOFF_BUFFER_BYTES")
+            .or_else(|_| std::env::var("FCNP_HANDOFF_BUFFER_BYTES"))
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value >= READ_CHUNK_SIZE)
+            .unwrap_or(HANDOFF_BUFFER_MAX)
+    })
 }
 
 pub(super) struct ConnectionRejector;

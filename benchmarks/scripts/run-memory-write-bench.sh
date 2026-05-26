@@ -12,6 +12,8 @@ modes="${MODES:-slice-copy,bytes-copy,vec-bytes,bytes-reuse,aligned-copy,nt-sse2
 warmup="${WARMUP_SECONDS:-1}"
 duration="${DURATION_SECONDS:-5}"
 pool_len="${POOL_LEN:-8}"
+threads="${THREADS:-1}"
+macos_qos="${MACOS_QOS:-0}"
 cpuset="${CPUSET:-0}"
 target_dir="${TARGET_DIR:-target/bench-memory-write}"
 
@@ -33,8 +35,13 @@ cmd=(
   --warmup-seconds "$warmup"
   --duration-seconds "$duration"
   --pool-len "$pool_len"
+  --threads "$threads"
   --csv "$csv"
 )
+
+if [[ "$macos_qos" == "1" ]]; then
+  cmd+=(--macos-qos)
+fi
 
 if command -v taskset >/dev/null 2>&1; then
   taskset -c "$cpuset" "${cmd[@]}" | tee "$out_dir/run.log"
