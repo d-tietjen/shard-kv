@@ -298,7 +298,6 @@ Public product surfaces:
 | `embedded` | Minimal in-process cache API. |
 | `sharded` | Embedded sharded storage and owner-local APIs; implies `embedded`. |
 | `redis` | Redis/Valkey object types, command families, and wrong-type behavior without server networking. |
-| `redis-compat` | Compatibility alias for `redis`. |
 | `server` | RESP/FCNP `fast-cache-server` runtime without the full Redis compatibility catalog. |
 | `redis-server` | Redis/Valkey-compatible server build; implies `server` and `redis`. |
 

@@ -50,10 +50,10 @@ jobs:
         run: cargo test -p fast-cache-formal
       - name: test unsafe feature
         run: cargo test -p fast-cache-core --features unsafe
-      - name: test redis compatibility feature
-        run: cargo test -p fast-cache-core --features redis-compat
+      - name: test redis feature
+        run: cargo test -p fast-cache-core --features redis
       - name: test redis command coverage
-        run: cargo test -p fast-cache-core --features redis-compat --test redis_tier1_coverage_test
+        run: cargo test -p fast-cache-core --features redis --test redis_tier1_coverage_test
       - name: test benchmark command tooling
         run: |
           cargo test -p fast-cache-benchmarks --bin redis_command_matrix
@@ -68,8 +68,8 @@ jobs:
         env:
           FAST_CACHE_COMPAT_SERVER_BIN: redis-server
         run: cargo test -p fast-cache-core --features redis-server --test redis_compat_differential_test -- --nocapture
-      - name: redis compatibility feature
-        run: cargo check -p fast-cache --features redis-compat
+      - name: redis feature
+        run: cargo check -p fast-cache --features redis
       - name: redis server feature
         run: cargo check -p fast-cache --features redis-server
       - name: redis compatibility source crate
