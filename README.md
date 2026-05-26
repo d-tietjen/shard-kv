@@ -88,13 +88,20 @@ Or run the server with Docker Compose:
 docker compose up --build fast-cache
 ```
 
-The Compose service publishes the RESP/FCNP fanout port on `127.0.0.1:6380`
-and enables direct shard-owned FCNP ports on `127.0.0.1:6501-6504` by default.
-Those direct ports match the default `FAST_CACHE_SHARD_COUNT=4`; if you change
-the shard count, update `FAST_CACHE_DIRECT_SHARD_PORT_RANGE` and
-`FAST_CACHE_DIRECT_SHARD_BASE_PORT` together. Persistent data is stored in the
-`fast-cache-data` volume. For same-host benchmark images, build with native CPU
-codegen:
+The Compose service builds a local image named `fast-cache:local`; it is not
+configured to push to Docker Hub or any remote registry. By default it builds
+the Redis/Valkey-compatible `redis-server` feature set and starts the direct
+in-memory server path. For the lean FCNP/RESP server build without the Redis
+compatibility catalog, build with `FAST_CACHE_FEATURES=server`.
+
+Compose publishes the RESP/FCNP fanout port on `127.0.0.1:6380` and enables
+direct shard-owned FCNP ports on `127.0.0.1:6501-6504` by default. Those direct
+ports match the default `FAST_CACHE_SHARD_COUNT=4`; if you change the shard
+count, update `FAST_CACHE_DIRECT_SHARD_PORT_RANGE` and
+`FAST_CACHE_DIRECT_SHARD_BASE_PORT` together. The default Compose command uses
+`--disable-persistence --server-mode direct`; it is meant for local/private
+compatibility and benchmark runs, not durable storage. For same-host benchmark
+images, build with native CPU codegen:
 
 ```bash
 RUSTFLAGS="-C target-cpu=native" docker compose build fast-cache
@@ -121,14 +128,18 @@ Compose variables:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `FAST_CACHE_HOST` | `127.0.0.1` | Host interface used by Compose port publishing |
 | `FAST_CACHE_PORT` | `6380` | Host/container fanout port |
 | `FAST_CACHE_SHARD_COUNT` | `4` | Server shard count |
 | `FAST_CACHE_DIRECT_SHARD_PORTS` | `1` | Enables shard-owned direct FCNP listeners |
 | `FAST_CACHE_DIRECT_SHARD_BASE_PORT` | `6501` | First direct shard port inside the container |
 | `FAST_CACHE_DIRECT_SHARD_PORT_RANGE` | `6501-6504` | Host/container port range published by Compose |
 | `FAST_CACHE_MAX_CONNECTIONS` | `4096` | Server connection limit |
-| `FAST_CACHE_FEATURES` | `server` | Cargo features used while building the image |
+| `FAST_CACHE_HANDOFF_BUFFER_BYTES` | empty | Optional request handoff cap override for large FCNP/TCP payloads |
+| `FAST_CACHE_TOKIO_WRITER_MODE` | `inline` | Tokio TCP writer mode; set `split` to use a separate writer task |
+| `FAST_CACHE_FEATURES` | `redis-server` | Cargo features used while building the image |
 | `RUSTFLAGS` | empty | Optional build flags, for example native CPU tuning |
+| `RUST_LOG` | `info` | Runtime log filter |
 
 `FAST_CACHE_DIRECT_SHARD_PORT_RANGE` is a Compose publishing setting; the
 server itself reads `FAST_CACHE_DIRECT_SHARD_PORTS` and
@@ -142,6 +153,12 @@ FAST_CACHE_SHARD_COUNT=16 \
 FAST_CACHE_DIRECT_SHARD_BASE_PORT=6501 \
 FAST_CACHE_DIRECT_SHARD_PORT_RANGE=6501-6516 \
 docker compose up --build fast-cache
+```
+
+And a local lean server build can be started with:
+
+```bash
+FAST_CACHE_FEATURES=server docker compose up --build fast-cache
 ```
 
 ## Benchmark Highlights

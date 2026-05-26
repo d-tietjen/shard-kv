@@ -30,6 +30,10 @@ Use `./benchmarks/scripts/run-redis-command-benchmark-bundle.sh` for command
 matrix performance proofs so each run carries metadata, raw CSV, Markdown,
 JSON, and compatibility-manifest artifacts together.
 
+Docker Compose is currently a local/private deployment path only. Do not add a
+Docker Hub or remote registry publish step until the compatibility surface and
+release policy explicitly call for it.
+
 ## Publishing
 
 ```bash

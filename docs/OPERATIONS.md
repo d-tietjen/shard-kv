@@ -15,6 +15,13 @@ This page is the short operational contract for running `fast-cache-server` in
 are expected not to compile the Redis compatibility source package; guard this
 with `./scripts/check-feature-matrix.sh`.
 
+The Dockerfile builds the same `fast-cache-server` binary into a local image.
+Compose names that image `fast-cache:local`; there is no Docker Hub or remote
+registry publishing path in this repository yet. The default Docker build uses
+the Redis/Valkey-compatible `redis-server` feature set and starts the direct
+in-memory server path. Use `FAST_CACHE_FEATURES=server` for the lean server
+build without the Redis compatibility catalog.
+
 ## Starting The Server
 
 ```bash
@@ -38,6 +45,18 @@ cargo run -p fast-cache --features redis-server --bin fast-cache-server -- \
   --data-dir ./var/fast-cache
 ```
 
+The local Docker path is:
+
+```bash
+docker compose up --build fast-cache
+```
+
+The default image and Compose command use
+`--disable-persistence --server-mode direct`. That is the current container path
+for Redis-compatible command execution. Engine-backed persistent deployment
+should be configured explicitly and validated against the command surface before
+it is treated as a durable Redis-compatible deployment.
+
 ## Ports
 
 | Surface | Default Shape | Notes |
@@ -50,6 +69,10 @@ to `FAST_CACHE_SHARD_COUNT`. RESP requests on shard ports must route all keys
 to that shard; keyspace-wide commands and RESP transactions are rejected there
 and should use the fanout listener.
 
+Direct server connections default to RESP2. `HELLO 3` switches that connection
+to RESP3, `HELLO 2` switches it back, and `HELLO` without a protocol argument
+returns the current connection protocol.
+
 ## Configuration
 
 Start from `fast-cache.toml.example` for file-based configuration. Docker
@@ -57,13 +80,22 @@ Compose exposes the main knobs as environment variables:
 
 | Variable | Meaning |
 | --- | --- |
+| `FAST_CACHE_HOST` | Host interface used by Compose port publishing. Defaults to `127.0.0.1`. |
 | `FAST_CACHE_PORT` | Host/container fanout port. |
 | `FAST_CACHE_SHARD_COUNT` | Server shard count. |
 | `FAST_CACHE_DIRECT_SHARD_PORTS` | Enables shard-owned direct FCNP listeners. |
 | `FAST_CACHE_DIRECT_SHARD_BASE_PORT` | First direct shard listener port. |
+| `FAST_CACHE_DIRECT_SHARD_PORT_RANGE` | Host/container direct shard port range published by Compose. |
 | `FAST_CACHE_MAX_CONNECTIONS` | Connection limit. |
+| `FAST_CACHE_HANDOFF_BUFFER_BYTES` | Optional request handoff cap override for large FCNP/TCP payloads. |
 | `FAST_CACHE_FEATURES` | Cargo features used by the Docker build. |
+| `RUSTFLAGS` | Optional Docker build flags, for example native CPU tuning. |
+| `RUST_LOG` | Runtime log filter. Defaults to `info` in Compose. |
 | `FAST_CACHE_TOKIO_WRITER_MODE` | `inline` by default; set `split` to use a separate per-connection writer task. |
+
+`FAST_CACHE_DIRECT_SHARD_PORT_RANGE` is only a Compose publishing setting. Keep
+its length equal to `FAST_CACHE_SHARD_COUNT`, and keep its first port aligned
+with `FAST_CACHE_DIRECT_SHARD_BASE_PORT`.
 
 ## Persistence
 

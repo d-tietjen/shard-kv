@@ -121,6 +121,15 @@ CSV=/private/tmp/fast-cache-0.2-redis-command-matrix-fastcache-vs-redis.csv \
 Valkey and Dragonfly should still be run before merge on a machine with Docker
 or local server binaries available.
 
+## Docker Deployment
+
+The Dockerfile and Compose file are ready for local/private deployment testing.
+Compose builds `fast-cache:local` and does not push to Docker Hub or any remote
+registry. The default Docker build uses the Redis/Valkey-compatible
+`redis-server` feature set and starts `--disable-persistence --server-mode
+direct`, so the container path is currently in-memory compatibility testing,
+not durable Redis-compatible storage.
+
 ## Publish Order
 
 The publishable crates are `fcnp-client-rs`, `fast-cache-core`, and
