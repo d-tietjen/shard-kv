@@ -8,6 +8,8 @@ mod protocol;
 mod routing;
 
 pub use client::{FcnpClient, FcnpDirectClient, FcnpDirectShardClient};
+#[cfg(feature = "redis")]
+pub use commands::redis::{RedisCommandKind, RedisResponse};
 pub use error::{FcnpClientError, Result};
 pub use routing::{
     FcnpDirectRouter, FcnpRoute, FcnpRouteMode, hash_key, hash_key_tag, shard_index,

@@ -12,7 +12,7 @@ threads.
 
 ```toml
 [dependencies]
-fcnp-client-rs = "0.1"
+fcnp-client-rs = "0.2"
 ```
 
 ## Server Shape
@@ -133,6 +133,41 @@ fn main() -> fcnp_client_rs::Result<()> {
 }
 ```
 
+## Optimized Redis Commands
+
+Enable the optional `redis` feature to use the compact opcode Redis wrapper.
+This sends the Redis command as an FCNP opcode plus compact binary arguments,
+instead of sending the command name in the generic `RESP` wrapper.
+
+```toml
+[dependencies]
+fcnp-client-rs = { version = "0.2", features = ["redis"] }
+```
+
+```rust,ignore
+use fcnp_client_rs::{FcnpClient, RedisCommandKind, RedisResponse};
+
+fn main() -> fcnp_client_rs::Result<()> {
+    let mut client = FcnpClient::connect("127.0.0.1:6380")?;
+
+    let response = client.redis_command(
+        RedisCommandKind::HGetAll,
+        &[b"user:42"],
+    )?;
+
+    if let RedisResponse::Array(fields) = response {
+        assert!(!fields.is_empty());
+    }
+
+    Ok(())
+}
+```
+
+`RedisCommandKind` covers the full Redis-compatible opcode table exposed by the
+server. Direct shard clients route keyed commands to their owning shard when
+all keys belong to one shard; commands that require all shards should use
+`FcnpClient` on the fanout listener.
+
 ## Routing Helpers
 
 The crate exposes the same routing helpers used by the direct clients:
@@ -165,6 +200,15 @@ This release supports the native hot-path commands currently implemented by
 
 - `GET`
 - `SET`
+- `SETEX` with millisecond TTLs
+- `GETEX` with millisecond TTLs
+- `DEL`
+- `EXISTS`
+- `TTL`, returning Redis-compatible seconds
+- `EXPIRE` with millisecond TTLs
+
+With the `redis` feature enabled, it also supports the full Redis-compatible
+command opcode table through `redis_command` and `redis_command_by_name`.
 
 The crate is organized internally with one command module per FCNP command so
 future commands can be added without growing the transport and routing code.
