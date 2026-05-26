@@ -500,7 +500,7 @@ pub(super) fn command_shards(store: &EmbeddedStore, parts: &[&[u8]]) -> Vec<usiz
 
 fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'_>) -> Vec<usize> {
     match &request.command {
-        FastCommand::RespCommand { parts } => return command_shards(store, parts),
+        FastCommand::RespCommand { parts } => command_shards(store, parts),
         command => route_keys_to_shards(store, command.route_keys()),
     }
 }
@@ -693,7 +693,7 @@ fn stream_read_route_keys<'a>(args: &'a [&'a [u8]]) -> FastRedisRouteKeys<'a> {
         return FastRedisRouteKeys::AllShards;
     };
     let stream_args = &args[streams_index + 1..];
-    if stream_args.len() < 2 || stream_args.len() % 2 != 0 {
+    if stream_args.len() < 2 || !stream_args.len().is_multiple_of(2) {
         return FastRedisRouteKeys::AllShards;
     }
     let key_count = stream_args.len() / 2;

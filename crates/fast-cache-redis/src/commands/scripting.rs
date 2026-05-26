@@ -21,6 +21,8 @@ pub(crate) struct Eval;
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EvalSha;
 
+type EvalKeysAndArgv<'a> = (&'a [&'a [u8]], &'a [&'a [u8]]);
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Script;
 
@@ -261,10 +263,7 @@ fn script(args: &[&[u8]]) -> Frame {
     }
 }
 
-fn eval_keys_and_argv<'a>(
-    _command: &str,
-    args: &'a [&'a [u8]],
-) -> Result<(&'a [&'a [u8]], &'a [&'a [u8]]), ()> {
+fn eval_keys_and_argv<'a>(_command: &str, args: &'a [&'a [u8]]) -> Result<EvalKeysAndArgv<'a>, ()> {
     if args.len() < 2 {
         return Err(());
     }
@@ -305,9 +304,9 @@ fn run_script(
 ) -> Frame {
     let program = match script.program() {
         Ok(program) => program,
-        Err(message) => return error(&message),
+        Err(message) => return error(message),
     };
-    match (ScriptRuntime { store, keys, argv }).eval_program(&program) {
+    match (ScriptRuntime { store, keys, argv }).eval_program(program) {
         Ok(frame) => frame,
         Err(message) => error(&message),
     }
@@ -324,14 +323,14 @@ fn write_cached_script_resp(
     let program = match script.program() {
         Ok(program) => program,
         Err(message) => {
-            ServerWire::write_resp_error(out, &message);
+            ServerWire::write_resp_error(out, message);
             return;
         }
     };
     let runtime = ScriptRuntime { store, keys, argv };
-    match runtime.write_program_resp(&program, out) {
+    match runtime.write_program_resp(program, out) {
         Ok(true) => {}
-        Ok(false) => match runtime.eval_program(&program) {
+        Ok(false) => match runtime.eval_program(program) {
             Ok(frame) => write_frame(out, &frame),
             Err(message) => ServerWire::write_resp_error(out, &message),
         },
@@ -534,7 +533,7 @@ impl ScriptRuntime<'_> {
             parts.extend(refs.iter().copied());
             let command = crate::storage::BorrowedCommand::from_parts(&parts)
                 .map_err(|error| format!("ERR {error}"))?;
-            return Ok(command.execute_borrowed_frame(self.store, crate::storage::now_millis()));
+            Ok(command.execute_borrowed_frame(self.store, crate::storage::now_millis()))
         }
         #[cfg(not(feature = "server"))]
         Ok(dispatch_redis_command(&command, self.store, &refs))

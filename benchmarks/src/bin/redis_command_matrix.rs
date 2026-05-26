@@ -181,6 +181,16 @@ impl FixtureScope {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RunConfig {
+    clients: usize,
+    key_shards: usize,
+    fixture_scope: FixtureScope,
+    pipeline_depth: usize,
+    warmup: Duration,
+    duration: Duration,
+}
+
 #[derive(Debug, Clone, Default)]
 struct CaseStats {
     ops: u64,
@@ -268,12 +278,14 @@ fn main() -> Result<(), BoxError> {
         let stats = run_target(
             &target,
             &cases,
-            args.clients,
-            args.key_shards,
-            args.fixture_scope,
-            args.pipeline_depth,
-            warmup,
-            duration,
+            RunConfig {
+                clients: args.clients,
+                key_shards: args.key_shards,
+                fixture_scope: args.fixture_scope,
+                pipeline_depth: args.pipeline_depth,
+                warmup,
+                duration,
+            },
         )?;
         for (case, stats) in cases.iter().zip(stats.iter()) {
             if args.fail_on_error && stats.errors > 0 {
@@ -510,40 +522,26 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
 fn run_target(
     target: &Target,
     cases: &[RedisCommandCase],
-    clients: usize,
-    key_shards: usize,
-    fixture_scope: FixtureScope,
-    pipeline_depth: usize,
-    warmup: Duration,
-    duration: Duration,
+    config: RunConfig,
 ) -> Result<Vec<CaseStats>, BoxError> {
-    if let Some(shard_count) = target.addr.shard_count() {
-        if key_shards > shard_count {
-            return Err(format!(
-                "target `{}` exposes {shard_count} direct shard ports but --key-shards is {key_shards}",
-                target.name
-            )
-            .into());
-        }
+    if let Some(shard_count) = target.addr.shard_count()
+        && config.key_shards > shard_count
+    {
+        return Err(format!(
+            "target `{}` exposes {shard_count} direct shard ports but --key-shards is {}",
+            target.name, config.key_shards
+        )
+        .into());
     }
     BenchConn::connect(target.protocol, &target.addr.probe_addr())?;
 
     let cases = Arc::new(cases.to_vec());
-    let mut handles = Vec::with_capacity(clients);
-    for worker_id in 0..clients {
+    let mut handles = Vec::with_capacity(config.clients);
+    for worker_id in 0..config.clients {
         let target = target.clone();
         let cases = Arc::clone(&cases);
         handles.push(thread::spawn(move || {
-            run_worker(
-                worker_id,
-                &target,
-                &cases,
-                key_shards,
-                fixture_scope,
-                pipeline_depth,
-                warmup,
-                duration,
-            )
+            run_worker(worker_id, &target, &cases, config)
         }));
     }
 
@@ -563,40 +561,36 @@ fn run_worker(
     worker_id: usize,
     target: &Target,
     cases: &[RedisCommandCase],
-    key_shards: usize,
-    fixture_scope: FixtureScope,
-    pipeline_depth: usize,
-    warmup: Duration,
-    duration: Duration,
+    config: RunConfig,
 ) -> Result<Vec<CaseStats>, BoxError> {
-    let suffixes = WorkerSuffixes::new(worker_id, key_shards);
+    let suffixes = WorkerSuffixes::new(worker_id, config.key_shards);
     let addr = target.addr.addr_for_lane(suffixes.worker.shard_lane)?;
     let mut conn = BenchConn::connect(target.protocol, &addr)?;
-    run_setup(&mut conn, cases, &suffixes, fixture_scope)?;
-    if !warmup.is_zero() {
+    run_setup(&mut conn, cases, &suffixes, config.fixture_scope)?;
+    if !config.warmup.is_zero() {
         run_script(
             &mut conn,
             cases,
             &suffixes,
-            fixture_scope,
-            pipeline_depth,
-            Instant::now() + warmup,
+            config.fixture_scope,
+            config.pipeline_depth,
+            Instant::now() + config.warmup,
             None,
         )?;
         // Warmup can stop between stateful command pairs, so reconnect before
         // timing to clear connection-local state such as Pub/Sub subscriptions.
         conn = BenchConn::connect(target.protocol, &addr)?;
-        run_setup(&mut conn, cases, &suffixes, fixture_scope)?;
+        run_setup(&mut conn, cases, &suffixes, config.fixture_scope)?;
     }
 
-    let deadline = Instant::now() + duration;
+    let deadline = Instant::now() + config.duration;
     let mut stats = vec![CaseStats::default(); cases.len()];
     run_script(
         &mut conn,
         cases,
         &suffixes,
-        fixture_scope,
-        pipeline_depth,
+        config.fixture_scope,
+        config.pipeline_depth,
         deadline,
         Some(&mut stats),
     )?;

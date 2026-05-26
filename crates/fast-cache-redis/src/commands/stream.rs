@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, fmt};
 
 #[cfg(feature = "server")]
 use bytes::BytesMut;
@@ -106,14 +106,14 @@ fn xadd_update(store: &EmbeddedStore, args: &[&[u8]]) -> Result<StreamId, Frame>
         return Err(wrong_arity("XADD"));
     };
     index += 1;
-    if index >= args.len() || (args.len() - index) % 2 != 0 {
+    if index >= args.len() || !(args.len() - index).is_multiple_of(2) {
         return Err(wrong_arity("XADD"));
     }
     let fields = args[index..]
         .chunks_exact(2)
         .map(|chunk| (chunk[0], chunk[1]))
         .collect::<Vec<_>>();
-    let result = store.transform_string_value_no_ttl(
+    store.transform_string_value_no_ttl(
         key,
         |existing| {
             if let Some((id, value)) = try_fast_append_stream(existing, id_arg, &fields, trim)? {
@@ -135,8 +135,7 @@ fn xadd_update(store: &EmbeddedStore, args: &[&[u8]]) -> Result<StreamId, Frame>
             Ok((id, encode_stream(&stream)))
         },
         wrongtype,
-    );
-    result
+    )
 }
 
 impl crate::commands::redis::RedisCommand for XLen {
@@ -471,9 +470,9 @@ struct StreamId {
     seq: u64,
 }
 
-impl StreamId {
-    fn to_string(self) -> String {
-        format!("{}-{}", self.ms, self.seq)
+impl fmt::Display for StreamId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.ms, self.seq)
     }
 }
 
@@ -596,7 +595,7 @@ fn parse_stream_range_args<'a>(
         return Err(wrong_arity(command.name()));
     };
     Ok(StreamRangeArgs {
-        key: *key,
+        key,
         start: parse_range_bound(start, false)?,
         end: parse_range_bound(end, true)?,
         count: parse_stream_range_options(options)?,
@@ -988,7 +987,7 @@ fn parse_stream_read_streams<'a>(
     args: &'a [&'a [u8]],
     command: StreamReadCommand,
 ) -> Result<Vec<StreamReadStream<'a>>, Frame> {
-    if args.is_empty() || args.len() % 2 != 0 {
+    if args.is_empty() || !args.len().is_multiple_of(2) {
         return Err(error("ERR Unbalanced XREAD list of streams"));
     }
     let key_count = args.len() / 2;
@@ -996,7 +995,7 @@ fn parse_stream_read_streams<'a>(
     keys.iter()
         .zip(ids.iter())
         .filter_map(|(key, raw_id)| match command.cursor_from_raw(raw_id) {
-            Ok(Some(after)) => Some(Ok(StreamReadStream { key: *key, after })),
+            Ok(Some(after)) => Some(Ok(StreamReadStream { key, after })),
             Ok(None) => None,
             Err(frame) => Some(Err(frame)),
         })

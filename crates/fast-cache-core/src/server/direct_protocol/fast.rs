@@ -174,12 +174,9 @@ impl DirectProtocol {
         started_at: Instant,
     ) {
         #[cfg(feature = "redis")]
-        match FcnpScanCommand::from_name(command) {
-            Some(command) => {
-                command.write_fast_response(store, args, out);
-                return;
-            }
-            None => {}
+        if let Some(command) = FcnpScanCommand::from_name(command) {
+            command.write_fast_response(store, args, out);
+            return;
         }
         let mut direct_args = RespDirectArgs::new();
         direct_args.extend(args.iter().copied());

@@ -27,11 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - name: install Redis reference server
         run: sudo apt-get update && sudo apt-get install -y redis-server
       - uses: Swatinem/rust-cache@v2
-      - name: fmt
+      - name: cargo fmt
         run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --workspace
       - name: test formal command laws
@@ -74,3 +78,55 @@ jobs:
         run: cargo package -p fcnp-client-rs --locked
       - name: package fast-cache-core crate
         run: cargo package -p fast-cache-core --locked
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config
+        run: docker compose config
+      - name: docker compose build
+        run: docker compose build fast-cache
+      - name: docker compose up
+        run: docker compose up -d --no-build fast-cache
+      - name: smoke RESP over docker compose
+        run: |
+          python3 - <<'PY'
+          import socket
+          import time
+
+          def request(payload, expected):
+              deadline = time.time() + 30
+              last_error = None
+              while time.time() < deadline:
+                  try:
+                      with socket.create_connection(("127.0.0.1", 6380), timeout=1) as sock:
+                          sock.settimeout(2)
+                          sock.sendall(payload)
+                          data = b""
+                          while expected not in data:
+                              chunk = sock.recv(4096)
+                              if not chunk:
+                                  break
+                              data += chunk
+                          if expected in data:
+                              return data
+                          last_error = AssertionError(f"expected {expected!r}, got {data!r}")
+                  except OSError as error:
+                      last_error = error
+                  time.sleep(0.25)
+              raise RuntimeError(f"RESP smoke failed: {last_error}")
+
+          request(b"*1\r\n$4\r\nPING\r\n", b"+PONG\r\n")
+          request(
+              b"*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"
+              b"*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n",
+              b"+OK\r\n$3\r\nbar\r\n",
+          )
+          PY
+      - name: docker compose logs
+        if: failure()
+        run: docker compose logs fast-cache
+      - name: docker compose down
+        if: always()
+        run: docker compose down --volumes --remove-orphans

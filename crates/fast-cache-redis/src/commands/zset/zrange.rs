@@ -6,7 +6,7 @@ use crate::commands::redis::{
     write_resp_wrong_arity, wrong_arity,
 };
 use crate::commands::zset_shared::{
-    write_zrange_rank_fast, write_zrange_rank_resp, write_zrange_score_fast,
+    ZRangeScoreRequest, write_zrange_rank_fast, write_zrange_rank_resp, write_zrange_score_fast,
     write_zrange_score_resp, zrange_by_rank_impl, zrange_by_score_impl,
 };
 use crate::protocol::Frame;
@@ -107,12 +107,14 @@ impl crate::commands::redis::RedisCommand for ZRange {
         if by_score {
             write_zrange_score_resp(
                 store,
-                args[0],
-                args[1],
-                args[2],
-                rev,
-                with_scores,
-                limit,
+                ZRangeScoreRequest {
+                    key: args[0],
+                    min: args[1],
+                    max: args[2],
+                    rev,
+                    with_scores,
+                    limit,
+                },
                 out,
             );
             return;
@@ -170,12 +172,14 @@ impl crate::commands::redis::RedisCommand for ZRange {
         if by_score {
             write_zrange_score_fast(
                 store,
-                args[0],
-                args[1],
-                args[2],
-                rev,
-                with_scores,
-                limit,
+                ZRangeScoreRequest {
+                    key: args[0],
+                    min: args[1],
+                    max: args[2],
+                    rev,
+                    with_scores,
+                    limit,
+                },
                 out,
             );
             return;

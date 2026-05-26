@@ -5,7 +5,7 @@ use crate::commands::redis::{
     define_redis_command, eq_ignore_ascii_case, error, parse_usize, write_resp_wrong_arity,
     wrong_arity, zrange_by_score_impl,
 };
-use crate::commands::zset_shared::write_zrange_score_fast;
+use crate::commands::zset_shared::{ZRangeScoreRequest, write_zrange_score_fast};
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
@@ -76,12 +76,14 @@ impl crate::commands::redis::RedisCommand for ZRevRangeByScore {
         }
         crate::commands::zset_shared::write_zrange_score_resp(
             store,
-            args[0],
-            args[1],
-            args[2],
-            true,
-            with_scores,
-            limit,
+            ZRangeScoreRequest {
+                key: args[0],
+                min: args[1],
+                max: args[2],
+                rev: true,
+                with_scores,
+                limit,
+            },
             out,
         );
     }
@@ -124,12 +126,14 @@ impl crate::commands::redis::RedisCommand for ZRevRangeByScore {
         }
         write_zrange_score_fast(
             store,
-            args[0],
-            args[1],
-            args[2],
-            true,
-            with_scores,
-            limit,
+            ZRangeScoreRequest {
+                key: args[0],
+                min: args[1],
+                max: args[2],
+                rev: true,
+                with_scores,
+                limit,
+            },
             out,
         );
     }

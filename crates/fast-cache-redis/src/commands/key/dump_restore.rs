@@ -101,7 +101,7 @@ pub(crate) fn encode_dump_value(value: &DumpRestoreValue) -> Vec<u8> {
 
 fn finish_dump_payload(out: &mut Vec<u8>) {
     out.extend_from_slice(&RDB_VERSION.to_le_bytes());
-    let checksum = crc64_jones(0, &out);
+    let checksum = crc64_jones(0, out);
     out.extend_from_slice(&checksum.to_le_bytes());
 }
 

@@ -582,7 +582,7 @@ fn read_sum_unrolled(slice: &[u8]) -> u64 {
 fn read_sum_neon(slice: &[u8]) -> u64 {
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        return read_sum_neon_aarch64(slice);
+        read_sum_neon_aarch64(slice)
     }
     #[cfg(not(target_arch = "aarch64"))]
     {

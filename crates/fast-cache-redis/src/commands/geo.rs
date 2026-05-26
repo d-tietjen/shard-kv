@@ -206,7 +206,7 @@ impl GeoUnit {
         value * self.meters
     }
 
-    fn from_meters(self, value: f64) -> f64 {
+    fn meters_to_unit(self, value: f64) -> f64 {
         value / self.meters
     }
 }
@@ -284,7 +284,7 @@ fn geodist_value(store: &EmbeddedStore, args: &[&[u8]]) -> Result<Option<String>
         Err(frame) => return Err(frame),
     };
     Ok(Some(format_float(
-        unit.from_meters(distance_m(left, right)),
+        unit.meters_to_unit(distance_m(left, right)),
     )))
 }
 
@@ -362,10 +362,7 @@ fn georadius_result<'a>(
         GeoRadiusQueryResult::Empty => return Ok(GeoRadiusResult::Empty),
         GeoRadiusQueryResult::Query(query) => query,
     };
-    let mut hits = match geo_hits(store, query.key, query.center, query.radius_m) {
-        Ok(hits) => hits,
-        Err(frame) => return Err(frame),
-    };
+    let mut hits = geo_hits(store, query.key, query.center, query.radius_m)?;
     match query.options.sort {
         SortOrder::Asc => hits.sort_by(|left, right| left.distance_m.total_cmp(&right.distance_m)),
         SortOrder::Desc => {
@@ -380,7 +377,7 @@ fn georadius_result<'a>(
         store.delete(dest);
         for hit in &hits {
             let score = if store_dist {
-                query.unit.from_meters(hit.distance_m)
+                query.unit.meters_to_unit(hit.distance_m)
             } else {
                 hit.score
             };
@@ -439,10 +436,7 @@ fn georadius_query<'a>(
         };
         (decode_geo_score(score), radius, unit, 5)
     };
-    let options = match parse_radius_options(&args[option_start..], read_only) {
-        Ok(options) => options,
-        Err(frame) => return Err(frame),
-    };
+    let options = parse_radius_options(&args[option_start..], read_only)?;
     Ok(GeoRadiusQueryResult::Query(GeoRadiusQuery {
         key,
         center,
@@ -625,7 +619,7 @@ fn write_radius_hit_resp(
     write_resp_array_header(out, len);
     ServerWire::write_resp_blob_string(out, member);
     if options.with_dist {
-        let distance = format_float(unit.from_meters(distance_m));
+        let distance = format_float(unit.meters_to_unit(distance_m));
         ServerWire::write_resp_blob_string(out, distance.as_bytes());
     }
     if options.with_hash {
@@ -751,7 +745,7 @@ fn radius_response(hits: Vec<GeoHit>, unit: GeoUnit, options: &GeoRadiusOptions<
                 item.push(bulk(hit.member));
                 if options.with_dist {
                     item.push(bulk(
-                        format_float(unit.from_meters(hit.distance_m)).into_bytes(),
+                        format_float(unit.meters_to_unit(hit.distance_m)).into_bytes(),
                     ));
                 }
                 if options.with_hash {

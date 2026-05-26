@@ -2171,6 +2171,10 @@ mod tests {
         REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES, RedisCommandFamily,
     };
 
+    fn has_cases<T>(items: &[T]) -> bool {
+        !items.is_empty()
+    }
+
     #[test]
     fn benchmark_cases_cover_declared_commands() {
         let actual = REDIS_COMMAND_CASES
@@ -2199,7 +2203,7 @@ mod tests {
     #[test]
     fn benchmarked_commands_have_fcnp_transport_path() {
         assert!(
-            !BENCHMARKED_COMMANDS.is_empty(),
+            has_cases(BENCHMARKED_COMMANDS),
             "benchmark manifest must not be empty"
         );
     }
@@ -2309,7 +2313,7 @@ mod tests {
     #[test]
     fn large_benchmark_cases_are_in_large_profile() {
         assert!(
-            !REDIS_COMMAND_LARGE_CASES.is_empty(),
+            has_cases(REDIS_COMMAND_LARGE_CASES),
             "large command benchmark profile is empty"
         );
         for case in REDIS_COMMAND_LARGE_CASES {
@@ -2325,7 +2329,7 @@ mod tests {
     #[test]
     fn destructive_benchmark_cases_are_isolated_from_default_profiles() {
         assert!(
-            !REDIS_COMMAND_DESTRUCTIVE_CASES.is_empty(),
+            has_cases(REDIS_COMMAND_DESTRUCTIVE_CASES),
             "destructive command benchmark profile is empty"
         );
         for case in REDIS_COMMAND_DESTRUCTIVE_CASES {

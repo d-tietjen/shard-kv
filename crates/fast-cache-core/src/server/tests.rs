@@ -1061,7 +1061,7 @@ fn decode_scan_response(raw: &[u8]) -> (u64, Vec<Vec<u8>>) {
     let Frame::Array(items) = frame else {
         panic!("scan response should be an array");
     };
-    let [cursor, values]: [Frame; 2] = items.try_into().ok().expect("scan response shape");
+    let [cursor, values]: [Frame; 2] = items.try_into().expect("scan response shape");
     let Frame::BlobString(cursor) = cursor else {
         panic!("scan cursor should be a bulk string");
     };

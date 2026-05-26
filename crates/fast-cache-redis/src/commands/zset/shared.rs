@@ -17,6 +17,17 @@ use crate::storage::{
     RedisObjectZSetRangeItem,
 };
 
+pub(crate) struct ZRangeScoreRequest<'a> {
+    pub(crate) key: &'a [u8],
+    pub(crate) min: &'a [u8],
+    pub(crate) max: &'a [u8],
+    pub(crate) rev: bool,
+    pub(crate) with_scores: bool,
+    pub(crate) limit: Option<(usize, usize)>,
+}
+
+type ZmPopSplit<'a> = (&'a [&'a [u8]], &'a [u8], &'a [&'a [u8]]);
+
 #[cfg(feature = "server")]
 pub(crate) fn write_zrange_rank_resp(
     store: &EmbeddedStore,
@@ -149,16 +160,19 @@ pub(crate) fn zrange_by_score_impl(
 #[cfg(feature = "server")]
 pub(crate) fn write_zrange_score_resp(
     store: &EmbeddedStore,
-    key: &[u8],
-    min: &[u8],
-    max: &[u8],
-    rev: bool,
-    with_scores: bool,
-    limit: Option<(usize, usize)>,
+    request: ZRangeScoreRequest<'_>,
     out: &mut BytesMut,
 ) {
-    let lower = if rev { max } else { min };
-    let upper_bound = if rev { min } else { max };
+    let lower = if request.rev {
+        request.max
+    } else {
+        request.min
+    };
+    let upper_bound = if request.rev {
+        request.min
+    } else {
+        request.max
+    };
     let Ok(lower) = crate::commands::redis::parse_score_bound(lower) else {
         ServerWire::write_resp_error(out, "ERR min or max is not a float");
         return;
@@ -167,7 +181,7 @@ pub(crate) fn write_zrange_score_resp(
         ServerWire::write_resp_error(out, "ERR min or max is not a float");
         return;
     };
-    let mut entries = match store.zentries(key) {
+    let mut entries = match store.zentries(request.key) {
         Ok(entries) => entries,
         Err(RedisObjectError::WrongType) => {
             write_resp_wrongtype(out);
@@ -176,28 +190,31 @@ pub(crate) fn write_zrange_score_resp(
         Err(RedisObjectError::MissingKey) => Vec::new(),
     };
     entries.retain(|(_, score)| lower.contains(*score, true) && upper.contains(*score, false));
-    if rev {
+    if request.rev {
         entries.reverse();
     }
-    if let Some((offset, count)) = limit {
+    if let Some((offset, count)) = request.limit {
         entries = entries.into_iter().skip(offset).take(count).collect();
     }
-    write_zentries_resp(out, entries, with_scores);
+    write_zentries_resp(out, entries, request.with_scores);
 }
 
 #[cfg(feature = "server")]
 pub(crate) fn write_zrange_score_fast(
     store: &EmbeddedStore,
-    key: &[u8],
-    min: &[u8],
-    max: &[u8],
-    rev: bool,
-    with_scores: bool,
-    limit: Option<(usize, usize)>,
+    request: ZRangeScoreRequest<'_>,
     out: &mut BytesMut,
 ) {
-    let lower = if rev { max } else { min };
-    let upper_bound = if rev { min } else { max };
+    let lower = if request.rev {
+        request.max
+    } else {
+        request.min
+    };
+    let upper_bound = if request.rev {
+        request.min
+    } else {
+        request.max
+    };
     let Ok(lower) = crate::commands::redis::parse_score_bound(lower) else {
         ServerWire::write_fast_error(out, "ERR min or max is not a float");
         return;
@@ -206,7 +223,7 @@ pub(crate) fn write_zrange_score_fast(
         ServerWire::write_fast_error(out, "ERR min or max is not a float");
         return;
     };
-    let mut entries = match store.zentries(key) {
+    let mut entries = match store.zentries(request.key) {
         Ok(entries) => entries,
         Err(RedisObjectError::WrongType) => {
             ServerWire::write_fast_error(out, crate::storage::WRONGTYPE_MESSAGE);
@@ -215,13 +232,13 @@ pub(crate) fn write_zrange_score_fast(
         Err(RedisObjectError::MissingKey) => Vec::new(),
     };
     entries.retain(|(_, score)| lower.contains(*score, true) && upper.contains(*score, false));
-    if rev {
+    if request.rev {
         entries.reverse();
     }
-    if let Some((offset, count)) = limit {
+    if let Some((offset, count)) = request.limit {
         entries = entries.into_iter().skip(offset).take(count).collect();
     }
-    write_zentries_fast(out, entries, with_scores);
+    write_zentries_fast(out, entries, request.with_scores);
 }
 
 #[cfg(feature = "server")]
@@ -426,7 +443,7 @@ fn validate_zmpop_timeout(timeout: &[u8]) -> std::result::Result<(), Frame> {
 
 fn split_zmpop_key_direction<'a>(
     args: &'a [&'a [u8]],
-) -> std::result::Result<(&'a [&'a [u8]], &'a [u8], &'a [&'a [u8]]), Frame> {
+) -> std::result::Result<ZmPopSplit<'a>, Frame> {
     let (numkeys, rest) = args.split_first().ok_or_else(zmpop_syntax_error)?;
     let numkeys = parse_nonzero_zmpop_usize(numkeys, "ERR numkeys should be greater than 0")?;
     let (direction, options) = rest
@@ -538,12 +555,7 @@ pub(crate) fn write_zrange_rank_fast(
 #[cfg(not(feature = "server"))]
 pub(crate) fn write_zrange_score_resp(
     _store: &EmbeddedStore,
-    _key: &[u8],
-    _min: &[u8],
-    _max: &[u8],
-    _rev: bool,
-    _with_scores: bool,
-    _limit: Option<(usize, usize)>,
+    _request: ZRangeScoreRequest<'_>,
     _out: &mut BytesMut,
 ) {
     unreachable!("RESP zset writers are only called by the server feature")
@@ -552,12 +564,7 @@ pub(crate) fn write_zrange_score_resp(
 #[cfg(not(feature = "server"))]
 pub(crate) fn write_zrange_score_fast(
     _store: &EmbeddedStore,
-    _key: &[u8],
-    _min: &[u8],
-    _max: &[u8],
-    _rev: bool,
-    _with_scores: bool,
-    _limit: Option<(usize, usize)>,
+    _request: ZRangeScoreRequest<'_>,
     _out: &mut BytesMut,
 ) {
     unreachable!("FCNP zset writers are only called by the server feature")
