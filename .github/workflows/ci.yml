@@ -35,7 +35,13 @@ jobs:
       - name: cargo fmt
         run: cargo fmt --all -- --check
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p fast-cache-core --all-targets --all-features -- -D warnings
+          cargo clippy -p fast-cache --all-targets --all-features -- -D warnings
+          cargo clippy -p fast-cache-redis --all-targets --all-features -- -D warnings
+          cargo clippy -p fast-cache-py --all-targets --all-features -- -D warnings
+          cargo clippy -p fast-cache-runtime --all-targets --features gpu-direct-api -- -D warnings
       - name: test
         run: cargo test --workspace
       - name: test formal command laws

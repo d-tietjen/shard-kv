@@ -1020,32 +1020,37 @@ impl MonoioDrainError {
 struct MonoioRequestDrain;
 
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
+struct MonoioRequestDrainContext<'a> {
+    store: &'a EmbeddedStore,
+    write_buffer: &'a mut BytesMut,
+    fast_write_queue: Option<&'a mut FastWriteQueue>,
+    single_threaded: bool,
+    owned_shard_id: Option<usize>,
+    started_at: Instant,
+    transaction_coordinator: Option<&'a TransactionCoordinator>,
+    transaction_state: &'a mut TransactionState,
+    resp_protocol: &'a mut RespProtocolVersion,
+}
+
+#[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
 impl MonoioRequestDrain {
     #[inline(always)]
     fn process(
         cursor: &mut bytes_handoff::HandoffDrainCursor<'_>,
-        store: &EmbeddedStore,
-        write_buffer: &mut BytesMut,
-        fast_write_queue: Option<&mut FastWriteQueue>,
-        single_threaded: bool,
-        owned_shard_id: Option<usize>,
-        started_at: Instant,
-        transaction_coordinator: Option<&TransactionCoordinator>,
-        transaction_state: &mut TransactionState,
-        resp_protocol: &mut RespProtocolVersion,
+        context: MonoioRequestDrainContext<'_>,
     ) -> std::result::Result<usize, MonoioDrainError> {
         let consumed = DirectProtocol::process_shared_request_buffer_with_context(
             cursor.remaining(),
-            store,
-            write_buffer,
-            fast_write_queue,
+            context.store,
+            context.write_buffer,
+            context.fast_write_queue,
             SharedRequestBufferContext {
-                single_threaded,
-                owned_shard_id,
-                started_at,
-                transaction_coordinator,
-                transaction_state,
-                resp_protocol,
+                single_threaded: context.single_threaded,
+                owned_shard_id: context.owned_shard_id,
+                started_at: context.started_at,
+                transaction_coordinator: context.transaction_coordinator,
+                transaction_state: context.transaction_state,
+                resp_protocol: context.resp_protocol,
             },
         )
         .map_err(MonoioDrainError::protocol)?;
@@ -1142,15 +1147,17 @@ impl MonoioMultiDirectConnection {
                 .read_and_drain_monoio(&mut stream, |cursor| {
                     MonoioRequestDrain::process(
                         cursor,
-                        &store,
-                        &mut write_buffer,
-                        None,
-                        single_threaded,
-                        owned_shard_id,
-                        started_at,
-                        transaction_coordinator.as_deref(),
-                        &mut transaction_state,
-                        &mut resp_protocol,
+                        MonoioRequestDrainContext {
+                            store: &store,
+                            write_buffer: &mut write_buffer,
+                            fast_write_queue: None,
+                            single_threaded,
+                            owned_shard_id,
+                            started_at,
+                            transaction_coordinator: transaction_coordinator.as_deref(),
+                            transaction_state: &mut transaction_state,
+                            resp_protocol: &mut resp_protocol,
+                        },
                     )
                 })
                 .await
@@ -1201,15 +1208,17 @@ impl MonoioMultiDirectConnection {
                 .read_and_drain_monoio(&mut read_half, |cursor| {
                     MonoioRequestDrain::process(
                         cursor,
-                        &store,
-                        &mut write_buffer,
-                        None,
-                        single_threaded,
-                        owned_shard_id,
-                        started_at,
-                        transaction_coordinator.as_deref(),
-                        &mut transaction_state,
-                        &mut resp_protocol,
+                        MonoioRequestDrainContext {
+                            store: &store,
+                            write_buffer: &mut write_buffer,
+                            fast_write_queue: None,
+                            single_threaded,
+                            owned_shard_id,
+                            started_at,
+                            transaction_coordinator: transaction_coordinator.as_deref(),
+                            transaction_state: &mut transaction_state,
+                            resp_protocol: &mut resp_protocol,
+                        },
                     )
                 })
                 .await
@@ -1253,15 +1262,17 @@ impl MonoioMultiDirectConnection {
                 .read_and_drain_monoio(&mut stream, |cursor| {
                     MonoioRequestDrain::process(
                         cursor,
-                        &store,
-                        &mut write_buffer,
-                        Some(&mut fast_write_queue),
-                        single_threaded,
-                        owned_shard_id,
-                        started_at,
-                        transaction_coordinator.as_deref(),
-                        &mut transaction_state,
-                        &mut resp_protocol,
+                        MonoioRequestDrainContext {
+                            store: &store,
+                            write_buffer: &mut write_buffer,
+                            fast_write_queue: Some(&mut fast_write_queue),
+                            single_threaded,
+                            owned_shard_id,
+                            started_at,
+                            transaction_coordinator: transaction_coordinator.as_deref(),
+                            transaction_state: &mut transaction_state,
+                            resp_protocol: &mut resp_protocol,
+                        },
                     )
                 })
                 .await

@@ -3,17 +3,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::*;
 
 #[cfg(feature = "embedded")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RespProtocolVersion {
+    #[default]
     Resp2,
     Resp3,
-}
-
-#[cfg(feature = "embedded")]
-impl Default for RespProtocolVersion {
-    fn default() -> Self {
-        Self::Resp2
-    }
 }
 
 #[cfg(feature = "embedded")]
