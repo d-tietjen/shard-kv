@@ -16,6 +16,7 @@ default = ["redis"]
 embedded = ["fast_cache_core/embedded"]
 sharded = ["embedded", "fast_cache_core/sharded"]
 redis = ["embedded", "fast_cache_core/redis"]
+redis-compat = ["redis"]
 server = ["sharded", "fast_cache_core/server"]
 redis-server = ["server", "redis", "fast_cache_core/redis-server"]
 

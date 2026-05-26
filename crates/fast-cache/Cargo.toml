@@ -25,6 +25,7 @@ redis = [
     "embedded",
     "fast_cache_core/redis",
 ]
+redis-compat = ["redis"]
 server = ["sharded", "fast_cache_core/server", "dep:clap", "dep:tokio"]
 redis-server = ["server", "redis", "fast_cache_core/redis-server"]
 monoio = ["server", "fast_cache_core/monoio"]

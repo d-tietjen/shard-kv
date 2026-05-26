@@ -40,6 +40,7 @@ default = ["sharded"]
 embedded = []
 sharded = ["embedded"]
 redis = ["embedded"]
+redis-compat = ["redis"]
 server = [
     "sharded",
     "dep:bytes-handoff",
