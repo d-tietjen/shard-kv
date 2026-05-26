@@ -330,9 +330,9 @@ The broader no-server-CPU sweep observed a best 1 MiB fanout row of
 but it did not raise the local large-value loopback ceiling. Pipeline depths
 above `1` generally reduced 1 MiB throughput, which points to byte movement
 through loopback/TCP and user-space buffers rather than fanout dispatch as the
-main limit. Values above 4 MiB currently need a server limit change before they
-are valid FCNP/TCP benchmark cases because the request handoff buffer is capped
-at 4 MiB.
+main limit. Values above 4 MiB need the server request handoff cap raised for
+the run, for example `FAST_CACHE_HANDOFF_BUFFER_BYTES=16777216` or
+`FCNP_HANDOFF_BUFFER_BYTES=16777216`, because the default cap remains 4 MiB.
 
 ## FCNP/TCP Linux Perf Profile
 

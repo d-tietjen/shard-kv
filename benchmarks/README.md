@@ -782,6 +782,11 @@ Use `--op-batch-size N` to issue same-operation batches from each benchmark
 worker. This is the knob that exercises pipelined FCNP/TCP batches for LMCache
 bandwidth ceiling tests.
 
+For FCNP/TCP payloads above the default 4 MiB request handoff cap, start the
+server with a larger cap, for example
+`FAST_CACHE_HANDOFF_BUFFER_BYTES=16777216` or
+`FCNP_HANDOFF_BUFFER_BYTES=16777216`.
+
 The benchmark defaults to `--client-architecture shared` because it uses
 arbitrary multi-client keys. `local_embedded` is for shard-owned caller
 routing, such as the vLLM direct connector path. Use

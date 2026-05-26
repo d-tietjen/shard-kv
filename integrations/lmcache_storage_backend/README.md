@@ -139,6 +139,10 @@ backend. The published head-to-head report currently compares fast-cache
 embedded LMCache and fast-cache FCNP/TCP LMCache against Redis TCP:
 [`benchmarks/LMCACHE_VS_REDIS.md`](../../benchmarks/LMCACHE_VS_REDIS.md).
 
+For FCNP/TCP payloads above 4 MiB, start `fast-cache-server` with a larger
+request handoff cap, such as `FAST_CACHE_HANDOFF_BUFFER_BYTES=16777216`. The
+default cap stays at 4 MiB for ordinary server runs.
+
 ## Notes
 
 - Uses `full_key` routing because LMCache keys are content-addressed.
