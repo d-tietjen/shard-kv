@@ -53,13 +53,26 @@ class FcPyWorker(Worker):
 
 def main() -> None:
     parser = common_argparser(default_clients=4)
+    parser.add_argument(
+        "--client-architecture",
+        choices=("shared", "local_embedded"),
+        default="shared",
+        help=(
+            "fast-cache Store architecture. The benchmark default is shared "
+            "because it generates arbitrary multi-client keys; local_embedded "
+            "requires caller-owned shard routing."
+        ),
+    )
     args = parser.parse_args()
     get_pct = parse_mix(args.mix)
     spec = WorkloadSpec(
         key_count=args.key_count, value_size=args.value_size, get_pct=get_pct
     )
 
-    store = fast_cache.Store(cores=max(1, args.vcpu_budget))
+    store = fast_cache.Store(
+        cores=max(1, args.vcpu_budget),
+        client_architecture=args.client_architecture,
+    )
 
     def new_worker() -> Worker:
         return FcPyWorker(store)
@@ -71,7 +84,8 @@ def main() -> None:
     print(
         f"fc-py: value_size={args.value_size}B mix={spec.mix_label} "
         f"vcpu_budget={args.vcpu_budget} clients={args.clients} "
-        f"keys={args.key_count} duration={args.duration}s"
+        f"keys={args.key_count} duration={args.duration}s "
+        f"client_architecture={args.client_architecture}"
     )
     print()
 
