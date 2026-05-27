@@ -57,9 +57,6 @@ pub struct ShardCacheServer {
     unix_socket_path: Option<PathBuf>,
 }
 
-/// Backward-compatible alias for the pre-rename server type.
-pub type FastCacheServer = ShardCacheServer;
-
 const READ_CHUNK_SIZE: usize = 64 * 1024;
 const READ_RESERVE_THRESHOLD: usize = 16 * 1024;
 const CONNECTION_BUFFER_CAPACITY: usize = 64 * 1024;

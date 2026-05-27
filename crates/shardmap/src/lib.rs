@@ -34,10 +34,9 @@ mod monoio_runtime;
 
 #[cfg(feature = "embedded")]
 pub use cache::{
-    CacheOptions, FastCache, FastCacheWithShards, FastMap, FastMapWithShards, ShardCache,
-    ShardCacheWithShards, ShardMap, ShardMapWithShards, SharedCache,
+    CacheOptions, ShardCache, ShardCacheWithShards, ShardMap, ShardMapWithShards, SharedCache,
 };
 #[cfg(feature = "embedded")]
-pub use error::{FastCacheError, Result, ShardCacheError};
+pub use error::{Result, ShardCacheError};
 #[cfg(all(feature = "telemetry", feature = "embedded"))]
 pub use storage::{CacheMetrics, CacheMetricsSnapshot, CacheTelemetry};

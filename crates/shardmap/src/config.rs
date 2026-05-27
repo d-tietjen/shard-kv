@@ -429,9 +429,6 @@ impl ShardCacheConfig {
     }
 }
 
-/// Backward-compatible alias for the pre-rename configuration type.
-pub type FastCacheConfig = ShardCacheConfig;
-
 impl CacheGeometry {
     /// Detects CPU cache geometry from the current host when possible.
     pub fn detect_current_host() -> Self {

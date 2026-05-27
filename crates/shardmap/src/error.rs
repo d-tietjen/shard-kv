@@ -33,6 +33,3 @@ pub enum ShardCacheError {
 }
 
 pub type Result<T> = std::result::Result<T, ShardCacheError>;
-
-/// Backward-compatible alias for the pre-rename error type.
-pub type FastCacheError = ShardCacheError;

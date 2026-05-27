@@ -2,13 +2,13 @@
 //!
 //! This module gives names to the three intended embedded surfaces:
 //!
-//! - [`FastMap`] / [`SharedCache`]: cloneable DashMap-like cache handles.
+//! - [`ShardMap`] / [`SharedCache`]: cloneable DashMap-like cache handles.
 //! - [`ShardedEngine`]: the richer shared sharded engine used by server mode.
 //! - [`LocalEmbeddedStore`]: owner-local stores for pinned workers.
 
 pub use crate::cache::{
     CacheEntry, CacheOptions, CacheRef, CacheRefMut, CacheVacantEntry, DEFAULT_CACHE_SHARDS,
-    FastCache, FastCacheWithShards, FastMap, FastMapWithShards, SharedCache,
+    ShardCache, ShardCacheWithShards, ShardMap, ShardMapWithShards, SharedCache,
 };
 pub use crate::storage::SharedEmbeddedStore as SharedCacheStore;
 pub use crate::storage::{

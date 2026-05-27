@@ -109,18 +109,6 @@ pub type ShardMapWithShards<const SHARDS: usize> = SharedCache<SHARDS>;
 /// Explicit-shard-count cache-flavored alias.
 pub type ShardCacheWithShards<const SHARDS: usize> = SharedCache<SHARDS>;
 
-/// Backward-compatible alias retained during the rename from shardcache.
-pub type FastMap = ShardMap;
-
-/// Backward-compatible alias retained during the rename from shardcache.
-pub type FastCache = ShardCache;
-
-/// Backward-compatible alias retained during the rename from shardcache.
-pub type FastMapWithShards<const SHARDS: usize> = ShardMapWithShards<SHARDS>;
-
-/// Backward-compatible alias retained during the rename from shardcache.
-pub type FastCacheWithShards<const SHARDS: usize> = ShardCacheWithShards<SHARDS>;
-
 impl<const SHARDS: usize> Default for SharedCache<SHARDS> {
     fn default() -> Self {
         Self::new()
