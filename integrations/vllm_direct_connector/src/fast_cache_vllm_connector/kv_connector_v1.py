@@ -429,22 +429,38 @@ class _RequestSaveState:
     buffered_block_hashes: tuple[bytes, ...] = ()
 
 
+def _env_names(name: str) -> tuple[str, ...]:
+    if name.startswith("FAST_CACHE_"):
+        return (f"SHARDCACHE_{name[len('FAST_CACHE_'):]}", name)
+    if name.startswith("SHARDCACHE_"):
+        return (name, f"FAST_CACHE_{name[len('SHARDCACHE_'):]}")
+    return (name,)
+
+
+def _env_raw(name: str) -> str | None:
+    for candidate in _env_names(name):
+        raw = os.getenv(candidate)
+        if raw is not None:
+            return raw
+    return None
+
+
 def _env_flag(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
+    raw = _env_raw(name)
     if raw is None:
         return default
     return raw.strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
+    raw = _env_raw(name)
     if raw is None or raw == "":
         return default
     return _coerce_int(raw, name)
 
 
 def _env_str(name: str, default: str) -> str:
-    raw = os.getenv(name)
+    raw = _env_raw(name)
     if raw is None or raw == "":
         return default
     return raw
@@ -453,7 +469,7 @@ def _env_str(name: str, default: str) -> str:
 def _debug_log(message: str) -> None:
     if not _env_flag("FAST_CACHE_VLLM_DEBUG", False):
         return
-    print(f"[fast-cache-vllm-direct pid={os.getpid()}] {message}", flush=True)
+    print(f"[shardcache-vllm-direct pid={os.getpid()}] {message}", flush=True)
 
 
 def _maybe_len(value: Any) -> int | None:
@@ -520,7 +536,7 @@ def _resolve_num_layers(vllm_config: Any) -> int:
 
 
 def _default_session_prefix_for_model(model_tag: str) -> bytes:
-    return f"fast-cache:vllm:{model_tag}".encode("utf-8")
+    return f"shardcache:vllm:{model_tag}".encode("utf-8")
 
 
 def _encode_vllm_page_key(block_hash: bytes, layer_index: int) -> bytes:
@@ -735,7 +751,7 @@ def _resolve_default_store_kwargs(
             "FAST_CACHE_VLLM_CLIENT_ARCHITECTURE", "local_embedded"
         ),
     }
-    if "FAST_CACHE_VLLM_ENABLE_METRICS" in os.environ:
+    if _env_raw("FAST_CACHE_VLLM_ENABLE_METRICS") is not None:
         resolved["enable_metrics"] = _env_flag(
             "FAST_CACHE_VLLM_ENABLE_METRICS", False
         )
@@ -758,7 +774,7 @@ def _default_store_singleton_key(store_kwargs: Mapping[str, Any]) -> tuple[tuple
 
 
 class FastCacheKVConnectorV1(KVConnectorBase_V1):
-    """Pinned vLLM 0.17.1-oriented control shim for direct fast-cache restore."""
+    """Pinned vLLM 0.17.1-oriented control shim for direct shardcache restore."""
 
     def _initialize_local_base_state(
         self,
@@ -820,14 +836,17 @@ class FastCacheKVConnectorV1(KVConnectorBase_V1):
             if store_factory is not None:
                 store = store_factory()
             else:
-                import fast_cache  # type: ignore
+                try:
+                    import shardcache as store_module  # type: ignore
+                except ImportError:
+                    import fast_cache as store_module  # type: ignore
 
                 resolved_store_kwargs = _resolve_default_store_kwargs(store_kwargs)
                 if _env_flag("FAST_CACHE_VLLM_SHARE_DEFAULT_STORE", True):
                     singleton_key = _default_store_singleton_key(resolved_store_kwargs)
                     store = _DEFAULT_STORE_SINGLETONS.get(singleton_key)
                     if store is None:
-                        store = fast_cache.Store(**resolved_store_kwargs)
+                        store = store_module.Store(**resolved_store_kwargs)
                         _DEFAULT_STORE_SINGLETONS[singleton_key] = store
                         _debug_log(
                             f"created shared default store id={id(store)} key={singleton_key}"
@@ -837,7 +856,7 @@ class FastCacheKVConnectorV1(KVConnectorBase_V1):
                             f"reused shared default store id={id(store)} key={singleton_key}"
                         )
                 else:
-                    store = fast_cache.Store(**resolved_store_kwargs)
+                    store = store_module.Store(**resolved_store_kwargs)
                     _debug_log(f"created isolated default store id={id(store)}")
         self._shim = FastCacheVllmConnectorShim(
             store,
@@ -1920,7 +1939,7 @@ class FastCacheKVConnectorV1(KVConnectorBase_V1):
             self._load_states[request_id] = state
         if state.pending_layer_handles or state.attached_layer_handles:
             raise RuntimeError(
-                f"direct fast-cache connector request {request_id!r} still has in-flight layer loads"
+                f"direct shardcache connector request {request_id!r} still has in-flight layer loads"
             )
         load_block_hashes = [
             _coerce_bytes(block_hash, "block_hash")
@@ -1934,7 +1953,7 @@ class FastCacheKVConnectorV1(KVConnectorBase_V1):
             layer_indices = self._load_layer_indices()
             if not layer_indices:
                 raise RuntimeError(
-                    "direct fast-cache block restore requires registered KV caches"
+                    "direct shardcache block restore requires registered KV caches"
                 )
             target_count = min(len(load_block_hashes), len(load_block_ids))
             load_signature = self._registered_block_load_signature(
@@ -2710,3 +2729,7 @@ class FastCacheKVConnectorV1(KVConnectorBase_V1):
         self._request_metadata.pop(request_id, None)
         self._mark_request_finished(request_id)
         return (False, None)
+
+
+class ShardCacheKVConnectorV1(FastCacheKVConnectorV1):
+    pass

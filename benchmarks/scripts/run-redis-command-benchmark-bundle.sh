@@ -16,7 +16,7 @@ label="${LABEL:-redis command matrix $stamp}"
 
 mkdir -p "$out_dir"
 
-cargo build --release -p fast-cache-benchmarks \
+cargo build --release -p shardcache-benchmarks \
   --bin redis_command_manifest \
   --bin redis_command_report
 
@@ -33,7 +33,7 @@ cargo build --release -p fast-cache-benchmarks \
   echo "rustc_end"
   echo "cargo=$(cargo -V 2>/dev/null || true)"
   echo "docker=$(docker --version 2>/dev/null || true)"
-  echo "targets=${TARGETS:-fast-cache=127.0.0.1:6383,redis=127.0.0.1:6379,valkey=127.0.0.1:6381}"
+  echo "targets=${TARGETS:-shardcache=127.0.0.1:6383,redis=127.0.0.1:6379,valkey=127.0.0.1:6381}"
   echo "cases=${CASES:-all}"
   echo "skip_cases=${SKIP_CASES:-}"
   echo "fixture_scope=${FIXTURE_SCOPE:-per-client}"
@@ -45,8 +45,8 @@ cargo build --release -p fast-cache-benchmarks \
   echo "server_cpuset=${SERVER_CPUSET:-}"
   echo "shard_count=${SHARD_COUNT:-4}"
   echo "server_direct_shard_ports=${SERVER_DIRECT_SHARD_PORTS:-0}"
-  echo "fast_cache_direct_shard_base_port=${FAST_CACHE_DIRECT_SHARD_BASE_PORT:-}"
-  echo "start_fast_cache=${START_FAST_CACHE:-1}"
+  echo "shardcache_direct_shard_base_port=${SHARDCACHE_DIRECT_SHARD_BASE_PORT:-}"
+  echo "start_shardcache=${START_SHARDCACHE:-1}"
   echo "docker=${DOCKER:-1}"
   echo "docker_services=${DOCKER_SERVICES:-redis valkey}"
   echo "reference_csvs=${REFERENCE_CSVS:-}"

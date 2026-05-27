@@ -11,20 +11,20 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use fast_cache::config::{
-    ReplicationCompression, ReplicationConfig, ReplicationRole, ReplicationSendPolicy,
-};
-use fast_cache::replication::{
-    ReplicatedEmbeddedStore, ReplicationPrimaryServer, ReplicationReplicaClient, SnapshotProvider,
-};
-use fast_cache::storage::EmbeddedStore;
-use fast_cache_benchmarks::backend::Op;
-use fast_cache_benchmarks::cpu::{process_cpu_time, vcpu};
-use fast_cache_benchmarks::workload::{
-    KeyDistribution, KeyPattern, Mix, OpStream, Workload, WorkloadSpec,
-};
 use rand::rngs::SmallRng;
 use rand::{RngCore, SeedableRng};
+use shardcache_benchmarks::backend::Op;
+use shardcache_benchmarks::cpu::{process_cpu_time, vcpu};
+use shardcache_benchmarks::workload::{
+    KeyDistribution, KeyPattern, Mix, OpStream, Workload, WorkloadSpec,
+};
+use shardmap::config::{
+    ReplicationCompression, ReplicationConfig, ReplicationRole, ReplicationSendPolicy,
+};
+use shardmap::replication::{
+    ReplicatedEmbeddedStore, ReplicationPrimaryServer, ReplicationReplicaClient, SnapshotProvider,
+};
+use shardmap::storage::EmbeddedStore;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
@@ -522,7 +522,7 @@ fn free_local_addr() -> Result<String, BoxError> {
 }
 
 fn runtime_label() -> &'static str {
-    match std::env::var("FAST_CACHE_REPLICATION_USE_MONOIO").is_ok_and(|value| value != "0") {
+    match std::env::var("SHARDCACHE_REPLICATION_USE_MONOIO").is_ok_and(|value| value != "0") {
         true => "monoio",
         false => "std",
     }

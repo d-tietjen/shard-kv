@@ -1,0 +1,17 @@
+[package]
+name = "shardcache-formal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Creusot verification targets for shardcache command semantics"
+publish = false
+
+[dependencies]
+creusot-std = "0.11.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(creusot)"] }

@@ -2201,7 +2201,7 @@ mod tests {
     }
 
     #[test]
-    fn benchmarked_commands_have_fcnp_transport_path() {
+    fn benchmarked_commands_have_scnp_transport_path() {
         assert!(
             has_cases(BENCHMARKED_COMMANDS),
             "benchmark manifest must not be empty"

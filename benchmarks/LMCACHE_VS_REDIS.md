@@ -1,4 +1,4 @@
-# Fast-Cache LMCache Backend vs Redis TCP: Bandwidth Saturation
+# shardcache LMCache Backend vs Redis TCP: Bandwidth Saturation
 
 Standalone benchmark run on Linux on May 14, 2026.
 
@@ -7,15 +7,15 @@ blocks, the important question is how much payload bandwidth the integration can
 move before the hardware, Python plugin layer, or Redis server path becomes the
 bottleneck.
 
-The surfaces are different: LMCache is measured through the fast-cache LMCache
-storage plugin API, either in-process or over fast-cache's native FCNP/TCP
+The surfaces are different: LMCache is measured through the shardcache LMCache
+storage plugin API, either in-process or over shardcache's native SCNP/TCP
 protocol. Redis uses RESP/TCP over loopback. Treat this as a practical
 integration comparison, not a pure engine microbenchmark.
 
 ## Current Coverage
 
 This is the curated LMCache head-to-head artifact currently in the repository.
-It covers fast-cache as an LMCache storage plugin against Redis TCP for
+It covers shardcache as an LMCache storage plugin against Redis TCP for
 `64 KiB`, `256 KiB`, and `1 MiB` payloads. It does not yet include:
 
 - LMCache's built-in `LocalCPUBackend` as a published baseline. The harness can
@@ -31,13 +31,13 @@ It covers fast-cache as an LMCache storage plugin against Redis TCP for
 | Setting | Value |
 | --- | --- |
 | Host | Ubuntu 24.04.4 LTS |
-| fast-cache path | `fast_cache_lmcache_backend.FastCacheStorageBackend` |
+| shardcache path | `shardcache_lmcache_backend.ShardCacheStorageBackend` |
 | LMCache | `lmcache 0.4.4`, Python non-CUDA backend fallback |
 | LMCache embedded architecture | `client_architecture=shared` |
-| LMCache TCP architecture | `client_architecture=fcnp_tcp`, generic FCNP listener at `127.0.0.1:6500` |
+| LMCache TCP architecture | `client_architecture=scnp_tcp`, generic SCNP listener at `127.0.0.1:6500` |
 | Redis | `redis:7-alpine`, Docker, `--cpuset-cpus=0-15` |
 | Redis protocol | RESP/TCP on `127.0.0.1:6379` |
-| Clients | LMCache embedded and FCNP/TCP swept `16`, `32`, `64`; Redis used `16` |
+| Clients | LMCache embedded and SCNP/TCP swept `16`, `32`, `64`; Redis used `16` |
 | Redis pipeline depth | swept `1`, `16`, `64` |
 | Key count | `1024`, uniform |
 | Warmup / measure | `2s` warmup, `6s` measured |
@@ -45,8 +45,8 @@ It covers fast-cache as an LMCache storage plugin against Redis TCP for
 | Latency timing | disabled with `--latency-sample-rate 0` |
 
 CPU reporting differs by harness. Embedded LMCache rows report CPU used by the
-Python benchmark process. LMCache FCNP/TCP rows report Python client CPU and a
-separate sampled fast-cache-server CPU. Redis rows report CPU used by the Redis
+Python benchmark process. LMCache SCNP/TCP rows report Python client CPU and a
+separate sampled shardcache CPU. Redis rows report CPU used by the Redis
 server process only; Redis client CPU is not included.
 
 LMCache's built-in `LocalCPUBackend` was not included because LMCache 0.4.4
@@ -59,9 +59,9 @@ requires allocator or metadata state for that backend constructor.
 | LMCache embedded plugin | 1 MiB GET | 40.107 | 16 clients | 4.723 client |
 | LMCache embedded plugin | 1 MiB SET | 19.601 | 16 clients | 10.039 client |
 | LMCache embedded plugin | 1 MiB 80/20 | 20.603 | 16 clients | 9.196 client |
-| LMCache FCNP/TCP plugin | 1 MiB GET | 6.944 | 16 clients | 2.578 client, 2.189 server |
-| LMCache FCNP/TCP plugin | 1 MiB SET | 6.112 | 16 clients | 9.332 client, 3.938 server |
-| LMCache FCNP/TCP plugin | 1 MiB 80/20 | 6.067 | 16 clients | 3.033 client, 2.187 server |
+| LMCache SCNP/TCP plugin | 1 MiB GET | 6.944 | 16 clients | 2.578 client, 2.189 server |
+| LMCache SCNP/TCP plugin | 1 MiB SET | 6.112 | 16 clients | 9.332 client, 3.938 server |
+| LMCache SCNP/TCP plugin | 1 MiB 80/20 | 6.067 | 16 clients | 3.033 client, 2.187 server |
 | Redis TCP | 1 MiB SET | 4.206 | 16 clients, pipeline 1 | 0.998 |
 | Redis TCP | 1 MiB 80/20 | 2.685 | 16 clients, pipeline 1 | 1.001 |
 | Redis TCP | 256 KiB SET | 3.621 | 16 clients, pipeline 1 | 0.998 |
@@ -69,7 +69,7 @@ requires allocator or metadata state for that backend constructor.
 ## Local Apple M5 Max Rerun
 
 Local rerun on May 26, 2026 on an Apple M5 Max with 18 CPU cores and 128 GiB
-memory. The fast-cache shard budget was set to `16` because embedded shard
+memory. The shardcache shard budget was set to `16` because embedded shard
 counts must be powers of two. LMCache `0.4.5` was installed from source with
 `NO_CUDA_EXT=1`, using its Python non-CUDA fallback. Redis ran locally through
 Homebrew on `127.0.0.1:6390`.
@@ -77,17 +77,17 @@ Homebrew on `127.0.0.1:6390`.
 The Redis vCPU column in the raw CSVs is client-process CPU on macOS, not Redis
 server CPU, because the Linux external PID sampler is unavailable locally. Use
 this table for payload bandwidth comparisons, not CPU-normalized claims. The
-FCNP/TCP SET rows in the table below were captured before the Rust-side LMCache
-PUT helpers were added to the FCNP Python store. Keep them as regression
+SCNP/TCP SET rows in the table below were captured before the Rust-side LMCache
+PUT helpers were added to the SCNP Python store. Keep them as regression
 evidence, not as the current optimized SET result.
 
 Raw CSVs:
 
 - [`lmcache-embedded.csv`](reference/lmcache-m5-local-20260526/lmcache-embedded.csv)
-- [`lmcache-fcnp-tcp.csv`](reference/lmcache-m5-local-20260526/lmcache-fcnp-tcp.csv)
+- [`lmcache-scnp-tcp.csv`](reference/lmcache-m5-local-20260526/lmcache-scnp-tcp.csv)
 - [`redis-tcp.csv`](reference/lmcache-m5-local-20260526/redis-tcp.csv)
 
-| Value | Mix | Embedded GB/s | Embedded shape | FCNP/TCP GB/s | FCNP shape | Redis GB/s | Redis shape | Embedded vs Redis | FCNP/TCP vs Redis |
+| Value | Mix | Embedded GB/s | Embedded shape | SCNP/TCP GB/s | SCNP shape | Redis GB/s | Redis shape | Embedded vs Redis | SCNP/TCP vs Redis |
 | --- | --- | ---: | --- | ---: | --- | ---: | --- | ---: | ---: |
 | 64 KiB | GET | 9.397 | C64 | 4.336 | C16 | 6.621 | P64 | 1.42x | 0.65x |
 | 64 KiB | SET | 10.159 | C64 | 0.291 | C16 | 4.338 | P16 | 2.34x | 0.07x |
@@ -99,20 +99,20 @@ Raw CSVs:
 | 1 MiB | SET | 104.971 | C64 | 0.253 | C16 | 11.282 | P16 | 9.30x | 0.02x |
 | 1 MiB | 80/20 | 90.147 | C32 | 0.401 | C16 | 9.467 | P1 | 9.52x | 0.04x |
 
-## Local FCNP/TCP SET Path Optimization Probe
+## Local SCNP/TCP SET Path Optimization Probe
 
-After the local Apple M5 Max rerun, `fast_cache.FcnpStore` was updated to expose
+After the local Apple M5 Max rerun, `shardcache.ScnpStore` was updated to expose
 the LMCache prepared PUT helpers, pipeline multi-item `batch_set` calls, and
-stream encoded byte payloads directly into the FCNP writer. This keeps LMCache
+stream encoded byte payloads directly into the SCNP writer. This keeps LMCache
 PUT record encoding in Rust instead of falling back to Python
 `_encode_memory_obj(...)` plus one generic `batch_set` loop.
 
 Raw CSVs:
 
-- [`fcnp-set-batch1-after.csv`](reference/lmcache-m5-set-path-20260526/fcnp-set-batch1-after.csv)
-- [`fcnp-set-batch16-after.csv`](reference/lmcache-m5-set-path-20260526/fcnp-set-batch16-after.csv)
+- [`scnp-set-batch1-after.csv`](reference/lmcache-m5-set-path-20260526/scnp-set-batch1-after.csv)
+- [`scnp-set-batch16-after.csv`](reference/lmcache-m5-set-path-20260526/scnp-set-batch16-after.csv)
 
-| Value | Mix | Clients | Op batch | FCNP/TCP GB/s | Previous local FCNP/TCP GB/s | Redis local GB/s | FCNP/TCP vs Redis |
+| Value | Mix | Clients | Op batch | SCNP/TCP GB/s | Previous local SCNP/TCP GB/s | Redis local GB/s | SCNP/TCP vs Redis |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 1 MiB | SET | 16 | 1 | 12.724 | 0.253 | 11.282 | 1.13x |
 | 1 MiB | SET | 16 | 16 | 8.823 | 0.253 | 11.282 | 0.78x |
@@ -122,43 +122,43 @@ batches reduce Python-side scheduling overhead, but they also bunch very large
 writes onto each worker connection, so the socket copy and server receive path
 become the limiter sooner.
 
-## Local FCNP/TCP Op-Rate Probe
+## Local SCNP/TCP Op-Rate Probe
 
-The same machine also ran a small-value `64 B` probe to separate raw FCNP/TCP
-capacity from LMCache Python plugin overhead. Raw FCNP was measured with the
+The same machine also ran a small-value `64 B` probe to separate raw SCNP/TCP
+capacity from LMCache Python plugin overhead. Raw SCNP was measured with the
 Rust saturation harness against the fanout port and shard-owned direct ports.
-LMCache was measured through `FastCacheStorageBackend` over `fast_cache.FcnpStore`.
+LMCache was measured through `ShardCacheStorageBackend` over `shardcache.ScnpStore`.
 
 Raw CSVs:
 
-- [`fcnp-raw-64b.csv`](reference/lmcache-m5-oplimit-20260526/fcnp-raw-64b.csv)
-- [`lmcache-fcnp-64b.csv`](reference/lmcache-m5-oplimit-20260526/lmcache-fcnp-64b.csv)
+- [`scnp-raw-64b.csv`](reference/lmcache-m5-oplimit-20260526/scnp-raw-64b.csv)
+- [`lmcache-scnp-64b.csv`](reference/lmcache-m5-oplimit-20260526/lmcache-scnp-64b.csv)
 
 | Path | Mix | Clients | Pipeline / op batch | Ops/sec |
 | --- | --- | ---: | ---: | ---: |
-| Raw FCNP fanout | GET | 16 | 1 | 192,140 |
-| Raw FCNP fanout | GET | 16 | 64 | 8,849,835 |
-| Raw FCNP fanout | SET | 16 | 64 | 6,467,487 |
-| Raw FCNP fanout | SET | 256 | 64 | 8,523,650 |
-| Raw FCNP shard-direct | GET | 16 | 64 | 8,810,884 |
-| Raw FCNP shard-direct | SET | 64 | 64 | 8,386,538 |
-| LMCache FCNP | GET | 16 | 1 | 54,600 |
-| LMCache FCNP | GET | 16 | 16 | 168,060 |
-| LMCache FCNP | SET | 16 | 1 | 43,964 |
-| LMCache FCNP | SET | 16 | 64 | 230,008 |
+| Raw SCNP fanout | GET | 16 | 1 | 192,140 |
+| Raw SCNP fanout | GET | 16 | 64 | 8,849,835 |
+| Raw SCNP fanout | SET | 16 | 64 | 6,467,487 |
+| Raw SCNP fanout | SET | 256 | 64 | 8,523,650 |
+| Raw SCNP shard-direct | GET | 16 | 64 | 8,810,884 |
+| Raw SCNP shard-direct | SET | 64 | 64 | 8,386,538 |
+| LMCache SCNP | GET | 16 | 1 | 54,600 |
+| LMCache SCNP | GET | 16 | 16 | 168,060 |
+| LMCache SCNP | SET | 16 | 1 | 43,964 |
+| LMCache SCNP | SET | 16 | 64 | 230,008 |
 
 The raw TCP path is therefore not the current op-rate ceiling; with request
 pipelining it is already in the `6.5M-8.9M ops/sec` range for tiny values on
 this local run. The LMCache path is bounded by Python key/object work,
 MemoryObj reconstruction, and the plugin call shape before it reaches the raw
-FCNP socket limit.
+SCNP socket limit.
 
 ## Best By Value Size
 
-Each row selects the best embedded LMCache client count, best FCNP/TCP LMCache
+Each row selects the best embedded LMCache client count, best SCNP/TCP LMCache
 client count, and best Redis pipeline depth for that value size and mix.
 
-| Value | Mix | Embedded GB/s | FCNP/TCP GB/s | Redis GB/s | FCNP/TCP vs Redis | Embedded vs FCNP/TCP |
+| Value | Mix | Embedded GB/s | SCNP/TCP GB/s | Redis GB/s | SCNP/TCP vs Redis | Embedded vs SCNP/TCP |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | 64 KiB | GET | 4.894 | 1.194 | 2.224 | 0.54x | 4.10x |
 | 64 KiB | SET | 3.743 | 1.228 | 2.201 | 0.56x | 3.05x |
@@ -234,7 +234,7 @@ client count, and best Redis pipeline depth for that value size and mix.
 | 1 MiB | 80/20 | 16 | 2.682 | 1.002 |
 | 1 MiB | 80/20 | 64 | 2.552 | 1.004 |
 
-## LMCache FCNP/TCP Sweep
+## LMCache SCNP/TCP Sweep
 
 | Value | Mix | Clients | GB/s | Client vCPU | Server vCPU |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -266,9 +266,9 @@ client count, and best Redis pipeline depth for that value size and mix.
 | 1 MiB | 80/20 | 32 | 4.695 | 4.584 | 3.433 |
 | 1 MiB | 80/20 | 64 | 4.401 | 4.666 | 3.153 |
 
-## FCNP/TCP Copy-Cut Rerun
+## SCNP/TCP Copy-Cut Rerun
 
-After the initial FCNP/TCP sweep, the Python adapter was updated to use
+After the initial SCNP/TCP sweep, the Python adapter was updated to use
 scatter/gather writes for SET and preallocated receive buffers for GET. The
 targeted rerun below uses the same server server shape with 16 clients.
 
@@ -281,11 +281,11 @@ targeted rerun below uses the same server server shape with 16 clients.
 | 1 MiB | SET | 5.929 | 8.784 | 3.458 | 4.724 |
 | 1 MiB | 80/20 | 5.453 | 3.036 | 2.003 | 5.753 |
 
-## FCNP/TCP Hash-Frame And Pipeline Rerun
+## SCNP/TCP Hash-Frame And Pipeline Rerun
 
-The FCNP/TCP adapter now sends `FAST_FLAG_KEY_HASH` frames, using the same Rust
-XXH3 key hash exported by the `fast_cache` Python extension. This lets the
-server stay on the command-owned FCNP path instead of decoding generic frames.
+The SCNP/TCP adapter now sends `FAST_FLAG_KEY_HASH` frames, using the same Rust
+XXH3 key hash exported by the `shardcache` Python extension. This lets the
+server stay on the command-owned SCNP path instead of decoding generic frames.
 The same run also swept `--op-batch-size`; batch size `1` remained the best
 aggregate shape for 1 MiB values.
 
@@ -301,12 +301,12 @@ aggregate shape for 1 MiB values.
 | 1 MiB | SET | 16 | 4 | 5.238 | 9.956 | 3.993 |
 | 1 MiB | 80/20 | 16 | 4 | 4.665 | 3.007 | 1.894 |
 
-## Local Raw FCNP GB/s Ceiling Probe
+## Local Raw SCNP GB/s Ceiling Probe
 
-Local Apple M5 Max raw FCNP runs were added to separate the FCNP transport
+Local Apple M5 Max raw SCNP runs were added to separate the SCNP transport
 ceiling from LMCache plugin/Python object overhead. The server was started in
 direct mode with 16 shards, a fanout listener at `127.0.0.1:6500`, and direct
-shard ports at `127.0.0.1:6501-6516`. The `fc-server-fcnp-direct` backend
+shard ports at `127.0.0.1:6501-6516`. The `fc-server-scnp-direct` backend
 routes workers to the direct shard ports and filters each worker to keys owned
 by that shard.
 
@@ -331,15 +331,15 @@ but it did not raise the local large-value loopback ceiling. Pipeline depths
 above `1` generally reduced 1 MiB throughput, which points to byte movement
 through loopback/TCP and user-space buffers rather than fanout dispatch as the
 main limit. Values above 4 MiB need the server request handoff cap raised for
-the run, for example `FAST_CACHE_HANDOFF_BUFFER_BYTES=16777216` or
-`FCNP_HANDOFF_BUFFER_BYTES=16777216`, because the default cap remains 4 MiB.
+the run, for example `SHARDCACHE_HANDOFF_BUFFER_BYTES=16777216` or
+`SCNP_HANDOFF_BUFFER_BYTES=16777216`, because the default cap remains 4 MiB.
 
-## FCNP/TCP Linux Perf Profile
+## SCNP/TCP Linux Perf Profile
 
-Linux `perf` was run on server against the 1 MiB, 16-client, no-batch FCNP/TCP
+Linux `perf` was run on server against the 1 MiB, 16-client, no-batch SCNP/TCP
 path. Kernel perf restrictions were temporarily lowered for symbolized reports
 and then restored. Reports are stored under
-`benchmarks/results/lmcache-fcnp-tcp-perf-kernel-20260514223146/`.
+`benchmarks/results/lmcache-scnp-tcp-perf-kernel-20260514223146/`.
 
 | Side | Mix | Main hot spots |
 | --- | --- | --- |
@@ -357,29 +357,29 @@ and then restored. Reports are stored under
   contention rather than insufficient client parallelism.
 - Redis stayed pinned to roughly one server vCPU. Pipelining helped at 64 KiB,
   but for 256 KiB and 1 MiB payloads, pipeline depth 1 was the best Redis shape.
-- The first FCNP/TCP LMCache adapter is viable for remote sharing and beats
+- The first SCNP/TCP LMCache adapter is viable for remote sharing and beats
   Redis for 256 KiB GET, 256 KiB SET, 256 KiB 80/20, and all 1 MiB mixes. It
   trails Redis at 64 KiB because the adapter is one request per Python socket
   round trip.
 - Cutting Python socket copies moved the TCP ceiling, most clearly at 1 MiB:
   GET improved from 5.809 to 6.944 GB/s and SET improved from 4.724 to
-  5.929 GB/s. Sending prehashed FCNP frames lifted the best SET row again to
+  5.929 GB/s. Sending prehashed SCNP frames lifted the best SET row again to
   6.112 GB/s.
-- Same-operation FCNP/TCP batches did not raise the 1 MiB aggregate ceiling;
+- Same-operation SCNP/TCP batches did not raise the 1 MiB aggregate ceiling;
   batch size `1` was still best for 16 clients. The bottleneck is therefore not
   simply request/response latency.
-- Raw FCNP direct-shard routing is implemented and benchmarked. On the local M5
+- Raw SCNP direct-shard routing is implemented and benchmarked. On the local M5
   Max loopback run it matched fanout for large 1 MiB payloads but did not exceed
   it, so direct shard routing is more likely to help small-operation routing and
   client-side shard affinity than to unlock more single-host TCP GB/s.
 - `perf` shows the current TCP ceiling is dominated by kernel TCP page-frag
   allocation and copy paths (`clear_page_rep`, `rep_movs_alternative`) plus
   Python/user-space reconstruction. The next large TCP step likely needs a
-  Rust/PyO3 FCNP client and/or Linux zero-copy send experiments, not more
+  Rust/PyO3 SCNP client and/or Linux zero-copy send experiments, not more
   Python-level batching.
-- FCNP/TCP is still roughly 3.2x to 5.8x behind embedded LMCache for 1 MiB
+- SCNP/TCP is still roughly 3.2x to 5.8x behind embedded LMCache for 1 MiB
   payloads depending on mix. The next TCP optimization targets are direct shard
-  routing from the Python adapter, a Rust/PyO3 FCNP client to reduce Python
+  routing from the Python adapter, a Rust/PyO3 SCNP client to reduce Python
   socket/object overhead, and Linux zero-copy send experiments for large values.
 - The next embedded LMCache optimization target remains the Python/plugin/shared
   store data movement path for 1 MiB blocks, especially GET reconstruction and

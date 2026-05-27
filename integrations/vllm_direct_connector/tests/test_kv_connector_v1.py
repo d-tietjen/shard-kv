@@ -600,7 +600,7 @@ class KvConnectorV1Tests(unittest.TestCase):
         self.assertEqual(request_meta["save_target_block_count"], 3)
         self.assertEqual(
             request_meta["session_prefix"],
-            b"fast-cache:vllm:unknown-model",
+            b"shardcache:vllm:unknown-model",
         )
 
     def test_build_connector_meta_prefers_materialized_blocks_when_scheduler_tokens_lag(self):

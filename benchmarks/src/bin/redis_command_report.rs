@@ -630,26 +630,26 @@ mod tests {
     #[test]
     fn summary_rolls_up_targets() {
         let rows = vec![
-            row("fast-cache", "GET", 100.0, 10.0, 0),
-            row("fast-cache", "SET", 200.0, 20.0, 1),
+            row("shardcache", "GET", 100.0, 10.0, 0),
+            row("shardcache", "SET", 200.0, 20.0, 1),
             row("redis", "GET", 50.0, 30.0, 0),
         ];
         let summaries = summarize(&rows);
-        let fast_cache = summaries
+        let shardcache = summaries
             .iter()
-            .find(|summary| summary.target == "fast-cache")
+            .find(|summary| summary.target == "shardcache")
             .unwrap();
 
-        assert_eq!(fast_cache.cases, 2);
-        assert_eq!(fast_cache.errors, 1);
-        assert_eq!(fast_cache.sum_ops_per_sec, 300.0);
-        assert_eq!(fast_cache.mean_avg_us, 15.0);
+        assert_eq!(shardcache.cases, 2);
+        assert_eq!(shardcache.errors, 1);
+        assert_eq!(shardcache.sum_ops_per_sec, 300.0);
+        assert_eq!(shardcache.mean_avg_us, 15.0);
     }
 
     #[test]
     fn merge_prefers_primary_rows_for_same_target_case() {
-        let reference_rows = vec![row("fast-cache", "GET", 100.0, 10.0, 0)];
-        let primary_rows = vec![row("fast-cache", "GET", 250.0, 5.0, 0)];
+        let reference_rows = vec![row("shardcache", "GET", 100.0, 10.0, 0)];
+        let primary_rows = vec![row("shardcache", "GET", 250.0, 5.0, 0)];
 
         let merged = merge_rows(primary_rows, reference_rows);
 
@@ -660,13 +660,13 @@ mod tests {
     #[test]
     fn comparisons_use_only_common_cases() {
         let rows = vec![
-            row("fast-cache", "GET", 100.0, 10.0, 0),
-            row("fast-cache", "SET", 300.0, 20.0, 0),
+            row("shardcache", "GET", 100.0, 10.0, 0),
+            row("shardcache", "SET", 300.0, 20.0, 0),
             row("redis", "GET", 50.0, 40.0, 1),
             row("redis", "MGET", 25.0, 80.0, 0),
         ];
 
-        let comparisons = compare_to_baseline(&rows, "fast-cache");
+        let comparisons = compare_to_baseline(&rows, "shardcache");
 
         assert_eq!(comparisons.len(), 1);
         assert_eq!(comparisons[0].target, "redis");

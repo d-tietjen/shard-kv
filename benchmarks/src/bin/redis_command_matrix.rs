@@ -1,7 +1,7 @@
 //! RESP command-script benchmark for Redis-compatible servers.
 //!
 //! This intentionally lives in the benchmark harness instead of Criterion so
-//! the same executable can compare fast-cache, Redis, and Valkey over TCP.
+//! the same executable can compare shardcache, Redis, and Valkey over TCP.
 
 use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
@@ -12,13 +12,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
-use fast_cache::protocol::{
-    FAST_FLAG_REDIS_COMMAND_ARGS, FAST_PROTOCOL_VERSION, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC,
-    FastCodec, FastCommand, FastCommandKind, FastRedisRouteKeys, FastRequest,
-};
-use fast_cache_benchmarks::redis_command_cases::{
+use shardcache_benchmarks::redis_command_cases::{
     REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES,
     RedisCommandCase,
+};
+use shardmap::protocol::{
+    FAST_FLAG_REDIS_COMMAND_ARGS, FAST_PROTOCOL_VERSION, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC,
+    FastCodec, FastCommand, FastCommandKind, FastRedisRouteKeys, FastRequest,
 };
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -57,7 +57,7 @@ struct Args {
 
     /// Logical key lanes used to spread per-client fixtures across server shards.
     ///
-    /// Use this with CLIENTS > 1, typically matching fast-cache's SHARD_COUNT.
+    /// Use this with CLIENTS > 1, typically matching shardcache's SHARD_COUNT.
     #[arg(long, default_value_t = 1)]
     key_shards: usize,
 
@@ -92,14 +92,14 @@ struct Target {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetProtocol {
     Resp,
-    Fcnp,
+    Scnp,
 }
 
 impl TargetProtocol {
     fn label(self) -> &'static str {
         match self {
             Self::Resp => "resp",
-            Self::Fcnp => "fcnp",
+            Self::Scnp => "scnp",
         }
     }
 }
@@ -383,11 +383,11 @@ fn parse_target_addr(raw: &str) -> Result<TargetAddr, String> {
 }
 
 fn parse_target_protocol(raw: &str) -> Result<(TargetProtocol, &str), String> {
-    if let Some(addr) = raw.strip_prefix("fcnp:") {
+    if let Some(addr) = raw.strip_prefix("scnp:") {
         if addr.is_empty() {
-            return Err("FCNP target address must not be empty".to_string());
+            return Err("SCNP target address must not be empty".to_string());
         }
-        return Ok((TargetProtocol::Fcnp, addr));
+        return Ok((TargetProtocol::Scnp, addr));
     }
     if let Some(addr) = raw.strip_prefix("resp:") {
         if addr.is_empty() {
@@ -727,21 +727,21 @@ fn drain_pipeline(
 
 enum BenchConn {
     Resp(RespConn),
-    Fcnp(FcnpConn),
+    Scnp(ScnpConn),
 }
 
 impl BenchConn {
     fn connect(protocol: TargetProtocol, addr: &str) -> Result<Self, BoxError> {
         match protocol {
             TargetProtocol::Resp => Ok(Self::Resp(RespConn::connect(addr)?)),
-            TargetProtocol::Fcnp => Ok(Self::Fcnp(FcnpConn::connect(addr)?)),
+            TargetProtocol::Scnp => Ok(Self::Scnp(ScnpConn::connect(addr)?)),
         }
     }
 
     fn execute(&mut self, parts: &[&str], namespace: &KeyNamespace) -> Result<bool, BoxError> {
         match self {
             Self::Resp(conn) => conn.execute(parts, namespace),
-            Self::Fcnp(conn) => conn.execute(parts, namespace),
+            Self::Scnp(conn) => conn.execute(parts, namespace),
         }
     }
 
@@ -752,21 +752,21 @@ impl BenchConn {
     ) -> Result<(), BoxError> {
         match self {
             Self::Resp(conn) => conn.write_case(case, namespace),
-            Self::Fcnp(conn) => conn.write_case(case, namespace),
+            Self::Scnp(conn) => conn.write_case(case, namespace),
         }
     }
 
     fn flush(&mut self) -> Result<(), BoxError> {
         match self {
             Self::Resp(conn) => conn.flush(),
-            Self::Fcnp(conn) => conn.flush(),
+            Self::Scnp(conn) => conn.flush(),
         }
     }
 
     fn read_case(&mut self, case: &RedisCommandCase) -> Result<bool, BoxError> {
         match self {
             Self::Resp(conn) => conn.read_case(case),
-            Self::Fcnp(conn) => conn.read_case(case),
+            Self::Scnp(conn) => conn.read_case(case),
         }
     }
 }
@@ -927,13 +927,13 @@ impl RespConn {
     }
 }
 
-struct FcnpConn {
+struct ScnpConn {
     reader: BufReader<TcpStream>,
     body: Vec<u8>,
     command_cache: HashMap<CommandCacheKey, Vec<u8>>,
 }
 
-impl FcnpConn {
+impl ScnpConn {
     const STATUS_OK: u8 = 0;
     const STATUS_NULL: u8 = 1;
     const STATUS_ERROR: u8 = 2;
@@ -999,7 +999,7 @@ impl FcnpConn {
         let encoded = match self.command_cache.entry(cache_key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(encode_fcnp_command(parts, namespace)?)
+                entry.insert(encode_scnp_command(parts, namespace)?)
             }
         };
         self.reader.get_mut().write_all(encoded)?;
@@ -1010,10 +1010,10 @@ impl FcnpConn {
         let mut header = [0_u8; 8];
         self.reader.read_exact(&mut header)?;
         if header[0] != FAST_RESPONSE_MAGIC {
-            return Err(format!("invalid FCNP response magic byte: {:#04x}", header[0]).into());
+            return Err(format!("invalid SCNP response magic byte: {:#04x}", header[0]).into());
         }
         if header[1] != FAST_PROTOCOL_VERSION {
-            return Err(format!("unsupported FCNP response version: {}", header[1]).into());
+            return Err(format!("unsupported SCNP response version: {}", header[1]).into());
         }
 
         let status = header[2];
@@ -1030,7 +1030,7 @@ impl FcnpConn {
             | Self::STATUS_FLOAT => Ok(false),
             Self::STATUS_ERROR => Ok(true),
             Self::STATUS_VALUE => Ok(self.body.first().copied() == Some(b'-')),
-            other => Err(format!("unsupported FCNP response status: {other:#x}").into()),
+            other => Err(format!("unsupported SCNP response status: {other:#x}").into()),
         }
     }
 }
@@ -1057,13 +1057,13 @@ fn encode_command(parts: &[&str], namespace: &KeyNamespace) -> Result<Vec<u8>, B
     Ok(encoded)
 }
 
-fn encode_fcnp_command(parts: &[&str], namespace: &KeyNamespace) -> Result<Vec<u8>, BoxError> {
+fn encode_scnp_command(parts: &[&str], namespace: &KeyNamespace) -> Result<Vec<u8>, BoxError> {
     let mut rewritten_parts = Vec::with_capacity(parts.len());
     for part in parts {
         append_rewritten_parts(part, namespace, &mut rewritten_parts)?;
     }
     let Some((command, args)) = rewritten_parts.split_first() else {
-        return Err("cannot encode empty FCNP Redis command".into());
+        return Err("cannot encode empty SCNP Redis command".into());
     };
     let Some(kind) = FastCommandKind::from_redis_name(command) else {
         let parts = rewritten_parts
@@ -1083,11 +1083,11 @@ fn encode_fcnp_command(parts: &[&str], namespace: &KeyNamespace) -> Result<Vec<u
         return Ok(encoded);
     };
 
-    let route = fcnp_route_metadata(kind, args, namespace);
+    let route = scnp_route_metadata(kind, args, namespace);
     let route_prefix_len = route.map_or(0, |_| 8 + 4 + 8);
     let body_len = compact_list_len(args)?
         .checked_add(route_prefix_len)
-        .ok_or("FCNP Redis command body length overflow")?;
+        .ok_or("SCNP Redis command body length overflow")?;
     let mut encoded = Vec::with_capacity(8 + body_len);
     encoded.push(FAST_REQUEST_MAGIC);
     encoded.push(FAST_PROTOCOL_VERSION);
@@ -1095,9 +1095,9 @@ fn encode_fcnp_command(parts: &[&str], namespace: &KeyNamespace) -> Result<Vec<u
     encoded.push(match route {
         Some(_) => {
             FAST_FLAG_REDIS_COMMAND_ARGS
-                | fast_cache::protocol::FAST_FLAG_KEY_HASH
-                | fast_cache::protocol::FAST_FLAG_ROUTE_SHARD
-                | fast_cache::protocol::FAST_FLAG_KEY_TAG
+                | shardmap::protocol::FAST_FLAG_KEY_HASH
+                | shardmap::protocol::FAST_FLAG_ROUTE_SHARD
+                | shardmap::protocol::FAST_FLAG_KEY_TAG
         }
         None => FAST_FLAG_REDIS_COMMAND_ARGS,
     });
@@ -1112,17 +1112,17 @@ fn encode_fcnp_command(parts: &[&str], namespace: &KeyNamespace) -> Result<Vec<u
 }
 
 #[derive(Clone, Copy)]
-struct FcnpRouteMetadata {
+struct ShardCacheRouteMetadata {
     key_hash: u64,
     shard_lane: u32,
     key_tag: u64,
 }
 
-fn fcnp_route_metadata(
+fn scnp_route_metadata(
     kind: FastCommandKind,
     args: &[Vec<u8>],
     namespace: &KeyNamespace,
-) -> Option<FcnpRouteMetadata> {
+) -> Option<ShardCacheRouteMetadata> {
     if namespace.key_shards == 0 || !namespace.key_shards.is_power_of_two() {
         return None;
     }
@@ -1145,7 +1145,7 @@ fn fcnp_route_metadata(
         return None;
     }
 
-    Some(FcnpRouteMetadata {
+    Some(ShardCacheRouteMetadata {
         key_hash: first_hash,
         shard_lane: u32::try_from(shard_lane).ok()?,
         key_tag: first_hash >> 56,
@@ -1154,19 +1154,19 @@ fn fcnp_route_metadata(
 
 fn compact_list_len(parts: &[Vec<u8>]) -> Result<usize, BoxError> {
     let count = u32::try_from(parts.len())
-        .map_err(|_| format!("FCNP Redis command has too many arguments: {}", parts.len()))?;
+        .map_err(|_| format!("SCNP Redis command has too many arguments: {}", parts.len()))?;
     let mut len = compact_u32_len(count);
     for part in parts {
         let part_len = u32::try_from(part.len()).map_err(|_| {
             format!(
-                "FCNP Redis command argument is too large: {} bytes",
+                "SCNP Redis command argument is too large: {} bytes",
                 part.len()
             )
         })?;
         len = len
             .checked_add(compact_u32_len(part_len))
             .and_then(|len| len.checked_add(part.len()))
-            .ok_or("FCNP Redis command body length overflow")?;
+            .ok_or("SCNP Redis command body length overflow")?;
     }
     Ok(len)
 }
@@ -1174,14 +1174,14 @@ fn compact_list_len(parts: &[Vec<u8>]) -> Result<usize, BoxError> {
 fn write_compact_len_prefixed_list(parts: &[Vec<u8>], out: &mut Vec<u8>) -> Result<(), BoxError> {
     write_compact_u32(
         u32::try_from(parts.len())
-            .map_err(|_| format!("FCNP Redis command has too many arguments: {}", parts.len()))?,
+            .map_err(|_| format!("SCNP Redis command has too many arguments: {}", parts.len()))?,
         out,
     );
     for part in parts {
         write_compact_u32(
             u32::try_from(part.len()).map_err(|_| {
                 format!(
-                    "FCNP Redis command argument is too large: {} bytes",
+                    "SCNP Redis command argument is too large: {} bytes",
                     part.len()
                 )
             })?,

@@ -2,7 +2,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use fast_cache::storage::{EmbeddedKeyRoute, EmbeddedStore, LocalEmbeddedStore, PreparedPointKey};
+use shardmap::storage::{EmbeddedKeyRoute, EmbeddedStore, LocalEmbeddedStore, PreparedPointKey};
 
 use crate::backend::{Backend, BackendClass, BoxError, ReadMode, Worker};
 
@@ -14,7 +14,7 @@ pub struct FcEmbed {
     read_mode: ReadMode,
 }
 
-// Unlike shared-reference embedded backends such as DashMap, fast-cache's
+// Unlike shared-reference embedded backends such as DashMap, shardcache's
 // embedded fast path is thread-local: each benchmark worker owns a
 // LocalEmbeddedStore and only receives keys routed to its shard set.
 struct FcEmbedState {

@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 
-use fast_cache::storage::{
+use shardmap::storage::{
     PreparedPointKey, SharedEmbeddedConfig, SharedEmbeddedLockPolicy, SharedEmbeddedStore,
 };
 

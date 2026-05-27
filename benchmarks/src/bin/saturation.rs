@@ -17,16 +17,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
-use fast_cache::config::EvictionPolicy;
-use fast_cache_benchmarks::backend::{Backend, BackendClass, Op, ReadMode};
-use fast_cache_benchmarks::backends::{BACKEND_IDS, BenchmarkCacheConfig, make};
-use fast_cache_benchmarks::clock::FastClock;
-use fast_cache_benchmarks::cpu::{external_cpu_time, process_cpu_time, vcpu};
-use fast_cache_benchmarks::csv::CsvWriter;
-use fast_cache_benchmarks::histogram::{LatencyHistogram, format_ns};
-use fast_cache_benchmarks::workload::{
+use shardcache_benchmarks::backend::{Backend, BackendClass, Op, ReadMode};
+use shardcache_benchmarks::backends::{BACKEND_IDS, BenchmarkCacheConfig, make};
+use shardcache_benchmarks::clock::FastClock;
+use shardcache_benchmarks::cpu::{external_cpu_time, process_cpu_time, vcpu};
+use shardcache_benchmarks::csv::CsvWriter;
+use shardcache_benchmarks::histogram::{LatencyHistogram, format_ns};
+use shardcache_benchmarks::workload::{
     KeyDistribution, KeyPattern, Mix, OpStream, Workload, WorkloadSpec,
 };
+use shardmap::config::EvictionPolicy;
 
 #[derive(Parser, Debug, Clone)]
 #[command(about = "Closed-loop saturation benchmark")]
@@ -374,8 +374,8 @@ fn routing_mode_label(backend_id: &str) -> &'static str {
     match backend_id {
         id if id.starts_with("fc-embed") => "embedded-direct",
         id if id.starts_with("fc-shared") => "shared-handle",
-        "fc-server-fcnp-direct" => "tcp-shard-direct",
-        "fc-server-fcnp" | "fc-server-resp" => "tcp-fanout",
+        "fc-server-scnp-direct" => "tcp-shard-direct",
+        "fc-server-scnp" | "fc-server-resp" => "tcp-fanout",
         "redis" | "valkey" | "dragonfly" => "tcp-baseline",
         _ => "competitor-shared",
     }

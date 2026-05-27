@@ -16,9 +16,9 @@ ws_root="$(cd "$root/.." && pwd)"
 cd "$ws_root"
 
 # Build the PyO3 wheel into the active Python environment.
-if ! python3 -c "import fast_cache" 2>/dev/null; then
-  echo "building fast_cache PyO3 wheel via maturin"
-  maturin develop --release -m crates/fast-cache-py/Cargo.toml --features extension-module
+if ! python3 -c "import shardcache" 2>/dev/null; then
+  echo "building shardcache PyO3 wheel via maturin"
+  maturin develop --release -m crates/shardcache-py/Cargo.toml --features extension-module
 fi
 
 mkdir -p "$root/results"
@@ -38,8 +38,8 @@ if [[ "${LMCACHE:-0}" == "1" ]]; then
   if ! python3 -c "import lmcache" 2>/dev/null; then
     echo "lmcache not installed; skipping fc-lmcache (pip install lmcache)"
   else
-    if ! python3 -c "import fast_cache_lmcache_backend" 2>/dev/null; then
-      echo "installing fast-cache LMCache backend plugin"
+    if ! python3 -c "import shardcache_lmcache_backend" 2>/dev/null; then
+      echo "installing shardcache LMCache backend plugin"
       pip install ./integrations/lmcache_storage_backend
     fi
     python3 "$root/python/fc_lmcache_bench.py" \

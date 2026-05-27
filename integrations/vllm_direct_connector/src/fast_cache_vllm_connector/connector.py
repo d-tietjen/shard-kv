@@ -249,3 +249,7 @@ class FastCacheVllmConnectorShim:
 
     def restore_from_start_load_kv(self, **kwargs: Any) -> Any:
         return self.submit_paged(**kwargs)
+
+
+class ShardCacheVllmConnectorShim(FastCacheVllmConnectorShim):
+    pass

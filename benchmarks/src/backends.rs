@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use fast_cache::config::EvictionPolicy;
-use fast_cache::storage::SharedEmbeddedLockPolicy;
+use shardmap::config::EvictionPolicy;
+use shardmap::storage::SharedEmbeddedLockPolicy;
 
 use crate::backend::{Backend, BoxError, ReadMode};
 
@@ -9,11 +9,11 @@ mod dashmap_bk;
 mod dashmap_ref;
 mod fc_embed;
 mod fc_shared;
-mod fcnp;
 mod lru_bk;
 mod moka_bk;
 mod resp;
 mod rwlock_hashmap;
+mod scnp;
 
 /// All supported backend ids. Order matches the standard reporting order.
 pub const BACKEND_IDS: &[&str] = &[
@@ -40,8 +40,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "lru",
     "rwlock-hashmap",
     "fc-server-resp",
-    "fc-server-fcnp",
-    "fc-server-fcnp-direct",
+    "fc-server-scnp",
+    "fc-server-scnp-direct",
     "redis",
     "valkey",
     "dragonfly",
@@ -281,17 +281,17 @@ pub fn make(
             })?;
             Arc::new(resp::RespBackend::new(id, addr)?)
         }
-        "fc-server-fcnp" => {
+        "fc-server-scnp" => {
             let addr = addr.ok_or_else(|| {
-                format!("backend `{id}` requires --addr host:port (fast-cache-server listener)")
+                format!("backend `{id}` requires --addr host:port (shardcache listener)")
             })?;
-            Arc::new(fcnp::FcnpBackend::new(addr)?)
+            Arc::new(scnp::ScnpBackend::new(addr)?)
         }
-        "fc-server-fcnp-direct" => {
+        "fc-server-scnp-direct" => {
             let addr = addr.ok_or_else(|| {
-                format!("backend `{id}` requires --addr host:port (fast-cache direct shard port 0)")
+                format!("backend `{id}` requires --addr host:port (shardcache direct shard port 0)")
             })?;
-            Arc::new(fcnp::FcnpBackend::new_direct_shards(
+            Arc::new(scnp::ScnpBackend::new_direct_shards(
                 addr,
                 vcpu_budget.max(1).next_power_of_two(),
             )?)

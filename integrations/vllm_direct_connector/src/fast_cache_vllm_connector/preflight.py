@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from .connector import SUPPORTED_VLLM_VERSION, assert_supported_vllm_version
-from .kv_connector_v1 import FastCacheKVConnectorV1
+from .kv_connector_v1 import ShardCacheKVConnectorV1
 
 
 def run_preflight(
@@ -11,7 +11,10 @@ def run_preflight(
     *,
     instantiate_connector: bool = True,
 ) -> dict[str, Any]:
-    import fast_cache  # type: ignore
+    try:
+        import shardcache as store_module  # type: ignore
+    except ImportError:
+        import fast_cache as store_module  # type: ignore
     import vllm  # type: ignore
 
     resolved_version = getattr(vllm, "__version__", None)
@@ -21,12 +24,12 @@ def run_preflight(
         "status": "ok",
         "vllm_version": resolved_version,
         "expected_vllm_version": expected_version,
-        "fast_cache_module": getattr(fast_cache, "__name__", "fast_cache"),
-        "connector_class": f"{FastCacheKVConnectorV1.__module__}.{FastCacheKVConnectorV1.__name__}",
+        "shardcache_module": getattr(store_module, "__name__", "shardcache"),
+        "connector_class": f"{ShardCacheKVConnectorV1.__module__}.{ShardCacheKVConnectorV1.__name__}",
     }
 
     if instantiate_connector:
-        connector = FastCacheKVConnectorV1(
+        connector = ShardCacheKVConnectorV1(
             validate_version=False,
             installed_vllm_version=resolved_version,
         )

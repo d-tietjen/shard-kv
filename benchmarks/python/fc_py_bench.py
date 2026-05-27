@@ -1,7 +1,7 @@
-"""fc-py: in-process Python benchmark against `fast_cache.Store`.
+"""fc-py: in-process Python benchmark against `shardcache.Store`.
 
 Usage:
-    maturin develop --release -m crates/fast-cache-py/Cargo.toml
+    maturin develop --release -m crates/shardcache-py/Cargo.toml
     python benchmarks/python/fc_py_bench.py \
         --value-size 512 --mix 80-20 --vcpu-budget 4 --clients 4 \
         --key-count 100000 --warmup 1 --duration 5
@@ -28,11 +28,11 @@ from _bench_common import (
 )
 
 try:
-    import fast_cache  # type: ignore[import-not-found]
+    import shardcache  # type: ignore[import-not-found]
 except ImportError as exc:
     print(
-        "fast_cache module not importable. Build the PyO3 wheel first:\n"
-        "  maturin develop --release -m crates/fast-cache-py/Cargo.toml --features extension-module",
+        "shardcache module not importable. Build the PyO3 wheel first:\n"
+        "  maturin develop --release -m crates/shardcache-py/Cargo.toml --features extension-module",
         file=sys.stderr,
     )
     raise SystemExit(1) from exc
@@ -41,7 +41,7 @@ except ImportError as exc:
 class FcPyWorker(Worker):
     """Thin wrapper around a shared Store. Store is thread-safe."""
 
-    def __init__(self, store: "fast_cache.Store") -> None:
+    def __init__(self, store: "shardcache.Store") -> None:
         self.store = store
 
     def do_get(self, key: bytes) -> None:
@@ -58,7 +58,7 @@ def main() -> None:
         choices=("shared", "local_embedded"),
         default="shared",
         help=(
-            "fast-cache Store architecture. The benchmark default is shared "
+            "shardcache Store architecture. The benchmark default is shared "
             "because it generates arbitrary multi-client keys; local_embedded "
             "requires caller-owned shard routing."
         ),
@@ -69,7 +69,7 @@ def main() -> None:
         key_count=args.key_count, value_size=args.value_size, get_pct=get_pct
     )
 
-    store = fast_cache.Store(
+    store = shardcache.Store(
         cores=max(1, args.vcpu_budget),
         client_architecture=args.client_architecture,
     )

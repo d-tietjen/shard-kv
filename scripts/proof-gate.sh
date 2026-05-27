@@ -15,35 +15,36 @@ tier="${1:-quick}"
 
 quick() {
   cargo fmt --all -- --check
-  cargo test -p fast-cache-benchmarks --bin redis_command_matrix
-  cargo test -p fast-cache-benchmarks --bin redis_command_manifest
-  cargo test -p fast-cache-benchmarks --bin redis_command_report
-  cargo test -p fast-cache-benchmarks redis_command_cases::tests
+  cargo test -p shardcache-benchmarks --bin redis_command_matrix
+  cargo test -p shardcache-benchmarks --bin redis_command_manifest
+  cargo test -p shardcache-benchmarks --bin redis_command_report
+  cargo test -p shardcache-benchmarks redis_command_cases::tests
   ./scripts/check-redis-compatibility-doc.sh
   ./scripts/check-feature-matrix.sh
+  ./scripts/check-publish-set.sh
   git diff --check
 }
 
 redis() {
   quick
-  cargo test -p fast-cache-core --features redis
-  cargo test -p fast-cache-core --features redis,server raw_resp_
-  FAST_CACHE_COMPAT_SERVER_BIN="${FAST_CACHE_COMPAT_SERVER_BIN:-redis-server}" \
-    cargo test -p fast-cache-core --features redis-server \
+  cargo test -p shardmap --features redis
+  cargo test -p shardmap --features redis,server raw_resp_
+  SHARDCACHE_COMPAT_SERVER_BIN="${SHARDCACHE_COMPAT_SERVER_BIN:-redis-server}" \
+    cargo test -p shardmap --features redis-server \
     --test redis_compat_differential_test -- --nocapture
 }
 
 release() {
   redis
   cargo test --workspace
-  cargo test -p fast-cache-core --features unsafe
-  cargo test -p fast-cache-formal
-  cargo doc -p fast-cache-core --no-deps --all-features
-  cargo doc -p fast-cache --no-deps --all-features
-  cargo doc -p fast-cache-redis --no-deps --all-features
-  cargo doc -p fcnp-client-rs --no-deps
-  cargo package -p fcnp-client-rs --locked
-  cargo package -p fast-cache-core --locked
+  cargo test -p shardmap --features unsafe
+  cargo test -p shardcache-formal
+  cargo doc -p shardmap --no-deps --all-features
+  cargo doc -p shardcache --no-deps --all-features
+  cargo doc -p shardcache-redis --no-deps --all-features
+  cargo doc -p shardcache-client-rs --no-deps
+  cargo package -p shardmap --locked
+  cargo package -p shardcache-client-rs --locked
 }
 
 case "$tier" in

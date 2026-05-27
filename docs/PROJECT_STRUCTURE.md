@@ -2,23 +2,23 @@
 
 This repository is organized as a Rust workspace with optional Python
 integration packages and local benchmark tooling. The goal is to keep the
-published crate surface easy to find while leaving generated artifacts, raw
+two published crate surfaces easy to find while leaving generated artifacts, raw
 benchmark outputs, and local verification caches outside version control.
 
 ## Top-Level Map
 
 | Path | Purpose |
 | --- | --- |
-| `crates/fast-cache` | Public facade crate and optional `fast-cache-server` binary. Downstream users normally depend on this package. |
-| `crates/fast-cache-core` | Core embedded cache, storage, protocol, persistence, replication, and server runtime implementation. Start here for base-cache behavior. |
-| `crates/fcnp-client-rs` | Blocking Rust client for the native FCNP protocol and direct shard routing. |
-| `crates/fast-cache-runtime` | Rust-native CPU/GPU transfer runtime used by model-serving integrations. |
-| `crates/fast-cache-py` | PyO3 bindings used by benchmarks and integration adapters. |
-| `crates/fast-cache-redis` | Redis/Valkey compatibility crate and source root. Core includes these files by path only while the extension API is being finished. |
-| `crates/fast-cache-formal` | Formal-model support crate used with the verification workspace. |
+| `crates/shardmap` | Published embedded cache crate. Core embedded cache, storage, protocol, persistence, replication, and opt-in server internals. Start here for base-cache behavior. |
+| `crates/shardcache` | Source-only server package and optional `shardcache` binary. |
+| `crates/shardcache-client-rs` | Published blocking Rust client for the native SCNP protocol and direct shard routing. |
+| `crates/shardcache-runtime` | Source-only Rust-native CPU/GPU transfer runtime used by model-serving integrations. |
+| `crates/shardcache-py` | Source-only PyO3 bindings used by benchmarks and integration adapters. |
+| `crates/shardcache-redis` | Redis/Valkey compatibility crate and source root. Core includes these files by path only while the extension API is being finished. |
+| `crates/shardcache-formal` | Formal-model support crate used with the verification workspace. |
 | `benchmarks` | Local benchmark harnesses, reproduction scripts, and curated benchmark writeups. Raw run outputs live under ignored `benchmarks/results/`. |
 | `integrations/lmcache_storage_backend` | Python LMCache storage backend package. |
-| `integrations/vllm_direct_connector` | Python vLLM connector shim for the fast-cache runtime path. |
+| `integrations/vllm_direct_connector` | Python vLLM connector shim for the shardcache runtime path. |
 | `docs` | Contributor-facing repository maps and design notes. |
 | `scripts` | Release/proof gates and source-of-truth consistency checks. |
 | `.github/workflows` | CI checks for formatting, tests, rustdoc, packaging, and repository hygiene. |
@@ -27,19 +27,19 @@ benchmark outputs, and local verification caches outside version control.
 
 ## Core Crate Layout
 
-Most production code lives under `crates/fast-cache-core/src`:
+Most production code lives under `crates/shardmap/src`:
 
 | Path | Purpose |
 | --- | --- |
 | `cache.rs` and `embedded.rs` | Public embedded cache handles and convenience API surface. |
 | `storage/` | Sharded storage engines, object stores, record layout, stats, and embedded store implementations. |
-| `commands/` | Base cache command implementations for GET/SET/DEL/TTL-style behavior. Redis-only command families live in `crates/fast-cache-redis/src/commands`. |
+| `commands/` | Base cache command implementations for GET/SET/DEL/TTL-style behavior. Redis-only command families live in `crates/shardcache-redis/src/commands`. |
 | `protocol/` | RESP and native fast protocol codecs. |
 | `server/` | TCP listeners, direct shard routing, connection lifecycle, and request execution. |
 | `persistence/` | WAL, snapshots, recovery, and TCP WAL export. |
 | `replication/` | Native replication protocol, backlog, transport, and batching. |
 | `config/` | TOML configuration, geometry, and validation. |
-| `crates/fast-cache/src/bin/fast-cache-server.rs` | Server entry point, gated behind the facade crate's `server` feature. |
+| `crates/shardcache/src/main.rs` | Server entry point for the source-only `shardcache` package. |
 | `tests/` | Integration tests for storage, protocol, persistence, server, and compatibility behavior. |
 | `fuzz/` | LibFuzzer harnesses for command-sequence validation. |
 
@@ -47,13 +47,13 @@ Most production code lives under `crates/fast-cache-core/src`:
 
 | Change | Primary Location | Also Check |
 | --- | --- | --- |
-| Embedded key/value API | `crates/fast-cache-core/src/cache.rs`, `embedded.rs`, `storage/` | Core README, rustdoc, storage tests |
-| Redis/Valkey command | `crates/fast-cache-redis/src/commands/<family>/` | `crates/fast-cache-core/src/commands/README.md`, compatibility tests, server dispatch |
-| RESP or FCNP behavior | `crates/fast-cache-core/src/protocol/`, `server/`, `crates/fcnp-client-rs` | Protocol tests and client README |
-| Server configuration | `crates/fast-cache-core/src/config/`, `fast-cache.toml.example` | Root README Docker/config sections |
-| Persistence or replication | `crates/fast-cache-core/src/persistence/`, `replication/` | Recovery tests, benchmark caveats, config docs |
+| Embedded key/value API | `crates/shardmap/src/cache.rs`, `embedded.rs`, `storage/` | Core README, rustdoc, storage tests |
+| Redis/Valkey command | `crates/shardcache-redis/src/commands/<family>/` | `crates/shardmap/src/commands/README.md`, compatibility tests, server dispatch |
+| RESP or SCNP behavior | `crates/shardmap/src/protocol/`, `server/`, `crates/shardcache-client-rs` | Protocol tests and client README |
+| Server configuration | `crates/shardmap/src/config/`, `shardcache.toml.example` | Root README Docker/config sections |
+| Persistence or replication | `crates/shardmap/src/persistence/`, `replication/` | Recovery tests, benchmark caveats, config docs |
 | Benchmark harness | `benchmarks/src`, `benchmarks/scripts` | `benchmarks/README.md` and curated benchmark writeups |
-| Python integration | `integrations/<package>` and `crates/fast-cache-py` | Package README and integration tests |
+| Python integration | `integrations/<package>` and `crates/shardcache-py` | Package README and integration tests |
 
 ## Repository Hygiene
 
@@ -80,14 +80,14 @@ New contributors should be able to answer the first set of questions from:
 
 - `README.md`: what the project is, how to run it, feature flags, Docker, and
   benchmark claims.
-- `crates/fast-cache/README.md`: public facade crate usage.
-- `crates/fast-cache-core/README.md`: crate-level API guide and server usage.
-- `crates/fast-cache-core/SAFETY.md`: reviewed unsafe inventory and invariants.
+- `crates/shardmap/README.md`: published crate API guide.
+- `crates/shardcache/README.md`: source-only server usage.
+- `crates/shardmap/SAFETY.md`: reviewed unsafe inventory and invariants.
 - `CONTRIBUTING.md`: setup, pull-request expectations, and verification
   commands.
 - `SECURITY.md`: vulnerability reporting.
 - `RELEASE.md`: release checklist.
-- `docs/RELEASE_0_2_READINESS.md`: current 0.2.0 proof, benchmark, and known
+- `docs/RELEASE_0_1_READINESS.md`: current 0.1.0 proof, benchmark, and known
   limitation checklist.
 - `docs/REDIS_COMPATIBILITY.md`: generated Redis command compatibility
   manifest based on the live command matrix registry, including supported

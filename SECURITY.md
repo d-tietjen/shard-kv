@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-`fast-cache` is pre-1.0. Fixes target the latest `main` branch and the
+`shard-kv` is pre-1.0. Fixes target the latest `main` branch and the
 latest published crate version.
 
 ## Reporting a vulnerability
@@ -23,4 +23,4 @@ Do not open a public issue for an unpatched vulnerability.
 
 The default build uses safe code. Reviewed performance paths that use
 unsafe are opt-in through `--features unsafe` and documented in
-[`crates/fast-cache/SAFETY.md`](crates/fast-cache/SAFETY.md).
+[`crates/shardmap/SAFETY.md`](crates/shardmap/SAFETY.md).

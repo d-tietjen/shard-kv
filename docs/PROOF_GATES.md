@@ -14,8 +14,8 @@ compatibility surface, and benchmark claims evolve.
 | Gate | Purpose |
 | --- | --- |
 | `quick` | Formatting, benchmark harness unit tests, compatibility manifest freshness, feature-flag compile matrix, and whitespace diff checks. |
-| `redis` | Everything in `quick`, plus Redis compatibility tests, raw RESP server tests, and the live differential test against `FAST_CACHE_COMPAT_SERVER_BIN` or `redis-server`. |
-| `release` | Everything in `redis`, plus the workspace test suite, formal support tests, rustdoc, and package dry runs for publishable crates. |
+| `redis` | Everything in `quick`, plus Redis compatibility tests, raw RESP server tests, and the live differential test against `SHARDCACHE_COMPAT_SERVER_BIN` or `redis-server`. |
+| `release` | Everything in `redis`, plus the workspace test suite, formal support tests, rustdoc, and the `shardmap` package dry run. |
 
 Use `quick` while iterating on source layout, feature flags, command registry,
 or docs. Use `redis` before merging compatibility changes. Use `release`
@@ -28,9 +28,9 @@ before tagging or publishing.
 ./scripts/check-redis-compatibility-doc.sh
 ```
 
-`check-feature-matrix.sh` compiles the public 0.2.0 feature contract for
-`fast-cache`, `fast-cache-core`, and `fast-cache-redis`, and verifies that
-embedded-only builds do not depend on `fast-cache-redis`.
+`check-feature-matrix.sh` compiles the public 0.1.0 feature contract for
+`shardcache`, `shardmap`, and `shardcache-redis`, and verifies that
+embedded-only builds do not depend on `shardcache-redis`.
 
 `check-redis-compatibility-doc.sh` regenerates
 `docs/REDIS_COMPATIBILITY.md` from `benchmarks/src/redis_command_cases.rs` and
@@ -38,7 +38,7 @@ diffs it against the tracked file. When command cases change, regenerate the
 doc intentionally:
 
 ```bash
-cargo run -p fast-cache-benchmarks --bin redis_command_manifest -- \
+cargo run -p shardcache-benchmarks --bin redis_command_manifest -- \
   --output docs/REDIS_COMPATIBILITY.md
 ```
 
@@ -68,9 +68,9 @@ The bundle contains:
 | `redis-compatibility.json` | JSON command compatibility manifest captured with the run. |
 
 When Redis, Valkey, or Dragonfly references are already captured for the same
-host and benchmark knobs, rerun only fast-cache and pass the saved CSV with
+host and benchmark knobs, rerun only shardcache and pass the saved CSV with
 `REFERENCE_CSVS=/path/to/redis-command-matrix.csv`. The report merges the saved
-rows and adds a common-case comparison table so fast-cache changes do not force
+rows and adds a common-case comparison table so shardcache changes do not force
 the external services to be rerun every iteration. `REFERENCE_CSVS` is
 comma-separated when the references are split across multiple CSVs.
 

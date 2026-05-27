@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Run the RESP command matrix against fast-cache, Redis, and Valkey.
+# Run the RESP command matrix against shardcache, Redis, and Valkey.
 #
 # Defaults:
 #   - starts Redis and Valkey via benchmarks/docker/compose.yml
-#   - starts fast-cache-server on 127.0.0.1:6383 with redis-server features
+#   - starts shardcache on 127.0.0.1:6383 with redis-server features
 #   - writes benchmarks/results/redis-command-matrix.csv
 #
 # Useful overrides:
-#   TARGETS=fast-cache=127.0.0.1:6383,redis=127.0.0.1:6379,valkey=127.0.0.1:6381
+#   TARGETS=shardcache=127.0.0.1:6383,redis=127.0.0.1:6379,valkey=127.0.0.1:6381
 #   CASES=hash,zset
 #   CASES=large
 #   CASES=extended-no-keyspace
@@ -20,12 +20,12 @@
 #   PIPELINE_DEPTH=16
 #   WARMUP=2
 #   DURATION=10
-#   START_FAST_CACHE=0
+#   START_SHARDCACHE=0
 #   DOCKER=0
 #   DOCKER_SERVICES="redis valkey dragonfly"
 #   DOCKER_CPUSET=0
 #   SERVER_DIRECT_SHARD_PORTS=1
-#   FAST_CACHE_DIRECT_SHARD_BASE_PORT=6384
+#   SHARDCACHE_DIRECT_SHARD_BASE_PORT=6384
 
 set -euo pipefail
 
@@ -37,21 +37,21 @@ ws_root="$(cd "$root/.." && pwd)"
 
 cd "$ws_root"
 
-fc_addr="${FAST_CACHE_ADDR:-127.0.0.1:6383}"
-targets="${TARGETS:-fast-cache=$fc_addr,redis=127.0.0.1:6379,valkey=127.0.0.1:6381}"
-start_fast_cache="${START_FAST_CACHE:-1}"
+fc_addr="${SHARDCACHE_ADDR:-127.0.0.1:6383}"
+targets="${TARGETS:-shardcache=$fc_addr,redis=127.0.0.1:6379,valkey=127.0.0.1:6381}"
+start_shardcache="${START_SHARDCACHE:-1}"
 server_env=()
 if [[ "${SERVER_DIRECT_SHARD_PORTS:-0}" != "0" ]]; then
-  server_env+=(FAST_CACHE_DIRECT_SHARD_PORTS=1)
-  if [[ -n "${FAST_CACHE_DIRECT_SHARD_BASE_PORT:-}" ]]; then
-    server_env+=(FAST_CACHE_DIRECT_SHARD_BASE_PORT="$FAST_CACHE_DIRECT_SHARD_BASE_PORT")
+  server_env+=(SHARDCACHE_DIRECT_SHARD_PORTS=1)
+  if [[ -n "${SHARDCACHE_DIRECT_SHARD_BASE_PORT:-}" ]]; then
+    server_env+=(SHARDCACHE_DIRECT_SHARD_BASE_PORT="$SHARDCACHE_DIRECT_SHARD_BASE_PORT")
   fi
 fi
 
-if [[ "$start_fast_cache" == "1" ]]; then
-  cargo build --release -p fast-cache --features redis-server --bin fast-cache-server
+if [[ "$start_shardcache" == "1" ]]; then
+  cargo build --release -p shardcache --features redis-server --bin shardcache
 fi
-cargo build --release -p fast-cache-benchmarks --bin redis_command_matrix
+cargo build --release -p shardcache-benchmarks --bin redis_command_matrix
 report_pinning
 
 if [[ "${DOCKER:-1}" == "1" ]]; then
@@ -66,8 +66,8 @@ if [[ "${DOCKER:-1}" == "1" ]]; then
 fi
 
 fc_server_pid=""
-if [[ "$start_fast_cache" == "1" ]]; then
-  server_cmd=("$ws_root/target/release/fast-cache-server")
+if [[ "$start_shardcache" == "1" ]]; then
+  server_cmd=("$ws_root/target/release/shardcache")
   if [[ -n "${SERVER_CPUSET:-}" ]] && command -v taskset >/dev/null 2>&1; then
     server_cmd=(taskset -c "$SERVER_CPUSET" "${server_cmd[@]}")
   fi
@@ -79,10 +79,10 @@ if [[ "$start_fast_cache" == "1" ]]; then
   )
   if [[ "${#server_env[@]}" -gt 0 ]]; then
     env "${server_env[@]}" "${server_cmd[@]}" \
-      >/tmp/fast-cache-server.redis-command-matrix.log 2>&1 &
+      >/tmp/shardcache.redis-command-matrix.log 2>&1 &
   else
     "${server_cmd[@]}" \
-      >/tmp/fast-cache-server.redis-command-matrix.log 2>&1 &
+      >/tmp/shardcache.redis-command-matrix.log 2>&1 &
   fi
   fc_server_pid=$!
 fi
