@@ -1,4 +1,4 @@
-"""fc-lmcache: benchmark shardcache as an LMCache storage plugin.
+"""shardcache-lmcache: benchmark shardcache as an LMCache storage plugin.
 
 Drives put / get through `ShardCacheStorageBackend` using LMCache's
 `CacheEngineKey` and `BytesBufferMemoryObj` types. This measures the
@@ -13,7 +13,7 @@ through the same plugin interface.
 Usage:
     pip install ./integrations/lmcache_storage_backend
     maturin develop --release -m crates/shardcache-py/Cargo.toml --features extension-module
-    python benchmarks/python/fc_lmcache_bench.py \
+    python benchmarks/python/shardcache_lmcache_bench.py \
         --value-size 4096 --mix 80-20 --vcpu-budget 4 --clients 4 \
         --key-count 4096 --warmup 1 --duration 5
 """
@@ -272,7 +272,7 @@ def main() -> None:
     ShardCacheBackend = _import_fc_backend()
 
     print(
-        f"fc-lmcache: value_size={args.value_size}B mix={spec.mix_label} "
+        f"shardcache-lmcache: value_size={args.value_size}B mix={spec.mix_label} "
         f"vcpu_budget={args.vcpu_budget} clients={args.clients} "
         f"keys={args.key_count} duration={args.duration}s "
         f"connection={args.connection or 'client_architecture'} "
@@ -296,8 +296,14 @@ def main() -> None:
     }
     if args.connection is not None:
         extra_config["storage_plugin.shardcache.connection"] = args.connection
-    fc_backend = ShardCacheBackend(config=type("Cfg", (), {"extra_config": extra_config})())
-    results.append(_run_backend("fc-lmcache", fc_backend, keys_lm, value_obj, spec, args))
+    shardcache_backend = ShardCacheBackend(
+        config=type("Cfg", (), {"extra_config": extra_config})()
+    )
+    results.append(
+        _run_backend(
+            "shardcache-lmcache", shardcache_backend, keys_lm, value_obj, spec, args
+        )
+    )
 
     if args.with_local_cpu and LocalCPUBackend is not None:
         try:

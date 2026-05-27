@@ -14,7 +14,7 @@ Two modes, parallel and independent:
 | `redis_command_matrix` | RESP command script, per command | Head-to-head command throughput for shardcache vs Redis/Valkey |
 
 Both drivers share the same backend list, the same workload axes, and
-the same CSV schema. Python harnesses for `fc-py` and `fc-lmcache`
+the same CSV schema. Python harnesses for `fc-py` and `shardcache-lmcache`
 emit rows in the same schema.
 
 ## Published Coverage
@@ -345,7 +345,7 @@ CSV artifact from this bench before changing the storage value movement path.
 | `fc-server-scnp` | `shardcache` over native binary (SCNP v2) |
 | `fc-server-scnp-direct` | `shardcache` over SCNP with client-side routing to shard-owned ports |
 | `fc-py` | `shardcache.Store` from Python (separate harness) |
-| `fc-lmcache` | LMCache with shardcache storage plugin (separate harness) |
+| `shardcache-lmcache` | LMCache with shardcache storage plugin (separate harness) |
 | `dashmap` | `dashmap::DashMap` |
 | `moka` | `moka::sync::Cache` |
 | `lru` | `parking_lot::Mutex<lru::LruCache>` |
@@ -744,14 +744,14 @@ python benchmarks/python/fc_py_bench.py \
 
 `./scripts/run-python.sh` builds the wheel if needed and runs the harness.
 
-### fc-lmcache (LMCache plugin via `ShardCacheStorageBackend`)
+### shardcache-lmcache (LMCache plugin via `ShardCacheStorageBackend`)
 
 ```bash
 pip install lmcache
 pip install ./integrations/lmcache_storage_backend
 maturin develop --release -m crates/shardcache-py/Cargo.toml --features extension-module
 
-python benchmarks/python/fc_lmcache_bench.py \
+python benchmarks/python/shardcache_lmcache_bench.py \
   --value-size 4096 --mix 80-20 \
   --vcpu-budget 4 --clients 4 --key-count 4096 \
   --client-architecture shared \
@@ -765,7 +765,7 @@ Pass `--with-local-cpu` to additionally bench LMCache's built-in
 interface:
 
 ```bash
-python benchmarks/python/fc_lmcache_bench.py --with-local-cpu \
+python benchmarks/python/shardcache_lmcache_bench.py --with-local-cpu \
   --value-size 4096 --mix 80-20 \
   --vcpu-budget 4 --clients 4 --key-count 4096 \
   --client-architecture shared \
@@ -821,7 +821,7 @@ Workload knobs are environment variables: `VALUE_SIZE`, `MIX`,
 PIPELINE_DEPTHS="1 4 16 64" ./scripts/run-saturation.sh
 BACKENDS=redis ADDR=127.0.0.1:6379 ./scripts/run-client-sweep.sh
 ./scripts/run-curve.sh              # CPU-vs-load curve at headline workload
-LMCACHE=1 ./scripts/run-python.sh   # fc-py + fc-lmcache
+LMCACHE=1 ./scripts/run-python.sh   # fc-py + shardcache-lmcache
 ```
 
 Both write to `results/<mode>_<timestamp>.csv`. The `results/` directory

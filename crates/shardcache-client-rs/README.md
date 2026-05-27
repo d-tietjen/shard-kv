@@ -8,6 +8,10 @@ server ports. This crate is intentionally small and synchronous: one client owns
 one or more TCP connections and is meant to be used directly from worker
 threads.
 
+This is one of the two publishable crates in the 0.1.x release line. The
+`shardcache` server itself is source-only and is built from the `shard-kv`
+repository.
+
 ## Install
 
 Use the published crate from crates.io:
@@ -23,6 +27,14 @@ From a workspace checkout, use a path dependency:
 [dependencies]
 shardcache-client-rs = { path = "crates/shardcache-client-rs" }
 ```
+
+## API Shape
+
+- `ShardCacheClient`: one fanout connection to the ordinary server listener.
+- `ShardCacheDirectClient`: one connection per direct shard listener, with client-side key routing.
+- `ShardCacheDirectRouter`: route keys and connect individual shard-owned clients.
+- `client.redis()`: optional first-party Redis command helpers behind the `redis` feature.
+- `client.redis().command(...)`: generic Redis argv construction over SCNP.
 
 ## Server Shape
 
@@ -155,7 +167,7 @@ building RESP request frames in user code.
 
 ```toml
 [dependencies]
-shardcache-client-rs = { path = "crates/shardcache-client-rs", features = ["redis"] }
+shardcache-client-rs = { version = "0.1.0", features = ["redis"] }
 ```
 
 The primary API is the first-party Redis namespace on the client. Common

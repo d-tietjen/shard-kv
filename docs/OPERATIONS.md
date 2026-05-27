@@ -3,6 +3,9 @@
 This page is the short operational contract for running `shardcache` in
 0.1.0-style deployments.
 
+For the container-specific runbook, see
+[`SHARDCACHE_DOCKER.md`](SHARDCACHE_DOCKER.md).
+
 ## Build Selection
 
 | Build | Command | Use When |
