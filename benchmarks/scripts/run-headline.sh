@@ -3,9 +3,9 @@
 #
 # Defaults: embedded backends only.
 # DOCKER=1                        include networked backends (Redis, Valkey,
-#                                 Dragonfly, fast-cache-server RESP+FCNP).
-# SERVER_CPUSET=0-3               pin fast-cache-server via taskset.
-# FCNP=1                          include fc-server-fcnp alongside fc-server-resp.
+#                                 Dragonfly, shardcache RESP+SCNP).
+# SERVER_CPUSET=0-3               pin shardcache via taskset.
+# SCNP=1                          include fc-server-scnp alongside fc-server-resp.
 # PIPELINE_DEPTH=16               enable network request pipelining where supported.
 
 set -euo pipefail
@@ -18,7 +18,7 @@ ws_root="$(cd "$root/.." && pwd)"
 
 cd "$ws_root"
 
-cargo build --release -p fast-cache-benchmarks
+cargo build --release -p shardcache-benchmarks
 report_pinning
 
 backends="fc-embed,dashmap,moka,lru,rwlock-hashmap"
@@ -26,15 +26,15 @@ server_pid_arg=()
 
 if [[ "${DOCKER:-0}" == "1" ]]; then
   docker compose -f "$root/docker/compose.yml" up -d
-  cargo build --release -p fast-cache --features server --bin fast-cache-server
-  pinned_exec ./target/release/fast-cache-server --bind-addr 127.0.0.1:6383 --shard-count 4 \
-    >/tmp/fast-cache-server.headline.log 2>&1 &
+  cargo build --release -p shardcache --features server --bin shardcache
+  pinned_exec ./target/release/shardcache --bind-addr 127.0.0.1:6383 --shard-count 4 \
+    >/tmp/shardcache.headline.log 2>&1 &
   fc_server_pid=$!
   trap 'kill $fc_server_pid 2>/dev/null || true; docker compose -f "$root/docker/compose.yml" down' EXIT
   sleep 1
   backends="$backends,fc-server-resp"
-  if [[ "${FCNP:-0}" == "1" ]]; then
-    backends="$backends,fc-server-fcnp"
+  if [[ "${SCNP:-0}" == "1" ]]; then
+    backends="$backends,fc-server-scnp"
   fi
   backends="$backends,redis,valkey,dragonfly"
   server_pid_arg=(--server-pid "$fc_server_pid")

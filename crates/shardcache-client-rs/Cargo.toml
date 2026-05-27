@@ -1,0 +1,22 @@
+[package]
+name = "shardcache-client-rs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Blocking Rust client for shardcache's native SCNP protocol"
+readme = "README.md"
+categories = ["caching", "database-implementations", "network-programming"]
+keywords = ["shardcache", "scnp", "client", "cache", "kv"]
+
+[features]
+default = []
+redis = []
+
+[dependencies]
+libc = { workspace = true }
+thiserror = { workspace = true }
+xxhash-rust = { workspace = true }

@@ -263,13 +263,13 @@ run_report_phase() {
 
 run_tcp_phase() {
   local csv="$out_dir/tcp_routing_appendix.csv"
-  echo "tcp phase expects fast-cache-server direct mode already running; set ADDR to shard port base/fanout as needed"
+  echo "tcp phase expects shardcache direct mode already running; set ADDR to shard port base/fanout as needed"
   for repeat in $(seq 1 "$repeats"); do
     for value_size in 64 512 4096 16384; do
       local key_count
       key_count="$(key_count_for_value_size "$value_size")"
       for mix in $mixes; do
-        run_saturation "$safe_bin" "$csv" "fc-server-fcnp,fc-server-fcnp-direct" "$value_size" "$mix" 16 64 "$key_count" "none" "none" "none" "none"
+        run_saturation "$safe_bin" "$csv" "fc-server-scnp,fc-server-scnp-direct" "$value_size" "$mix" 16 64 "$key_count" "none" "none" "none" "none"
       done
     done
   done

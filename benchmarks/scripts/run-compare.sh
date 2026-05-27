@@ -3,7 +3,7 @@
 #
 #   BACKENDS=fc-embed,dashmap ./scripts/run-compare.sh
 #   BACKENDS=fc-server-resp,redis ADDR=127.0.0.1:6379 ./scripts/run-compare.sh
-#   BACKENDS=fc-server-fcnp,fc-server-resp ADDR=127.0.0.1:6383 ./scripts/run-compare.sh
+#   BACKENDS=fc-server-scnp,fc-server-resp ADDR=127.0.0.1:6383 ./scripts/run-compare.sh
 #
 # SERVER_CPUSET=0-3 pins the server via taskset (Linux).
 # PIPELINE_DEPTH=16 enables network request pipelining where supported.
@@ -21,7 +21,7 @@ backends="${BACKENDS:?set BACKENDS=a,b (comma-separated)}"
 addr="${ADDR:-}"
 
 cd "$ws_root"
-cargo build --release -p fast-cache-benchmarks
+cargo build --release -p shardcache-benchmarks
 report_pinning
 
 addr_arg=()

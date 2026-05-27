@@ -5,10 +5,11 @@ from .connector import (
     BlockAllocation,
     FastCacheVllmConnectorShim,
     RequestedPage,
+    ShardCacheVllmConnectorShim,
     VersionMismatchError,
     assert_supported_vllm_version,
 )
-from .kv_connector_v1 import FastCacheKVConnectorV1
+from .kv_connector_v1 import FastCacheKVConnectorV1, ShardCacheKVConnectorV1
 from .preflight import run_preflight
 
 __all__ = [
@@ -19,6 +20,8 @@ __all__ = [
     "FastCacheKVConnectorV1",
     "FastCacheVllmConnectorShim",
     "RequestedPage",
+    "ShardCacheKVConnectorV1",
+    "ShardCacheVllmConnectorShim",
     "VersionMismatchError",
     "assert_supported_vllm_version",
     "run_preflight",

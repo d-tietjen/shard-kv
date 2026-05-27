@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
-use fast_cache_benchmarks::redis_command_cases::{
+use shardcache_benchmarks::redis_command_cases::{
     REDIS_5_0_14_COMMANDS, REDIS_5_0_14_EXCLUSIONS, REDIS_COMMAND_CASES,
     REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES, RedisCommandCase,
 };
@@ -146,7 +146,7 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "```bash\ncargo run -p fast-cache-benchmarks --bin redis_command_manifest -- --output docs/REDIS_COMPATIBILITY.md\n```"
+        "```bash\ncargo run -p shardcache-benchmarks --bin redis_command_manifest -- --output docs/REDIS_COMPATIBILITY.md\n```"
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -178,7 +178,7 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in fast-cache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.2.0 compatibility surface."
+        "`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in shardcache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.1.0 compatibility surface."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -206,7 +206,7 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     .unwrap();
     writeln!(
         out,
-        "| Redis 5.0.14 commands explicitly excluded from 0.2.0 | {} |",
+        "| Redis 5.0.14 commands explicitly excluded from 0.1.0 | {} |",
         redis5_excluded.len()
     )
     .unwrap();
@@ -319,7 +319,7 @@ fn render_semantic_notes(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "- Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.2.0 compatibility semantics."
+        "- Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.1.0 compatibility semantics."
     )
     .unwrap();
     writeln!(
@@ -334,7 +334,7 @@ fn render_semantic_notes(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "- HyperLogLog commands return compatible cardinalities for the covered operations, but fast-cache stores exact sets in its own representation rather than Redis' binary HLL encoding."
+        "- HyperLogLog commands return compatible cardinalities for the covered operations, but shardcache stores exact sets in its own representation rather than Redis' binary HLL encoding."
     )
     .unwrap();
     writeln!(
@@ -344,7 +344,7 @@ fn render_semantic_notes(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "- FCNP one-byte opcodes cover the hot command set. Commands outside that compact opcode table use the RESP/FCNP command-name fallback path so the server can still route and execute them."
+        "- SCNP one-byte opcodes cover the hot command set. Commands outside that compact opcode table use the RESP/SCNP command-name fallback path so the server can still route and execute them."
     )
     .unwrap();
 }

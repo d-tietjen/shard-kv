@@ -1,0 +1,29 @@
+[package]
+name = "shardcache-py"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "PyO3 bindings for shardmap benchmark adapters"
+publish = false
+
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
+telemetry = ["shardmap/telemetry"]
+gpu-direct-api = ["shardcache-runtime/gpu-direct-api"]
+
+[lib]
+name = "shardcache"
+crate-type = ["cdylib"]
+
+[dependencies]
+dashmap = "6.1"
+shardmap = { workspace = true, default-features = false, features = ["sharded"] }
+shardcache-runtime = { path = "../shardcache-runtime", version = "0.1.0" }
+shardcache-client-rs = { workspace = true }
+pyo3 = { version = "0.23", features = ["abi3-py311"] }
+xxhash-rust = { workspace = true }

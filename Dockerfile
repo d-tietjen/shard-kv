@@ -2,27 +2,27 @@ FROM rust:1.90-slim-bookworm AS builder
 
 WORKDIR /app
 
-ARG FAST_CACHE_FEATURES=redis-server
+ARG SHARDCACHE_FEATURES=redis-server
 ARG RUSTFLAGS=
 ENV RUSTFLAGS=${RUSTFLAGS}
 
 COPY . .
 
-RUN cargo build --locked --release -p fast-cache --features "${FAST_CACHE_FEATURES}" --bin fast-cache-server
+RUN cargo build --locked --release -p shardcache --features "${SHARDCACHE_FEATURES}" --bin shardcache
 
 FROM debian:bookworm-slim AS runtime
 
-RUN groupadd --system fast-cache \
-    && useradd --system --gid fast-cache --home-dir /var/lib/fast-cache --create-home fast-cache
+RUN groupadd --system shardcache \
+    && useradd --system --gid shardcache --home-dir /var/lib/shardcache --create-home shardcache
 
-COPY --from=builder /app/target/release/fast-cache-server /usr/local/bin/fast-cache-server
+COPY --from=builder /app/target/release/shardcache /usr/local/bin/shardcache
 
-RUN mkdir -p /var/lib/fast-cache \
-    && chown -R fast-cache:fast-cache /var/lib/fast-cache
+RUN mkdir -p /var/lib/shardcache \
+    && chown -R shardcache:shardcache /var/lib/shardcache
 
-USER fast-cache
+USER shardcache
 
 EXPOSE 6380 6501 6502 6503 6504
 
-ENTRYPOINT ["fast-cache-server"]
+ENTRYPOINT ["shardcache"]
 CMD ["--bind-addr", "0.0.0.0:6380", "--disable-persistence", "--server-mode", "direct"]

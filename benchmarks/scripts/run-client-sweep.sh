@@ -11,7 +11,7 @@
 # Examples:
 #   BACKENDS=fc-embed,dashmap ./scripts/run-client-sweep.sh
 #   BACKENDS=fc-server-resp,redis ADDR=127.0.0.1:6383 SERVER_PID=$pid ./scripts/run-client-sweep.sh
-#   BACKENDS=fc-server-fcnp-direct ADDR=127.0.0.1:6500 SERVER_PID=$pid PIPELINE_DEPTHS="1 64 128 256" ./scripts/run-client-sweep.sh
+#   BACKENDS=fc-server-scnp-direct ADDR=127.0.0.1:6500 SERVER_PID=$pid PIPELINE_DEPTHS="1 64 128 256" ./scripts/run-client-sweep.sh
 #
 # SERVER_CPUSET=0 is reported when set, but this script does not launch a
 # server itself. Start/pin the server first and pass SERVER_PID for server CPU
@@ -32,7 +32,7 @@ client_counts="${CLIENT_COUNTS:-1 4 16 64 256}"
 pipeline_depths="${PIPELINE_DEPTHS:-${PIPELINE_DEPTH:-1}}"
 
 cd "$ws_root"
-cargo build --release -p fast-cache-benchmarks
+cargo build --release -p shardcache-benchmarks
 report_pinning
 
 addr_arg=()

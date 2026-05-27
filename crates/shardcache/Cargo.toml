@@ -1,0 +1,33 @@
+[package]
+name = "shardcache"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Redis/Valkey-compatible server built on shardmap"
+keywords = ["cache", "redis", "kv", "storage", "server"]
+categories = ["caching", "database-implementations"]
+readme = "README.md"
+publish = false
+autobins = false
+autotests = false
+autobenches = false
+
+[features]
+default = ["redis-server"]
+server = ["shardmap/server"]
+redis = ["shardmap/redis"]
+redis-server = ["server", "redis", "shardmap/redis-server"]
+monoio = ["server", "shardmap/monoio"]
+
+[dependencies]
+shardmap = { workspace = true, default-features = false }
+clap = { workspace = true }
+tokio = { workspace = true }
+
+[[bin]]
+name = "shardcache"
+path = "src/main.rs"

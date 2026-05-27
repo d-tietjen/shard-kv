@@ -57,7 +57,7 @@ static TTL_CLOCK_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 fn start_ttl_clock() {
     TTL_CLOCK_MS.store(exact_epoch_millis(), std::sync::atomic::Ordering::Relaxed);
     match std::thread::Builder::new()
-        .name("fast-cache-bench-ttl-clock".to_string())
+        .name("shardcache-bench-ttl-clock".to_string())
         .spawn(|| {
             loop {
                 TTL_CLOCK_MS.store(exact_epoch_millis(), std::sync::atomic::Ordering::Relaxed);

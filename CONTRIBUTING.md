@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve `fast-cache`.
+Thanks for helping improve `shard-kv`.
 
 ## Development Setup
 
@@ -10,14 +10,14 @@ Use a current stable Rust toolchain that satisfies the workspace
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace
-cargo test -p fast-cache-core --features unsafe
-cargo test -p fast-cache-core --features redis
-cargo check -p fast-cache --features redis
-cargo check -p fast-cache --features redis-server
-cargo check -p fast-cache-redis --all-features
-cargo doc -p fast-cache-core --no-deps --all-features
-cargo doc -p fast-cache-redis --no-deps --all-features
-cargo package -p fast-cache-core --locked
+cargo test -p shardmap --features unsafe
+cargo test -p shardmap --features redis
+cargo check -p shardcache --features redis
+cargo check -p shardcache --features redis-server
+cargo check -p shardcache-redis --all-features
+cargo doc -p shardmap --no-deps --all-features
+cargo doc -p shardcache-redis --no-deps --all-features
+cargo package -p shardmap --locked
 ```
 
 Before making larger changes, skim [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md)
@@ -45,4 +45,4 @@ The default build is safe by default. Any new unsafe hot path must:
 - include a local `SAFETY:` comment that states the invariant;
 - have a safe fallback where practical;
 - be covered by tests in both default and `--features unsafe` builds;
-- update `crates/fast-cache-core/SAFETY.md`.
+- update `crates/shardmap/SAFETY.md`.

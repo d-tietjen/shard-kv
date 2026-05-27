@@ -377,108 +377,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast-cache"
-version = "0.2.0"
-dependencies = [
- "clap",
- "fast-cache-core",
- "tokio",
-]
-
-[[package]]
-name = "fast-cache-benchmarks"
-version = "0.2.0"
-dependencies = [
- "bytes",
- "clap",
- "crossbeam-channel",
- "dashmap",
- "fast-cache",
- "fcnp-client-rs",
- "hdrhistogram",
- "libc",
- "lru",
- "moka",
- "parking_lot",
- "rand",
- "xxhash-rust",
-]
-
-[[package]]
-name = "fast-cache-core"
-version = "0.2.0"
-dependencies = [
- "bytes",
- "bytes-handoff",
- "clap",
- "core_affinity",
- "crc32fast",
- "creusot-std",
- "crossbeam-channel",
- "crossbeam-utils",
- "fast-telemetry",
- "flume",
- "hashbrown 0.14.5",
- "indextreemap",
- "itoa",
- "libc",
- "log",
- "lz4_flex",
- "memchr",
- "monoio",
- "parking_lot",
- "rblock",
- "serde",
- "serde_json",
- "smallvec",
- "socket2 0.5.10",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "xxhash-rust",
- "zstd",
-]
-
-[[package]]
-name = "fast-cache-formal"
-version = "0.2.0"
-dependencies = [
- "creusot-std",
-]
-
-[[package]]
-name = "fast-cache-py"
-version = "0.2.0"
-dependencies = [
- "dashmap",
- "fast-cache-core",
- "fast-cache-runtime",
- "fcnp-client-rs",
- "pyo3",
- "xxhash-rust",
-]
-
-[[package]]
-name = "fast-cache-redis"
-version = "0.2.0"
-dependencies = [
- "fast-cache-core",
-]
-
-[[package]]
-name = "fast-cache-runtime"
-version = "0.2.0"
-dependencies = [
- "cust",
- "fast-cache-core",
- "serde",
- "thiserror",
-]
-
-[[package]]
 name = "fast-telemetry"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -508,15 +406,6 @@ name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
-
-[[package]]
-name = "fcnp-client-rs"
-version = "0.2.0"
-dependencies = [
- "libc",
- "thiserror",
- "xxhash-rust",
-]
 
 [[package]]
 name = "find-msvc-tools"
@@ -1387,12 +1276,123 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardcache"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "shardmap",
+ "tokio",
+]
+
+[[package]]
+name = "shardcache-benchmarks"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "crossbeam-channel",
+ "dashmap",
+ "hdrhistogram",
+ "libc",
+ "lru",
+ "moka",
+ "parking_lot",
+ "rand",
+ "shardcache-client-rs",
+ "shardmap",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "shardcache-client-rs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "shardcache-formal"
+version = "0.1.0"
+dependencies = [
+ "creusot-std",
+]
+
+[[package]]
+name = "shardcache-py"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "pyo3",
+ "shardcache-client-rs",
+ "shardcache-runtime",
+ "shardmap",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "shardcache-redis"
+version = "0.1.0"
+dependencies = [
+ "shardmap",
+]
+
+[[package]]
+name = "shardcache-runtime"
+version = "0.1.0"
+dependencies = [
+ "cust",
+ "serde",
+ "shardmap",
+ "thiserror",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "shardmap"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "bytes-handoff",
+ "clap",
+ "core_affinity",
+ "crc32fast",
+ "creusot-std",
+ "crossbeam-channel",
+ "crossbeam-utils",
+ "fast-telemetry",
+ "flume",
+ "hashbrown 0.14.5",
+ "indextreemap",
+ "itoa",
+ "libc",
+ "log",
+ "lz4_flex",
+ "memchr",
+ "monoio",
+ "parking_lot",
+ "rblock",
+ "serde",
+ "serde_json",
+ "smallvec",
+ "socket2 0.5.10",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "xxhash-rust",
+ "zstd",
 ]
 
 [[package]]

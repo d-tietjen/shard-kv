@@ -1,7 +1,7 @@
-# fast-cache benchmarks
+# shard-kv benchmarks
 
-Head-to-head benchmarks for fast-cache against embedded Rust caches and
-networked databases. Not part of the published crate.
+Head-to-head benchmarks for the `shard-kv` embedded and server surfaces against
+embedded Rust caches and networked databases. Not part of the published crates.
 
 ## What is measured
 
@@ -11,7 +11,7 @@ Two modes, parallel and independent:
 | --- | --- | --- |
 | `saturation` | Closed-loop, push as hard as possible | Peak ops/sec, logical payload GB/s, CPU and p99 at peak |
 | `curve` | Open-loop, target rate sweep | How CPU and p99 scale with load up to saturation |
-| `redis_command_matrix` | RESP command script, per command | Head-to-head command throughput for fast-cache vs Redis/Valkey |
+| `redis_command_matrix` | RESP command script, per command | Head-to-head command throughput for shardcache vs Redis/Valkey |
 
 Both drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `fc-lmcache`
@@ -24,12 +24,12 @@ artifact or still needs a fresh run.
 
 | Comparison | Curated artifact | Coverage | Status |
 | --- | --- | --- | --- |
-| fast-cache vs Redis / Valkey / Dragonfly TCP | [`FAST_CACHE_VS_REDIS_TCP.md`](FAST_CACHE_VS_REDIS_TCP.md) | Saturation matrix across value sizes, mixes, clients, and pipeline depths | Publishable for TCP throughput claims. |
-| fast-cache vs Redis command-by-command | [`REDIS_HEAD_TO_HEAD_BENCHMARKS.md`](REDIS_HEAD_TO_HEAD_BENCHMARKS.md) | Redis 5.0 compatibility surface and saved per-command rows | Compatibility coverage is complete; some saved head-to-head cells are marked `n/a` where that exact shape has not been rerun. |
-| fast-cache embedded vs Moka | [`FAST_CACHE_VS_MOKA_EMBEDDED.md`](FAST_CACHE_VS_MOKA_EMBEDDED.md) | Embedded owner-local fast-cache against `moka::sync::Cache` | Publishable for this embedded comparison. |
-| Embedded release matrix | [`FAST_CACHE_EMBEDDED_RELEASE.md`](FAST_CACHE_EMBEDDED_RELEASE.md) | Direct, shared, TTL, LRU, and selected Rust-cache baselines | Publishable as a release proof, not a single competitor-only report. |
-| LMCache plugin vs Redis TCP | [`LMCACHE_VS_REDIS.md`](LMCACHE_VS_REDIS.md) | fast-cache LMCache embedded and FCNP/TCP against Redis TCP | Publishable for the recorded Linux run; rerun before making new M5 or 5MiB LMCache claims. |
-| Local hardware memory ceiling | [`FAST_CACHE_MEMORY_WRITE_COST.md`](FAST_CACHE_MEMORY_WRITE_COST.md) | Pure read, pure write, and copy/materialization probes | Use as the denominator for hardware-scaled bandwidth claims. |
+| shardcache vs Redis / Valkey / Dragonfly TCP | [`SHARDCACHE_VS_REDIS_TCP.md`](SHARDCACHE_VS_REDIS_TCP.md) | Saturation matrix across value sizes, mixes, clients, and pipeline depths | Publishable for TCP throughput claims. |
+| shardcache vs Redis command-by-command | [`REDIS_HEAD_TO_HEAD_BENCHMARKS.md`](REDIS_HEAD_TO_HEAD_BENCHMARKS.md) | Redis 5.0 compatibility surface and saved per-command rows | Compatibility coverage is complete; some saved head-to-head cells are marked `n/a` where that exact shape has not been rerun. |
+| shardmap embedded vs Moka | [`SHARDMAP_VS_MOKA_EMBEDDED.md`](SHARDMAP_VS_MOKA_EMBEDDED.md) | Embedded owner-local shardmap against `moka::sync::Cache` | Publishable for this embedded comparison. |
+| Embedded release matrix | [`SHARDMAP_EMBEDDED_RELEASE.md`](SHARDMAP_EMBEDDED_RELEASE.md) | Direct, shared, TTL, LRU, and selected Rust-cache baselines | Publishable as a release proof, not a single competitor-only report. |
+| LMCache plugin vs Redis TCP | [`LMCACHE_VS_REDIS.md`](LMCACHE_VS_REDIS.md) | shardcache LMCache embedded and SCNP/TCP against Redis TCP | Publishable for the recorded Linux run; rerun before making new M5 or 5MiB LMCache claims. |
+| Local hardware memory ceiling | [`SHARDMAP_MEMORY_WRITE_COST.md`](SHARDMAP_MEMORY_WRITE_COST.md) | Pure read, pure write, and copy/materialization probes | Use as the denominator for hardware-scaled bandwidth claims. |
 
 Known gaps before saying "all caching solutions":
 
@@ -49,14 +49,14 @@ Known gaps before saying "all caching solutions":
 `redis_command_matrix` runs a deterministic RESP command script and reports
 per-command throughput and average request latency. It is intentionally not a
 Criterion benchmark: it talks to real TCP servers so the same command cases can
-run head-to-head against fast-cache, Redis, and Valkey.
+run head-to-head against shardcache, Redis, and Valkey.
 
 ```bash
 ./benchmarks/scripts/run-redis-command-matrix.sh
 ```
 
 The default script starts Redis and Valkey from
-`benchmarks/docker/compose.yml`, starts `fast-cache-server` with the
+`benchmarks/docker/compose.yml`, starts `shardcache` with the
 `redis-server` feature, and writes
 `benchmarks/results/redis-command-matrix.csv`. Use `CASES=hash,zset` or
 `CASES=HSET,ZRANGE` for focused runs. `CASES=extended` runs the full repeatable
@@ -69,19 +69,19 @@ can dominate the mixed loop and hide point-command scaling. Set
 `CLIENTS` does not also multiply the seeded keyspace size. `SKIP_CASES` accepts
 the same command, family, case, and profile filters as `CASES`. `CLIENTS`,
 `WARMUP`, and `DURATION` scale the run. Set `KEY_SHARDS` to split per-client
-fixtures across logical key lanes, normally matching fast-cache's `SHARD_COUNT`
+fixtures across logical key lanes, normally matching shardcache's `SHARD_COUNT`
 for parallel shard fanout runs. Set `PIPELINE_DEPTH` to keep multiple adjacent
 case operations in flight on each socket while preserving the global case order;
 this is useful for separating strict request/response latency from socket-fed
 throughput. Set `FAIL_ON_ERROR=1` when the matrix should fail on any RESP error
 reply instead of recording the error count in the output.
-For fast-cache direct shard ports, use `host:base_port+shards` in `TARGETS`
+For shardcache direct shard ports, use `host:base_port+shards` in `TARGETS`
 and set `KEY_SHARDS` to the same shard count. When the script starts
-fast-cache, also set `SERVER_DIRECT_SHARD_PORTS=1` and optionally
-`FAST_CACHE_DIRECT_SHARD_BASE_PORT`; for example
-`SERVER_DIRECT_SHARD_PORTS=1 FAST_CACHE_DIRECT_SHARD_BASE_PORT=6384
-TARGETS=fast-cache-sharded=fcnp:127.0.0.1:6384+4 KEY_SHARDS=4` routes each
-worker to the shard-owned FCNP port for its generated key lane.
+shardcache, also set `SERVER_DIRECT_SHARD_PORTS=1` and optionally
+`SHARDCACHE_DIRECT_SHARD_BASE_PORT`; for example
+`SERVER_DIRECT_SHARD_PORTS=1 SHARDCACHE_DIRECT_SHARD_BASE_PORT=6384
+TARGETS=shardcache-sharded=scnp:127.0.0.1:6384+4 KEY_SHARDS=4` routes each
+worker to the shard-owned SCNP port for its generated key lane.
 
 Destructive keyspace-wide commands such as `FLUSHDB` and `FLUSHALL` are in an
 explicit profile so they are present in the perf matrix without corrupting the
@@ -116,9 +116,9 @@ compatibility manifest captured at the same git SHA. Use
 
 The latest no-keyspace Redis-command matrix was run on `adam` on 2026-05-24
 with 16 clients, 16 key shards, `SHARD_COUNT=16`, shared keyspace fixtures,
-and direct shard ports enabled at `127.0.0.1:6384+16`. The fast-cache rows use
+and direct shard ports enabled at `127.0.0.1:6384+16`. The shardcache rows use
 the pass-2 optimized artifacts below; Redis/Valkey/Dragonfly rows are saved
-reference rows from the same Adam setup so fast-cache can be rerun without
+reference rows from the same Adam setup so shardcache can be rerun without
 rerunning external services. Transaction cases are skipped for direct shard
 ports because transactions are connection-scoped and intentionally unsupported
 on shard-owned listeners.
@@ -127,9 +127,9 @@ Depth 1, strict request/response:
 
 | Target | Cases | Sum ops/sec | Mean avg us | Errors |
 | --- | ---: | ---: | ---: | ---: |
-| fast-cache FCNP direct | 209 | 460,886 | 34.6 | 0 |
-| fast-cache FCNP shared | 209 | 460,459 | 34.6 | 0 |
-| fast-cache RESP | 209 | 381,477 | 41.8 | 0 |
+| shardcache SCNP direct | 209 | 460,886 | 34.6 | 0 |
+| shardcache SCNP shared | 209 | 460,459 | 34.6 | 0 |
+| shardcache RESP | 209 | 381,477 | 41.8 | 0 |
 | Redis | 209 | 29,251 | 546.5 | 2,818 |
 | Valkey | 209 | 31,198 | 512.3 | 3,004 |
 | Dragonfly | 209 | 6,506 | 2,459.9 | 3,133 |
@@ -138,20 +138,20 @@ Depth 16, ordered pipelining:
 
 | Target | Cases | Sum ops/sec | Mean avg us | Errors |
 | --- | ---: | ---: | ---: | ---: |
-| fast-cache FCNP direct | 209 | 1,324,917 | 88.7 | 0 |
-| fast-cache FCNP shared | 209 | 1,328,698 | 88.4 | 0 |
-| fast-cache RESP | 209 | 841,790 | 116.9 | 0 |
+| shardcache SCNP direct | 209 | 1,324,917 | 88.7 | 0 |
+| shardcache SCNP shared | 209 | 1,328,698 | 88.4 | 0 |
+| shardcache RESP | 209 | 841,790 | 116.9 | 0 |
 | Redis | 209 | 37,483 | 5,216.9 | 3,604 |
 | Valkey | 209 | 46,885 | 4,184.5 | 4,492 |
 | Dragonfly | 209 | 17,500 | 12,175.6 | 8,396 |
 
 Zero-error common-case summaries are often more useful for implementation
 comparisons. Excluding commands that produced reference-service errors, the
-depth-1 Redis/Valkey common subset has 207 cases: FCNP direct `456,474`
-ops/sec at `34.6 us`, FCNP shared `456,051` at `34.6 us`, RESP `377,825` at
+depth-1 Redis/Valkey common subset has 207 cases: SCNP direct `456,474`
+ops/sec at `34.6 us`, SCNP shared `456,051` at `34.6 us`, RESP `377,825` at
 `41.9 us`, Redis `28,969` at `541.9 us`, and Valkey `30,898` at `507.7 us`.
-The ordered depth-16 common subset has 207 cases: FCNP direct `1,312,237`
-ops/sec at `88.5 us`, FCNP shared `1,315,982` at `88.2 us`, RESP `833,734`
+The ordered depth-16 common subset has 207 cases: SCNP direct `1,312,237`
+ops/sec at `88.5 us`, SCNP shared `1,315,982` at `88.2 us`, RESP `833,734`
 at `117.1 us`, Redis `37,123` at `5,150.4 us`, and Valkey `46,436` at
 `4,125.1 us`.
 
@@ -160,22 +160,22 @@ and `SCRIPT` support:
 
 | Mode | Target | Cases | Ops/sec | Mean avg us | Errors |
 | --- | --- | ---: | ---: | ---: | ---: |
-| C1/P1 | fast-cache RESP | 3 | 14,727 | 22.5 | 0 |
+| C1/P1 | shardcache RESP | 3 | 14,727 | 22.5 | 0 |
 | C1/P1 | Redis | 3 | 6,312 | 52.7 | 0 |
 | C1/P1 | Valkey | 3 | 6,058 | 54.9 | 0 |
 | C1/P1 | Dragonfly | 3 | 5,725 | 58.1 | 0 |
-| C16/P16 | fast-cache RESP | 3 | 184,328 | 76.7 | 0 |
+| C16/P16 | shardcache RESP | 3 | 184,328 | 76.7 | 0 |
 | C16/P16 | Redis | 3 | 42,200 | 363.1 | 0 |
 | C16/P16 | Valkey | 3 | 41,645 | 368.0 | 0 |
 | C16/P16 | Dragonfly | 3 | 85,832 | 169.0 | 0 |
 
-For fast-cache optimization loops, save the Redis/Valkey/Dragonfly side once
-and reuse those CSVs while only rerunning fast-cache. First capture the external
+For shardcache optimization loops, save the Redis/Valkey/Dragonfly side once
+and reuse those CSVs while only rerunning shardcache. First capture the external
 reference services:
 
 ```bash
 OUT_DIR=benchmarks/results/redis-command-reference-$(date -u +%Y%m%dT%H%M%SZ) \
-START_FAST_CACHE=0 \
+START_SHARDCACHE=0 \
 TARGETS=redis=127.0.0.1:6379,valkey=127.0.0.1:6381,dragonfly=127.0.0.1:6382 \
 DOCKER_SERVICES="redis valkey dragonfly" \
 CASES=extended-no-keyspace \
@@ -187,11 +187,11 @@ BASELINE=redis \
 ./benchmarks/scripts/run-redis-command-benchmark-bundle.sh
 ```
 
-Then rerun fast-cache only and merge the saved reference CSV into the report:
+Then rerun shardcache only and merge the saved reference CSV into the report:
 
 ```bash
-OUT_DIR=benchmarks/results/redis-command-fast-cache-$(date -u +%Y%m%dT%H%M%SZ) \
-TARGETS=fast-cache=127.0.0.1:6383 \
+OUT_DIR=benchmarks/results/redis-command-shardcache-$(date -u +%Y%m%dT%H%M%SZ) \
+TARGETS=shardcache=127.0.0.1:6383 \
 DOCKER=0 \
 REFERENCE_CSVS=benchmarks/results/redis-command-reference-YYYYMMDDTHHMMSSZ/redis-command-matrix.csv \
 CASES=extended-no-keyspace \
@@ -204,19 +204,19 @@ BASELINE=redis \
 ```
 
 Reference CSVs should use the same `CASES`, `CLIENTS`, `FIXTURE_SCOPE`,
-`WARMUP`, `DURATION`, host, and CPU pinning knobs as the fast-cache run. The
+`WARMUP`, `DURATION`, host, and CPU pinning knobs as the shardcache run. The
 report still shows the full target rollup, and its common-case comparison table
 only compares command cases present in both the current run and the saved
 references. `REFERENCE_CSVS` accepts a comma-separated list when Redis/Valkey
 and Dragonfly are stored in separate files. Set `BASELINE=redis` for the usual
-fast-cache-over-Redis speedup table, or `BASELINE=fast-cache` when you want the
-external services normalized against the current fast-cache run.
+shardcache-over-Redis speedup table, or `BASELINE=shardcache` when you want the
+external services normalized against the current shardcache run.
 
 The tracked Redis compatibility manifest is generated from the same command
 registry:
 
 ```bash
-cargo run -p fast-cache-benchmarks --bin redis_command_manifest -- \
+cargo run -p shardcache-benchmarks --bin redis_command_manifest -- \
   --output docs/REDIS_COMPATIBILITY.md
 ```
 
@@ -240,7 +240,7 @@ ordinary release builds for portable artifacts and cross-host comparisons.
 replication and compares immediate one-record sends with batched sends:
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --bin replication_cost -- \
+cargo run --release -p shardcache-benchmarks --bin replication_cost -- \
   --value-sizes 64,512,4096,16384 \
   --mixes set,80-20 \
   --value-pattern semi-random \
@@ -262,7 +262,7 @@ the compression tradeoff.
 
 The current pinned Linux matrix comparing primary throughput with and
 without native replication is published in
-[fast-cache Native Replication Cost](FAST_CACHE_REPLICATION_COST.md).
+[shardcache Native Replication Cost](SHARDCACHE_REPLICATION_COST.md).
 
 ## Embedded Release Matrix
 
@@ -291,10 +291,10 @@ three repeats, `10s` duration, no latency sampling for throughput rows, and
 
 `replication_tcp_cost` exercises the native FCRP TCP transport specifically.
 Build with `--features monoio`, run once normally, then run again with
-`FAST_CACHE_REPLICATION_USE_MONOIO=1`:
+`SHARDCACHE_REPLICATION_USE_MONOIO=1`:
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --features monoio \
+cargo run --release -p shardcache-benchmarks --features monoio \
   --bin replication_tcp_cost -- \
   --value-sizes 64,4096 --mixes set,80-20 \
   --modes immediate-none,batch-none \
@@ -303,10 +303,10 @@ cargo run --release -p fast-cache-benchmarks --features monoio \
 
 `wal_tcp_export_cost` measures the production persistence runtime with disk WAL
 append plus live TCP export. Build with `--features monoio`, run once normally,
-then run again with `FAST_CACHE_WAL_TCP_USE_MONOIO=1`:
+then run again with `SHARDCACHE_WAL_TCP_USE_MONOIO=1`:
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --features monoio \
+cargo run --release -p shardcache-benchmarks --features monoio \
   --bin wal_tcp_export_cost -- \
   --value-sizes 64,4096 \
   --clients 16 --shards 16 --duration 10
@@ -316,7 +316,7 @@ cargo run --release -p fast-cache-benchmarks --features monoio \
 
 `memory_write_cost` isolates local memory movement from cache lookup, eviction,
 protocol, and routing work. Use it to establish the machine ceiling before
-interpreting large-value fast-cache GB/s. The product claim should be framed as
+interpreting large-value shardcache GB/s. The product claim should be framed as
 percentage of hardware ceiling reached, not one universal GB/s number.
 
 ```bash
@@ -332,20 +332,20 @@ modes for materialized reads. Sweep `THREADS` sequentially to find the host
 maximum; do not run competing ceiling jobs at the same time. On macOS, set
 `MACOS_QOS=1` to request high-priority benchmark worker threads. The current
 note is published in
-[fast-cache Memory Bandwidth Ceiling](FAST_CACHE_MEMORY_WRITE_COST.md). Use the
+[shardmap Memory Bandwidth Ceiling](SHARDMAP_MEMORY_WRITE_COST.md). Use the
 CSV artifact from this bench before changing the storage value movement path.
 
 ## Backends
 
 | id | What it is |
 | --- | --- |
-| `fc-embed` | `fast_cache::storage::LocalEmbeddedStore` in-process Rust, one local store per worker |
+| `fc-embed` | `shardmap::storage::LocalEmbeddedStore` in-process Rust, one local store per worker |
 | `fc-embed-unsafe` | Same, with `--features unsafe` on the bench crate |
-| `fc-server-resp` | `fast-cache-server` over RESP/TCP |
-| `fc-server-fcnp` | `fast-cache-server` over native binary (FCNP v2) |
-| `fc-server-fcnp-direct` | `fast-cache-server` over FCNP with client-side routing to shard-owned ports |
-| `fc-py` | `fast_cache.Store` from Python (separate harness) |
-| `fc-lmcache` | LMCache with fast_cache storage plugin (separate harness) |
+| `fc-server-resp` | `shardcache` over RESP/TCP |
+| `fc-server-scnp` | `shardcache` over native binary (SCNP v2) |
+| `fc-server-scnp-direct` | `shardcache` over SCNP with client-side routing to shard-owned ports |
+| `fc-py` | `shardcache.Store` from Python (separate harness) |
+| `fc-lmcache` | LMCache with shardcache storage plugin (separate harness) |
 | `dashmap` | `dashmap::DashMap` |
 | `moka` | `moka::sync::Cache` |
 | `lru` | `parking_lot::Mutex<lru::LruCache>` |
@@ -372,18 +372,18 @@ For the curated 1-vCPU and 16-vCPU Redis head-to-head summary, see
 [Redis Head-to-Head Benchmarks](REDIS_HEAD_TO_HEAD_BENCHMARKS.md). For the
 fuller TCP report, including the standalone pipeline sweep and the 2026-05-18
 Redis/Valkey/Dragonfly matrix, see
-[fast-cache vs Redis, Valkey, and Dragonfly over TCP](FAST_CACHE_VS_REDIS_TCP.md).
+[shardcache vs Redis, Valkey, and Dragonfly over TCP](SHARDCACHE_VS_REDIS_TCP.md).
 
 For an embedded Rust cache comparison, see
-[fast-cache vs Moka Embedded](FAST_CACHE_VS_MOKA_EMBEDDED.md).
+[shardmap vs Moka Embedded](SHARDMAP_VS_MOKA_EMBEDDED.md).
 
 ### Same-Core Head-To-Head
 
-This view pins fast-cache to one CPU with `taskset -c 0` and starts it with
+This view pins shardcache to one CPU with `taskset -c 0` and starts it with
 `--shard-count 1`. Redis is single-threaded and reports about one measured
 server vCPU in the same harness.
 
-| Value | Mix | FCNP direct | RESP | Redis |
+| Value | Mix | SCNP direct | RESP | Redis |
 | ---: | --- | ---: | ---: | ---: |
 | 64B | GET | 105,970 @ 1.000 | 98,817 @ 0.999 | 93,631 @ 0.999 |
 | 64B | SET | 107,447 @ 0.999 | 97,776 @ 0.999 | 90,881 @ 0.999 |
@@ -400,11 +400,11 @@ server vCPU in the same harness.
 
 ### 16-vCPU Saturation
 
-This view pins fast-cache to CPUs `0-15` with `taskset -c 0-15` and starts it
+This view pins shardcache to CPUs `0-15` with `taskset -c 0-15` and starts it
 with `--shard-count 16`. Redis remains the single-threaded baseline, so its
 measured server vCPU remains near one.
 
-| Value | Mix | FCNP direct | RESP | Redis |
+| Value | Mix | SCNP direct | RESP | Redis |
 | ---: | --- | ---: | ---: | ---: |
 | 64B | GET | 895,979 @ 12.852 | 883,799 @ 13.015 | 91,193 @ 0.999 |
 | 64B | SET | 892,359 @ 12.678 | 868,260 @ 12.980 | 90,049 @ 0.999 |
@@ -421,7 +421,7 @@ measured server vCPU remains near one.
 
 Use these numbers as a sanity-check baseline, not as a universal claim. The
 same-core view shows per-core efficiency. The 16-vCPU view shows the intended
-scaled-out server shape. In the 16-vCPU runs, fast-cache does not consume the
+scaled-out server shape. In the 16-vCPU runs, shardcache does not consume the
 full CPU cap, so the observed ceiling is not purely server CPU-bound. When
 investigating regressions, profile I/O polling, request framing, socket
 scheduling, and benchmark client pressure before assuming the shard engine is
@@ -432,14 +432,14 @@ the limiting factor.
 The `saturation` driver also supports a network-only pipelining axis:
 `--pipeline-depth <N>`. Depth `1` is the default strict request/response loop.
 Depths above `1` queue that many requests on each connection, flush once, and
-then read the ordered responses. RESP backends and FCNP backends implement this
+then read the ordered responses. RESP backends and SCNP backends implement this
 path. Embedded backends and TTL workloads are skipped for pipelined runs.
 
 Example:
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --bin saturation -- \
-  --backends fc-server-fcnp-direct \
+cargo run --release -p shardcache-benchmarks --bin saturation -- \
+  --backends fc-server-scnp-direct \
   --addr 127.0.0.1:6501 \
   --value-size 512 --mix 80-20 \
   --vcpu-budget 16 --clients 64 --pipeline-depth 16 \
@@ -448,7 +448,7 @@ cargo run --release -p fast-cache-benchmarks --bin saturation -- \
 
 Repeat the same shape with each backend's address, for example RESP on
 `127.0.0.1:6383` and Redis on `127.0.0.1:6379`. When comparing Redis and
-fast-cache, run at least depths `1`, `4`, `16`, and `64` for the ordinary
+shardcache, run at least depths `1`, `4`, `16`, and `64` for the ordinary
 pipeline curve. For ceiling claims, also test deeper queues such as `128`,
 `500`, and `2000`. Pipelining changes the meaning of latency samples because
 a request can wait behind earlier requests in the same connection queue; use
@@ -465,9 +465,9 @@ Start and pin the server separately first. The focused script keeps value size,
 mix, server core count, and pipeline depth fixed, then varies `--clients`:
 
 ```bash
-BACKENDS=fc-server-fcnp-direct \
+BACKENDS=fc-server-scnp-direct \
 ADDR=127.0.0.1:6501 \
-SERVER_PID="$(pgrep -f fast-cache-server | head -1)" \
+SERVER_PID="$(pgrep -f shardcache | head -1)" \
 VCPU_BUDGET=1 \
 CLIENT_COUNTS="1 4 16 64 256" \
 PIPELINE_DEPTHS="1 64 128 256" \
@@ -485,9 +485,9 @@ single-core point is usually a combination of client count and pipeline depth.
 `DashMap` is a shared, reference-counted cache: every benchmark worker
 can hold a clone of the same shared map handle and issue requests for
 any key. That is the right model for `DashMap`, but it is not the
-fast-cache embedded fast path.
+shardmap embedded fast path.
 
-fast-cache assumes thread-local sharding. A worker owns its assigned
+shardcache assumes thread-local sharding. A worker owns its assigned
 cache slabs through `LocalEmbeddedStore`; requests must be routed to
 the worker that owns the key's shard. The benchmark therefore warms an
 `EmbeddedStore`, splits it into local stores, gives each worker one
@@ -522,13 +522,13 @@ cd benchmarks
 ./scripts/run-headline.sh
 ```
 
-Include the networked competitors via Docker (also turns on FCNP):
+Include the networked competitors via Docker (also turns on SCNP):
 
 ```bash
-DOCKER=1 FCNP=1 ./scripts/run-headline.sh
+DOCKER=1 SCNP=1 ./scripts/run-headline.sh
 ```
 
-Pin fast-cache-server cores on Linux:
+Pin shardcache cores on Linux:
 
 ```bash
 SERVER_CPUSET=0-3 DOCKER=1 ./scripts/run-headline.sh
@@ -536,10 +536,10 @@ SERVER_CPUSET=0-3 DOCKER=1 ./scripts/run-headline.sh
 
 ## How to run each backend
 
-### fc-embed (default fast-cache library, safe build)
+### fc-embed (default shardcache library, safe build)
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --bin saturation -- \
+cargo run --release -p shardcache-benchmarks --bin saturation -- \
   --backends fc-embed \
   --value-size 512 --mix 80-20 \
   --vcpu-budget 4 --clients 16 --key-count 100000 \
@@ -555,7 +555,7 @@ benchmark scratch buffer when comparing copy bandwidth against backends that
 always copy values out.
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --bin saturation -- \
+cargo run --release -p shardcache-benchmarks --bin saturation -- \
   --backends fc-embed \
   --value-size 1048576 --mix get \
   --vcpu-budget 4 --clients 16 --key-count 1024 \
@@ -565,7 +565,7 @@ cargo run --release -p fast-cache-benchmarks --bin saturation -- \
 Other reference-read baselines are exposed as explicit backend ids, such as
 `fc-shared-ref`, `fc-shared-prepared-ref`, and `dashmap-ref`.
 
-Shared-handle fast-cache backends default to `4 * --vcpu-budget` lock stripes.
+Shared-handle shardcache backends default to `4 * --vcpu-budget` lock stripes.
 That is the recommended comparison shape for DashMap-style shared access. Use
 the `fc-shared-worker-stripes` family when you specifically need the older
 one-stripe-per-worker baseline.
@@ -583,7 +583,7 @@ Build the bench crate with `--features unsafe`. The same `fc-embed`
 backend id now reports as `fc-embed-unsafe`.
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --features unsafe \
+cargo run --release -p shardcache-benchmarks --features unsafe \
   --bin saturation -- \
   --backends fc-embed \
   --value-size 512 --mix 80-20 \
@@ -594,25 +594,25 @@ cargo run --release -p fast-cache-benchmarks --features unsafe \
 To collect both rows in one CSV, run the bench twice (default and
 `--features unsafe`) writing to the same `--csv` file.
 
-### fc-server-resp (fast-cache-server, RESP wire)
+### fc-server-resp (shardcache, RESP wire)
 
 Start the server (optionally pinned):
 
 ```bash
-cargo run --release -p fast-cache --features server --bin fast-cache-server -- \
+cargo run --release -p shardcache --features server --bin shardcache -- \
   --server-mode direct --disable-persistence \
   --bind-addr 127.0.0.1:6383 --shard-count 4 &
-# or pinned: taskset -c 0-3 ./target/release/fast-cache-server --server-mode direct --disable-persistence ...
+# or pinned: taskset -c 0-3 ./target/release/shardcache --server-mode direct --disable-persistence ...
 ```
 
 The default server build is tokio/non-monoio and works on every supported
 platform. On Linux, add `--features server,monoio` and run with
-`FAST_CACHE_USE_MONOIO=1` to switch the TCP workers to monoio. Monoio always
+`SHARDCACHE_USE_MONOIO=1` to switch the TCP workers to monoio. Monoio always
 uses `bytes-handoff` for connection read buffering through the monoio read
 adapter. With `SERVER_DIRECT_SHARD_PORTS=1`, monoio also uses shard-owned
 listener ports so each worker owns direct accept, parsing, command execution,
 and storage on its pinned thread; the fanout port remains available for
-non-routed clients. Direct shard ports start at `FCNP_DIRECT_BASE_PORT` or the
+non-routed clients. Direct shard ports start at `SCNP_DIRECT_BASE_PORT` or the
 fanout port + 1. The helper
 `scripts/run-tcp-client-sweep-local.sh` follows the same split:
 `SERVER_RUNTIME=tokio` is the default, while `SERVER_RUNTIME=monoio` builds the
@@ -622,11 +622,11 @@ shard ports in safe mode. Add `SERVER_UNSAFE=1` to the same run to enable the
 owned-shard lock-bypass hot path where supported.
 
 Monoio runtime experiments can be passed through the same helper. Use
-`FAST_CACHE_MONOIO_DRIVER=auto|legacy|io_uring` to compare monoio drivers,
-`FAST_CACHE_MONOIO_SAFE_WRITER=inline|split|writev` to compare safe writer
-paths, and `FAST_CACHE_TCP_BUFFER_BYTES=<bytes>` for socket buffer sweeps. The
+`SHARDCACHE_MONOIO_DRIVER=auto|legacy|io_uring` to compare monoio drivers,
+`SHARDCACHE_MONOIO_SAFE_WRITER=inline|split|writev` to compare safe writer
+paths, and `SHARDCACHE_TCP_BUFFER_BYTES=<bytes>` for socket buffer sweeps. The
 `writev` safe writer keeps command execution unchanged, but lets GET responses
-reuse the queued response path so larger FCNP/RESP values can be written as
+reuse the queued response path so larger SCNP/RESP values can be written as
 header plus stored `Bytes` payload instead of always materializing a contiguous
 response buffer.
 
@@ -636,19 +636,19 @@ legacy driver avoids enough per-request `io_uring_enter` cost to improve the
 16-worker RESP hot mix, while io_uring remains faster for the one-worker shape.
 
 The non-command streaming paths are opt-in separately on Linux. Use
-`FAST_CACHE_WAL_TCP_USE_MONOIO=1` to run the TCP WAL exporter on monoio, and
-`FAST_CACHE_REPLICATION_USE_MONOIO=1` to run the native FCRP replication
+`SHARDCACHE_WAL_TCP_USE_MONOIO=1` to run the TCP WAL exporter on monoio, and
+`SHARDCACHE_REPLICATION_USE_MONOIO=1` to run the native FCRP replication
 transport on monoio. These switches are intentionally independent of
-`FAST_CACHE_USE_MONOIO=1` so direct server runtime benchmarks, WAL export
+`SHARDCACHE_USE_MONOIO=1` so direct server runtime benchmarks, WAL export
 benchmarks, and replication-cost benchmarks can be isolated.
 
 Then run the bench:
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --bin saturation -- \
+cargo run --release -p shardcache-benchmarks --bin saturation -- \
   --backends fc-server-resp \
   --addr 127.0.0.1:6383 \
-  --server-pid "$(pgrep -f fast-cache-server | head -1)" \
+  --server-pid "$(pgrep -f shardcache | head -1)" \
   --value-size 512 --mix 80-20 \
   --vcpu-budget 4 --clients 16 --key-count 100000 \
   --duration 10
@@ -658,16 +658,16 @@ cargo run --release -p fast-cache-benchmarks --bin saturation -- \
 `/proc/<pid>/stat` (Linux). On macOS this falls back to in-process
 `getrusage`, which only captures the bench process.
 
-### fc-server-fcnp (fast-cache-server, native binary wire)
+### fc-server-scnp (shardcache, native binary wire)
 
-Same listener as `fc-server-resp`; the server auto-detects FCNP from
+Same listener as `fc-server-resp`; the server auto-detects SCNP from
 the first request byte. Just point the bench at the same address:
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --bin saturation -- \
-  --backends fc-server-fcnp \
+cargo run --release -p shardcache-benchmarks --bin saturation -- \
+  --backends fc-server-scnp \
   --addr 127.0.0.1:6383 \
-  --server-pid "$(pgrep -f fast-cache-server | head -1)" \
+  --server-pid "$(pgrep -f shardcache | head -1)" \
   --value-size 512 --mix 80-20 \
   --vcpu-budget 4 --clients 16 --key-count 100000 \
   --duration 10
@@ -678,7 +678,7 @@ cargo run --release -p fast-cache-benchmarks --bin saturation -- \
 ```bash
 docker compose -f docker/compose.yml up -d redis
 
-cargo run --release -p fast-cache-benchmarks --bin saturation -- \
+cargo run --release -p shardcache-benchmarks --bin saturation -- \
   --backends redis \
   --addr 127.0.0.1:6379 \
   --server-pid "$(docker inspect --format '{{.State.Pid}}' bench-redis)" \
@@ -694,7 +694,7 @@ Redis is single-threaded; `--vcpu-budget` is informational for this row.
 ```bash
 docker compose -f docker/compose.yml up -d valkey
 
-cargo run --release -p fast-cache-benchmarks --bin saturation -- \
+cargo run --release -p shardcache-benchmarks --bin saturation -- \
   --backends valkey \
   --addr 127.0.0.1:6381 \
   --server-pid "$(docker inspect --format '{{.State.Pid}}' bench-valkey)" \
@@ -708,7 +708,7 @@ cargo run --release -p fast-cache-benchmarks --bin saturation -- \
 ```bash
 docker compose -f docker/compose.yml up -d dragonfly
 
-cargo run --release -p fast-cache-benchmarks --bin saturation -- \
+cargo run --release -p shardcache-benchmarks --bin saturation -- \
   --backends dragonfly \
   --addr 127.0.0.1:6382 \
   --server-pid "$(docker inspect --format '{{.State.Pid}}' bench-dragonfly)" \
@@ -720,20 +720,20 @@ cargo run --release -p fast-cache-benchmarks --bin saturation -- \
 ### Embedded competitors (dashmap, moka, lru, rwlock-hashmap)
 
 ```bash
-cargo run --release -p fast-cache-benchmarks --bin saturation -- \
+cargo run --release -p shardcache-benchmarks --bin saturation -- \
   --backends dashmap,moka,lru,rwlock-hashmap \
   --value-size 512 --mix 80-20 \
   --vcpu-budget 4 --clients 16 --key-count 100000 \
   --duration 10
 ```
 
-### fc-py (Python harness, `fast_cache.Store`)
+### fc-py (Python harness, `shardcache.Store`)
 
 Build the PyO3 wheel into the active environment, then run the
 Python harness:
 
 ```bash
-maturin develop --release -m crates/fast-cache-py/Cargo.toml --features extension-module
+maturin develop --release -m crates/shardcache-py/Cargo.toml --features extension-module
 
 python benchmarks/python/fc_py_bench.py \
   --value-size 512 --mix 80-20 \
@@ -744,12 +744,12 @@ python benchmarks/python/fc_py_bench.py \
 
 `./scripts/run-python.sh` builds the wheel if needed and runs the harness.
 
-### fc-lmcache (LMCache plugin via `FastCacheStorageBackend`)
+### fc-lmcache (LMCache plugin via `ShardCacheStorageBackend`)
 
 ```bash
 pip install lmcache
 pip install ./integrations/lmcache_storage_backend
-maturin develop --release -m crates/fast-cache-py/Cargo.toml --features extension-module
+maturin develop --release -m crates/shardcache-py/Cargo.toml --features extension-module
 
 python benchmarks/python/fc_lmcache_bench.py \
   --value-size 4096 --mix 80-20 \
@@ -779,22 +779,22 @@ Use `--latency-sample-rate 0` for logical payload GB/s saturation runs where lat
 percentiles are secondary to raw bytes moved per second.
 
 Use `--op-batch-size N` to issue same-operation batches from each benchmark
-worker. This is the knob that exercises pipelined FCNP/TCP batches for LMCache
+worker. This is the knob that exercises pipelined SCNP/TCP batches for LMCache
 bandwidth ceiling tests.
 
-For FCNP/TCP payloads above the default 4 MiB request handoff cap, start the
+For SCNP/TCP payloads above the default 4 MiB request handoff cap, start the
 server with a larger cap, for example
-`FAST_CACHE_HANDOFF_BUFFER_BYTES=16777216` or
-`FCNP_HANDOFF_BUFFER_BYTES=16777216`.
+`SHARDCACHE_HANDOFF_BUFFER_BYTES=16777216` or
+`SCNP_HANDOFF_BUFFER_BYTES=16777216`.
 
 The benchmark defaults to `--client-architecture shared` because it uses
 arbitrary multi-client keys. `local_embedded` is for shard-owned caller
 routing, such as the vLLM direct connector path. Use
 `--connection embedded` for the in-process LMCache path, or
-`--connection tcp --fcnp-addr 127.0.0.1:6500` to drive the LMCache plugin
-through a fast-cache FCNP/TCP server. `--client-architecture` remains available
+`--connection tcp --scnp-addr 127.0.0.1:6500` to drive the LMCache plugin
+through a shardcache SCNP/TCP server. `--client-architecture` remains available
 for low-level benchmark shapes such as `shared`, `local_embedded`,
-`fcnp_tcp`, and `fcnp_tcp_python`.
+`scnp_tcp`, and `scnp_tcp_python`.
 
 LMCache's wire-level types (`CacheEngineKey`, `BytesBufferMemoryObj`)
 vary between releases; the harness probes the common constructor
@@ -806,8 +806,8 @@ signature.
 ```bash
 BACKENDS=fc-embed,dashmap ./scripts/run-compare.sh
 BACKENDS=fc-server-resp,redis ADDR=127.0.0.1:6379 ./scripts/run-compare.sh
-BACKENDS=fc-server-fcnp,fc-server-resp ADDR=127.0.0.1:6383 ./scripts/run-compare.sh
-BACKENDS=fc-server-fcnp,dragonfly ADDR=127.0.0.1:6382 ./scripts/run-compare.sh
+BACKENDS=fc-server-scnp,fc-server-resp ADDR=127.0.0.1:6383 ./scripts/run-compare.sh
+BACKENDS=fc-server-scnp,dragonfly ADDR=127.0.0.1:6382 ./scripts/run-compare.sh
 ```
 
 Workload knobs are environment variables: `VALUE_SIZE`, `MIX`,
@@ -830,7 +830,7 @@ is gitignored; commit only curated summaries.
 ## Server CPU pinning
 
 For honest CPU-budget comparisons, set `SERVER_CPUSET` (Linux) to pin
-`fast-cache-server` to a cpuset via `taskset`. The helper scripts pick
+`shardcache` to a cpuset via `taskset`. The helper scripts pick
 it up automatically:
 
 ```bash

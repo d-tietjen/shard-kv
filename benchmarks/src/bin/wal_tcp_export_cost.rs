@@ -2,7 +2,7 @@
 //!
 //! This measures the production persistence runtime with disk WAL append plus
 //! live TCP export. Run once with the std exporter and once with
-//! `FAST_CACHE_WAL_TCP_USE_MONOIO=1`.
+//! `SHARDCACHE_WAL_TCP_USE_MONOIO=1`.
 
 use std::error::Error;
 use std::io::{self, Read};
@@ -14,13 +14,13 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use fast_cache::config::{PersistenceConfig, WalTcpExportMode};
-use fast_cache::persistence::PersistenceRuntime;
-use fast_cache::storage::{MutationBytes, MutationOp, MutationRecord};
-use fast_cache_benchmarks::cpu::{process_cpu_time, vcpu};
-use fast_cache_benchmarks::workload::{KeyDistribution, KeyPattern, Workload, WorkloadSpec};
 use rand::rngs::SmallRng;
 use rand::{RngCore, SeedableRng};
+use shardcache_benchmarks::cpu::{process_cpu_time, vcpu};
+use shardcache_benchmarks::workload::{KeyDistribution, KeyPattern, Workload, WorkloadSpec};
+use shardmap::config::{PersistenceConfig, WalTcpExportMode};
+use shardmap::persistence::PersistenceRuntime;
+use shardmap::storage::{MutationBytes, MutationOp, MutationRecord};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
@@ -86,7 +86,7 @@ fn main() -> Result<(), BoxError> {
         let workload = Arc::new(Workload::build(&WorkloadSpec {
             key_count: args.key_count,
             value_size,
-            mix: fast_cache_benchmarks::workload::Mix::write_only(),
+            mix: shardcache_benchmarks::workload::Mix::write_only(),
             key_pattern: KeyPattern::Point,
             key_distribution: KeyDistribution::Uniform,
         }));
@@ -409,11 +409,11 @@ fn bench_data_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    PathBuf::from(format!("/tmp/fast-cache-wal-bench-{pid}-{nanos}"))
+    PathBuf::from(format!("/tmp/shardcache-wal-bench-{pid}-{nanos}"))
 }
 
 fn runtime_label() -> &'static str {
-    match std::env::var("FAST_CACHE_WAL_TCP_USE_MONOIO").is_ok_and(|value| value != "0") {
+    match std::env::var("SHARDCACHE_WAL_TCP_USE_MONOIO").is_ok_and(|value| value != "0") {
         true => "monoio",
         false => "std",
     }

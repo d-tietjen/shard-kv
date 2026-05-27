@@ -9,7 +9,7 @@ cd "$root"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-cargo run --quiet -p fast-cache-benchmarks --bin redis_command_manifest -- \
+cargo run --quiet -p shardcache-benchmarks --bin redis_command_manifest -- \
   --format markdown \
   --output "$tmp"
 

@@ -2,12 +2,12 @@
 
 Updated: 2026-05-26
 
-This is the curated entry point for fast-cache head-to-head benchmarks against
+This is the curated entry point for shardcache head-to-head benchmarks against
 Redis-compatible servers. It combines the publishable 1-vCPU and 16-vCPU TCP
 server rows with the current Adam command-matrix artifacts.
 
 Raw per-case CSVs stay in `benchmarks/results/`. This document summarizes the
-rows we should cite in README, release notes, and 0.2.0 readiness work.
+rows we should cite in README, release notes, and 0.1.0 readiness work.
 
 ## Scope
 
@@ -15,9 +15,9 @@ Backends:
 
 | Backend | Meaning |
 | --- | --- |
-| FCNP direct | fast-cache native TCP protocol with client-side routing to shard-owned ports |
-| FCNP shared | fast-cache native TCP protocol through the shared listener |
-| RESP | fast-cache Redis-compatible TCP protocol |
+| SCNP direct | shardcache native TCP protocol with client-side routing to shard-owned ports |
+| SCNP shared | shardcache native TCP protocol through the shared listener |
+| RESP | shardcache Redis-compatible TCP protocol |
 | Redis | Redis OSS TCP baseline |
 | Valkey | Valkey TCP baseline |
 | Dragonfly | Dragonfly TCP baseline |
@@ -26,8 +26,8 @@ Server CPU views:
 
 | View | Meaning |
 | --- | --- |
-| 1 vCPU | fast-cache pinned to one server CPU with one shard. Redis remains its normal single-threaded baseline. |
-| 16 vCPU | fast-cache pinned to CPUs `0-15` with 16 shards. Redis remains the single-threaded drop-in baseline. |
+| 1 vCPU | shardcache pinned to one server CPU with one shard. Redis remains its normal single-threaded baseline. |
+| 16 vCPU | shardcache pinned to CPUs `0-15` with 16 shards. Redis remains the single-threaded drop-in baseline. |
 | C16/P16 | 16 benchmark clients with pipeline depth 16. This is a load shape, not a server CPU count. |
 
 Cells in the TCP saturation tables are `ops/sec @ measured server vCPU`.
@@ -82,7 +82,7 @@ are `CLUSTER`, `HOST:`, `MIGRATE`, `MONITOR`, `MOVE`, `POST`, `PSYNC`,
 These tables list every supported Redis command. Command rows are aggregated
 by summing `ops/sec` across that command's benchmark cases in the source
 artifact, matching the rollup method used by the matrix reports. Ratios are
-fast-cache over Redis for the same command and shape. `n/a` means the command
+shardcache over Redis for the same command and shape. `n/a` means the command
 is supported, but there is no saved Redis head-to-head row for that exact
 benchmark shape yet.
 
@@ -90,12 +90,12 @@ The 16-shard opcode artifacts predate the later Redis 5 family runs. Stream,
 geo, pubsub, hyperloglog, and scripting rows in the sharded C16/P1 and C16/P16
 tables use isolated Adam family reruns because the first mixed-family gap-fill
 run was throttled by slow stateful/diagnostic cases and made Redis look
-implausibly low. FCNP-direct shard-port rows for these families are still not
+implausibly low. SCNP-direct shard-port rows for these families are still not
 published because the direct-port attempt failed during stream setup (`XLEN`).
 The pubsub family reruns are throughput probes; Redis reported one transient
 ack/read error on a few subscription-control cases.
 
-| Shape | Commands with saved Redis head-to-head rows | Commands with FCNP-direct rows | Total supported commands |
+| Shape | Commands with saved Redis head-to-head rows | Commands with SCNP-direct rows | Total supported commands |
 | --- | ---: | ---: | ---: |
 | 1-vCPU C16/P16 | 174 | n/a | 222 |
 | 16-shard/opcode C16/P1 plus isolated family reruns | 182 | 145 | 222 |
@@ -103,7 +103,7 @@ ack/read error on a few subscription-control cases.
 
 ### 1-vCPU C16/P16
 
-| Family | Command | Cases | fast-cache ops/sec | Redis ops/sec | FC/Redis | Source |
+| Family | Command | Cases | shardcache ops/sec | Redis ops/sec | FC/Redis | Source |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | connection | `AUTH` | n/a | n/a | n/a | n/a | n/a |
 | connection | `CLIENT` | n/a | n/a | n/a | n/a | n/a |
@@ -330,7 +330,7 @@ ack/read error on a few subscription-control cases.
 
 ### 16-Shard C16/P1
 
-| Family | Command | Cases | FCNP direct ops/sec | RESP ops/sec | Redis ops/sec | FCNP/Redis | RESP/Redis | Source |
+| Family | Command | Cases | SCNP direct ops/sec | RESP ops/sec | Redis ops/sec | SCNP/Redis | RESP/Redis | Source |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | connection | `AUTH` | 1 | 2,206.0 | 1,826.0 | 141.0 | 15.65x | 12.95x | opcode C16/P1 |
 | connection | `CLIENT` | 5 | 11,030.0 | 9,130.0 | 704.0 | 15.67x | 12.97x | opcode C16/P1 |
@@ -557,7 +557,7 @@ ack/read error on a few subscription-control cases.
 
 ### 16-Shard C16/P16
 
-| Family | Command | Cases | FCNP direct ops/sec | RESP ops/sec | Redis ops/sec | FCNP/Redis | RESP/Redis | Source |
+| Family | Command | Cases | SCNP direct ops/sec | RESP ops/sec | Redis ops/sec | SCNP/Redis | RESP/Redis | Source |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | connection | `AUTH` | 1 | 6,340.0 | 4,028.2 | 180.2 | 35.18x | 22.35x | opcode C16/P16 |
 | connection | `CLIENT` | 5 | 31,700.0 | 20,141.0 | 901.0 | 35.18x | 22.35x | opcode C16/P16 |
@@ -790,9 +790,9 @@ above: `DISCARD`, `EXEC`, `MULTI`, `UNWATCH`, `WATCH`, `ASKING`, `BGREWRITEAOF`,
 
 | Artifact | What it covers |
 | --- | --- |
-| [`FAST_CACHE_VS_REDIS_TCP.md`](FAST_CACHE_VS_REDIS_TCP.md) | Published TCP saturation, 1-vCPU and 16-vCPU Redis rows, fixed-load CPU, and Redis/Valkey/Dragonfly large-value matrix |
-| [`benchmarks/results/redis-command-opcode-optimized-pass2-depth1-20260524T1555Z/report.md`](results/redis-command-opcode-optimized-pass2-depth1-20260524T1555Z/report.md) | 16-shard fast-cache command matrix, depth 1, optimized opcode pass |
-| [`benchmarks/results/redis-command-opcode-optimized-pass2-depth16-20260524T1600Z/report.md`](results/redis-command-opcode-optimized-pass2-depth16-20260524T1600Z/report.md) | 16-shard fast-cache command matrix, ordered depth 16, optimized opcode pass |
+| [`SHARDCACHE_VS_REDIS_TCP.md`](SHARDCACHE_VS_REDIS_TCP.md) | Published TCP saturation, 1-vCPU and 16-vCPU Redis rows, fixed-load CPU, and Redis/Valkey/Dragonfly large-value matrix |
+| [`benchmarks/results/redis-command-opcode-optimized-pass2-depth1-20260524T1555Z/report.md`](results/redis-command-opcode-optimized-pass2-depth1-20260524T1555Z/report.md) | 16-shard shardcache command matrix, depth 1, optimized opcode pass |
+| [`benchmarks/results/redis-command-opcode-optimized-pass2-depth16-20260524T1600Z/report.md`](results/redis-command-opcode-optimized-pass2-depth16-20260524T1600Z/report.md) | 16-shard shardcache command matrix, ordered depth 16, optimized opcode pass |
 | [`benchmarks/results/redis-command-opcode-optimized-direct-depth1-20260524T152034Z/report.md`](results/redis-command-opcode-optimized-direct-depth1-20260524T152034Z/report.md) | 16-shard command matrix, depth 1, saved Redis/Valkey/Dragonfly reference rows |
 | [`benchmarks/results/redis-command-opcode-optimized-direct-depth16-ordered-20260524T152654Z/report.md`](results/redis-command-opcode-optimized-direct-depth16-ordered-20260524T152654Z/report.md) | 16-shard command matrix, ordered depth 16, saved Redis/Valkey/Dragonfly reference rows |
 | `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-stream.csv` | Adam isolated 16-shard RESP stream rows at C16/P1 |
@@ -812,10 +812,10 @@ above: `DISCARD`, `EXEC`, `MULTI`, `UNWATCH`, `WATCH`, `ASKING`, `BGREWRITEAOF`,
 | [`benchmarks/results/adam-redis-keyspace-1vcpu-c16p16-20260525T042907Z/report.md`](results/adam-redis-keyspace-1vcpu-c16p16-20260525T042907Z/report.md) | 1-vCPU Redis keyspace matrix, C16/P16 |
 | [`benchmarks/results/adam-monoio-transport-20260525T220653Z/`](results/adam-monoio-transport-20260525T220653Z/) | Adam Tokio vs monoio RESP transport hot-mix comparison, 1-vCPU and 16-vCPU server views |
 | [`benchmarks/results/adam-monoio-profile-20260525T222318Z/`](results/adam-monoio-profile-20260525T222318Z/) | Adam `perf record` comparison for 16-vCPU C16/P16 Tokio vs monoio hot RESP transport |
-| [`benchmarks/results/adam-monoio-writev-control-20260525T222741Z/`](results/adam-monoio-writev-control-20260525T222741Z/) | Adam monoio `FAST_CACHE_MONOIO_SAFE_WRITER=writev` control for 16-vCPU C16/P16 hot RESP transport |
-| [`benchmarks/results/adam-monoio-legacy-control-20260525T223157Z/`](results/adam-monoio-legacy-control-20260525T223157Z/) | Adam monoio `FAST_CACHE_MONOIO_DRIVER=legacy` control for 16-vCPU C16/P16 hot RESP transport |
+| [`benchmarks/results/adam-monoio-writev-control-20260525T222741Z/`](results/adam-monoio-writev-control-20260525T222741Z/) | Adam monoio `SHARDCACHE_MONOIO_SAFE_WRITER=writev` control for 16-vCPU C16/P16 hot RESP transport |
+| [`benchmarks/results/adam-monoio-legacy-control-20260525T223157Z/`](results/adam-monoio-legacy-control-20260525T223157Z/) | Adam monoio `SHARDCACHE_MONOIO_DRIVER=legacy` control for 16-vCPU C16/P16 hot RESP transport |
 | [`benchmarks/results/adam-monoio-legacy-transport-20260525T223244Z/`](results/adam-monoio-legacy-transport-20260525T223244Z/) | Adam monoio legacy driver controls for the remaining hot RESP transport rows |
-| [`benchmarks/results/adam-monoio-auto-driver-20260525T223959Z/`](results/adam-monoio-auto-driver-20260525T223959Z/) | Adam monoio `FAST_CACHE_MONOIO_DRIVER=auto` proof rows showing 16-worker legacy and 1-worker io_uring selection |
+| [`benchmarks/results/adam-monoio-auto-driver-20260525T223959Z/`](results/adam-monoio-auto-driver-20260525T223959Z/) | Adam monoio `SHARDCACHE_MONOIO_DRIVER=auto` proof rows showing 16-worker legacy and 1-worker io_uring selection |
 | [`benchmarks/results/adam-monoio-driver-sweep-20260525T224908Z/`](results/adam-monoio-driver-sweep-20260525T224908Z/) | Adam monoio driver sweep for 2, 4, and 8 workers on the C16/P16 hot RESP mix |
 | [`benchmarks/results/adam-monoio-driver-w4-repeat-20260525T225104Z/`](results/adam-monoio-driver-w4-repeat-20260525T225104Z/) | Longer Adam repeat for the 4-worker monoio driver crossover check |
 | [`benchmarks/results/adam-single-shard-input-profile-20260525/`](results/adam-single-shard-input-profile-20260525/) | Adam one-worker monoio C16/P16 hot input profile before the direct RESP no-parts fast path |
@@ -827,14 +827,14 @@ above: `DISCARD`, `EXEC`, `MULTI`, `UNWATCH`, `WATCH`, `ASKING`, `BGREWRITEAOF`,
 
 Workload: `64B`, `80/20`, pipeline depth `1`.
 
-| Server CPU view | FCNP direct | RESP | Redis |
+| Server CPU view | SCNP direct | RESP | Redis |
 | --- | ---: | ---: | ---: |
 | 1 vCPU | 106,072 @ 1.000 | 99,438 @ 1.000 | 94,015 @ 0.999 |
 | 16 vCPU | 896,322 @ 12.595 | 870,934 @ 12.842 | 90,735 @ 0.998 |
 
-At strict request/response depth, same-core fast-cache RESP is `1.06x` Redis
-and FCNP direct is `1.13x` Redis. With 16 server CPUs available, fast-cache RESP
-is `9.60x` Redis and FCNP direct is `9.88x` Redis for the same workload.
+At strict request/response depth, same-core shardcache RESP is `1.06x` Redis
+and SCNP direct is `1.13x` Redis. With 16 server CPUs available, shardcache RESP
+is `9.60x` Redis and SCNP direct is `9.88x` Redis for the same workload.
 
 ## Monoio RESP Transport Spot Check
 
@@ -842,10 +842,10 @@ Artifact:
 [`benchmarks/results/adam-monoio-transport-20260525T220653Z/`](results/adam-monoio-transport-20260525T220653Z/).
 
 These rows isolate the server socket runtime on Adam using the hot RESP command
-mix (`PING`, `ECHO`, `GET`, `SET`, `PUBSUB`). Fast-cache was built once with
+mix (`PING`, `ECHO`, `GET`, `SET`, `PUBSUB`). Shardcache was built once with
 `redis-server,monoio`; the Tokio rows use that binary with
-`FAST_CACHE_USE_MONOIO` unset, and the monoio rows use the original io_uring
-monoio path (`FAST_CACHE_USE_MONOIO=1`, io_uring driver, inline safe writer).
+`SHARDCACHE_USE_MONOIO` unset, and the monoio rows use the original io_uring
+monoio path (`SHARDCACHE_USE_MONOIO=1`, io_uring driver, inline safe writer).
 Redis uses `redis:7-alpine`. Each row sums 12 command cases and reports the
 mean of per-case `avg us`.
 
@@ -860,7 +860,7 @@ Takeaway: the original io_uring monoio path helps the single-worker,
 socket-bound RESP shape, but does not beat the Tokio transport in the 16-worker
 shared-listener shape. After profiling, server monoio uses an adaptive `auto`
 driver default: io_uring for one worker, legacy poll for multi-worker socket
-runs. Benchmark `FAST_CACHE_MONOIO_SAFE_WRITER=writev` before using monoio for
+runs. Benchmark `SHARDCACHE_MONOIO_SAFE_WRITER=writev` before using monoio for
 large-value RESP claims.
 
 Follow-up profile artifact:
@@ -876,12 +876,12 @@ transport cycles in the normal task/syscall path: `tokio::runtime::task::raw::po
 `poll_write_vectored_priv` 20.0%. The flat hot symbols were kernel TCP costs in
 both cases: `clear_page_rep`, `rep_movs_alternative`, and `nft_do_chain`.
 
-The `FAST_CACHE_MONOIO_SAFE_WRITER=writev` control artifact:
+The `SHARDCACHE_MONOIO_SAFE_WRITER=writev` control artifact:
 [`benchmarks/results/adam-monoio-writev-control-20260525T222741Z/`](results/adam-monoio-writev-control-20260525T222741Z/).
 It produced 959,772 ops/sec for the same 16-vCPU C16/P16 hot RESP mix, below
 the io_uring monoio row, so writev is not currently a small-response win.
 
-The `FAST_CACHE_MONOIO_DRIVER=legacy` control artifacts:
+The `SHARDCACHE_MONOIO_DRIVER=legacy` control artifacts:
 [`benchmarks/results/adam-monoio-legacy-control-20260525T223157Z/`](results/adam-monoio-legacy-control-20260525T223157Z/)
 and
 [`benchmarks/results/adam-monoio-legacy-transport-20260525T223244Z/`](results/adam-monoio-legacy-transport-20260525T223244Z/).
@@ -895,9 +895,9 @@ server fans out across 16 monoio workers:
 | 16 vCPU | C16/P1 | 411,154.0 | 435,550.3 | 1.06x | 36.6 |
 | 16 vCPU | C16/P16 | 977,626.5 | 1,052,395.4 | 1.08x | 120.6 |
 
-Server monoio now defaults `FAST_CACHE_MONOIO_DRIVER=auto`: io_uring for one
+Server monoio now defaults `SHARDCACHE_MONOIO_DRIVER=auto`: io_uring for one
 worker and legacy for multi-worker socket runs. Explicit
-`FAST_CACHE_MONOIO_DRIVER=legacy|io_uring` still overrides the auto choice.
+`SHARDCACHE_MONOIO_DRIVER=legacy|io_uring` still overrides the auto choice.
 The auto proof artifact:
 [`benchmarks/results/adam-monoio-auto-driver-20260525T223959Z/`](results/adam-monoio-auto-driver-20260525T223959Z/).
 It logged `Legacy driver (16 workers)` for the 16-vCPU C16/P16 row and
@@ -941,10 +941,10 @@ current Redis compatibility and RESP2/RESP3 transaction surface.
 
 ## 1-vCPU TCP Matrix
 
-Fast-cache is pinned to one CPU and started with `--shard-count 1`. Redis is
+Shardcache is pinned to one CPU and started with `--shard-count 1`. Redis is
 the single-threaded baseline. Pipeline depth is `1`.
 
-| Value | Mix | FCNP direct | RESP | Redis |
+| Value | Mix | SCNP direct | RESP | Redis |
 | ---: | --- | ---: | ---: | ---: |
 | 64B | GET | 105,970 @ 1.000 | 98,817 @ 0.999 | 93,631 @ 0.999 |
 | 64B | SET | 107,447 @ 0.999 | 97,776 @ 0.999 | 90,881 @ 0.999 |
@@ -961,10 +961,10 @@ the single-threaded baseline. Pipeline depth is `1`.
 
 ## 16-vCPU TCP Matrix
 
-Fast-cache is pinned to CPUs `0-15` and started with `--shard-count 16`. Redis
+Shardcache is pinned to CPUs `0-15` and started with `--shard-count 16`. Redis
 remains the single-threaded baseline. Pipeline depth is `1`.
 
-| Value | Mix | FCNP direct | RESP | Redis |
+| Value | Mix | SCNP direct | RESP | Redis |
 | ---: | --- | ---: | ---: | ---: |
 | 64B | GET | 895,979 @ 12.852 | 883,799 @ 13.015 | 91,193 @ 0.999 |
 | 64B | SET | 892,359 @ 12.678 | 868,260 @ 12.980 | 90,049 @ 0.999 |
@@ -985,7 +985,7 @@ Workload: `64B`, `80/20`, `64` clients, `100k` keys.
 
 ### 1 vCPU
 
-| Pipeline depth | FCNP direct | RESP | Redis |
+| Pipeline depth | SCNP direct | RESP | Redis |
 | ---: | ---: | ---: | ---: |
 | 1 | 109,927 @ 0.999 | 98,069 @ 0.999 | 89,035 @ 0.999 |
 | 4 | 395,374 @ 1.000 | 358,517 @ 0.999 | 301,799 @ 0.999 |
@@ -994,7 +994,7 @@ Workload: `64B`, `80/20`, `64` clients, `100k` keys.
 
 ### 16 vCPU
 
-| Pipeline depth | FCNP direct | RESP | Redis |
+| Pipeline depth | SCNP direct | RESP | Redis |
 | ---: | ---: | ---: | ---: |
 | 1 | 892,222 @ 12.544 | 904,005 @ 13.394 | 91,842 @ 0.999 |
 | 4 | 3,389,930 @ 12.400 | 3,146,744 @ 12.906 | 303,558 @ 0.999 |
@@ -1009,15 +1009,15 @@ Artifact:
 Workload: `64B`, `80/20`, `64` clients, pipeline depth `64`, server pinned to
 CPU `0`.
 
-| Target | FCNP direct | RESP | Redis |
+| Target | SCNP direct | RESP | Redis |
 | ---: | ---: | ---: | ---: |
 | 100K ops/s | 99,962 @ 0.052 | 99,978 @ 0.060 | 99,976 @ 0.098 |
 | 1M ops/s | 999,731 @ 0.439 | 999,736 @ 0.531 | 999,734 @ 0.909 |
 | 2M ops/s | 1,999,581 @ 0.843 | 1,999,570 @ 0.975 | 1,233,072 @ 1.001 |
 
-At the 1M fixed-load point, FCNP direct uses about half the server CPU Redis
+At the 1M fixed-load point, SCNP direct uses about half the server CPU Redis
 uses for the same delivered request rate. At the 2M target, Redis is saturated
-at about `1.23M` ops/sec while fast-cache FCNP and RESP still deliver about
+at about `1.23M` ops/sec while shardcache SCNP and RESP still deliver about
 `2.00M` ops/sec within one measured server vCPU.
 
 ## 16-vCPU Redis-Compatible Large Matrix
@@ -1025,14 +1025,14 @@ at about `1.23M` ops/sec while fast-cache FCNP and RESP still deliver about
 Artifact:
 `benchmarks/results/network_db_server_20260518_030526/network_db_matrix.csv`.
 
-This sweep compares fast-cache, Redis, Valkey, and Dragonfly over TCP. Server
+This sweep compares shardcache, Redis, Valkey, and Dragonfly over TCP. Server
 processes were pinned to CPUs `0-15`; benchmark clients were pinned to CPUs
 `16-31`. Cells are `ops/sec / logical GB/s @ measured server vCPU (clients,
 pipeline)`.
 
 ### Best 80/20 Throughput By Value Size
 
-| Value | FCNP direct | RESP | Redis | Valkey | Dragonfly |
+| Value | SCNP direct | RESP | Redis | Valkey | Dragonfly |
 | ---: | ---: | ---: | ---: | ---: | ---: |
 | 64B | 31.18M / 2.00 @ 14.6 (64c, p64) | 19.76M / 1.26 @ 16.0 (64c, p64) | 1.19M / 0.08 @ 1.0 (16c, p64) | 1.21M / 0.08 @ 1.0 (16c, p64) | 4.10M / 0.26 @ 15.9 (64c, p64) |
 | 512B | 12.20M / 6.25 @ 9.1 (16c, p64) | 10.52M / 5.39 @ 16.0 (64c, p64) | 858k / 0.44 @ 1.0 (16c, p64) | 855k / 0.44 @ 1.0 (16c, p64) | 1.08M / 0.55 @ 14.1 (64c, p64) |
@@ -1042,7 +1042,7 @@ pipeline)`.
 
 ### 64B Best Throughput By Mix
 
-| Mix | FCNP direct | RESP | Redis | Valkey | Dragonfly |
+| Mix | SCNP direct | RESP | Redis | Valkey | Dragonfly |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | GET | 32.11M / 2.06 @ 14.6 (64c, p64) | 23.28M / 1.49 @ 16.0 (64c, p64) | 1.22M / 0.08 @ 1.0 (16c, p64) | 1.23M / 0.08 @ 1.0 (16c, p64) | 3.93M / 0.25 @ 15.9 (64c, p64) |
 | SET | 32.07M / 2.05 @ 15.3 (64c, p64) | 12.56M / 0.80 @ 15.7 (64c, p64) | 1.03M / 0.07 @ 1.0 (16c, p64) | 997k / 0.06 @ 1.0 (16c, p64) | 4.31M / 0.28 @ 16.0 (256c, p64) |
@@ -1059,9 +1059,9 @@ Depth 1, strict request/response:
 
 | Target | Cases | Sum ops/sec | Mean avg us | Errors |
 | --- | ---: | ---: | ---: | ---: |
-| fast-cache FCNP direct | 209 | 460,886 | 34.6 | 0 |
-| fast-cache FCNP shared | 209 | 460,459 | 34.6 | 0 |
-| fast-cache RESP | 209 | 381,477 | 41.8 | 0 |
+| shardcache SCNP direct | 209 | 460,886 | 34.6 | 0 |
+| shardcache SCNP shared | 209 | 460,459 | 34.6 | 0 |
+| shardcache RESP | 209 | 381,477 | 41.8 | 0 |
 | Redis | 209 | 29,251 | 546.5 | 2,818 |
 | Valkey | 209 | 31,198 | 512.3 | 3,004 |
 | Dragonfly | 209 | 6,506 | 2,459.9 | 3,133 |
@@ -1070,9 +1070,9 @@ Depth 16, ordered pipelining:
 
 | Target | Cases | Sum ops/sec | Mean avg us | Errors |
 | --- | ---: | ---: | ---: | ---: |
-| fast-cache FCNP direct | 209 | 1,324,917 | 88.7 | 0 |
-| fast-cache FCNP shared | 209 | 1,328,698 | 88.4 | 0 |
-| fast-cache RESP | 209 | 841,790 | 116.9 | 0 |
+| shardcache SCNP direct | 209 | 1,324,917 | 88.7 | 0 |
+| shardcache SCNP shared | 209 | 1,328,698 | 88.4 | 0 |
+| shardcache RESP | 209 | 841,790 | 116.9 | 0 |
 | Redis | 209 | 37,483 | 5,216.9 | 3,604 |
 | Valkey | 209 | 46,885 | 4,184.5 | 4,492 |
 | Dragonfly | 209 | 17,500 | 12,175.6 | 8,396 |
@@ -1080,18 +1080,18 @@ Depth 16, ordered pipelining:
 Zero-error common subsets are the cleaner implementation comparison for these
 runs:
 
-| Shape | Common cases | FCNP direct | FCNP shared | RESP | Redis | Valkey |
+| Shape | Common cases | SCNP direct | SCNP shared | RESP | Redis | Valkey |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | Depth 1 | 207 | 456,474 @ 34.6 us | 456,051 @ 34.6 us | 377,825 @ 41.9 us | 28,969 @ 541.9 us | 30,898 @ 507.7 us |
 | Depth 16 | 207 | 1,312,237 @ 88.5 us | 1,315,982 @ 88.2 us | 833,734 @ 117.1 us | 37,123 @ 5,150.4 us | 46,436 @ 4,125.1 us |
 
 ## 1-vCPU Command Matrices
 
-These Redis-only command proof runs use Adam with a 1-vCPU fast-cache server
+These Redis-only command proof runs use Adam with a 1-vCPU shardcache server
 shape and C16/P16 load. They are useful for compatibility and command-family
 regression tracking.
 
-| Matrix | Cases | Clients/Pipeline | Duration | fast-cache sum ops/sec | Redis sum ops/sec | Ratio vs Redis | fast-cache mean avg us | Redis mean avg us | Errors |
+| Matrix | Cases | Clients/Pipeline | Duration | shardcache sum ops/sec | Redis sum ops/sec | Ratio vs Redis | shardcache mean avg us | Redis mean avg us | Errors |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Family matrix | 217 | C16/P16 | 5s | 2,514,174.8 | 1,590,932.8 | 1.58x | 851.6 | 8,739.9 | 0 / 0 |
 | Data-command matrix | 224 | C16/P16 | 10s | 189,399.3 | 1,009.6 | 187.60x | 1,191.5 | 246,239.0 | 0 / 0 |
@@ -1108,11 +1108,11 @@ support.
 
 | Mode | Target | Cases | Ops/sec | Mean avg us | Errors |
 | --- | --- | ---: | ---: | ---: | ---: |
-| C1/P1 | fast-cache RESP | 3 | 14,727 | 22.5 | 0 |
+| C1/P1 | shardcache RESP | 3 | 14,727 | 22.5 | 0 |
 | C1/P1 | Redis | 3 | 6,312 | 52.7 | 0 |
 | C1/P1 | Valkey | 3 | 6,058 | 54.9 | 0 |
 | C1/P1 | Dragonfly | 3 | 5,725 | 58.1 | 0 |
-| C16/P16 | fast-cache RESP | 3 | 184,328 | 76.7 | 0 |
+| C16/P16 | shardcache RESP | 3 | 184,328 | 76.7 | 0 |
 | C16/P16 | Redis | 3 | 42,200 | 363.1 | 0 |
 | C16/P16 | Valkey | 3 | 41,645 | 368.0 | 0 |
 | C16/P16 | Dragonfly | 3 | 85,832 | 169.0 | 0 |
@@ -1128,7 +1128,7 @@ support.
   fast commands when they share a timed loop with slow stateful or diagnostic
   cases.
 - Use zero-error common subsets when comparing implementation speed across
-  fast-cache, Redis, Valkey, and Dragonfly.
+  shardcache, Redis, Valkey, and Dragonfly.
 - External reference CSVs should be saved and reused for optimization loops so
-  new fast-cache runs can be compared against stable Redis, Valkey, and
+  new shardcache runs can be compared against stable Redis, Valkey, and
   Dragonfly baselines.

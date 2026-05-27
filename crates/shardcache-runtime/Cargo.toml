@@ -1,0 +1,26 @@
+[package]
+name = "shardcache-runtime"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Rust-native GPU/runtime integration layer for shardmap"
+publish = false
+
+[features]
+default = ["sharded"]
+embedded = ["shardmap/embedded"]
+sharded = ["embedded", "shardmap/sharded"]
+cuda = ["sharded", "shardmap/cuda", "dep:cust"]
+gpu-direct-api = ["sharded"]
+
+[dependencies]
+shardmap = { workspace = true, default-features = false }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cust = { workspace = true, optional = true }

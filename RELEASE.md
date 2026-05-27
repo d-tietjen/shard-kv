@@ -23,8 +23,8 @@ Use this checklist before publishing the repository or the crates.io crates.
 For full release confidence, also run any Redis compatibility or performance
 validation suites that support the release announcement. Keep raw artifacts
 outside the public repository unless they have been intentionally curated.
-For the current 0.2.0 release shape, known limits, and smoke benchmark command,
-see `docs/RELEASE_0_2_READINESS.md`.
+For the current release shape, known limits, and smoke benchmark command, see
+`docs/RELEASE_0_1_READINESS.md`.
 
 Use `./benchmarks/scripts/run-redis-command-benchmark-bundle.sh` for command
 matrix performance proofs so each run carries metadata, raw CSV, Markdown,
@@ -37,15 +37,14 @@ release policy explicitly call for it.
 ## Publishing
 
 ```bash
-cargo publish -p fcnp-client-rs --dry-run
-cargo publish -p fast-cache-core --dry-run
-cargo publish -p fcnp-client-rs
-cargo publish -p fast-cache-core
-cargo publish -p fast-cache --dry-run
-cargo publish -p fast-cache
+cargo publish -p shardmap --dry-run
+cargo publish -p shardcache-client-rs --dry-run
+cargo publish -p shardmap
+cargo publish -p shardcache-client-rs
 ```
 
-Publish `fast-cache-core` before dry-running or publishing the public
-`fast-cache` facade so the facade's registry dependency can resolve. Only
-publish after the dry run succeeds and the final changelog or performance
-claims have been checked against source artifacts.
+`shardmap` and `shardcache-client-rs` are the crates.io crates for this
+release. `shardcache`, `shardcache-redis`, `shardcache-runtime`,
+`shardcache-py`, and `shardcache-formal` are workspace support packages with
+`publish = false`. Only publish after the dry runs succeed and the final
+changelog or performance claims have been checked against source artifacts.

@@ -1,9 +1,0 @@
-backend,build_variant,ttl_mode,routing_mode,eviction_policy,cache_capacity_keys,cache_memory_bytes,read_mode,value_size,mix,vcpu_budget,clients,pipeline_depth,duration_s,ops_total,ops_per_sec,logical_payload_gb_per_sec,vcpu_consumed,p50_ns,p99_ns,p999_ns,read_ops,read_p99_ns,read_p999_ns,write_ops,write_p99_ns,write_p999_ns,errors,latency_sample_rate,ttl_ms,key_pattern,key_distribution
-fc-server-fcnp,safe,none,tcp-fanout,none,,,ref,1048576,100-0,16,32,1,2.008,25507,12705,13.322,1.606,0,0,0,25507,0,0,0,0,0,0,0,,point,uniform
-fc-server-fcnp,safe,none,tcp-fanout,none,,,ref,1048576,0-100,16,32,1,2.006,26968,13441,14.094,2.121,0,0,0,0,0,0,26968,0,0,0,0,,point,uniform
-fc-server-fcnp,safe,none,tcp-fanout,none,,,ref,1048576,100-0,16,64,1,2.010,22162,11025,11.560,1.361,0,0,0,22162,0,0,0,0,0,0,0,,point,uniform
-fc-server-fcnp,safe,none,tcp-fanout,none,,,ref,1048576,0-100,16,64,1,2.008,23313,11612,12.176,1.674,0,0,0,0,0,0,23313,0,0,0,0,,point,uniform
-fc-server-fcnp-direct,safe,none,tcp-shard-direct,none,,,ref,1048576,100-0,16,32,1,2.008,25170,12537,13.146,1.598,0,0,0,25170,0,0,0,0,0,0,0,,point,uniform
-fc-server-fcnp-direct,safe,none,tcp-shard-direct,none,,,ref,1048576,0-100,16,32,1,2.006,26733,13324,13.972,2.158,0,0,0,0,0,0,26733,0,0,0,0,,point,uniform
-fc-server-fcnp-direct,safe,none,tcp-shard-direct,none,,,ref,1048576,100-0,16,64,1,2.011,21179,10531,11.042,1.319,0,0,0,21179,0,0,0,0,0,0,0,,point,uniform
-fc-server-fcnp-direct,safe,none,tcp-shard-direct,none,,,ref,1048576,0-100,16,64,1,2.008,23059,11481,12.039,1.668,0,0,0,0,0,0,23059,0,0,0,0,,point,uniform

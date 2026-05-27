@@ -1,0 +1,25 @@
+[package]
+name = "shardmap-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[features]
+default = []
+unsafe = ["shardmap/unsafe"]
+
+[dependencies]
+shardmap = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "embedded_command_sequence"
+path = "fuzz_targets/embedded_command_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

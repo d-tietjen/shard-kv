@@ -1,18 +1,18 @@
-"""fc-lmcache: benchmark fast-cache as an LMCache storage plugin.
+"""fc-lmcache: benchmark shardcache as an LMCache storage plugin.
 
-Drives put / get through `FastCacheStorageBackend` using LMCache's
+Drives put / get through `ShardCacheStorageBackend` using LMCache's
 `CacheEngineKey` and `BytesBufferMemoryObj` types. This measures the
-LMCache plugin contract overhead on top of the underlying fast-cache
+LMCache plugin contract overhead on top of the underlying shardcache
 storage path.
 
 Optional comparison: pass `--with-local-cpu` to additionally bench
 LMCache's built-in `LocalCPUBackend` on the same workload. That answers
-"how does fast-cache backend compare to LMCache's native local backend"
+"how does shardcache backend compare to LMCache's native local backend"
 through the same plugin interface.
 
 Usage:
     pip install ./integrations/lmcache_storage_backend
-    maturin develop --release -m crates/fast-cache-py/Cargo.toml --features extension-module
+    maturin develop --release -m crates/shardcache-py/Cargo.toml --features extension-module
     python benchmarks/python/fc_lmcache_bench.py \
         --value-size 4096 --mix 80-20 --vcpu-budget 4 --clients 4 \
         --key-count 4096 --warmup 1 --duration 5
@@ -62,13 +62,13 @@ def _import_lmcache():
 
 def _import_fc_backend():
     try:
-        from fast_cache_lmcache_backend.backend import (  # type: ignore[import-not-found]
-            FastCacheStorageBackend,
+        from shardcache_lmcache_backend.backend import (  # type: ignore[import-not-found]
+            ShardCacheStorageBackend,
         )
-        return FastCacheStorageBackend
+        return ShardCacheStorageBackend
     except ImportError as exc:
         print(
-            "fast_cache_lmcache_backend not importable. Install it first:\n"
+            "shardcache_lmcache_backend not importable. Install it first:\n"
             "  pip install ./integrations/lmcache_storage_backend",
             file=sys.stderr,
         )
@@ -240,11 +240,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--client-architecture",
-        choices=("shared", "local_embedded", "fcnp_tcp", "fcnp_tcp_python"),
+        choices=("shared", "local_embedded", "scnp_tcp", "scnp_tcp_python"),
         default="shared",
         help=(
-            "fast-cache Python store architecture for the LMCache backend. "
-            "Use shared or fcnp_tcp for arbitrary multi-client benchmark keys; "
+            "shardcache Python store architecture for the LMCache backend. "
+            "Use shared or scnp_tcp for arbitrary multi-client benchmark keys; "
             "local_embedded requires caller-owned shard routing."
         ),
     )
@@ -254,13 +254,13 @@ def main() -> None:
         default=None,
         help=(
             "High-level LMCache connection mode. Use embedded for in-process "
-            "fast-cache and tcp for fast-cache over FCNP/TCP."
+            "shardcache and tcp for shardcache over SCNP/TCP."
         ),
     )
     parser.add_argument(
-        "--fcnp-addr",
+        "--scnp-addr",
         default="127.0.0.1:6500",
-        help="host:port for --client-architecture fcnp_tcp",
+        help="host:port for --client-architecture scnp_tcp",
     )
     args = parser.parse_args()
     get_pct = parse_mix(args.mix)
@@ -269,14 +269,14 @@ def main() -> None:
     )
 
     KeyClass, BufClass, FormatEnum, MetadataClass, LocalCPUBackend = _import_lmcache()
-    FastCacheBackend = _import_fc_backend()
+    ShardCacheBackend = _import_fc_backend()
 
     print(
         f"fc-lmcache: value_size={args.value_size}B mix={spec.mix_label} "
         f"vcpu_budget={args.vcpu_budget} clients={args.clients} "
         f"keys={args.key_count} duration={args.duration}s "
         f"connection={args.connection or 'client_architecture'} "
-        f"client_architecture={args.client_architecture} fcnp_addr={args.fcnp_addr} "
+        f"client_architecture={args.client_architecture} scnp_addr={args.scnp_addr} "
         f"op_batch_size={args.op_batch_size}"
     )
     print()
@@ -288,15 +288,15 @@ def main() -> None:
     results = []
 
     extra_config = {
-        "storage_plugin.fast_cache.cores": args.vcpu_budget,
-        "storage_plugin.fast_cache.client_architecture": args.client_architecture,
-        "storage_plugin.fast_cache.fcnp_addr": args.fcnp_addr,
-        "storage_plugin.fast_cache.enable_metrics": False,
-        "storage_plugin.fast_cache.zero_copy_reads": True,
+        "storage_plugin.shardcache.cores": args.vcpu_budget,
+        "storage_plugin.shardcache.client_architecture": args.client_architecture,
+        "storage_plugin.shardcache.scnp_addr": args.scnp_addr,
+        "storage_plugin.shardcache.enable_metrics": False,
+        "storage_plugin.shardcache.zero_copy_reads": True,
     }
     if args.connection is not None:
-        extra_config["storage_plugin.fast_cache.connection"] = args.connection
-    fc_backend = FastCacheBackend(config=type("Cfg", (), {"extra_config": extra_config})())
+        extra_config["storage_plugin.shardcache.connection"] = args.connection
+    fc_backend = ShardCacheBackend(config=type("Cfg", (), {"extra_config": extra_config})())
     results.append(_run_backend("fc-lmcache", fc_backend, keys_lm, value_obj, spec, args))
 
     if args.with_local_cpu and LocalCPUBackend is not None:

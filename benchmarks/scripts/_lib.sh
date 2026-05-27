@@ -4,7 +4,7 @@
 # set. On macOS or when SERVER_CPUSET is empty, runs the command directly.
 #
 # Usage:
-#   pinned_exec ./target/release/fast-cache-server ...
+#   pinned_exec ./target/release/shardcache ...
 pinned_exec() {
   if [[ -n "${SERVER_CPUSET:-}" ]] && command -v taskset >/dev/null 2>&1; then
     taskset -c "$SERVER_CPUSET" "$@"

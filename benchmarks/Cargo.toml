@@ -1,36 +1,36 @@
 [package]
-name = "fast-cache-benchmarks"
+name = "shardcache-benchmarks"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Head-to-head benchmarks for fast-cache against embedded Rust caches and networked databases. Not published."
+description = "Head-to-head benchmarks for shardmap/shardcache against embedded Rust caches and networked databases. Not published."
 publish = false
 
 [features]
 default = []
-# Build the fc-embed backend on top of fast-cache's reviewed unsafe hot paths.
+# Build the fc-embed backend on top of shardmap's reviewed unsafe hot paths.
 # Run the bench twice (default + --features unsafe) to get both rows.
-unsafe = ["fast-cache/unsafe"]
-# Build fast-cache's shared embedded hot path in no-TTL mode for point-key
+unsafe = ["shardmap/unsafe"]
+# Build shardmap's shared embedded hot path in no-TTL mode for point-key
 # workloads that never create expiring entries.
-no-ttl = ["fast-cache/no-ttl"]
-# Build fast-cache's experimental point-key-only no-TTL hot path.
-experimental-no-ttl-point-hot-path = ["fast-cache/experimental-no-ttl-point-hot-path"]
-# Rebuild fast-cache's shared embedded store with parking_lot::RwLock stripes
+no-ttl = ["shardmap/no-ttl"]
+# Build shardmap's experimental point-key-only no-TTL hot path.
+experimental-no-ttl-point-hot-path = ["shardmap/experimental-no-ttl-point-hot-path"]
+# Rebuild shardmap's shared embedded store with parking_lot::RwLock stripes
 # for cache-level lock A/B runs against the default read-biased lock.
-shared-parking-lot-lock = ["fast-cache/shared-parking-lot-lock"]
-# Rebuild fast-cache's server/direct EmbeddedStore with read-biased shard locks
+shared-parking-lot-lock = ["shardmap/shared-parking-lot-lock"]
+# Rebuild shardcache's server/direct EmbeddedStore with read-biased shard locks
 # for A/B runs against the default parking_lot lock.
-embedded-read-biased-lock = ["fast-cache/embedded-read-biased-lock"]
-# Build benchmark binaries with fast-cache's Linux-only monoio transport code
+embedded-read-biased-lock = ["shardmap/embedded-read-biased-lock"]
+# Build benchmark binaries with shardcache's Linux-only monoio transport code
 # available. Runtime selection is still controlled by the relevant env vars.
-monoio = ["fast-cache/monoio"]
+monoio = ["shardmap/monoio"]
 
 [dependencies]
-fast-cache = { workspace = true }
-fcnp-client-rs = { workspace = true }
+shardmap = { workspace = true, features = ["sharded"] }
+shardcache-client-rs = { workspace = true }
 bytes = "1"
 clap = { workspace = true }
 crossbeam-channel = { workspace = true }
@@ -80,5 +80,5 @@ name = "redis_command_report"
 path = "src/bin/redis_command_report.rs"
 
 [[bin]]
-name = "fcnp_scan_matrix"
-path = "src/bin/fcnp_scan_matrix.rs"
+name = "scnp_scan_matrix"
+path = "src/bin/scnp_scan_matrix.rs"

@@ -11,18 +11,18 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 use crossbeam_channel::RecvTimeoutError;
-use fast_cache::config::{ReplicationCompression, ReplicationConfig, ReplicationSendPolicy};
-use fast_cache::replication::{ReplicatedEmbeddedStore, ReplicationReplica};
-use fast_cache::storage::EmbeddedStore;
-use fast_cache_benchmarks::backend::Op;
-use fast_cache_benchmarks::clock::FastClock;
-use fast_cache_benchmarks::cpu::{process_cpu_time, vcpu};
-use fast_cache_benchmarks::histogram::{LatencyHistogram, format_ns};
-use fast_cache_benchmarks::workload::{
-    KeyDistribution, KeyPattern, Mix, OpStream, Workload, WorkloadSpec,
-};
 use rand::rngs::SmallRng;
 use rand::{RngCore, SeedableRng};
+use shardcache_benchmarks::backend::Op;
+use shardcache_benchmarks::clock::FastClock;
+use shardcache_benchmarks::cpu::{process_cpu_time, vcpu};
+use shardcache_benchmarks::histogram::{LatencyHistogram, format_ns};
+use shardcache_benchmarks::workload::{
+    KeyDistribution, KeyPattern, Mix, OpStream, Workload, WorkloadSpec,
+};
+use shardmap::config::{ReplicationCompression, ReplicationConfig, ReplicationSendPolicy};
+use shardmap::replication::{ReplicatedEmbeddedStore, ReplicationReplica};
+use shardmap::storage::EmbeddedStore;
 
 type BoxError = Box<dyn Error + Send + Sync>;
 

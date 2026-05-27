@@ -1,8 +1,8 @@
-# fast-cache vLLM connector
+# shardcache vLLM connector
 
-A Python control shim for the direct Rust-native fast-cache vLLM path.
+A Python control shim for the direct Rust-native shardcache vLLM path.
 Python handles hook registration. Rust runs the validated restore plan
-through `fast_cache.Store.restore_vllm_paged(...)`.
+through `shardcache.Store.restore_vllm_paged(...)`.
 
 Target: `vllm==0.17.1`.
 
@@ -12,11 +12,11 @@ Target: `vllm==0.17.1`.
 pip install ./integrations/vllm_direct_connector
 ```
 
-Install the matching `fast_cache` PyO3 wheel in the same environment.
+Install the matching `shardcache` PyO3 wheel in the same environment.
 
 ## Connector class
 
-`fast_cache_vllm_connector.kv_connector_v1.FastCacheKVConnectorV1`
+`shardcache_vllm_connector.kv_connector_v1.ShardCacheKVConnectorV1`
 exposes the pinned vLLM hooks:
 
 - `build_connector_meta`
@@ -29,7 +29,7 @@ exposes the pinned vLLM hooks:
 
 ## Restore path
 
-Selected through `FAST_CACHE_VLLM_PATH_VERSION`:
+Selected through `SHARDCACHE_VLLM_PATH_VERSION`:
 
 - `host_direct_v1` (default): direct Rust restore path.
 - `gpu_direct_api_v0`: experimental queue-based GPU-originated path.
