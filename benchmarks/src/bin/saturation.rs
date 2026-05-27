@@ -122,6 +122,8 @@ struct Args {
 enum BenchEvictionPolicy {
     None,
     Lru,
+    #[cfg(feature = "prefix-eviction")]
+    Prefix,
 }
 
 impl From<BenchEvictionPolicy> for EvictionPolicy {
@@ -129,6 +131,8 @@ impl From<BenchEvictionPolicy> for EvictionPolicy {
         match value {
             BenchEvictionPolicy::None => Self::None,
             BenchEvictionPolicy::Lru => Self::Lru,
+            #[cfg(feature = "prefix-eviction")]
+            BenchEvictionPolicy::Prefix => Self::Prefix,
         }
     }
 }
@@ -347,6 +351,8 @@ impl BenchEvictionPolicy {
         match self {
             Self::None => "none",
             Self::Lru => "lru",
+            #[cfg(feature = "prefix-eviction")]
+            Self::Prefix => "prefix",
         }
     }
 }

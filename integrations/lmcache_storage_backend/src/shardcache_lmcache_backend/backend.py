@@ -179,6 +179,9 @@ class ShardCacheStorageBackend(StoragePluginInterface):
         self._eviction_policy = str(
             self._get_config_value("eviction_policy", "none") or "none"
         ).strip().lower()
+        self._numa_policy = str(
+            self._get_config_value("numa_policy", "off") or "off"
+        ).strip().lower()
         self._encoded_key_cache_limit = max(0, self._get_int_config("encoded_key_cache_limit", 65536))
         self._encoded_metadata_cache_limit = max(
             0, self._get_int_config("encoded_metadata_cache_limit", 4096)
@@ -204,6 +207,7 @@ class ShardCacheStorageBackend(StoragePluginInterface):
             client_architecture=self._client_architecture,
             prefer_session_tags=True,
             scnp_addr=self._scnp_addr,
+            numa_policy=self._numa_policy,
         )
 
         self._lock = threading.RLock()
@@ -747,6 +751,7 @@ class ShardCacheStorageBackend(StoragePluginInterface):
             "scnp_addr": self._scnp_addr,
             "max_memory_bytes": self._max_memory_bytes,
             "eviction_policy": self._eviction_policy,
+            "numa_policy": self._numa_policy,
             "config_prefix": self._config_prefix,
         }
 

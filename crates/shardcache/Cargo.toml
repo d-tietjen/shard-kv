@@ -22,6 +22,7 @@ server = ["shardmap/server"]
 redis = ["shardmap/redis"]
 redis-server = ["server", "redis", "shardmap/redis-server"]
 monoio = ["server", "shardmap/monoio"]
+prefix-eviction = ["shardmap/prefix-eviction"]
 
 [dependencies]
 shardmap = { workspace = true, default-features = false }

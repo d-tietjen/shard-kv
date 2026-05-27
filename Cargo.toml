@@ -2,6 +2,7 @@
 members = [
     "benchmarks",
     "crates/shardcache-client-rs",
+    "crates/shardcache-c",
     "crates/shardcache-formal",
     "crates/shardcache-py",
     "crates/shardcache-runtime",

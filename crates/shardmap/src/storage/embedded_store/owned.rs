@@ -795,6 +795,18 @@ impl OwnedEmbeddedWorkerShards {
             return;
         }
         let route = self.route_session(packed.session_prefix());
+        self.local_batch_set_session_packed_routed_no_ttl(route, packed);
+    }
+
+    #[cfg(feature = "embedded")]
+    pub(crate) fn local_batch_set_session_packed_routed_no_ttl(
+        &mut self,
+        route: EmbeddedSessionRoute,
+        packed: PackedSessionWrite,
+    ) {
+        if packed.item_count() == 0 {
+            return;
+        }
         let shard = self.shard_for_route_mut(route.shard_id);
         for entry in packed.slab.entries.iter() {
             shard.map.delete_hashed_local(entry.hash, &entry.key, 0);
@@ -806,6 +818,11 @@ impl OwnedEmbeddedWorkerShards {
     #[cfg(feature = "embedded")]
     pub(crate) fn local_delete(&mut self, key: &[u8]) -> bool {
         let route = self.route_key(key);
+        self.local_delete_routed(route, key)
+    }
+
+    #[cfg(feature = "embedded")]
+    pub(crate) fn local_delete_routed(&mut self, route: EmbeddedKeyRoute, key: &[u8]) -> bool {
         let shard = self.shard_for_route_mut(route.shard_id);
         let deleted_session = derived_session_storage_prefix(key).is_some_and(|session_prefix| {
             shard

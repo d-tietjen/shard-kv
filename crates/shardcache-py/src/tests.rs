@@ -7,6 +7,22 @@ use shardmap_crate::config::EvictionPolicy;
 use shardmap_crate::cuda::CudaConfig;
 use shardmap_crate::storage::EmbeddedRouteMode;
 
+use crate::NumaRoutePolicy;
+
+#[cfg(feature = "prefix-eviction")]
+#[test]
+fn parses_prefix_eviction_policy_when_feature_is_enabled() {
+    assert_eq!(
+        super::parse_eviction_policy("prefix").expect("prefix policy should parse"),
+        EvictionPolicy::Prefix
+    );
+    assert_eq!(
+        super::parse_eviction_policy("prefix_eviction")
+            .expect("prefix_eviction alias should parse"),
+        EvictionPolicy::Prefix
+    );
+}
+
 #[test]
 fn threaded_store_can_restore_vllm_pages_with_cpu_fallback() {
     let core = StoreCore::new(
@@ -19,6 +35,7 @@ fn threaded_store_can_restore_vllm_pages_with_cpu_fallback() {
         false,
         "local_embedded",
         false,
+        NumaRoutePolicy::Off,
     )
     .expect("threaded store should build");
     core.batch_set_session_owned_no_ttl(
@@ -82,6 +99,7 @@ fn threaded_store_can_restore_vllm_pages_without_gpu_blocks_when_cpu_fallback_ex
         false,
         "local_embedded",
         false,
+        NumaRoutePolicy::Off,
     )
     .expect("threaded store should build");
     core.batch_set_session_owned_no_ttl(
@@ -141,6 +159,7 @@ fn shared_store_rejects_direct_vllm_restore() {
         false,
         "shared",
         false,
+        NumaRoutePolicy::Off,
     )
     .expect("shared store should build");
 
@@ -162,4 +181,52 @@ fn shared_store_rejects_direct_vllm_restore() {
             .contains("client_architecture='local_embedded'"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn threaded_store_routes_full_key_workloads_with_multiple_workers() {
+    let core = StoreCore::new(
+        2,
+        None,
+        true,
+        None,
+        EvictionPolicy::None,
+        EmbeddedRouteMode::FullKey,
+        false,
+        "local_embedded",
+        false,
+        NumaRoutePolicy::Off,
+    )
+    .expect("threaded store should build");
+
+    for index in 0..128usize {
+        let key = format!("k:{index:04x}").into_bytes();
+        let value = format!("v:{index:04x}").into_bytes();
+        core.set(key.clone(), value.clone(), None);
+        assert_eq!(core.get(&key), Some(value));
+    }
+}
+
+#[test]
+fn caller_local_numa_policy_keeps_threaded_store_operations_routed() {
+    let core = StoreCore::new(
+        2,
+        None,
+        true,
+        None,
+        EvictionPolicy::None,
+        EmbeddedRouteMode::FullKey,
+        false,
+        "local_embedded",
+        false,
+        NumaRoutePolicy::CallerLocal,
+    )
+    .expect("threaded store should build");
+
+    let key = b"session-aware-key".to_vec();
+    core.set(key.clone(), b"local".to_vec(), None);
+    assert!(core.exists(&key));
+    assert_eq!(core.get(&key), Some(b"local".to_vec()));
+    assert!(core.delete(&key));
+    assert!(!core.exists(&key));
 }

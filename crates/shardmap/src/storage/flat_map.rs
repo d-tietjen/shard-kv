@@ -1,4 +1,6 @@
 use hashbrown::HashTable;
+#[cfg(feature = "prefix-eviction")]
+use std::collections::HashMap;
 use std::collections::{BinaryHeap, VecDeque};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -162,6 +164,11 @@ impl EntryAccessMeta {
                 primary: self.frequency as u64,
                 secondary: self.last_touch,
             },
+            #[cfg(feature = "prefix-eviction")]
+            EvictionPolicy::Prefix => EvictionRank {
+                primary: self.last_touch,
+                secondary: self.frequency as u64,
+            },
         }
     }
 }
@@ -205,6 +212,81 @@ impl Ord for EvictionCandidate {
 struct LruTouch {
     tick: u64,
     hash: u64,
+}
+
+#[cfg(feature = "prefix-eviction")]
+#[inline(always)]
+fn prefix_eviction_group_rank(access: EntryAccessMeta) -> EvictionRank {
+    EvictionRank {
+        primary: access.last_touch,
+        secondary: access.frequency as u64,
+    }
+}
+
+#[cfg(feature = "prefix-eviction")]
+#[inline(always)]
+fn prefix_eviction_member_rank(
+    prefix_len: usize,
+    key_len: usize,
+    access: EntryAccessMeta,
+) -> EvictionRank {
+    let suffix_depth = key_len.saturating_sub(prefix_len) as u64;
+    EvictionRank {
+        primary: access.last_touch,
+        secondary: u64::MAX.saturating_sub(suffix_depth),
+    }
+}
+
+#[cfg(feature = "prefix-eviction")]
+fn prefix_eviction_key_prefix(key: &[u8]) -> &[u8] {
+    if let Some(prefix) = prefix_eviction_session_chunk_prefix(key) {
+        return prefix;
+    }
+    if let Some(prefix) = prefix_eviction_lmcache_session_prefix(key) {
+        return prefix;
+    }
+    if let Some(index) = key
+        .iter()
+        .rposition(|byte| matches!(*byte, b':' | b'/' | b'|' | b'@'))
+        .filter(|index| *index > 0)
+    {
+        return &key[..index];
+    }
+    key
+}
+
+#[cfg(feature = "prefix-eviction")]
+fn prefix_eviction_session_chunk_prefix(key: &[u8]) -> Option<&[u8]> {
+    if !key.starts_with(b"s:") {
+        return None;
+    }
+    let marker = b":c:";
+    key.windows(marker.len())
+        .rposition(|window| window == marker)
+        .filter(|index| *index > 0)
+        .map(|index| &key[..index])
+}
+
+#[cfg(feature = "prefix-eviction")]
+fn prefix_eviction_lmcache_session_prefix(key: &[u8]) -> Option<&[u8]> {
+    let marker = b"session%";
+    let mut start = 0usize;
+    while start <= key.len() {
+        let remaining = &key[start..];
+        let segment_len = remaining
+            .iter()
+            .position(|byte| *byte == b'@')
+            .unwrap_or(remaining.len());
+        let segment = &remaining[..segment_len];
+        if segment.starts_with(marker) && segment.len() > marker.len() {
+            return Some(segment);
+        }
+        if segment_len == remaining.len() {
+            break;
+        }
+        start = start.saturating_add(segment_len).saturating_add(1);
+    }
+    None
 }
 
 const REUSABLE_VALUE_MIN_BYTES: usize = 4096;
@@ -449,5 +531,25 @@ mod tests {
         assert_eq!(map.get(b"c", 0), Some(b"3".to_vec()));
         assert!(map.stored_bytes() <= 4);
         assert_eq!(map.evictions(), 1);
+    }
+
+    #[cfg(feature = "prefix-eviction")]
+    #[test]
+    fn prefix_eviction_preserves_refreshed_prefix_group() {
+        let mut map = FlatMap::new();
+        map.configure_memory_policy(None, EvictionPolicy::Prefix, 0);
+
+        map.set(b"cold:0".to_vec(), b"1".to_vec(), None, 0);
+        map.set(b"cold:1".to_vec(), b"2".to_vec(), None, 0);
+        map.set(b"hot:0".to_vec(), b"3".to_vec(), None, 0);
+        map.set(b"hot:1".to_vec(), b"4".to_vec(), None, 0);
+        map.set(b"cold:1".to_vec(), b"2".to_vec(), None, 0);
+
+        assert!(map.evict_with_policy(EvictionPolicy::Prefix, 0));
+
+        assert_eq!(map.get(b"hot:0", 0), None);
+        assert_eq!(map.get(b"hot:1", 0), Some(b"4".to_vec()));
+        assert_eq!(map.get(b"cold:0", 0), Some(b"1".to_vec()));
+        assert_eq!(map.get(b"cold:1", 0), Some(b"2".to_vec()));
     }
 }

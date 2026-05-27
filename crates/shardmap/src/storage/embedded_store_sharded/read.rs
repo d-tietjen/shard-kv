@@ -55,6 +55,16 @@ impl WorkerLocalEmbeddedStore {
         self.inner.get_view(key)
     }
 
+    #[inline(always)]
+    pub fn get_owned_view_routed_local(
+        &mut self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+    ) -> OwnedEmbeddedReadView {
+        debug_assert!(self.owns_shard(route.shard_id));
+        OwnedEmbeddedReadView::from_item(self.inner.local_get_slice_routed(route, key))
+    }
+
     pub fn get_view_if_local<'a>(
         &'a mut self,
         key: &[u8],
@@ -227,6 +237,21 @@ impl WorkerLocalEmbeddedStore {
         self.inner.batch_get_view(keys)
     }
 
+    #[inline(always)]
+    pub fn batch_get_owned_view_routed_local(
+        &mut self,
+        keys: &[(EmbeddedKeyRoute, Bytes)],
+    ) -> OwnedEmbeddedBatchReadView {
+        let items = keys
+            .iter()
+            .map(|(route, key)| {
+                debug_assert!(self.owns_shard(route.shard_id));
+                self.inner.local_get_slice_routed(*route, key)
+            })
+            .collect::<Vec<_>>();
+        OwnedEmbeddedBatchReadView::from_items(items)
+    }
+
     pub fn batch_get_view_if_local<'a>(
         &'a mut self,
         keys: &[Bytes],
@@ -267,6 +292,16 @@ impl WorkerLocalEmbeddedStore {
         self.inner.batch_get_session_view(session_prefix, keys)
     }
 
+    #[inline(always)]
+    pub fn batch_get_session_owned_view_routed_local(
+        &mut self,
+        route: EmbeddedSessionRoute,
+        keys: &[Bytes],
+    ) -> OwnedEmbeddedBatchReadView {
+        debug_assert!(self.owns_shard(route.shard_id));
+        self.inner.batch_get_session_view_routed_no_ttl(route, keys)
+    }
+
     pub fn batch_get_session_view_prehashed_if_local<'a>(
         &'a mut self,
         session_prefix: &[u8],
@@ -291,6 +326,18 @@ impl WorkerLocalEmbeddedStore {
             .batch_get_session_view_prehashed(session_prefix, keys, key_hashes)
     }
 
+    #[inline(always)]
+    pub fn batch_get_session_owned_view_prehashed_routed_local(
+        &mut self,
+        route: EmbeddedSessionRoute,
+        keys: &[Bytes],
+        key_hashes: &[u64],
+    ) -> OwnedEmbeddedBatchReadView {
+        debug_assert!(self.owns_shard(route.shard_id));
+        self.inner
+            .batch_get_session_view_prehashed_routed_no_ttl(route, keys, key_hashes)
+    }
+
     pub fn batch_get_session_packed(
         &mut self,
         session_prefix: &[u8],
@@ -307,6 +354,17 @@ impl WorkerLocalEmbeddedStore {
     ) -> Result<PackedBatch, LocalRouteError> {
         self.local_session_route(session_prefix)?;
         Ok(self.inner.batch_get_session_packed(session_prefix, keys))
+    }
+
+    #[inline(always)]
+    pub fn batch_get_session_packed_routed_local(
+        &mut self,
+        route: EmbeddedSessionRoute,
+        keys: &[Bytes],
+    ) -> PackedBatch {
+        debug_assert!(self.owns_shard(route.shard_id));
+        self.inner
+            .batch_get_session_packed_routed_no_ttl(route, keys)
     }
 
     pub fn batch_get_session_packed_view(

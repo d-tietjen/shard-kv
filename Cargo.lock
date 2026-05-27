@@ -1304,6 +1304,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "shardcache-c"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "shardmap",
+]
+
+[[package]]
 name = "shardcache-client-rs"
 version = "0.1.0"
 dependencies = [
@@ -1323,7 +1331,9 @@ dependencies = [
 name = "shardcache-py"
 version = "0.1.0"
 dependencies = [
+ "core_affinity",
  "dashmap",
+ "libc",
  "pyo3",
  "shardcache-client-rs",
  "shardcache-runtime",

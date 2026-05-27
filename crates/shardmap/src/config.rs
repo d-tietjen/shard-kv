@@ -61,6 +61,9 @@ pub enum EvictionPolicy {
     Lru,
     /// Evict least-frequently-used entries first.
     Lfu,
+    /// Evict cold prefix groups first, then cold suffix blocks inside that group.
+    #[cfg(feature = "prefix-eviction")]
+    Prefix,
 }
 
 /// Redis-compatible transaction execution policy.

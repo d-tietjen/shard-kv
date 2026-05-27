@@ -4,6 +4,16 @@ use super::{
 };
 use crate::{Result, ShardCacheError};
 
+#[cfg(feature = "prefix-eviction")]
+fn memory_limit_eviction_policy_message() -> &'static str {
+    "max_memory_bytes requires eviction_policy to be set to lru, lfu, or prefix"
+}
+
+#[cfg(not(feature = "prefix-eviction"))]
+fn memory_limit_eviction_policy_message() -> &'static str {
+    "max_memory_bytes requires eviction_policy to be set to lru or lfu"
+}
+
 pub(super) struct ConfigValidator<'a> {
     config: &'a ShardCacheConfig,
 }
@@ -97,7 +107,7 @@ impl ConfigValidationRule {
             0 => Ok(()),
             _ => ConfigCheck::require(
                 config.eviction_policy != EvictionPolicy::None,
-                "max_memory_bytes requires eviction_policy to be set to lru or lfu",
+                memory_limit_eviction_policy_message(),
             ),
         }
     }

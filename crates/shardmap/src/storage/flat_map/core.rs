@@ -301,6 +301,10 @@ impl FlatMap {
         if policy == EvictionPolicy::None || self.entries.is_empty() {
             return None;
         }
+        #[cfg(feature = "prefix-eviction")]
+        if policy == EvictionPolicy::Prefix {
+            return self.prefix_eviction_candidate();
+        }
 
         let mut selected: Option<(EvictionRank, u64, &[u8])> = None;
         for entry in self.entries.iter() {
@@ -328,6 +332,18 @@ impl FlatMap {
     ) -> bool {
         if policy == EvictionPolicy::None || self.entries.is_empty() {
             return false;
+        }
+
+        #[cfg(feature = "prefix-eviction")]
+        if policy == EvictionPolicy::Prefix {
+            let mut evicted = false;
+            while self.stored_bytes > target_bytes {
+                if !self.evict_with_policy(policy, now_ms) {
+                    break;
+                }
+                evicted = true;
+            }
+            return evicted;
         }
 
         if policy == EvictionPolicy::Lru {
@@ -434,6 +450,43 @@ impl FlatMap {
             }
         }
         candidates.into_vec()
+    }
+
+    #[cfg(feature = "prefix-eviction")]
+    fn prefix_eviction_candidate(&self) -> Option<(EvictionRank, u64, Bytes)> {
+        let mut group_ranks: HashMap<Bytes, EvictionRank> = HashMap::new();
+        for entry in self.entries.iter() {
+            let prefix = prefix_eviction_key_prefix(entry.key.as_ref()).to_vec();
+            let rank = prefix_eviction_group_rank(entry.access);
+            group_ranks
+                .entry(prefix)
+                .and_modify(|group_rank| {
+                    if *group_rank < rank {
+                        *group_rank = rank;
+                    }
+                })
+                .or_insert(rank);
+        }
+
+        let (group_rank, prefix) = group_ranks
+            .into_iter()
+            .min_by_key(|(_prefix, rank)| *rank)
+            .map(|(prefix, rank)| (rank, prefix))?;
+
+        let mut selected: Option<(EvictionRank, u64, &[u8])> = None;
+        for entry in self.entries.iter() {
+            if prefix_eviction_key_prefix(entry.key.as_ref()) != prefix.as_slice() {
+                continue;
+            }
+            let rank = prefix_eviction_member_rank(prefix.len(), entry.key_len, entry.access);
+            let candidate = (rank, entry.hash, entry.key.as_ref());
+            selected = match selected {
+                Some(current) if current.0 <= candidate.0 => Some(current),
+                _ => Some(candidate),
+            };
+        }
+
+        selected.map(|(_member_rank, hash, key)| (group_rank, hash, key.to_vec()))
     }
 
     fn eviction_candidate_count(&self, target_bytes: usize) -> usize {
