@@ -144,6 +144,12 @@ pub extern "C" fn shardcache_status_string(status: shardcache_status_t) -> *cons
     }
 }
 
+/// Writes the default cache options into `out_options`.
+///
+/// # Safety
+///
+/// `out_options` must be non-null and valid for writes of one
+/// `shardcache_options_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_options_default(
     out_options: *mut shardcache_options_t,
@@ -159,6 +165,14 @@ pub unsafe extern "C" fn shardcache_options_default(
     })
 }
 
+/// Opens an embedded cache handle.
+///
+/// # Safety
+///
+/// `options` may be null; when non-null it must be valid for reads of one
+/// `shardcache_options_t`. `out_db` must be non-null and valid for writes of
+/// one handle pointer. A returned handle must be released exactly once with
+/// `shardcache_close`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_open(
     options: *const shardcache_options_t,
@@ -211,6 +225,12 @@ pub unsafe extern "C" fn shardcache_open(
     })
 }
 
+/// Closes an embedded cache handle.
+///
+/// # Safety
+///
+/// `db` must be null or a handle returned by `shardcache_open` that has not
+/// already been closed. No other thread may use the handle after this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_close(db: *mut shardcache_db_t) {
     if !db.is_null() {
@@ -220,6 +240,14 @@ pub unsafe extern "C" fn shardcache_close(db: *mut shardcache_db_t) {
     }
 }
 
+/// Prepares a key for repeated routed operations.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `key_ptr` must point to `key_len` bytes
+/// unless `key_len` is zero. `out_prepared` must be non-null and valid for
+/// writes of one prepared-key pointer. A returned prepared key must be freed
+/// with `shardcache_prepared_key_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_prepare_key(
     db: *mut shardcache_db_t,
@@ -248,6 +276,12 @@ pub unsafe extern "C" fn shardcache_prepare_key(
     })
 }
 
+/// Frees a prepared key.
+///
+/// # Safety
+///
+/// `prepared` must be null or a pointer returned by `shardcache_prepare_key`
+/// that has not already been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_prepared_key_free(prepared: *mut shardcache_prepared_key_t) {
     if !prepared.is_null() {
@@ -257,6 +291,12 @@ pub unsafe extern "C" fn shardcache_prepared_key_free(prepared: *mut shardcache_
     }
 }
 
+/// Stores a key/value pair without a TTL.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `key_ptr` and `value_ptr` must each point
+/// to their corresponding byte lengths unless that length is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_set(
     db: *mut shardcache_db_t,
@@ -280,6 +320,12 @@ pub unsafe extern "C" fn shardcache_set(
     })
 }
 
+/// Stores a key/value pair with an optional TTL in milliseconds.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `key_ptr` and `value_ptr` must each point
+/// to their corresponding byte lengths unless that length is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_set_ttl(
     db: *mut shardcache_db_t,
@@ -305,6 +351,13 @@ pub unsafe extern "C" fn shardcache_set_ttl(
     })
 }
 
+/// Stores a value through a prepared key.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `prepared` must be a live prepared key
+/// created from the same handle. `value_ptr` must point to `value_len` bytes
+/// unless `value_len` is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_set_prepared(
     db: *mut shardcache_db_t,
@@ -335,6 +388,14 @@ pub unsafe extern "C" fn shardcache_set_prepared(
     })
 }
 
+/// Reads a value by key.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `key_ptr` must point to `key_len` bytes
+/// unless `key_len` is zero. `out_bytes` must be non-null and valid for writes
+/// of one `shardcache_bytes_t`. A successful output must be released with
+/// `shardcache_bytes_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_get(
     db: *mut shardcache_db_t,
@@ -364,6 +425,14 @@ pub unsafe extern "C" fn shardcache_get(
     })
 }
 
+/// Reads a value through a prepared key.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `prepared` must be a live prepared key
+/// created from the same handle. `out_bytes` must be non-null and valid for
+/// writes of one `shardcache_bytes_t`. A successful output must be released
+/// with `shardcache_bytes_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_get_prepared(
     db: *mut shardcache_db_t,
@@ -395,6 +464,12 @@ pub unsafe extern "C" fn shardcache_get_prepared(
     })
 }
 
+/// Deletes a key.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `key_ptr` must point to `key_len` bytes
+/// unless `key_len` is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_delete(
     db: *mut shardcache_db_t,
@@ -416,6 +491,13 @@ pub unsafe extern "C" fn shardcache_delete(
     })
 }
 
+/// Stores a batch of key/value pairs.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `items_ptr` must point to `items_len`
+/// valid items unless `items_len` is zero. Each item slice must point to its
+/// corresponding byte length unless that length is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_batch_set(
     db: *mut shardcache_db_t,
@@ -444,6 +526,15 @@ pub unsafe extern "C" fn shardcache_batch_set(
     })
 }
 
+/// Reads a batch of keys.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `keys_ptr` must point to `keys_len` valid
+/// key slices unless `keys_len` is zero. Each key slice must point to its byte
+/// length unless that length is zero. `out_batch` must be non-null and valid
+/// for writes of one `shardcache_batch_t`. A successful output must be
+/// released with `shardcache_batch_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_batch_get(
     db: *mut shardcache_db_t,
@@ -474,6 +565,13 @@ pub unsafe extern "C" fn shardcache_batch_get(
     })
 }
 
+/// Stores a session-scoped key/value pair.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `session_ptr`, `key_ptr`, and `value_ptr`
+/// must each point to their corresponding byte lengths unless that length is
+/// zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_session_set(
     db: *mut shardcache_db_t,
@@ -503,6 +601,15 @@ pub unsafe extern "C" fn shardcache_session_set(
     })
 }
 
+/// Reads a session-scoped value.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `session_ptr` and `key_ptr` must each
+/// point to their corresponding byte lengths unless that length is zero.
+/// `out_bytes` must be non-null and valid for writes of one
+/// `shardcache_bytes_t`. A successful output must be released with
+/// `shardcache_bytes_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_session_get(
     db: *mut shardcache_db_t,
@@ -539,6 +646,13 @@ pub unsafe extern "C" fn shardcache_session_get(
     })
 }
 
+/// Checks whether a key exists.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `key_ptr` must point to `key_len` bytes
+/// unless `key_len` is zero. `out_present` must be non-null and valid for
+/// writes of one `bool`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_contains(
     db: *mut shardcache_db_t,
@@ -563,6 +677,12 @@ pub unsafe extern "C" fn shardcache_contains(
     })
 }
 
+/// Returns the number of entries in the cache.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `out_len` must be non-null and valid for
+/// writes of one `usize`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_len(
     db: *mut shardcache_db_t,
@@ -582,6 +702,12 @@ pub unsafe extern "C" fn shardcache_len(
     })
 }
 
+/// Returns the approximate number of stored value bytes.
+///
+/// # Safety
+///
+/// `db` must be a valid open handle. `out_bytes` must be non-null and valid
+/// for writes of one `usize`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_stored_bytes(
     db: *mut shardcache_db_t,
@@ -601,6 +727,13 @@ pub unsafe extern "C" fn shardcache_stored_bytes(
     })
 }
 
+/// Frees bytes returned by a read operation.
+///
+/// # Safety
+///
+/// `bytes` must be null or a pointer to a `shardcache_bytes_t` initialized by
+/// this library. Each initialized output must be freed at most once unless it
+/// is overwritten by another successful read.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_bytes_free(bytes: *mut shardcache_bytes_t) {
     if bytes.is_null() {
@@ -615,6 +748,13 @@ pub unsafe extern "C" fn shardcache_bytes_free(bytes: *mut shardcache_bytes_t) {
     *bytes = shardcache_bytes_t::default();
 }
 
+/// Frees a batch returned by `shardcache_batch_get`.
+///
+/// # Safety
+///
+/// `batch` must be null or a pointer to a `shardcache_batch_t` initialized by
+/// this library. Each initialized output must be freed at most once unless it
+/// is overwritten by another successful batch read.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn shardcache_batch_free(batch: *mut shardcache_batch_t) {
     if batch.is_null() {

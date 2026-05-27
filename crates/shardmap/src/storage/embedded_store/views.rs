@@ -424,11 +424,9 @@ impl OwnedEmbeddedBatchReadView {
     pub(crate) fn from_items(items: Vec<Option<EmbeddedReadSlice>>) -> Self {
         let mut hit_count = 0usize;
         let mut total_bytes = 0usize;
-        for item in &items {
-            if let Some(item) = item {
-                hit_count += 1;
-                total_bytes += item.len();
-            }
+        for item in items.iter().flatten() {
+            hit_count += 1;
+            total_bytes += item.len();
         }
         Self {
             items,

@@ -586,7 +586,7 @@ impl NumaTopology {
             return Self::single_node(worker_count, policy);
         }
 
-        let nodes = discover_numa_nodes().unwrap_or_else(|| discover_single_node());
+        let nodes = discover_numa_nodes().unwrap_or_else(discover_single_node);
         if nodes.is_empty() {
             return Self::single_node(worker_count, policy);
         }
