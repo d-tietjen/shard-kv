@@ -11,8 +11,6 @@ verif
 rustc-ice-*.txt
 docs
 benchmarks/results
-crates/fast-cache/bench
-crates/fast-cache/src/bin/bench_*.rs
 **/__pycache__
 **/.pytest_cache
 **/.mypy_cache

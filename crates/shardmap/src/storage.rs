@@ -1,6 +1,6 @@
 //! Embedded storage APIs, routing helpers, batch payloads, and runtime stats.
 //!
-//! Most applications should start with [`crate::FastMap`], which is a
+//! Most applications should start with [`crate::ShardMap`], which is a
 //! cloneable DashMap-like facade over [`SharedEmbeddedStore`]. This module
 //! exposes the lower-level storage surfaces behind that facade. Use
 //! [`EmbeddedStore`] for the richer shared sharded engine used by server mode.
