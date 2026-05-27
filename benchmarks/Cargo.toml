@@ -13,6 +13,11 @@ default = []
 # Build the fc-embed backend on top of fast-cache's reviewed unsafe hot paths.
 # Run the bench twice (default + --features unsafe) to get both rows.
 unsafe = ["fast-cache/unsafe"]
+# Build fast-cache's shared embedded hot path in no-TTL mode for point-key
+# workloads that never create expiring entries.
+no-ttl = ["fast-cache/no-ttl"]
+# Build fast-cache's experimental point-key-only no-TTL hot path.
+experimental-no-ttl-point-hot-path = ["fast-cache/experimental-no-ttl-point-hot-path"]
 # Rebuild fast-cache's shared embedded store with parking_lot::RwLock stripes
 # for cache-level lock A/B runs against the default read-biased lock.
 shared-parking-lot-lock = ["fast-cache/shared-parking-lot-lock"]
@@ -61,3 +66,19 @@ path = "src/bin/wal_tcp_export_cost.rs"
 [[bin]]
 name = "memory_write_cost"
 path = "src/bin/memory_write_cost.rs"
+
+[[bin]]
+name = "redis_command_matrix"
+path = "src/bin/redis_command_matrix.rs"
+
+[[bin]]
+name = "redis_command_manifest"
+path = "src/bin/redis_command_manifest.rs"
+
+[[bin]]
+name = "redis_command_report"
+path = "src/bin/redis_command_report.rs"
+
+[[bin]]
+name = "fcnp_scan_matrix"
+path = "src/bin/fcnp_scan_matrix.rs"

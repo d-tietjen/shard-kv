@@ -1,7 +1,7 @@
-use fast_cache::cuda::{CudaConfig, CudaSessionTransferRequest};
-use fast_cache::storage::LocalEmbeddedStore;
+use fast_cache_core::cuda::{CudaConfig, CudaSessionTransferRequest};
+use fast_cache_core::storage::LocalEmbeddedStore;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
-use fast_cache::storage::{LocalEmbeddedSessionPackedView, PackedBatch};
+use fast_cache_core::storage::{LocalEmbeddedSessionPackedView, PackedBatch};
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 use std::sync::{Arc, Mutex};
 
@@ -430,8 +430,8 @@ impl DirectKvConnector {
 
 #[cfg(test)]
 mod tests {
-    use fast_cache::cuda::{CudaChunkTransferDescriptor, CudaSessionTransferRequest};
-    use fast_cache::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap};
+    use fast_cache_core::cuda::{CudaChunkTransferDescriptor, CudaSessionTransferRequest};
+    use fast_cache_core::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap};
 
     use super::{DirectKvConnector, TransferBackend, TransferDestination};
     #[cfg(all(feature = "cuda", target_os = "linux"))]
@@ -464,7 +464,7 @@ mod tests {
             .expect("session write should work");
 
         let mut dst = vec![0u8; 8];
-        let connector = DirectKvConnector::new(fast_cache::cuda::CudaConfig::default());
+        let connector = DirectKvConnector::new(fast_cache_core::cuda::CudaConfig::default());
         let report = connector
             .restore_session(
                 &mut local,
@@ -503,7 +503,7 @@ mod tests {
             .expect("session write should work");
 
         let mut dst = vec![0u8; 8];
-        let config = fast_cache::cuda::CudaConfig {
+        let config = fast_cache_core::cuda::CudaConfig {
             enabled: false,
             allow_cpu_fallback: true,
             ..Default::default()
@@ -556,7 +556,7 @@ mod tests {
             .expect("session write should work");
 
         let mut simulated_device = vec![0u8; 8];
-        let connector = DirectKvConnector::new(fast_cache::cuda::CudaConfig::default());
+        let connector = DirectKvConnector::new(fast_cache_core::cuda::CudaConfig::default());
         let mut engine = SimulatedGpuEngine::default();
         let report = connector
             .restore_session_with_gpu_engine(
@@ -606,7 +606,7 @@ mod tests {
 
         let mut page0 = vec![0u8; 4];
         let mut page1 = vec![0u8; 4];
-        let connector = DirectKvConnector::new(fast_cache::cuda::CudaConfig::default());
+        let connector = DirectKvConnector::new(fast_cache_core::cuda::CudaConfig::default());
         let mut engine = SimulatedGpuEngine::default();
         let report = connector
             .restore_session_with_gpu_engine(
@@ -670,7 +670,7 @@ mod tests {
             )
             .expect("session write should work");
 
-        let connector = DirectKvConnector::new(fast_cache::cuda::CudaConfig::default());
+        let connector = DirectKvConnector::new(fast_cache_core::cuda::CudaConfig::default());
         let mut engine = CudaTransferEngine::new(0).expect("real CUDA engine should initialize");
         let device_buffer =
             DeviceBuffer::from_slice(&[0u8; 8]).expect("device buffer allocation should succeed");
@@ -752,10 +752,10 @@ mod tests {
                 dst_base_offset_bytes: 0,
             },
         );
-        let policy = HostTransferPolicy::from(&fast_cache::cuda::CudaConfig {
+        let policy = HostTransferPolicy::from(&fast_cache_core::cuda::CudaConfig {
             prefer_direct_host_dma: false,
             pinned_staging_threshold_bytes: 1,
-            ..fast_cache::cuda::CudaConfig::default()
+            ..fast_cache_core::cuda::CudaConfig::default()
         });
         let mut staging_pool = CudaPinnedStagingPool::default();
 
@@ -824,10 +824,10 @@ mod tests {
                 dst_base_offset_bytes: 0,
             },
         );
-        let policy = HostTransferPolicy::from(&fast_cache::cuda::CudaConfig {
+        let policy = HostTransferPolicy::from(&fast_cache_core::cuda::CudaConfig {
             prefer_direct_host_dma: true,
             pinned_staging_threshold_bytes: usize::MAX,
-            ..fast_cache::cuda::CudaConfig::default()
+            ..fast_cache_core::cuda::CudaConfig::default()
         });
         let mut staging_pool = CudaPinnedStagingPool::default();
 
@@ -909,7 +909,7 @@ mod tests {
     #[cfg(all(feature = "cuda", target_os = "linux"))]
     fn run_real_cuda_benchmark_case(
         case_name: &str,
-        cuda: fast_cache::cuda::CudaConfig,
+        cuda: fast_cache_core::cuda::CudaConfig,
         layout: BenchTransferLayout,
         use_configured_direct_dma_streams: bool,
         chunk_size: usize,
@@ -1042,7 +1042,7 @@ mod tests {
     #[cfg(all(feature = "cuda", target_os = "linux"))]
     fn report_real_cuda_benchmark_case(
         case_name: &str,
-        cuda: fast_cache::cuda::CudaConfig,
+        cuda: fast_cache_core::cuda::CudaConfig,
         layout: BenchTransferLayout,
         use_configured_direct_dma_streams: bool,
     ) {
@@ -1094,13 +1094,13 @@ mod tests {
     fn connector_can_report_real_cuda_direct_dma_single_stream_benchmark_when_enabled() {
         report_real_cuda_benchmark_case(
             "engine_direct_dma_single_stream",
-            fast_cache::cuda::CudaConfig {
+            fast_cache_core::cuda::CudaConfig {
                 enabled: true,
                 transfer_stream_count: 1,
                 layer_streaming: false,
                 prefer_direct_host_dma: true,
                 pinned_staging_threshold_bytes: usize::MAX,
-                ..fast_cache::cuda::CudaConfig::default()
+                ..fast_cache_core::cuda::CudaConfig::default()
             },
             BenchTransferLayout::Contiguous,
             false,
@@ -1112,13 +1112,13 @@ mod tests {
     fn connector_can_report_real_cuda_direct_dma_layered_4stream_benchmark_when_enabled() {
         report_real_cuda_benchmark_case(
             "engine_direct_dma_layered_4stream",
-            fast_cache::cuda::CudaConfig {
+            fast_cache_core::cuda::CudaConfig {
                 enabled: true,
                 transfer_stream_count: 4,
                 layer_streaming: true,
                 prefer_direct_host_dma: true,
                 pinned_staging_threshold_bytes: usize::MAX,
-                ..fast_cache::cuda::CudaConfig::default()
+                ..fast_cache_core::cuda::CudaConfig::default()
             },
             BenchTransferLayout::Contiguous,
             false,
@@ -1130,13 +1130,13 @@ mod tests {
     fn connector_can_report_real_cuda_direct_dma_layered_8stream_benchmark_when_enabled() {
         report_real_cuda_benchmark_case(
             "engine_direct_dma_layered_8stream",
-            fast_cache::cuda::CudaConfig {
+            fast_cache_core::cuda::CudaConfig {
                 enabled: true,
                 transfer_stream_count: 8,
                 layer_streaming: true,
                 prefer_direct_host_dma: true,
                 pinned_staging_threshold_bytes: usize::MAX,
-                ..fast_cache::cuda::CudaConfig::default()
+                ..fast_cache_core::cuda::CudaConfig::default()
             },
             BenchTransferLayout::Contiguous,
             false,
@@ -1148,13 +1148,13 @@ mod tests {
     fn connector_can_report_real_cuda_fragmented_direct_dma_single_stream_benchmark_when_enabled() {
         report_real_cuda_benchmark_case(
             "engine_direct_dma_fragmented_single_stream",
-            fast_cache::cuda::CudaConfig {
+            fast_cache_core::cuda::CudaConfig {
                 enabled: true,
                 transfer_stream_count: 1,
                 layer_streaming: false,
                 prefer_direct_host_dma: true,
                 pinned_staging_threshold_bytes: usize::MAX,
-                ..fast_cache::cuda::CudaConfig::default()
+                ..fast_cache_core::cuda::CudaConfig::default()
             },
             BenchTransferLayout::Fragmented { gap_multiplier: 1 },
             true,
@@ -1167,13 +1167,13 @@ mod tests {
     {
         report_real_cuda_benchmark_case(
             "engine_direct_dma_fragmented_layered_4stream",
-            fast_cache::cuda::CudaConfig {
+            fast_cache_core::cuda::CudaConfig {
                 enabled: true,
                 transfer_stream_count: 4,
                 layer_streaming: true,
                 prefer_direct_host_dma: true,
                 pinned_staging_threshold_bytes: usize::MAX,
-                ..fast_cache::cuda::CudaConfig::default()
+                ..fast_cache_core::cuda::CudaConfig::default()
             },
             BenchTransferLayout::Fragmented { gap_multiplier: 1 },
             true,
@@ -1186,13 +1186,13 @@ mod tests {
     {
         report_real_cuda_benchmark_case(
             "engine_direct_dma_fragmented_layered_8stream",
-            fast_cache::cuda::CudaConfig {
+            fast_cache_core::cuda::CudaConfig {
                 enabled: true,
                 transfer_stream_count: 8,
                 layer_streaming: true,
                 prefer_direct_host_dma: true,
                 pinned_staging_threshold_bytes: usize::MAX,
-                ..fast_cache::cuda::CudaConfig::default()
+                ..fast_cache_core::cuda::CudaConfig::default()
             },
             BenchTransferLayout::Fragmented { gap_multiplier: 1 },
             true,
@@ -1204,13 +1204,13 @@ mod tests {
     fn connector_can_report_real_cuda_pinned_staging_layered_4stream_benchmark_when_enabled() {
         report_real_cuda_benchmark_case(
             "engine_pinned_staging_layered_4stream",
-            fast_cache::cuda::CudaConfig {
+            fast_cache_core::cuda::CudaConfig {
                 enabled: true,
                 transfer_stream_count: 4,
                 layer_streaming: true,
                 prefer_direct_host_dma: false,
                 pinned_staging_threshold_bytes: 1,
-                ..fast_cache::cuda::CudaConfig::default()
+                ..fast_cache_core::cuda::CudaConfig::default()
             },
             BenchTransferLayout::Contiguous,
             false,
@@ -1223,13 +1223,13 @@ mod tests {
      {
         report_real_cuda_benchmark_case(
             "engine_pinned_staging_fragmented_layered_4stream",
-            fast_cache::cuda::CudaConfig {
+            fast_cache_core::cuda::CudaConfig {
                 enabled: true,
                 transfer_stream_count: 4,
                 layer_streaming: true,
                 prefer_direct_host_dma: false,
                 pinned_staging_threshold_bytes: 1,
-                ..fast_cache::cuda::CudaConfig::default()
+                ..fast_cache_core::cuda::CudaConfig::default()
             },
             BenchTransferLayout::Fragmented { gap_multiplier: 1 },
             false,

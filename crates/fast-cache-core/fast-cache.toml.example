@@ -1,0 +1,33 @@
+bind_addr = "127.0.0.1:6380"
+max_connections = 4096
+shard_count = 4
+ttl_sweep_interval_ms = 1000
+stats_interval_ms = 5000
+transaction_mode = "shard_local"
+
+[tiers]
+hot_capacity = 2048
+warm_capacity = 8192
+cold_capacity = 65536
+promotion_batch = 256
+
+[cuda]
+enabled = false
+device_ordinal = 0
+hot_tier_bytes = 10737418240
+pinned_host_bytes = 536870912
+transfer_stream_count = 4
+layer_streaming = true
+prefer_direct_host_dma = true
+pinned_staging_threshold_bytes = 2097152
+allow_cpu_fallback = true
+
+[persistence]
+enabled = true
+data_dir = "./var/fast-cache"
+segment_size_bytes = 67108864
+fsync_interval_ms = 100
+snapshot_every_seconds = 300
+snapshot_min_writes = 1000
+compress_snapshots = true
+wal_channel_capacity = 16384

@@ -5,29 +5,28 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        FAST_CACHE_FEATURES: ${FAST_CACHE_FEATURES:-server}
+        FAST_CACHE_FEATURES: ${FAST_CACHE_FEATURES:-redis-server}
         RUSTFLAGS: ${RUSTFLAGS:-}
     restart: unless-stopped
     ports:
-      - "${FAST_CACHE_PORT:-6380}:${FAST_CACHE_PORT:-6380}"
+      - "${FAST_CACHE_HOST:-127.0.0.1}:${FAST_CACHE_PORT:-6380}:${FAST_CACHE_PORT:-6380}"
       # Keep this range length equal to FAST_CACHE_SHARD_COUNT.
       # The server reads FAST_CACHE_DIRECT_SHARD_BASE_PORT; this range only
       # controls which host/container ports Compose publishes.
-      - "${FAST_CACHE_DIRECT_SHARD_PORT_RANGE:-6501-6504}:${FAST_CACHE_DIRECT_SHARD_PORT_RANGE:-6501-6504}"
+      - "${FAST_CACHE_HOST:-127.0.0.1}:${FAST_CACHE_DIRECT_SHARD_PORT_RANGE:-6501-6504}:${FAST_CACHE_DIRECT_SHARD_PORT_RANGE:-6501-6504}"
     environment:
       FAST_CACHE_DIRECT_SHARD_PORTS: ${FAST_CACHE_DIRECT_SHARD_PORTS:-1}
       FAST_CACHE_DIRECT_SHARD_BASE_PORT: ${FAST_CACHE_DIRECT_SHARD_BASE_PORT:-6501}
+      FAST_CACHE_HANDOFF_BUFFER_BYTES: ${FAST_CACHE_HANDOFF_BUFFER_BYTES:-}
+      FAST_CACHE_TOKIO_WRITER_MODE: ${FAST_CACHE_TOKIO_WRITER_MODE:-inline}
+      RUST_LOG: ${RUST_LOG:-info}
     command:
       - --bind-addr
       - "0.0.0.0:${FAST_CACHE_PORT:-6380}"
-      - --data-dir
-      - /var/lib/fast-cache
+      - --disable-persistence
+      - --server-mode
+      - direct
       - --shard-count
       - "${FAST_CACHE_SHARD_COUNT:-4}"
       - --max-connections
       - "${FAST_CACHE_MAX_CONNECTIONS:-4096}"
-    volumes:
-      - fast-cache-data:/var/lib/fast-cache
-
-volumes:
-  fast-cache-data:

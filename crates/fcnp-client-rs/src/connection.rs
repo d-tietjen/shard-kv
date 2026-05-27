@@ -2,11 +2,15 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 
 use crate::commands::FcnpCommand;
+#[cfg(feature = "redis")]
+use crate::commands::redis::RedisResponse;
 use crate::error::{FcnpClientError, Result};
 use crate::protocol::{
-    FAST_PROTOCOL_VERSION, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC, STATUS_ERROR, STATUS_NULL,
-    STATUS_OK, STATUS_VALUE,
+    FAST_PROTOCOL_VERSION, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC, STATUS_ERROR, STATUS_INTEGER,
+    STATUS_NULL, STATUS_OK, STATUS_VALUE,
 };
+#[cfg(feature = "redis")]
+use crate::protocol::{STATUS_ARRAY, STATUS_FLOAT};
 
 #[derive(Debug)]
 pub(crate) struct FcnpConnection {
@@ -29,7 +33,7 @@ impl FcnpConnection {
     }
 
     pub(crate) fn execute<C: FcnpCommand>(&mut self, command: C) -> Result<C::Output> {
-        self.write_header(C::OPCODE, command.flags(), command.body_len() as u32)?;
+        self.write_header(command.opcode(), command.flags(), command.body_len() as u32)?;
         command.write_body(&mut self.w)?;
         self.w.flush()?;
         command.read_response(self)
@@ -74,6 +78,74 @@ impl FcnpConnection {
         }
     }
 
+    pub(crate) fn read_integer(&mut self, op: &str) -> Result<i64> {
+        let (status, body_len) = self.read_response_header()?;
+        match status {
+            STATUS_INTEGER => {
+                if body_len != 8 {
+                    self.discard(body_len)?;
+                    return Err(FcnpClientError::Protocol(format!(
+                        "{op} integer response body length was {body_len}, expected 8"
+                    )));
+                }
+                let mut value = [0u8; 8];
+                self.r.read_exact(&mut value)?;
+                Ok(i64::from_le_bytes(value))
+            }
+            STATUS_ERROR => Err(FcnpClientError::Protocol(self.read_error(body_len)?)),
+            other => Err(FcnpClientError::Protocol(format!(
+                "{op} unexpected response status: {other}"
+            ))),
+        }
+    }
+
+    #[cfg(feature = "redis")]
+    pub(crate) fn read_redis_response(&mut self, op: &str) -> Result<RedisResponse> {
+        let (status, body_len) = self.read_response_header()?;
+        match status {
+            STATUS_OK => {
+                self.discard(body_len)?;
+                Ok(RedisResponse::Ok)
+            }
+            STATUS_NULL => {
+                self.discard(body_len)?;
+                Ok(RedisResponse::Null)
+            }
+            STATUS_ERROR => Err(FcnpClientError::Protocol(self.read_error(body_len)?)),
+            STATUS_INTEGER => {
+                if body_len != 8 {
+                    self.discard(body_len)?;
+                    return Err(FcnpClientError::Protocol(format!(
+                        "{op} integer response body length was {body_len}, expected 8"
+                    )));
+                }
+                let mut value = [0u8; 8];
+                self.r.read_exact(&mut value)?;
+                Ok(RedisResponse::Integer(i64::from_le_bytes(value)))
+            }
+            STATUS_VALUE => {
+                let mut value = vec![0; body_len];
+                self.r.read_exact(value.as_mut_slice())?;
+                Ok(RedisResponse::Value(value))
+            }
+            STATUS_ARRAY => self.read_array_response(op, body_len),
+            STATUS_FLOAT => {
+                if body_len != 8 {
+                    self.discard(body_len)?;
+                    return Err(FcnpClientError::Protocol(format!(
+                        "{op} float response body length was {body_len}, expected 8"
+                    )));
+                }
+                let mut value = [0u8; 8];
+                self.r.read_exact(&mut value)?;
+                Ok(RedisResponse::Float(f64::from_le_bytes(value)))
+            }
+            other => Err(FcnpClientError::Protocol(format!(
+                "{op} unexpected response status: {other}"
+            ))),
+        }
+    }
+
     pub(crate) fn write_header(&mut self, cmd: u8, flags: u8, body_len: u32) -> Result<()> {
         let header = [
             FAST_REQUEST_MAGIC,
@@ -107,6 +179,45 @@ impl FcnpConnection {
         let status = header[2];
         let body_len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
         Ok((status, body_len))
+    }
+
+    #[cfg(feature = "redis")]
+    fn read_array_response(&mut self, op: &str, body_len: usize) -> Result<RedisResponse> {
+        self.scratch.resize(body_len, 0);
+        self.r.read_exact(&mut self.scratch[..body_len])?;
+        if body_len < 4 {
+            return Err(FcnpClientError::Protocol(format!(
+                "{op} array response body length was {body_len}, expected at least 4"
+            )));
+        }
+
+        let mut cursor = 0usize;
+        let count = read_u32(&self.scratch, &mut cursor, op)? as usize;
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = read_u32(&self.scratch, &mut cursor, op)?;
+            if len == u32::MAX {
+                values.push(None);
+                continue;
+            }
+            let len = len as usize;
+            let end = cursor.checked_add(len).ok_or_else(|| {
+                FcnpClientError::Protocol(format!("{op} array item length overflow"))
+            })?;
+            if end > self.scratch.len() {
+                return Err(FcnpClientError::Protocol(format!(
+                    "{op} array item exceeds response body"
+                )));
+            }
+            values.push(Some(self.scratch[cursor..end].to_vec()));
+            cursor = end;
+        }
+        if cursor != self.scratch.len() {
+            return Err(FcnpClientError::Protocol(format!(
+                "{op} array response has trailing bytes"
+            )));
+        }
+        Ok(RedisResponse::Array(values))
     }
 
     fn discard(&mut self, n: usize) -> Result<()> {
@@ -159,3 +270,18 @@ fn tune_tcp_stream_buffers(stream: &TcpStream) {
 
 #[cfg(not(unix))]
 fn tune_tcp_stream_buffers(_stream: &TcpStream) {}
+
+#[cfg(feature = "redis")]
+fn read_u32(buf: &[u8], cursor: &mut usize, op: &str) -> Result<u32> {
+    let end = cursor
+        .checked_add(4)
+        .ok_or_else(|| FcnpClientError::Protocol(format!("{op} array cursor overflow")))?;
+    if end > buf.len() {
+        return Err(FcnpClientError::Protocol(format!(
+            "{op} truncated array response"
+        )));
+    }
+    let value = u32::from_le_bytes(buf[*cursor..end].try_into().unwrap());
+    *cursor = end;
+    Ok(value)
+}

@@ -212,11 +212,9 @@ impl ValueCorpus {
         let pool_count = match pattern {
             ValuePattern::Repeat => 1,
             ValuePattern::SemiRandom => {
-                let byte_limited = if value_size == 0 {
-                    requested_pool_count
-                } else {
-                    max_pool_bytes / value_size
-                };
+                let byte_limited = max_pool_bytes
+                    .checked_div(value_size)
+                    .unwrap_or(requested_pool_count);
                 requested_pool_count
                     .min(key_count)
                     .min(byte_limited.max(1))

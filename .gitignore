@@ -1,31 +1,49 @@
+# Rust build outputs
 /target/
 /crates/*/target/
+/crates/fast-cache/src/bin/bench_*.rs
 
-/.claude/
-/.DS_Store
-*.DS_Store
+# Local formal-verification and solver caches
+/verif/
+/.why3find/
 
+# Local runtime data, crash reports, and profiling artifacts
 /var/
 /tmp/
+rustc-ice-*.txt
 *.tmp
 *.trace
 perf.data*
 *.rdb
 texput.log
 
-/docs/
+# Local editor, assistant, and OS files
+/.claude/
+/.idea/
+/.DS_Store
+*.DS_Store
+
+# Benchmark outputs generated outside the tracked writeups
 /benchmarks/results/
 /crates/fast-cache/bench/
-/crates/fast-cache/src/bin/bench_*.rs
 
+# Python environments and build artifacts
 /.venv/
 **/.venv/
 __pycache__/
 **/__pycache__/
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
 *.py[cod]
 *.egg-info/
 **/*.egg-info/
+build/
+dist/
+*.so
 
+# Generated document/report artifacts
 *.aux
 *.fdb_latexmk
 *.fls

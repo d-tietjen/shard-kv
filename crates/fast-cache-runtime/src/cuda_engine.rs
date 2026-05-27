@@ -7,9 +7,9 @@ use crate::runtime::{
 };
 
 #[cfg(all(feature = "cuda", target_os = "linux"))]
-use fast_cache::cuda::CudaConfig;
+use fast_cache_core::cuda::CudaConfig;
 #[cfg(all(feature = "cuda", target_os = "linux"))]
-use fast_cache::storage::{LocalEmbeddedSessionPackedView, PackedBatch};
+use fast_cache_core::storage::{LocalEmbeddedSessionPackedView, PackedBatch};
 
 #[cfg(all(feature = "cuda", target_os = "linux"))]
 use cust::{
@@ -380,7 +380,7 @@ impl CudaTransferEngine {
     fn submit_host_copy(
         &mut self,
         target: &RuntimeTransferTarget,
-        descriptor: &fast_cache::cuda::CudaChunkTransferDescriptor,
+        descriptor: &fast_cache_core::cuda::CudaChunkTransferDescriptor,
         src: *const u8,
         len: usize,
     ) -> RuntimeResult<()> {
@@ -432,7 +432,7 @@ impl CudaTransferEngine {
     fn submit_host_copy_2d(
         &mut self,
         target: &RuntimeTransferTarget,
-        descriptor: &fast_cache::cuda::CudaChunkTransferDescriptor,
+        descriptor: &fast_cache_core::cuda::CudaChunkTransferDescriptor,
         src: *const u8,
         row_bytes: usize,
         row_count: usize,
@@ -821,7 +821,7 @@ impl KvTransferEngine for CudaTransferEngine {
 }
 
 #[cfg(not(all(feature = "cuda", target_os = "linux")))]
-use fast_cache::cuda::CudaConfig;
+use fast_cache_core::cuda::CudaConfig;
 
 #[cfg(not(all(feature = "cuda", target_os = "linux")))]
 #[derive(Debug)]

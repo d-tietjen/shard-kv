@@ -1,5 +1,5 @@
-use fast_cache::cuda::{CudaChunkTransferDescriptor, CudaConfig, CudaSessionTransferRequest};
-use fast_cache::storage::{Bytes, LocalEmbeddedStore};
+use fast_cache_core::cuda::{CudaChunkTransferDescriptor, CudaConfig, CudaSessionTransferRequest};
+use fast_cache_core::storage::{Bytes, LocalEmbeddedStore};
 
 use crate::connector::{
     ConnectorTransferHandle, ConnectorTransferReport, DirectKvConnector, TransferDestination,
@@ -310,8 +310,8 @@ impl TransferAllocator for FixedBufferAllocator {
 
 #[cfg(test)]
 mod tests {
-    use fast_cache::cuda::CudaConfig;
-    use fast_cache::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap};
+    use fast_cache_core::cuda::CudaConfig;
+    use fast_cache_core::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStoreBootstrap};
 
     use super::{
         FixedBufferAllocator, PreferredTransferBackend, RestoreChunkSpec, ServingKvConnector,

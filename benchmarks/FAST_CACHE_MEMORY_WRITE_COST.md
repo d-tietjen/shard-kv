@@ -1,8 +1,63 @@
-# fast-cache Memory Write Cost
+# fast-cache Memory Bandwidth Ceiling
 
-This benchmark isolates the cost of writing value bytes into storage-like
-buffers. It is a microbench for large-value SET investigations, not a cache
-throughput replacement for `saturation`.
+This benchmark isolates memory movement from cache lookup, eviction, protocol,
+and routing work. Use it to set the local hardware ceiling before interpreting
+large-value cache throughput.
+
+The goal is to show how much of the machine's bandwidth fast-cache can expose.
+Absolute GB/s is hardware-specific; the portable claim is the percentage of the
+local ceiling reached by each cache path.
+
+Use the ceiling mode that matches the cache path:
+
+| Cache path | Ceiling mode | Meaning |
+| --- | --- | --- |
+| Borrowed or zero-copy GET | `read-scan` | Touch every byte without writing. |
+| Apple Silicon read probe | `read-scan-neon` | Touch every byte with NEON vector loads. |
+| SET or overwrite-heavy write path | `write-fill` | Overwrite value buffers without reading. |
+| Materialized GET or copy-on-read path | copy modes | Copy payload bytes from source to destination. |
+
+For copy/materialization rows, reported payload GB/s performs both one read and
+one write for every payload byte. Compare the payload rate to the lower of the
+pure read and pure write ceilings, and compare physical fabric traffic as
+roughly `2x` payload bytes.
+
+## Local Hardware Ceiling Example
+
+Exploratory run on an Apple M5 Max, built with `cargo native-bench`, using the
+native `memory_write_cost` binary and no competing benchmark jobs:
+
+| Mode | Value size | Threads | GB/s |
+| --- | ---: | ---: | ---: |
+| `read-scan` | 512KiB | 6 | 298.09 |
+| `read-scan-neon` | 4MiB | 6 | 296.69 |
+| `read-scan` | 5MiB | 6 | 295.10 |
+| `write-fill` | 512KiB | 6 | 259.10 |
+| `write-fill` | 5MiB | 4 | 250.93 |
+
+These rows mean a read-only KV path should be judged against roughly
+`300 GB/s` on this host, while a write-only or copy-materialization payload path
+should be judged against roughly `250-260 GB/s`. On larger memory systems, the
+ceiling should move with the memory subsystem, NUMA topology, CPU pinning, and
+the number of active memory controllers.
+
+Reproduce a ceiling run:
+
+```bash
+cargo native-bench --bin memory_write_cost
+
+target/release/memory_write_cost \
+  --modes read-scan,read-scan-neon,write-fill \
+  --value-sizes 524288,1048576,2097152,3145728,4194304,5242880 \
+  --threads 1 \
+  --pool-len 512 \
+  --warmup-seconds 2 \
+  --duration-seconds 8
+```
+
+Sweep `--threads` sequentially, not in parallel benchmark jobs, when finding the
+machine maximum. On macOS, add `--macos-qos` to request
+`QOS_CLASS_USER_INTERACTIVE` for benchmark worker threads.
 
 ## Server Run
 
@@ -14,9 +69,10 @@ throughput replacement for `saturation`.
 | Warmup | `1s` |
 | Duration | `5s` per row |
 | Pool length | `8` |
+| Threads | `1` |
 | CSV artifact | `/tmp/fast-cache-memory-write/benchmarks/results/memory_write_cost_20260518_000025/memory_write_cost.csv` |
 
-## Results
+## Server Materialization Results
 
 | Size | Mode | GB/s | Ops/sec |
 | ---: | --- | ---: | ---: |
@@ -65,6 +121,9 @@ It reduced 1MiB reusable-copy throughput from roughly `43 GB/s` to roughly
 
 ## Takeaways
 
+- Hardware ceilings should be recorded alongside large-value fast-cache runs.
+  The fast-cache product claim is hardware-scaled bandwidth exposure, not one
+  universal GB/s number.
 - Manual non-temporal SSE2/AVX2 stores are slower than cached copies for this
   cache write path on server.
 - The useful optimization is avoiding fresh allocation and reusing destination

@@ -3,13 +3,16 @@ members = [
     "benchmarks",
     "crates/fcnp-client-rs",
     "crates/fast-cache",
+    "crates/fast-cache-core",
+    "crates/fast-cache-formal",
     "crates/fast-cache-py",
+    "crates/fast-cache-redis",
     "crates/fast-cache-runtime",
 ]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Devon Tietjen <devon@eden.dev>"]
 homepage = "https://github.com/d-tietjen/fast-cache"
@@ -18,9 +21,10 @@ repository = "https://github.com/d-tietjen/fast-cache"
 rust-version = "1.90"
 
 [workspace.dependencies]
-fast-cache = { path = "crates/fast-cache", version = "0.1.0" }
-fcnp-client-rs = { path = "crates/fcnp-client-rs", version = "0.1.0" }
-fast-telemetry = "0.3"
+fast-cache = { path = "crates/fast-cache", version = "0.2.0" }
+fast-cache-core = { path = "crates/fast-cache-core", version = "0.2.0", default-features = false }
+fcnp-client-rs = { path = "crates/fcnp-client-rs", version = "0.2.0" }
+fast-telemetry = "0.4"
 
 clap = { version = "4.5", features = ["derive"] }
 core_affinity = "0.8"
@@ -28,6 +32,7 @@ crc32fast = "1.4"
 crossbeam-channel = "0.5"
 crossbeam-utils = "0.8"
 hashbrown = "0.14"
+indextreemap = { version = "0.2.0", default-features = false }
 log = "0.4"
 libc = "0.2"
 lz4_flex = "0.11"

@@ -1,0 +1,8 @@
+backend,value_size,mix,clients,op_batch_size,ops_per_sec,gb_per_sec,vcpu_consumed,note
+fc-lmcache,64,GET,16,1,54600,0.003,1.310,before batch_get pipeline
+fc-lmcache,64,SET,16,1,43964,0.003,1.857,prepared PUT helpers
+fc-lmcache,64,GET,16,16,131406,0.008,2.477,before batch_get pipeline
+fc-lmcache,64,SET,16,16,191344,0.012,1.090,prepared PUT helpers plus SET pipeline
+fc-lmcache,64,GET,16,16,168060,0.011,1.048,after batch_get pipeline
+fc-lmcache,64,GET,16,64,155360,0.010,0.960,after batch_get pipeline
+fc-lmcache,64,SET,16,64,230008,0.015,0.960,prepared PUT helpers plus SET pipeline

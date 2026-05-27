@@ -58,7 +58,7 @@ Staging remains multi-stream configurable.
 
 ## Features
 
-- `embedded`, `sharded` (default): forwarded to `fast-cache`.
+- `embedded`, `sharded` (default): forwarded to `fast-cache-core`.
 - `cuda`: real CUDA engine on Linux + NVIDIA via `cust`.
 - `gpu-direct-api`: experimental queue-based GPU-originated request track.
 

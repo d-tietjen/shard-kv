@@ -65,10 +65,21 @@ OUT_DIR=benchmarks/results/lru_buffer_reuse_20260518_0521 \
   80% GET / 20% SET.
 - `fc-embed` is the owner-local direct embedded path. This is the deployment
   model where each worker owns its local shard slab.
-- `fc-shared` is the shared-handle comparison path. It is useful for comparing
-  with shared-reference caches such as DashMap and Moka.
-- Large-value GET GB/s can be logical no-copy/reference throughput. Large-value
-  SET GB/s is the better indicator of physical memory write pressure.
+- `fc-shared` is the shared-handle comparison path. It uses the recommended
+  shared stripe count of `4 * max(vcpu_budget, clients)` so shared-handle rows
+  are not under-striped. Use `fc-shared-worker-stripes` for the older
+  one-stripe-per-worker comparison shape.
+- `fc-shared-prepared` / `fc-shared-prepared-ref` are prepared-key A/B rows for
+  repeated point-key access. `fc-shared-copy-unlocked` keeps copy-after-unlock
+  as an explicit experiment; it is not the default shared copy path.
+- Build the benchmark crate with `--features no-ttl` for TTL-free shared-store
+  point-key runs that remove shared hot-path TTL checks.
+- Large-value fast-cache GET GB/s uses `--read-mode ref` unless noted. That is
+  a logical payload rate, computed as successful operations multiplied by value
+  size. It is not physical data throughput because `get_ref` does not copy the
+  value bytes. Use `--read-mode copy` for materialized read-copy bandwidth;
+  large-value SET GB/s remains the better indicator of physical memory write
+  pressure.
 - Active TTL is `60000ms`.
 - LRU capacity rows use 25% resident capacity.
 
@@ -84,9 +95,17 @@ OUT_DIR=benchmarks/results/lru_buffer_reuse_20260518_0521 \
 - The targeted LRU rerun confirms that the 64KiB write path is stable after the
   reusable large-buffer change. The 1/1 no-TTL LRU SET row holds around
   `187k ops/s`, and active-TTL holds around `180k ops/s`.
-- Moka remains faster on 64KiB LRU write-only at 16 workers, reaching roughly
-  `511k ops/s` versus fast-cache embedded direct at roughly `292k ops/s`.
-  That is the main remaining LRU write-path optimization opportunity.
+- The 64KiB LRU write-only row is the worst case for fast-cache because it
+  turns the benchmark into large-value materialization plus eviction
+  bookkeeping. It is useful as a write-pressure checkpoint, but not as an
+  overall LRU score.
+- On the same 64KiB LRU shape at 16 workers, read-only reaches `756.93M ops/s`
+  for fast-cache embedded direct versus `3.31M ops/s` for Moka and `579.8k
+  ops/s` for the `lru` crate. The 80/20 row is close to Moka: `1.45M ops/s`
+  for fast-cache versus `1.42M ops/s` for Moka.
+- On the smaller 4KiB LRU shape at 16 workers, fast-cache embedded direct
+  reaches `676.37M ops/s` read-only, `26.70M ops/s` on 80/20, and `5.41M
+  ops/s` write-only.
 
 ## fc-embed Direct Headlines
 
@@ -163,10 +182,58 @@ Medians for `fc-embed`, safe build, no eviction. Values are SET-only.
 | 1MiB | 1/1 | 13.1k | 13.0k | 1.00x |
 | 1MiB | 16/16 | 18.6k | 18.6k | 1.00x |
 
+## LRU Read And Mixed Reference
+
+LRU caches are normally evaluated with reads in the mix. The targeted rerun
+below isolates write-only behavior because that is the worst fast-cache case
+for large values, but the full embedded report also includes read-only and
+80/20 LRU rows. Medians below are no-TTL, 25% resident-capacity rows from
+`embedded_report.csv`.
+
+Large-value fast-cache GET rows use the default `--read-mode ref` behavior:
+they measure lookup plus borrowed value access through `get_ref`, not copying
+the full value into a new buffer on every hit. The reported GB/s is therefore a
+logical payload rate for fast-cache reference-read rows, not real data
+throughput. Use `--read-mode copy` for materialized read comparisons where
+physical copy bandwidth is the intended measurement.
+
+### 4KiB, 1 vCPU / 1 Client
+
+| Mix | fast-cache embedded direct | fast-cache shared handle | Moka | `lru` crate |
+| --- | ---: | ---: | ---: | ---: |
+| GET | 26.42M ops/s | 5.45M ops/s | 4.09M ops/s | 4.15M ops/s |
+| 80/20 | 4.01M ops/s | 2.74M ops/s | 1.19M ops/s | 2.37M ops/s |
+| SET | 1.18M ops/s | 1.10M ops/s | 657.3k ops/s | 1.02M ops/s |
+
+### 4KiB, 16 vCPU / 16 Clients
+
+| Mix | fast-cache embedded direct | fast-cache shared handle | Moka | `lru` crate |
+| --- | ---: | ---: | ---: | ---: |
+| GET | 676.37M ops/s | 37.12M ops/s | 2.98M ops/s | 1.03M ops/s |
+| 80/20 | 26.70M ops/s | 7.98M ops/s | 3.28M ops/s | 847.8k ops/s |
+| SET | 5.41M ops/s | 2.56M ops/s | 896.0k ops/s | 458.8k ops/s |
+
+### 64KiB, 1 vCPU / 1 Client
+
+| Mix | fast-cache embedded direct | fast-cache shared handle | Moka | `lru` crate |
+| --- | ---: | ---: | ---: | ---: |
+| GET | 34.54M ops/s | 1.12M ops/s | 2.07M ops/s | 1.02M ops/s |
+| 80/20 | 859.0k ops/s | 540.1k ops/s | 456.5k ops/s | 504.1k ops/s |
+| SET | 188.0k ops/s | 184.1k ops/s | 238.9k ops/s | 177.6k ops/s |
+
+### 64KiB, 16 vCPU / 16 Clients
+
+| Mix | fast-cache embedded direct | fast-cache shared handle | Moka | `lru` crate |
+| --- | ---: | ---: | ---: | ---: |
+| GET | 756.93M ops/s | 2.87M ops/s | 3.31M ops/s | 579.8k ops/s |
+| 80/20 | 1.45M ops/s | 991.5k ops/s | 1.42M ops/s | 329.2k ops/s |
+| SET | 291.5k ops/s | 288.4k ops/s | 510.1k ops/s | 139.0k ops/s |
+
 ## Targeted LRU Write Checkpoint
 
 This rerun targets the large-value LRU write path after adding reusable storage
-for evicted large value buffers on the TTL/LRU write path. It also includes
+for evicted large value buffers on the TTL/LRU write path. Treat it as a
+write-pressure checkpoint, not a representative LRU workload. It also includes
 64B, 512B, and 4KiB guard rows to verify that the large-buffer path does not
 spill into small writes.
 
@@ -222,8 +289,10 @@ change.
 
 ## What To Optimize Next
 
-- The largest remaining gap is 64KiB LRU write-only at 16 workers: Moka is
-  around `511k ops/sec`, while `fc-embed` is around `292k ops/sec`.
+- The largest remaining LRU gap is the pathological 64KiB write-only row at 16
+  workers: Moka is around `511k ops/sec`, while `fc-embed` is around
+  `292k ops/sec`. Read-only and 80/20 LRU rows are already competitive or ahead,
+  so optimize this without adding overhead to LRU read touch/accounting.
 - Small-value direct embedded performance is healthy; avoid optimizations that
   add branches or allocation behavior to the 64B/512B path.
 - TTL overhead is primarily a small-value write issue. For 4KiB and larger SET

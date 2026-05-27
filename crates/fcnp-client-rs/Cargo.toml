@@ -13,6 +13,10 @@ readme = "README.md"
 categories = ["caching", "database-implementations", "network-programming"]
 keywords = ["fast-cache", "fcnp", "client", "cache", "kv"]
 
+[features]
+default = []
+redis = []
+
 [dependencies]
 libc = { workspace = true }
 thiserror = { workspace = true }

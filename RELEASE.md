@@ -17,28 +17,35 @@ Use this checklist before publishing the repository or the crates.io crates.
 ## Validation
 
 ```bash
-cargo fmt --all -- --check
-cargo test -p fast-cache
-cargo test -p fast-cache --features unsafe
-cargo test -p fcnp-client-rs
-cargo doc -p fast-cache --no-deps --all-features
-cargo doc -p fcnp-client-rs --no-deps
-cargo package -p fcnp-client-rs --locked
-cargo package -p fast-cache --locked
+./scripts/proof-gate.sh release
 ```
 
 For full release confidence, also run any Redis compatibility or performance
 validation suites that support the release announcement. Keep raw artifacts
 outside the public repository unless they have been intentionally curated.
+For the current 0.2.0 release shape, known limits, and smoke benchmark command,
+see `docs/RELEASE_0_2_READINESS.md`.
+
+Use `./benchmarks/scripts/run-redis-command-benchmark-bundle.sh` for command
+matrix performance proofs so each run carries metadata, raw CSV, Markdown,
+JSON, and compatibility-manifest artifacts together.
+
+Docker Compose is currently a local/private deployment path only. Do not add a
+Docker Hub or remote registry publish step until the compatibility surface and
+release policy explicitly call for it.
 
 ## Publishing
 
 ```bash
 cargo publish -p fcnp-client-rs --dry-run
-cargo publish -p fast-cache --dry-run
+cargo publish -p fast-cache-core --dry-run
 cargo publish -p fcnp-client-rs
+cargo publish -p fast-cache-core
+cargo publish -p fast-cache --dry-run
 cargo publish -p fast-cache
 ```
 
-Only publish after the dry run succeeds and the final changelog or performance
+Publish `fast-cache-core` before dry-running or publishing the public
+`fast-cache` facade so the facade's registry dependency can resolve. Only
+publish after the dry run succeeds and the final changelog or performance
 claims have been checked against source artifacts.

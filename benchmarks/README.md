@@ -9,12 +9,216 @@ Two modes, parallel and independent:
 
 | Mode | Driver | Question |
 | --- | --- | --- |
-| `saturation` | Closed-loop, push as hard as possible | Peak ops/sec, peak GB/s, CPU and p99 at peak |
+| `saturation` | Closed-loop, push as hard as possible | Peak ops/sec, logical payload GB/s, CPU and p99 at peak |
 | `curve` | Open-loop, target rate sweep | How CPU and p99 scale with load up to saturation |
+| `redis_command_matrix` | RESP command script, per command | Head-to-head command throughput for fast-cache vs Redis/Valkey |
 
 Both drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `fc-lmcache`
 emit rows in the same schema.
+
+## Published Coverage
+
+Use this table to decide whether a claim already has a curated head-to-head
+artifact or still needs a fresh run.
+
+| Comparison | Curated artifact | Coverage | Status |
+| --- | --- | --- | --- |
+| fast-cache vs Redis / Valkey / Dragonfly TCP | [`FAST_CACHE_VS_REDIS_TCP.md`](FAST_CACHE_VS_REDIS_TCP.md) | Saturation matrix across value sizes, mixes, clients, and pipeline depths | Publishable for TCP throughput claims. |
+| fast-cache vs Redis command-by-command | [`REDIS_HEAD_TO_HEAD_BENCHMARKS.md`](REDIS_HEAD_TO_HEAD_BENCHMARKS.md) | Redis 5.0 compatibility surface and saved per-command rows | Compatibility coverage is complete; some saved head-to-head cells are marked `n/a` where that exact shape has not been rerun. |
+| fast-cache embedded vs Moka | [`FAST_CACHE_VS_MOKA_EMBEDDED.md`](FAST_CACHE_VS_MOKA_EMBEDDED.md) | Embedded owner-local fast-cache against `moka::sync::Cache` | Publishable for this embedded comparison. |
+| Embedded release matrix | [`FAST_CACHE_EMBEDDED_RELEASE.md`](FAST_CACHE_EMBEDDED_RELEASE.md) | Direct, shared, TTL, LRU, and selected Rust-cache baselines | Publishable as a release proof, not a single competitor-only report. |
+| LMCache plugin vs Redis TCP | [`LMCACHE_VS_REDIS.md`](LMCACHE_VS_REDIS.md) | fast-cache LMCache embedded and FCNP/TCP against Redis TCP | Publishable for the recorded Linux run; rerun before making new M5 or 5MiB LMCache claims. |
+| Local hardware memory ceiling | [`FAST_CACHE_MEMORY_WRITE_COST.md`](FAST_CACHE_MEMORY_WRITE_COST.md) | Pure read, pure write, and copy/materialization probes | Use as the denominator for hardware-scaled bandwidth claims. |
+
+Known gaps before saying "all caching solutions":
+
+- No curated, current LMCache `LocalCPUBackend` head-to-head row is published;
+  the harness can try it with `--with-local-cpu` when the installed LMCache
+  version exposes a constructible local CPU backend.
+- The benchmark harness supports `dashmap`, `lru`, and `rwlock-hashmap`, but
+  only Moka and selected embedded release rows have polished standalone
+  writeups.
+- GPU/direct-runtime claims need separate CUDA-capable proof runs; the LMCache
+  plugin report is CPU/LMCache storage API focused.
+- The new 5MiB local memory ceiling is documented, but LMCache and Redis
+  head-to-head runs have not yet been repeated at 5MiB.
+
+## Redis Command Matrix
+
+`redis_command_matrix` runs a deterministic RESP command script and reports
+per-command throughput and average request latency. It is intentionally not a
+Criterion benchmark: it talks to real TCP servers so the same command cases can
+run head-to-head against fast-cache, Redis, and Valkey.
+
+```bash
+./benchmarks/scripts/run-redis-command-matrix.sh
+```
+
+The default script starts Redis and Valkey from
+`benchmarks/docker/compose.yml`, starts `fast-cache-server` with the
+`redis-server` feature, and writes
+`benchmarks/results/redis-command-matrix.csv`. Use `CASES=hash,zset` or
+`CASES=HSET,ZRANGE` for focused runs. `CASES=extended` runs the full repeatable
+matrix, including larger values, 4K-key keyspace walks, and 1K-element
+hash/list/set/zset objects. For concurrency scaling, prefer
+`CASES=extended-no-keyspace` and run the expensive keyspace-wide cases
+separately with `CASES=profile:keyspace`; otherwise `KEYS`/global `SCAN` cases
+can dominate the mixed loop and hide point-command scaling. Set
+`FIXTURE_SCOPE=shared-keyspace` for concurrent keyspace runs so increasing
+`CLIENTS` does not also multiply the seeded keyspace size. `SKIP_CASES` accepts
+the same command, family, case, and profile filters as `CASES`. `CLIENTS`,
+`WARMUP`, and `DURATION` scale the run. Set `KEY_SHARDS` to split per-client
+fixtures across logical key lanes, normally matching fast-cache's `SHARD_COUNT`
+for parallel shard fanout runs. Set `PIPELINE_DEPTH` to keep multiple adjacent
+case operations in flight on each socket while preserving the global case order;
+this is useful for separating strict request/response latency from socket-fed
+throughput. Set `FAIL_ON_ERROR=1` when the matrix should fail on any RESP error
+reply instead of recording the error count in the output.
+For fast-cache direct shard ports, use `host:base_port+shards` in `TARGETS`
+and set `KEY_SHARDS` to the same shard count. When the script starts
+fast-cache, also set `SERVER_DIRECT_SHARD_PORTS=1` and optionally
+`FAST_CACHE_DIRECT_SHARD_BASE_PORT`; for example
+`SERVER_DIRECT_SHARD_PORTS=1 FAST_CACHE_DIRECT_SHARD_BASE_PORT=6384
+TARGETS=fast-cache-sharded=fcnp:127.0.0.1:6384+4 KEY_SHARDS=4` routes each
+worker to the shard-owned FCNP port for its generated key lane.
+
+Destructive keyspace-wide commands such as `FLUSHDB` and `FLUSHALL` are in an
+explicit profile so they are present in the perf matrix without corrupting the
+ordinary mixed command loop:
+
+```bash
+CASES=profile:destructive ./benchmarks/scripts/run-redis-command-matrix.sh
+```
+
+Set `DOCKER_SERVICES="redis valkey dragonfly"` and include
+`dragonfly=127.0.0.1:6382` in `TARGETS` when running Dragonfly in the same
+matrix.
+
+For proof and release work, prefer the bundle wrapper:
+
+```bash
+CASES=extended-no-keyspace \
+CLIENTS=16 \
+KEY_SHARDS=4 \
+FIXTURE_SCOPE=shared-keyspace \
+WARMUP=2 \
+DURATION=10 \
+./benchmarks/scripts/run-redis-command-benchmark-bundle.sh
+```
+
+It writes an ignored artifact directory under `benchmarks/results/` containing
+run metadata, the raw CSV, a Markdown report, a JSON summary, and the Redis
+compatibility manifest captured at the same git SHA. Use
+`docs/PROOF_GATES.md` for the exact artifact contract.
+
+### Current Adam Command Snapshot
+
+The latest no-keyspace Redis-command matrix was run on `adam` on 2026-05-24
+with 16 clients, 16 key shards, `SHARD_COUNT=16`, shared keyspace fixtures,
+and direct shard ports enabled at `127.0.0.1:6384+16`. The fast-cache rows use
+the pass-2 optimized artifacts below; Redis/Valkey/Dragonfly rows are saved
+reference rows from the same Adam setup so fast-cache can be rerun without
+rerunning external services. Transaction cases are skipped for direct shard
+ports because transactions are connection-scoped and intentionally unsupported
+on shard-owned listeners.
+
+Depth 1, strict request/response:
+
+| Target | Cases | Sum ops/sec | Mean avg us | Errors |
+| --- | ---: | ---: | ---: | ---: |
+| fast-cache FCNP direct | 209 | 460,886 | 34.6 | 0 |
+| fast-cache FCNP shared | 209 | 460,459 | 34.6 | 0 |
+| fast-cache RESP | 209 | 381,477 | 41.8 | 0 |
+| Redis | 209 | 29,251 | 546.5 | 2,818 |
+| Valkey | 209 | 31,198 | 512.3 | 3,004 |
+| Dragonfly | 209 | 6,506 | 2,459.9 | 3,133 |
+
+Depth 16, ordered pipelining:
+
+| Target | Cases | Sum ops/sec | Mean avg us | Errors |
+| --- | ---: | ---: | ---: | ---: |
+| fast-cache FCNP direct | 209 | 1,324,917 | 88.7 | 0 |
+| fast-cache FCNP shared | 209 | 1,328,698 | 88.4 | 0 |
+| fast-cache RESP | 209 | 841,790 | 116.9 | 0 |
+| Redis | 209 | 37,483 | 5,216.9 | 3,604 |
+| Valkey | 209 | 46,885 | 4,184.5 | 4,492 |
+| Dragonfly | 209 | 17,500 | 12,175.6 | 8,396 |
+
+Zero-error common-case summaries are often more useful for implementation
+comparisons. Excluding commands that produced reference-service errors, the
+depth-1 Redis/Valkey common subset has 207 cases: FCNP direct `456,474`
+ops/sec at `34.6 us`, FCNP shared `456,051` at `34.6 us`, RESP `377,825` at
+`41.9 us`, Redis `28,969` at `541.9 us`, and Valkey `30,898` at `507.7 us`.
+The ordered depth-16 common subset has 207 cases: FCNP direct `1,312,237`
+ops/sec at `88.5 us`, FCNP shared `1,315,982` at `88.2 us`, RESP `833,734`
+at `117.1 us`, Redis `37,123` at `5,150.4 us`, and Valkey `46,436` at
+`4,125.1 us`.
+
+Scripting command spot-check, rerun on `adam` after adding `EVAL`, `EVALSHA`,
+and `SCRIPT` support:
+
+| Mode | Target | Cases | Ops/sec | Mean avg us | Errors |
+| --- | --- | ---: | ---: | ---: | ---: |
+| C1/P1 | fast-cache RESP | 3 | 14,727 | 22.5 | 0 |
+| C1/P1 | Redis | 3 | 6,312 | 52.7 | 0 |
+| C1/P1 | Valkey | 3 | 6,058 | 54.9 | 0 |
+| C1/P1 | Dragonfly | 3 | 5,725 | 58.1 | 0 |
+| C16/P16 | fast-cache RESP | 3 | 184,328 | 76.7 | 0 |
+| C16/P16 | Redis | 3 | 42,200 | 363.1 | 0 |
+| C16/P16 | Valkey | 3 | 41,645 | 368.0 | 0 |
+| C16/P16 | Dragonfly | 3 | 85,832 | 169.0 | 0 |
+
+For fast-cache optimization loops, save the Redis/Valkey/Dragonfly side once
+and reuse those CSVs while only rerunning fast-cache. First capture the external
+reference services:
+
+```bash
+OUT_DIR=benchmarks/results/redis-command-reference-$(date -u +%Y%m%dT%H%M%SZ) \
+START_FAST_CACHE=0 \
+TARGETS=redis=127.0.0.1:6379,valkey=127.0.0.1:6381,dragonfly=127.0.0.1:6382 \
+DOCKER_SERVICES="redis valkey dragonfly" \
+CASES=extended-no-keyspace \
+CLIENTS=16 \
+FIXTURE_SCOPE=shared-keyspace \
+WARMUP=2 \
+DURATION=10 \
+BASELINE=redis \
+./benchmarks/scripts/run-redis-command-benchmark-bundle.sh
+```
+
+Then rerun fast-cache only and merge the saved reference CSV into the report:
+
+```bash
+OUT_DIR=benchmarks/results/redis-command-fast-cache-$(date -u +%Y%m%dT%H%M%SZ) \
+TARGETS=fast-cache=127.0.0.1:6383 \
+DOCKER=0 \
+REFERENCE_CSVS=benchmarks/results/redis-command-reference-YYYYMMDDTHHMMSSZ/redis-command-matrix.csv \
+CASES=extended-no-keyspace \
+CLIENTS=16 \
+FIXTURE_SCOPE=shared-keyspace \
+WARMUP=2 \
+DURATION=10 \
+BASELINE=redis \
+./benchmarks/scripts/run-redis-command-benchmark-bundle.sh
+```
+
+Reference CSVs should use the same `CASES`, `CLIENTS`, `FIXTURE_SCOPE`,
+`WARMUP`, `DURATION`, host, and CPU pinning knobs as the fast-cache run. The
+report still shows the full target rollup, and its common-case comparison table
+only compares command cases present in both the current run and the saved
+references. `REFERENCE_CSVS` accepts a comma-separated list when Redis/Valkey
+and Dragonfly are stored in separate files. Set `BASELINE=redis` for the usual
+fast-cache-over-Redis speedup table, or `BASELINE=fast-cache` when you want the
+external services normalized against the current fast-cache run.
+
+The tracked Redis compatibility manifest is generated from the same command
+registry:
+
+```bash
+cargo run -p fast-cache-benchmarks --bin redis_command_manifest -- \
+  --output docs/REDIS_COMPATIBILITY.md
+```
 
 ## Native CPU Builds
 
@@ -65,8 +269,9 @@ without native replication is published in
 The crates.io release embedded matrix is orchestrated by
 `scripts/run-embedded-release-matrix.sh`. Run it on Linux. The script
 builds separate native safe and unsafe benchmark binaries, records
-`build_variant`, `ttl_mode`, `routing_mode`, eviction policy, entry capacity,
-and memory capacity in the `saturation` CSV, and defaults to the LRU gate:
+`build_variant`, `ttl_mode`, `routing_mode`, `read_mode`, eviction policy,
+entry capacity, and memory capacity in the `saturation` CSV, and defaults to
+the LRU gate:
 
 ```bash
 PHASE=lru ./scripts/run-embedded-release-matrix.sh
@@ -107,25 +312,28 @@ cargo run --release -p fast-cache-benchmarks --features monoio \
   --clients 16 --shards 16 --duration 10
 ```
 
-## Memory Write Cost
+## Memory Bandwidth Ceiling
 
-`memory_write_cost` isolates value materialization and memory write strategies
-from cache lookup and eviction policy work. It is useful when investigating
-large-value SET throughput on Linux:
+`memory_write_cost` isolates local memory movement from cache lookup, eviction,
+protocol, and routing work. Use it to establish the machine ceiling before
+interpreting large-value fast-cache GB/s. The product claim should be framed as
+percentage of hardware ceiling reached, not one universal GB/s number.
 
 ```bash
-CPUSET=0 VALUE_SIZES=4096,16384,65536,1048576 \
+MODES=read-scan,read-scan-neon,write-fill \
+  VALUE_SIZES=524288,1048576,2097152,3145728,4194304,5242880 \
+  THREADS=1 CPUSET=0 \
   ./scripts/run-memory-write-bench.sh
 ```
 
-The benchmark compares reusable slice copies, fresh `Bytes` allocation,
-`Vec -> Bytes`, pooled `Bytes::try_into_mut` reuse, aligned destination copies,
-and x86 non-temporal SSE2/AVX2 stores when available. Current server results show
-that manual non-temporal stores are slower than normal cached copies for these
-cache workloads, while reusable buffers remove most of the fresh-allocation
-cost. The current server note is published in
-[fast-cache Memory Write Cost](FAST_CACHE_MEMORY_WRITE_COST.md). Use the CSV
-artifact from this bench before changing the storage value write path.
+Use `read-scan` for read-only/zero-copy paths, `read-scan-neon` as the Apple
+Silicon vector-load cross-check, `write-fill` for write-only paths, and the copy
+modes for materialized reads. Sweep `THREADS` sequentially to find the host
+maximum; do not run competing ceiling jobs at the same time. On macOS, set
+`MACOS_QOS=1` to request high-priority benchmark worker threads. The current
+note is published in
+[fast-cache Memory Bandwidth Ceiling](FAST_CACHE_MEMORY_WRITE_COST.md). Use the
+CSV artifact from this bench before changing the storage value movement path.
 
 ## Backends
 
@@ -160,8 +368,10 @@ Redis, Valkey, and Dragonfly. The current Linux baseline uses:
 
 Cells are `ops/sec @ measured server vCPU`.
 
-For the fuller TCP report, including the standalone pipeline sweep and the
-2026-05-18 Redis/Valkey/Dragonfly matrix, see
+For the curated 1-vCPU and 16-vCPU Redis head-to-head summary, see
+[Redis Head-to-Head Benchmarks](REDIS_HEAD_TO_HEAD_BENCHMARKS.md). For the
+fuller TCP report, including the standalone pipeline sweep and the 2026-05-18
+Redis/Valkey/Dragonfly matrix, see
 [fast-cache vs Redis, Valkey, and Dragonfly over TCP](FAST_CACHE_VS_REDIS_TCP.md).
 
 For an embedded Rust cache comparison, see
@@ -336,6 +546,37 @@ cargo run --release -p fast-cache-benchmarks --bin saturation -- \
   --duration 10
 ```
 
+`fc-embed` defaults to `--read-mode ref`, matching the embedded API's
+zero-copy `get_ref` path. In that mode GET rows measure lookup plus borrowed
+value access; the reported GB/s is a logical payload rate computed as
+successful operations multiplied by value size. It is not physical data
+throughput. Use `--read-mode copy` to force materialized GET reads into the
+benchmark scratch buffer when comparing copy bandwidth against backends that
+always copy values out.
+
+```bash
+cargo run --release -p fast-cache-benchmarks --bin saturation -- \
+  --backends fc-embed \
+  --value-size 1048576 --mix get \
+  --vcpu-budget 4 --clients 16 --key-count 1024 \
+  --read-mode copy --duration 10
+```
+
+Other reference-read baselines are exposed as explicit backend ids, such as
+`fc-shared-ref`, `fc-shared-prepared-ref`, and `dashmap-ref`.
+
+Shared-handle fast-cache backends default to `4 * --vcpu-budget` lock stripes.
+That is the recommended comparison shape for DashMap-style shared access. Use
+the `fc-shared-worker-stripes` family when you specifically need the older
+one-stripe-per-worker baseline.
+
+Prepared-key shared baselines are exposed as `fc-shared-prepared` and
+`fc-shared-prepared-ref`; they precompute route/hash metadata for repeated
+point-key workloads. `fc-shared-copy-unlocked` is an explicit A/B backend that
+clones stored `Bytes` under the read lock and copies after unlocking.
+Build the benchmark crate with `--features no-ttl` to remove shared-store TTL
+checks for TTL-free point-key comparisons.
+
 ### fc-embed-unsafe (reviewed unsafe hot paths)
 
 Build the bench crate with `--features unsafe`. The same `fc-embed`
@@ -381,13 +622,18 @@ shard ports in safe mode. Add `SERVER_UNSAFE=1` to the same run to enable the
 owned-shard lock-bypass hot path where supported.
 
 Monoio runtime experiments can be passed through the same helper. Use
-`FAST_CACHE_MONOIO_DRIVER=legacy|io_uring` to compare monoio drivers,
+`FAST_CACHE_MONOIO_DRIVER=auto|legacy|io_uring` to compare monoio drivers,
 `FAST_CACHE_MONOIO_SAFE_WRITER=inline|split|writev` to compare safe writer
 paths, and `FAST_CACHE_TCP_BUFFER_BYTES=<bytes>` for socket buffer sweeps. The
 `writev` safe writer keeps command execution unchanged, but lets GET responses
 reuse the queued response path so larger FCNP/RESP values can be written as
 header plus stored `Bytes` payload instead of always materializing a contiguous
 response buffer.
+
+The server monoio default is `auto`: one worker uses the io_uring driver, while
+multi-worker runs use monoio's legacy socket driver. Adam profiling showed the
+legacy driver avoids enough per-request `io_uring_enter` cost to improve the
+16-worker RESP hot mix, while io_uring remains faster for the one-worker shape.
 
 The non-command streaming paths are opt-in separately on Linux. Use
 `FAST_CACHE_WAL_TCP_USE_MONOIO=1` to run the TCP WAL exporter on monoio, and
@@ -529,12 +775,17 @@ python benchmarks/python/fc_lmcache_bench.py --with-local-cpu \
 
 `LMCACHE=1 ./scripts/run-python.sh` runs both Python harnesses.
 
-Use `--latency-sample-rate 0` for bandwidth/GB/s saturation runs where latency
+Use `--latency-sample-rate 0` for logical payload GB/s saturation runs where latency
 percentiles are secondary to raw bytes moved per second.
 
 Use `--op-batch-size N` to issue same-operation batches from each benchmark
 worker. This is the knob that exercises pipelined FCNP/TCP batches for LMCache
 bandwidth ceiling tests.
+
+For FCNP/TCP payloads above the default 4 MiB request handoff cap, start the
+server with a larger cap, for example
+`FAST_CACHE_HANDOFF_BUFFER_BYTES=16777216` or
+`FCNP_HANDOFF_BUFFER_BYTES=16777216`.
 
 The benchmark defaults to `--client-architecture shared` because it uses
 arbitrary multi-client keys. `local_embedded` is for shard-owned caller

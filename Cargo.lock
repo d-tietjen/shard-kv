@@ -256,6 +256,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "creusot-std"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0eeaaebdee9aa688b8ad786e721deaee4e2d15da3a043acf6fcb7efb4a4e226c"
+dependencies = [
+ "creusot-std-proc",
+ "num-rational",
+]
+
+[[package]]
+name = "creusot-std-proc"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bee44c269dbf2a9c3afc96f5983ec3b0cd7e7105218e4dadf62eb821bd20ca46"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -357,18 +378,48 @@ dependencies = [
 
 [[package]]
 name = "fast-cache"
-version = "0.1.0"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "fast-cache-core",
+ "tokio",
+]
+
+[[package]]
+name = "fast-cache-benchmarks"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "crossbeam-channel",
+ "dashmap",
+ "fast-cache",
+ "fcnp-client-rs",
+ "hdrhistogram",
+ "libc",
+ "lru",
+ "moka",
+ "parking_lot",
+ "rand",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "fast-cache-core"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "bytes-handoff",
  "clap",
  "core_affinity",
  "crc32fast",
+ "creusot-std",
  "crossbeam-channel",
  "crossbeam-utils",
  "fast-telemetry",
  "flume",
  "hashbrown 0.14.5",
+ "indextreemap",
  "itoa",
  "libc",
  "log",
@@ -392,30 +443,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast-cache-benchmarks"
-version = "0.1.0"
+name = "fast-cache-formal"
+version = "0.2.0"
 dependencies = [
- "bytes",
- "clap",
- "crossbeam-channel",
- "dashmap",
- "fast-cache",
- "fcnp-client-rs",
- "hdrhistogram",
- "libc",
- "lru",
- "moka",
- "parking_lot",
- "rand",
- "xxhash-rust",
+ "creusot-std",
 ]
 
 [[package]]
 name = "fast-cache-py"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dashmap",
- "fast-cache",
+ "fast-cache-core",
  "fast-cache-runtime",
  "fcnp-client-rs",
  "pyo3",
@@ -423,20 +462,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-cache-redis"
+version = "0.2.0"
+dependencies = [
+ "fast-cache-core",
+]
+
+[[package]]
 name = "fast-cache-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cust",
- "fast-cache",
+ "fast-cache-core",
  "serde",
  "thiserror",
 ]
 
 [[package]]
 name = "fast-telemetry"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4ad318bab93e2a2896191015d2c818140e5c42803432dabb49b0a55ef1a8093"
+checksum = "e79e9a74909aa76159af4104ac5ef63248c1c39db6a2347e00a13fe9350fdba1"
 dependencies = [
  "crossbeam-utils",
  "fast-telemetry-macros",
@@ -448,9 +494,9 @@ dependencies = [
 
 [[package]]
 name = "fast-telemetry-macros"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00f234a512fe65a20d844278576674215fdf28535056d6a4d074e19cdeb790ee"
+checksum = "8c3fa6fc1431a3c8988cd79d4d17a7386f7f9f67b9a0117d249f02ec59681dde"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -465,7 +511,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "fcnp-client-rs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "thiserror",
@@ -674,6 +720,12 @@ dependencies = [
  "serde",
  "serde_core",
 ]
+
+[[package]]
+name = "indextreemap"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8da02f77ec2e796359b8be67098f95eb06931a177977f3055ff2df807f873163"
 
 [[package]]
 name = "indoc"
@@ -950,11 +1002,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-integer"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
 dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-bigint",
+ "num-integer",
  "num-traits",
 ]
 

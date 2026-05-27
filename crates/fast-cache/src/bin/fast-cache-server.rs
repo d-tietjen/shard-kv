@@ -4,7 +4,7 @@ use clap::{Parser, ValueEnum};
 use tokio::runtime::Builder;
 
 use fast_cache::FastCacheError;
-use fast_cache::config::{EvictionPolicy, FastCacheConfig};
+use fast_cache::config::{EvictionPolicy, FastCacheConfig, TransactionMode};
 use fast_cache::server::{FastCacheServer, ServerMode, ServerRuntime};
 
 #[derive(Debug, Parser)]
@@ -42,6 +42,9 @@ struct Cli {
 
     #[arg(long, value_enum, default_value_t = CliServerMode::Auto)]
     server_mode: CliServerMode,
+
+    #[arg(long, value_enum)]
+    transaction_mode: Option<CliTransactionMode>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -58,12 +61,29 @@ enum CliEvictionPolicy {
     Lfu,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliTransactionMode {
+    Disabled,
+    ShardLocal,
+    CoordinatedCrossShard,
+}
+
 impl From<CliEvictionPolicy> for EvictionPolicy {
     fn from(value: CliEvictionPolicy) -> Self {
         match value {
             CliEvictionPolicy::None => EvictionPolicy::None,
             CliEvictionPolicy::Lru => EvictionPolicy::Lru,
             CliEvictionPolicy::Lfu => EvictionPolicy::Lfu,
+        }
+    }
+}
+
+impl From<CliTransactionMode> for TransactionMode {
+    fn from(value: CliTransactionMode) -> Self {
+        match value {
+            CliTransactionMode::Disabled => TransactionMode::Disabled,
+            CliTransactionMode::ShardLocal => TransactionMode::ShardLocal,
+            CliTransactionMode::CoordinatedCrossShard => TransactionMode::CoordinatedCrossShard,
         }
     }
 }
@@ -111,6 +131,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(snapshot_every_seconds) = cli.snapshot_every_seconds {
         config.persistence.snapshot_every_seconds = snapshot_every_seconds;
+    }
+    if let Some(transaction_mode) = cli.transaction_mode {
+        config.transaction_mode = transaction_mode.into();
     }
 
     config.validate()?;

@@ -1,11 +1,30 @@
 use std::error::Error;
 
+use clap::ValueEnum;
+
 pub type BoxError = Box<dyn Error + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     Get,
     Set,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ReadMode {
+    /// Borrow/reference values on GET without copying into the benchmark buffer.
+    Ref,
+    /// Materialize GET values into the benchmark scratch buffer.
+    Copy,
+}
+
+impl ReadMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ref => "ref",
+            Self::Copy => "copy",
+        }
+    }
 }
 
 pub trait Backend: Send + Sync {

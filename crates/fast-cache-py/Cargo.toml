@@ -12,7 +12,7 @@ description = "PyO3 bindings for fast-cache benchmark adapters"
 [features]
 default = []
 extension-module = ["pyo3/extension-module"]
-telemetry = ["fast-cache/telemetry"]
+telemetry = ["fast_cache_core/telemetry"]
 gpu-direct-api = ["fast-cache-runtime/gpu-direct-api"]
 
 [lib]
@@ -21,8 +21,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 dashmap = "6.1"
-fast-cache = { workspace = true, features = ["sharded"] }
-fast-cache-runtime = { path = "../fast-cache-runtime", version = "0.1.0" }
+fast_cache_core = { package = "fast-cache-core", path = "../fast-cache-core", version = "0.2.0", default-features = false, features = ["sharded"] }
+fast-cache-runtime = { path = "../fast-cache-runtime", version = "0.2.0" }
 fcnp-client-rs = { workspace = true }
 pyo3 = { version = "0.23", features = ["abi3-py311"] }
 xxhash-rust = { workspace = true }

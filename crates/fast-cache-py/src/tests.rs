@@ -1,7 +1,7 @@
 use super::StoreCore;
-use fast_cache::config::EvictionPolicy;
-use fast_cache::cuda::CudaConfig;
-use fast_cache::storage::EmbeddedRouteMode;
+use fast_cache_crate::config::EvictionPolicy;
+use fast_cache_crate::cuda::CudaConfig;
+use fast_cache_crate::storage::EmbeddedRouteMode;
 use fast_cache_runtime::{
     CpuTransferTarget, TransferBackend as RuntimeTransferBackend, VllmBlockAllocation,
     VllmConnectorLoadSpec, VllmRequestedPage,

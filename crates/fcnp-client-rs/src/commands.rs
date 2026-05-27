@@ -9,14 +9,28 @@ use std::io::Write;
 use crate::connection::FcnpConnection;
 use crate::error::Result;
 
+pub(crate) mod common;
+pub(crate) mod del;
+pub(crate) mod exists;
+pub(crate) mod expire;
 pub(crate) mod get;
+pub(crate) mod getex;
+#[cfg(feature = "redis")]
+pub(crate) mod redis;
+pub(crate) mod resp;
 pub(crate) mod set;
+pub(crate) mod setex;
+pub(crate) mod ttl;
 
 pub(crate) trait FcnpCommand {
     type Output;
 
     const NAME: &'static str;
     const OPCODE: u8;
+
+    fn opcode(&self) -> u8 {
+        Self::OPCODE
+    }
 
     fn flags(&self) -> u8 {
         0
