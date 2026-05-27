@@ -17,6 +17,7 @@ def create_shardcache_store(
     client_architecture: str = "local_embedded",
     prefer_session_tags: bool = False,
     scnp_addr: str = "127.0.0.1:6500",
+    numa_policy: str = "off",
 ) -> Any:
     client_architecture = _normalize_client_architecture(client_architecture)
     if client_architecture in {"scnp_tcp_python", "tcp_python"}:
@@ -40,6 +41,7 @@ def create_shardcache_store(
         enable_metrics=enable_metrics,
         client_architecture=client_architecture,
         prefer_session_tags=prefer_session_tags,
+        numa_policy=numa_policy,
     )
 
 

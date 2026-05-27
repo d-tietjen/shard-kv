@@ -1,0 +1,23 @@
+[package]
+name = "shardcache-c"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "SQLite-style C ABI for embedding shardcache from any language"
+publish = false
+
+[features]
+default = ["prefix-eviction"]
+prefix-eviction = ["shardmap/prefix-eviction"]
+
+[lib]
+name = "shardcache"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+bytes = "1"
+shardmap = { workspace = true, default-features = false, features = ["sharded"] }

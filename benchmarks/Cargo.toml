@@ -27,6 +27,8 @@ embedded-read-biased-lock = ["shardmap/embedded-read-biased-lock"]
 # Build benchmark binaries with shardcache's Linux-only monoio transport code
 # available. Runtime selection is still controlled by the relevant env vars.
 monoio = ["shardmap/monoio"]
+# Build benchmark binaries with prefix-aware memory-limit eviction available.
+prefix-eviction = ["shardmap/prefix-eviction"]
 
 [dependencies]
 shardmap = { workspace = true, features = ["sharded"] }

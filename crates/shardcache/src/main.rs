@@ -59,6 +59,8 @@ enum CliEvictionPolicy {
     None,
     Lru,
     Lfu,
+    #[cfg(feature = "prefix-eviction")]
+    Prefix,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -74,6 +76,8 @@ impl From<CliEvictionPolicy> for EvictionPolicy {
             CliEvictionPolicy::None => EvictionPolicy::None,
             CliEvictionPolicy::Lru => EvictionPolicy::Lru,
             CliEvictionPolicy::Lfu => EvictionPolicy::Lfu,
+            #[cfg(feature = "prefix-eviction")]
+            CliEvictionPolicy::Prefix => EvictionPolicy::Prefix,
         }
     }
 }

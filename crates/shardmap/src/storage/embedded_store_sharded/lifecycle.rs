@@ -6,6 +6,11 @@ impl WorkerLocalEmbeddedStore {
             .expect("worker-local embedded store key does not belong to this thread")
     }
 
+    pub fn delete_routed_local(&mut self, route: EmbeddedKeyRoute, key: &[u8]) -> bool {
+        debug_assert!(self.owns_shard(route.shard_id));
+        self.inner.local_delete_routed(route, key)
+    }
+
     pub fn delete_if_local(&mut self, key: &[u8]) -> Result<bool, LocalRouteError> {
         self.local_key_route(key)?;
         Ok(self.inner.local_delete(key))
@@ -14,6 +19,11 @@ impl WorkerLocalEmbeddedStore {
     pub fn exists(&mut self, key: &[u8]) -> bool {
         self.exists_if_local(key)
             .expect("worker-local embedded store key does not belong to this thread")
+    }
+
+    pub fn exists_routed_local(&mut self, route: EmbeddedKeyRoute, key: &[u8]) -> bool {
+        debug_assert!(self.owns_shard(route.shard_id));
+        self.inner.local_get_ref_routed(route, key).is_some()
     }
 
     pub fn exists_if_local(&mut self, key: &[u8]) -> Result<bool, LocalRouteError> {

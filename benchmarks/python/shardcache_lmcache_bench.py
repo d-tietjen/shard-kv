@@ -169,24 +169,94 @@ def _build_memory_obj(buf_class, metadata_class, format_enum, value: bytes):
 
 
 def _build_local_cpu_backend(local_backend_class):
-    try:
-        return local_backend_class()
-    except TypeError:
+    config = _build_lmcache_config()
+    attempts = [
+        ((), {}),
+        ((config,), {}),
+        ((config,), {"dst_device": "cpu"}),
+        ((), {"config": config}),
+        ((), {"config": config, "dst_device": "cpu"}),
+        (
+            (),
+            {
+                "config": config,
+                "metadata": None,
+                "loop": None,
+                "memory_allocator": None,
+                "dst_device": "cpu",
+            },
+        ),
+    ]
+    errors: list[str] = []
+    for positional, keyword in attempts:
         try:
-            from lmcache.v1.config import LMCacheEngineConfig  # type: ignore[import-not-found]
+            return local_backend_class(*positional, **keyword)
+        except TypeError as exc:
+            errors.append(str(exc))
+    raise TypeError("; ".join(errors[-3:]))
 
-            config = LMCacheEngineConfig()
-        except ImportError:
-            from lmcache.v1.config_base import (  # type: ignore[import-not-found]
-                LMCacheEngineConfig,
-            )
 
-            config = LMCacheEngineConfig()
-
+def _build_lmcache_config():
+    config_classes = []
+    for module_name in ("lmcache.v1.config", "lmcache.v1.config_base"):
         try:
-            return local_backend_class(config, dst_device="cpu")
+            module = __import__(module_name, fromlist=["LMCacheEngineConfig"])
+            config_classes.append(module.LMCacheEngineConfig)
+        except Exception:
+            continue
+    if not config_classes:
+        return type("Cfg", (), {"extra_config": {}})()
+
+    cls = config_classes[0]
+    for positional, keyword in (
+        ((), {}),
+        ((), {"extra_config": {}}),
+        ((), {"chunk_size": 256, "local_cpu": True}),
+    ):
+        try:
+            return cls(*positional, **keyword)
         except TypeError:
-            return local_backend_class(config)
+            continue
+    return type("Cfg", (), {"extra_config": {}})()
+
+
+class LocalCpuBackendAdapter:
+    def __init__(self, backend):
+        self.backend = backend
+
+    def __getattr__(self, name):
+        return getattr(self.backend, name)
+
+    def batched_submit_put_task(self, keys, objs):
+        if hasattr(self.backend, "batched_submit_put_task"):
+            return self.backend.batched_submit_put_task(keys, objs)
+        if hasattr(self.backend, "submit_put_task"):
+            for key, obj in zip(keys, objs):
+                self.backend.submit_put_task(key, obj)
+            return None
+        if hasattr(self.backend, "put_blocking"):
+            for key, obj in zip(keys, objs):
+                self.backend.put_blocking(key, obj)
+            return None
+        if hasattr(self.backend, "put"):
+            for key, obj in zip(keys, objs):
+                self.backend.put(key, obj)
+            return None
+        raise AttributeError("LocalCPUBackend does not expose a known put method")
+
+    def get_blocking(self, key):
+        if hasattr(self.backend, "get_blocking"):
+            return self.backend.get_blocking(key)
+        if hasattr(self.backend, "get"):
+            return self.backend.get(key)
+        raise AttributeError("LocalCPUBackend does not expose a known get method")
+
+    def batched_get_blocking(self, keys):
+        if hasattr(self.backend, "batched_get_blocking"):
+            return self.backend.batched_get_blocking(keys)
+        if hasattr(self.backend, "batched_get"):
+            return self.backend.batched_get(keys)
+        return [self.get_blocking(key) for key in keys]
 
 
 class FcLmcacheWorker(Worker):
@@ -262,6 +332,15 @@ def main() -> None:
         default="127.0.0.1:6500",
         help="host:port for --client-architecture scnp_tcp",
     )
+    parser.add_argument(
+        "--numa-policy",
+        choices=("off", "worker_pinned", "caller_local"),
+        default="off",
+        help=(
+            "NUMA policy for local_embedded shardcache: off, worker_pinned, "
+            "or caller_local node-local routing"
+        ),
+    )
     args = parser.parse_args()
     get_pct = parse_mix(args.mix)
     spec = WorkloadSpec(
@@ -277,6 +356,7 @@ def main() -> None:
         f"keys={args.key_count} duration={args.duration}s "
         f"connection={args.connection or 'client_architecture'} "
         f"client_architecture={args.client_architecture} scnp_addr={args.scnp_addr} "
+        f"numa_policy={args.numa_policy} "
         f"op_batch_size={args.op_batch_size}"
     )
     print()
@@ -293,6 +373,7 @@ def main() -> None:
         "storage_plugin.shardcache.scnp_addr": args.scnp_addr,
         "storage_plugin.shardcache.enable_metrics": False,
         "storage_plugin.shardcache.zero_copy_reads": True,
+        "storage_plugin.shardcache.numa_policy": args.numa_policy,
     }
     if args.connection is not None:
         extra_config["storage_plugin.shardcache.connection"] = args.connection
@@ -314,6 +395,7 @@ def main() -> None:
                 file=sys.stderr,
             )
         else:
+            local_backend = LocalCpuBackendAdapter(local_backend)
             results.append(
                 _run_backend(
                     "lmcache-local-cpu", local_backend, keys_lm, value_obj, spec, args

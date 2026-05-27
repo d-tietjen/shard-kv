@@ -103,6 +103,19 @@ impl WorkerLocalEmbeddedStore {
             .expect("worker-local embedded store session does not belong to this thread");
     }
 
+    pub fn batch_set_session_owned_no_ttl_routed_local(
+        &mut self,
+        route: EmbeddedSessionRoute,
+        session_prefix: Bytes,
+        items: Vec<(Bytes, Bytes)>,
+    ) {
+        debug_assert!(self.owns_shard(route.shard_id));
+        self.inner.local_batch_set_session_packed_routed_no_ttl(
+            route,
+            PackedSessionWrite::from_owned_items(session_prefix, items),
+        );
+    }
+
     pub fn batch_set_session_owned_no_ttl_if_local(
         &mut self,
         session_prefix: Bytes,
@@ -117,6 +130,16 @@ impl WorkerLocalEmbeddedStore {
     pub fn batch_set_session_packed_no_ttl(&mut self, packed: PackedSessionWrite) {
         self.batch_set_session_packed_no_ttl_if_local(packed)
             .expect("worker-local embedded store session does not belong to this thread");
+    }
+
+    pub fn batch_set_session_packed_no_ttl_routed_local(
+        &mut self,
+        route: EmbeddedSessionRoute,
+        packed: PackedSessionWrite,
+    ) {
+        debug_assert!(self.owns_shard(route.shard_id));
+        self.inner
+            .local_batch_set_session_packed_routed_no_ttl(route, packed);
     }
 
     pub fn batch_set_session_packed_no_ttl_if_local(

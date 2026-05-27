@@ -28,6 +28,7 @@ extra_config:
   storage_plugin.shardcache.class_name: ShardCacheStorageBackend
   storage_plugin.shardcache.connection: embedded
   storage_plugin.shardcache.cores: 8
+  storage_plugin.shardcache.numa_policy: off
   storage_plugin.shardcache.enable_metrics: false
 ```
 
@@ -86,10 +87,11 @@ All keys use the `storage_plugin.<name>.` prefix. With the examples above,
 | `enable_metrics` | `false` | Enable shardcache store metrics. |
 | `enable_backend_stage_metrics` | `false` | Record plugin-stage timings. |
 | `zero_copy_reads` | `true` | Rebuild raw `BytesBufferMemoryObj` payloads without an extra copy when possible. |
+| `numa_policy` | `off` | Embedded NUMA mode: `off`, `worker_pinned`, or `caller_local`. `worker_pinned` pins owner workers to discovered NUMA CPUs. `caller_local` also routes keys/sessions to the calling thread's NUMA node, creating node-local cache copies. |
 | `wal_path` | unset | Embedded WAL path. Empty disables WAL persistence. |
 | `compress_wal` | `true` | Compress embedded WAL records when WAL is enabled. |
 | `max_memory_bytes` | `0` | Embedded memory budget. `0` disables memory-limit eviction. |
-| `eviction_policy` | `none` | Embedded eviction policy: `none`, `lru`, or `lfu`. |
+| `eviction_policy` | `none` | Embedded eviction policy: `none`, `lru`, `lfu`, or feature-gated `prefix`. |
 | `encoded_key_cache_limit` | `65536` | Encoded LMCache key cache entries. |
 | `encoded_metadata_cache_limit` | `4096` | Encoded metadata cache entries. |
 | `prepared_batch_cache_limit` | `4096` | Prepared batch lookup/put cache entries. |
@@ -171,6 +173,10 @@ cap stays at 4 MiB for ordinary server runs.
 ## Notes
 
 - Uses `full_key` routing because LMCache keys are content-addressed.
+- `numa_policy=caller_local` is for dual-socket/GPU-local deployments where
+  callers are already pinned near their target GPU; the same logical key can
+  exist once per NUMA node to avoid cross-socket hot-path reads. Do not combine
+  this mode with WAL persistence; replay cannot infer the original caller node.
 - Prefers zero-copy `BytesBufferMemoryObj` reconstruction for raw buffers.
 - Keeps one Rust SCNP connection per Python worker thread in TCP mode.
 - Falls back to allocator-backed `MemoryObj` for KV-cache formats when LMCache's GPU connector expects `memory_obj.tensor`.

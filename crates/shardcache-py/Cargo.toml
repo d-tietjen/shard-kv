@@ -15,13 +15,16 @@ default = []
 extension-module = ["pyo3/extension-module"]
 telemetry = ["shardmap/telemetry"]
 gpu-direct-api = ["shardcache-runtime/gpu-direct-api"]
+prefix-eviction = ["shardmap/prefix-eviction"]
 
 [lib]
 name = "shardcache"
 crate-type = ["cdylib"]
 
 [dependencies]
+core_affinity = { workspace = true }
 dashmap = "6.1"
+libc = { workspace = true }
 shardmap = { workspace = true, default-features = false, features = ["sharded"] }
 shardcache-runtime = { path = "../shardcache-runtime", version = "0.1.0" }
 shardcache-client-rs = { workspace = true }

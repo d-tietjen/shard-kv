@@ -382,6 +382,10 @@ pub struct OwnedEmbeddedReadView {
 }
 
 impl OwnedEmbeddedReadView {
+    pub(crate) fn from_item(item: Option<EmbeddedReadSlice>) -> Self {
+        Self { item }
+    }
+
     #[inline(always)]
     pub fn is_hit(&self) -> bool {
         self.item.is_some()
@@ -417,6 +421,20 @@ pub struct OwnedEmbeddedBatchReadView {
 }
 
 impl OwnedEmbeddedBatchReadView {
+    pub(crate) fn from_items(items: Vec<Option<EmbeddedReadSlice>>) -> Self {
+        let mut hit_count = 0usize;
+        let mut total_bytes = 0usize;
+        for item in items.iter().flatten() {
+            hit_count += 1;
+            total_bytes += item.len();
+        }
+        Self {
+            items,
+            hit_count,
+            total_bytes,
+        }
+    }
+
     #[inline(always)]
     pub fn item_count(&self) -> usize {
         self.items.len()

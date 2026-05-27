@@ -116,6 +116,7 @@ and replication. Most embedded applications should start with `ShardMap`.
 | `redis-server` | No | Server internals plus Redis/Valkey compatibility. |
 | `telemetry` | No | Embedded operational metrics. |
 | `monoio` | No | Linux-only server transport internals. |
+| `prefix-eviction` | No | Enables `EvictionPolicy::Prefix` for prefix-group memory-limit eviction. |
 
 ## License
 

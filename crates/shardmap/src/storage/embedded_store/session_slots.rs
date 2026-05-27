@@ -75,7 +75,35 @@ impl SessionAccessMeta {
                 primary: self.frequency as u64,
                 secondary: self.last_touch,
             },
+            #[cfg(feature = "prefix-eviction")]
+            EvictionPolicy::Prefix => EvictionRank {
+                primary: self.last_touch,
+                secondary: self.frequency as u64,
+            },
         }
+    }
+}
+
+#[cfg(feature = "prefix-eviction")]
+#[inline(always)]
+fn prefix_eviction_group_rank(access: SessionAccessMeta) -> EvictionRank {
+    EvictionRank {
+        primary: access.last_touch,
+        secondary: access.frequency as u64,
+    }
+}
+
+#[cfg(feature = "prefix-eviction")]
+#[inline(always)]
+fn prefix_eviction_member_rank(
+    session_prefix_len: usize,
+    key_len: usize,
+    access: SessionAccessMeta,
+) -> EvictionRank {
+    let suffix_depth = key_len.saturating_sub(session_prefix_len) as u64;
+    EvictionRank {
+        primary: access.last_touch,
+        secondary: u64::MAX.saturating_sub(suffix_depth),
     }
 }
 
@@ -791,6 +819,10 @@ impl SessionSlotMap {
         if policy == EvictionPolicy::None {
             return None;
         }
+        #[cfg(feature = "prefix-eviction")]
+        if policy == EvictionPolicy::Prefix {
+            return self.prefix_eviction_candidate();
+        }
 
         self.sessions
             .iter()
@@ -805,6 +837,37 @@ impl SessionSlotMap {
                 })
             })
             .min_by_key(|(rank, _, _, _)| *rank)
+    }
+
+    #[cfg(feature = "prefix-eviction")]
+    fn prefix_eviction_candidate(&self) -> Option<(EvictionRank, Bytes, u64, Bytes)> {
+        let (group_rank, session_prefix) = self
+            .sessions
+            .iter()
+            .filter_map(|(session_prefix, slab)| {
+                slab.entries
+                    .iter()
+                    .map(|entry| prefix_eviction_group_rank(entry.access))
+                    .max()
+                    .map(|rank| (rank, session_prefix.clone()))
+            })
+            .min_by_key(|(rank, _session_prefix)| *rank)?;
+
+        let slab = self.sessions.get(&session_prefix)?;
+        let session_prefix_len = session_prefix.len();
+        let (_member_rank, hash, key) = slab
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    prefix_eviction_member_rank(session_prefix_len, entry.key.len(), entry.access),
+                    entry.hash,
+                    entry.key.as_ref().to_vec(),
+                )
+            })
+            .min_by_key(|(rank, _, _)| *rank)?;
+
+        Some((group_rank, session_prefix, hash, key))
     }
 
     pub(super) fn evict_with_policy(&mut self, policy: EvictionPolicy) -> bool {

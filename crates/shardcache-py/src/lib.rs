@@ -12,10 +12,10 @@ use shardmap_crate::config::{EvictionPolicy, ShardCacheConfig};
 use shardmap_crate::cuda::CudaConfig;
 use shardmap_crate::persistence::{PersistenceRuntime, WalAppender, load_recovery_state};
 use shardmap_crate::storage::{
-    Bytes, EmbeddedBatchReadView, EmbeddedReadSlice, EmbeddedReadView, EmbeddedRouteMode,
-    EmbeddedStore, FastHashMap, LocalEmbeddedStore, MutationBytes, MutationOp, MutationRecord,
-    OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView, PackedBatch, PackedSessionWrite,
-    StoredEntry, now_millis,
+    Bytes, EmbeddedBatchReadView, EmbeddedKeyRoute, EmbeddedReadSlice, EmbeddedReadView,
+    EmbeddedRouteMode, EmbeddedSessionRoute, EmbeddedStore, FastHashMap, LocalEmbeddedStore,
+    MutationBytes, MutationOp, MutationRecord, OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView,
+    PackedBatch, PackedSessionWrite, StoredEntry, now_millis, shift_for, stripe_index,
 };
 #[cfg(feature = "telemetry")]
 use shardmap_crate::storage::{CacheMetricsSnapshot, CacheTelemetry};
@@ -34,7 +34,9 @@ use shardcache_runtime_crate::{
     VllmConnectorLoadSpec, VllmKvConnector, VllmRequestedPage,
 };
 use std::cell::RefCell;
+use std::fs;
 use std::os::raw::{c_int, c_void};
+use std::path::Path;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -451,9 +453,12 @@ impl std::fmt::Debug for ThreadedStoreWorker {
 }
 
 impl ThreadedStoreWorker {
-    fn new(worker_store: LocalEmbeddedStore) -> Self {
+    fn new(worker_store: LocalEmbeddedStore, placement: Option<NumaWorkerPlacement>) -> Self {
         let (tx, rx) = mpsc::channel::<WorkerCommand>();
         let join = thread::spawn(move || {
+            if let Some(cpu_id) = placement.and_then(|placement| placement.cpu_id) {
+                pin_current_thread_to_cpu(cpu_id);
+            }
             let mut state = ThreadedStoreWorkerState::new(worker_store);
             while let Ok(command) = rx.recv() {
                 match command {
@@ -523,6 +528,7 @@ struct ThreadedStoreCore {
     workers: Vec<ThreadedStoreWorker>,
     route_mode: EmbeddedRouteMode,
     prefer_session_tags: bool,
+    numa: NumaTopology,
     #[cfg(feature = "telemetry")]
     metrics: Option<Arc<CacheTelemetry>>,
     _persistence_owner: Option<Arc<PersistenceRuntime>>,
@@ -537,12 +543,222 @@ struct SharedStoreCore {
     wal_sequences: Vec<AtomicU64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NumaRoutePolicy {
+    Off,
+    WorkerPinned,
+    CallerLocal,
+}
+
+impl NumaRoutePolicy {
+    fn routes_by_caller(self) -> bool {
+        matches!(self, Self::CallerLocal)
+    }
+
+    fn pins_workers(self) -> bool {
+        matches!(self, Self::WorkerPinned | Self::CallerLocal)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NumaWorkerPlacement {
+    cpu_id: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveredNumaNode {
+    cpus: Vec<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct NumaTopology {
+    policy: NumaRoutePolicy,
+    worker_count: usize,
+    workers: Vec<NumaWorkerPlacement>,
+    node_workers: Vec<Vec<usize>>,
+    cpu_to_node: Vec<Option<usize>>,
+}
+
+impl NumaTopology {
+    fn new(worker_count: usize, policy: NumaRoutePolicy) -> Self {
+        let worker_count = worker_count.max(1);
+        if policy == NumaRoutePolicy::Off {
+            return Self::single_node(worker_count, policy);
+        }
+
+        let nodes = discover_numa_nodes().unwrap_or_else(discover_single_node);
+        if nodes.is_empty() {
+            return Self::single_node(worker_count, policy);
+        }
+
+        let mut workers = Vec::with_capacity(worker_count);
+        let mut node_workers = vec![Vec::new(); nodes.len()];
+        let mut node_worker_ordinals = vec![0usize; nodes.len()];
+        for worker_id in 0..worker_count {
+            let node_index = worker_id % nodes.len();
+            let cpu_id = nodes[node_index]
+                .cpus
+                .get(node_worker_ordinals[node_index] % nodes[node_index].cpus.len().max(1))
+                .copied();
+            node_worker_ordinals[node_index] = node_worker_ordinals[node_index].saturating_add(1);
+            workers.push(NumaWorkerPlacement { cpu_id });
+            node_workers[node_index].push(worker_id);
+        }
+
+        let max_cpu = nodes
+            .iter()
+            .flat_map(|node| node.cpus.iter().copied())
+            .max()
+            .unwrap_or(0);
+        let mut cpu_to_node = vec![None; max_cpu.saturating_add(1)];
+        for (node_index, node) in nodes.iter().enumerate() {
+            for cpu in &node.cpus {
+                if let Some(slot) = cpu_to_node.get_mut(*cpu) {
+                    *slot = Some(node_index);
+                }
+            }
+        }
+
+        Self {
+            policy,
+            worker_count,
+            workers,
+            node_workers,
+            cpu_to_node,
+        }
+    }
+
+    fn single_node(worker_count: usize, policy: NumaRoutePolicy) -> Self {
+        let worker_count = worker_count.max(1);
+        let cpus = available_cpu_ids();
+        let mut workers = Vec::with_capacity(worker_count);
+        let mut node_workers = vec![Vec::with_capacity(worker_count)];
+        for worker_id in 0..worker_count {
+            workers.push(NumaWorkerPlacement {
+                cpu_id: cpus.get(worker_id % cpus.len().max(1)).copied(),
+            });
+            node_workers[0].push(worker_id);
+        }
+        let max_cpu = cpus.iter().copied().max().unwrap_or(0);
+        let mut cpu_to_node = vec![None; max_cpu.saturating_add(1)];
+        for cpu in cpus {
+            if let Some(slot) = cpu_to_node.get_mut(cpu) {
+                *slot = Some(0);
+            }
+        }
+        Self {
+            policy,
+            worker_count,
+            workers,
+            node_workers,
+            cpu_to_node,
+        }
+    }
+
+    fn placement_for_worker(&self, worker_id: usize) -> Option<NumaWorkerPlacement> {
+        if !self.policy.pins_workers() {
+            return None;
+        }
+        self.workers.get(worker_id).cloned()
+    }
+
+    fn default_worker_for_hash(&self, route_hash: u64) -> usize {
+        stripe_index(route_hash, shift_for(self.worker_count))
+    }
+
+    fn worker_for_route_hash(&self, route_hash: u64) -> usize {
+        if !self.policy.routes_by_caller() {
+            return self.default_worker_for_hash(route_hash);
+        }
+        let node_index = self.current_node_index();
+        let workers = self
+            .node_workers
+            .get(node_index)
+            .filter(|workers| !workers.is_empty())
+            .unwrap_or(&self.node_workers[0]);
+        workers[(route_hash as usize) % workers.len()]
+    }
+
+    fn current_node_index(&self) -> usize {
+        let Some(cpu_id) = current_cpu_id() else {
+            return 0;
+        };
+        self.cpu_to_node
+            .get(cpu_id)
+            .and_then(|node| *node)
+            .unwrap_or(0)
+    }
+}
+
+fn available_cpu_ids() -> Vec<usize> {
+    core_affinity::get_core_ids()
+        .map(|cores| cores.into_iter().map(|core| core.id).collect())
+        .filter(|cpus: &Vec<_>| !cpus.is_empty())
+        .unwrap_or_else(|| vec![0])
+}
+
+fn discover_single_node() -> Vec<DiscoveredNumaNode> {
+    vec![DiscoveredNumaNode {
+        cpus: available_cpu_ids(),
+    }]
+}
+
+fn discover_numa_nodes() -> Option<Vec<DiscoveredNumaNode>> {
+    let root = Path::new("/sys/devices/system/node");
+    let mut nodes = Vec::new();
+    for entry in fs::read_dir(root).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("node") || name[4..].parse::<usize>().is_err() {
+            continue;
+        }
+        let cpulist = fs::read_to_string(entry.path().join("cpulist")).ok()?;
+        let cpus = parse_cpu_list(&cpulist);
+        if !cpus.is_empty() {
+            nodes.push(DiscoveredNumaNode { cpus });
+        }
+    }
+    (!nodes.is_empty()).then_some(nodes)
+}
+
+fn parse_cpu_list(raw: &str) -> Vec<usize> {
+    let mut cpus = Vec::new();
+    for part in raw.trim().split(',').filter(|part| !part.is_empty()) {
+        if let Some((start, end)) = part.split_once('-') {
+            if let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) {
+                cpus.extend(start..=end);
+            }
+        } else if let Ok(cpu) = part.parse::<usize>() {
+            cpus.push(cpu);
+        }
+    }
+    cpus
+}
+
+fn current_cpu_id() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        let cpu = unsafe { libc::sched_getcpu() };
+        (cpu >= 0).then_some(cpu as usize)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn pin_current_thread_to_cpu(cpu_id: usize) {
+    let _ = core_affinity::set_for_current(core_affinity::CoreId { id: cpu_id });
+}
+
 impl std::fmt::Debug for ThreadedStoreCore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ThreadedStoreCore")
             .field("worker_count", &self.workers.len())
             .field("route_mode", &self.route_mode)
             .field("prefer_session_tags", &self.prefer_session_tags)
+            .field("numa", &self.numa)
             .finish_non_exhaustive()
     }
 }
@@ -571,9 +787,11 @@ impl ThreadedStoreCore {
         per_worker_memory_limit_bytes: Option<usize>,
         eviction_policy: EvictionPolicy,
         persistence: Option<PersistenceSetup>,
+        numa_policy: NumaRoutePolicy,
         #[cfg(feature = "telemetry")] metrics: Option<Arc<CacheTelemetry>>,
     ) -> Self {
         let worker_count = worker_count.max(1);
+        let numa = NumaTopology::new(worker_count, numa_policy);
         let (persistence, wal_appenders, recovered) = if let Some(persistence) = persistence {
             (
                 Some(persistence.runtime),
@@ -599,12 +817,16 @@ impl ThreadedStoreCore {
         let local_workers = store.into_local_stores(worker_count);
         let workers = local_workers
             .into_iter()
-            .map(ThreadedStoreWorker::new)
+            .enumerate()
+            .map(|(worker_id, store)| {
+                ThreadedStoreWorker::new(store, numa.placement_for_worker(worker_id))
+            })
             .collect::<Vec<_>>();
         Self {
             workers,
             route_mode,
             prefer_session_tags,
+            numa,
             #[cfg(feature = "telemetry")]
             metrics,
             _persistence_owner: persistence,
@@ -620,7 +842,27 @@ impl ThreadedStoreCore {
 
     #[inline(always)]
     fn worker_for_hash(&self, hash: u64) -> usize {
-        (hash as usize) % self.worker_count()
+        self.numa.worker_for_route_hash(hash)
+    }
+
+    #[inline(always)]
+    fn uses_caller_local_routes(&self) -> bool {
+        self.numa.policy.routes_by_caller()
+    }
+
+    #[inline(always)]
+    fn route_hash_for_key(&self, key: &[u8]) -> u64 {
+        if self.prefer_session_tags
+            && let Some(session_prefix) = extract_lmcache_session_prefix(key)
+        {
+            return shardmap_crate::storage::hash_key(&session_prefix);
+        }
+        match self.route_mode {
+            EmbeddedRouteMode::FullKey => shardmap_crate::storage::hash_key(key),
+            EmbeddedRouteMode::SessionPrefix => {
+                shardmap_crate::storage::hash_key(session_route_prefix(key))
+            }
+        }
     }
 
     #[inline(always)]
@@ -630,19 +872,30 @@ impl ThreadedStoreCore {
 
     #[inline(always)]
     fn route_key(&self, key: &[u8]) -> usize {
-        if self.prefer_session_tags
-            && let Some(session_prefix) = extract_lmcache_session_prefix(key)
-        {
-            return self.route_session(&session_prefix);
-        }
-        match self.route_mode {
-            EmbeddedRouteMode::FullKey => {
-                self.worker_for_hash(shardmap_crate::storage::hash_key(key))
-            }
-            EmbeddedRouteMode::SessionPrefix => {
-                self.worker_for_hash(shardmap_crate::storage::hash_key(session_route_prefix(key)))
-            }
-        }
+        self.worker_for_hash(self.route_hash_for_key(key))
+    }
+
+    #[inline(always)]
+    fn routed_key(&self, key: &[u8]) -> (usize, EmbeddedKeyRoute) {
+        let worker_id = self.route_key(key);
+        (
+            worker_id,
+            EmbeddedKeyRoute {
+                shard_id: worker_id,
+                key_hash: shardmap_crate::storage::hash_key(key),
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn routed_session(&self, session_prefix: &[u8]) -> (usize, EmbeddedSessionRoute) {
+        let worker_id = self.route_session(session_prefix);
+        (
+            worker_id,
+            EmbeddedSessionRoute {
+                shard_id: worker_id,
+            },
+        )
     }
 
     #[cfg(feature = "telemetry")]
@@ -734,7 +987,10 @@ fn routed_shard_for_key(
 ) -> usize {
     let shard_count = shard_count.max(1);
     if prefer_session_tags && let Some(session_prefix) = extract_lmcache_session_prefix(key) {
-        return (shardmap_crate::storage::hash_key(&session_prefix) as usize) % shard_count;
+        return stripe_index(
+            shardmap_crate::storage::hash_key(&session_prefix),
+            shift_for(shard_count),
+        );
     }
     let route_hash = match route_mode {
         EmbeddedRouteMode::FullKey => shardmap_crate::storage::hash_key(key),
@@ -742,7 +998,7 @@ fn routed_shard_for_key(
             shardmap_crate::storage::hash_key(session_route_prefix(key))
         }
     };
-    (route_hash as usize) % shard_count
+    stripe_index(route_hash, shift_for(shard_count))
 }
 
 fn build_persistence_setup(
@@ -1097,6 +1353,7 @@ impl StoreCore {
         enable_metrics: bool,
         client_architecture: &str,
         prefer_session_tags: bool,
+        numa_policy: NumaRoutePolicy,
     ) -> PyResult<Self> {
         let cores = cores.max(1);
         #[cfg(feature = "telemetry")]
@@ -1112,8 +1369,20 @@ impl StoreCore {
                 "shardcache-py was built without the telemetry feature",
             ));
         }
+        if numa_policy == NumaRoutePolicy::CallerLocal && wal_path.is_some() {
+            return Err(PyValueError::new_err(
+                "numa_policy='caller_local' is incompatible with WAL persistence because one logical key may have one node-local copy per NUMA node",
+            ));
+        }
 
-        match Self::normalize_client_architecture(client_architecture) {
+        let normalized_architecture = Self::normalize_client_architecture(client_architecture);
+        if normalized_architecture != "local_embedded" && numa_policy != NumaRoutePolicy::Off {
+            return Err(PyValueError::new_err(
+                "numa_policy requires client_architecture='local_embedded'",
+            ));
+        }
+
+        match normalized_architecture {
             "local_embedded" => {
                 let per_worker_memory_limit_bytes =
                     max_memory_bytes.map(|bytes| bytes.div_ceil(cores.max(1)));
@@ -1133,6 +1402,7 @@ impl StoreCore {
                     per_worker_memory_limit_bytes,
                     eviction_policy,
                     persistence,
+                    numa_policy,
                     #[cfg(feature = "telemetry")]
                     metrics,
                 )))
@@ -1458,13 +1728,20 @@ impl StoreCore {
                 }
             }
             Self::Threaded(store) => {
-                let worker_id = store.route_key(&key);
+                let (worker_id, route) = store.routed_key(&key);
                 let now_ms = now_millis();
                 let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
                 if store.wal_enabled_for_shard(worker_id) {
                     let wal_key = key.clone();
                     let wal_value = value.clone();
-                    store.workers[worker_id].run_store(move |inner| inner.set(key, value, ttl_ms));
+                    if store.uses_caller_local_routes() {
+                        store.workers[worker_id].run_store(move |inner| {
+                            inner.set_slice_routed_local(route, &key, &value, ttl_ms)
+                        });
+                    } else {
+                        store.workers[worker_id]
+                            .run_store(move |inner| inner.set(key, value, ttl_ms));
+                    }
                     store.append_wal(
                         worker_id,
                         MutationOp::Set,
@@ -1473,6 +1750,10 @@ impl StoreCore {
                         expire_at_ms,
                         now_ms,
                     );
+                } else if store.uses_caller_local_routes() {
+                    store.workers[worker_id].run_store(move |inner| {
+                        inner.set_slice_routed_local(route, &key, &value, ttl_ms)
+                    });
                 } else {
                     store.workers[worker_id].run_store(move |inner| inner.set(key, value, ttl_ms));
                 }
@@ -1517,9 +1798,49 @@ impl StoreCore {
                 }
             }
             Self::Threaded(store) => {
-                let mut grouped = vec![Vec::<(Vec<u8>, Vec<u8>)>::new(); store.worker_count()];
                 let now_ms = now_millis();
                 let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+                if store.uses_caller_local_routes() {
+                    let mut grouped = vec![
+                        Vec::<(EmbeddedKeyRoute, Vec<u8>, Vec<u8>)>::new();
+                        store.worker_count()
+                    ];
+                    for (key, value) in items {
+                        let (worker_id, route) = store.routed_key(&key);
+                        grouped[worker_id].push((route, key, value));
+                    }
+                    for (worker_id, group) in grouped.into_iter().enumerate() {
+                        if group.is_empty() {
+                            continue;
+                        }
+                        let records = if store.wal_enabled_for_shard(worker_id) {
+                            group
+                                .iter()
+                                .map(|(_, key, value)| (key.clone(), value.clone()))
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
+                        store.workers[worker_id].run_store(move |inner| {
+                            for (route, key, value) in group {
+                                inner.set_slice_routed_local(route, &key, &value, ttl_ms);
+                            }
+                        });
+                        for (key, value) in records {
+                            store.append_wal(
+                                worker_id,
+                                MutationOp::Set,
+                                key,
+                                value,
+                                expire_at_ms,
+                                now_ms,
+                            );
+                        }
+                    }
+                    return;
+                }
+
+                let mut grouped = vec![Vec::<(Vec<u8>, Vec<u8>)>::new(); store.worker_count()];
                 for (key, value) in items {
                     let worker_id = store.route_key(&key);
                     grouped[worker_id].push((key, value));
@@ -1584,19 +1905,37 @@ impl StoreCore {
                 }
             }
             Self::Threaded(store) => {
-                let worker_id = store.route_session(&session_prefix);
+                let (worker_id, route) = store.routed_session(&session_prefix);
                 let now_ms = now_millis();
                 if store.wal_enabled_for_shard(worker_id) {
                     let records = items
                         .iter()
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect::<Vec<_>>();
-                    store.workers[worker_id].run_store(move |inner| {
-                        inner.batch_set_session_owned_no_ttl(session_prefix, items)
-                    });
+                    if store.uses_caller_local_routes() {
+                        store.workers[worker_id].run_store(move |inner| {
+                            inner.batch_set_session_owned_no_ttl_routed_local(
+                                route,
+                                session_prefix,
+                                items,
+                            )
+                        });
+                    } else {
+                        store.workers[worker_id].run_store(move |inner| {
+                            inner.batch_set_session_owned_no_ttl(session_prefix, items)
+                        });
+                    }
                     for (key, value) in records {
                         store.append_wal(worker_id, MutationOp::Set, key, value, None, now_ms);
                     }
+                } else if store.uses_caller_local_routes() {
+                    store.workers[worker_id].run_store(move |inner| {
+                        inner.batch_set_session_owned_no_ttl_routed_local(
+                            route,
+                            session_prefix,
+                            items,
+                        )
+                    });
                 } else {
                     store.workers[worker_id].run_store(move |inner| {
                         inner.batch_set_session_owned_no_ttl(session_prefix, items)
@@ -1635,11 +1974,11 @@ impl StoreCore {
             Self::Threaded(store) => {
                 let now_ms = now_millis();
                 let mut grouped = (0..store.worker_count())
-                    .map(|_| Vec::<PackedSessionWrite>::new())
+                    .map(|_| Vec::<(EmbeddedSessionRoute, PackedSessionWrite)>::new())
                     .collect::<Vec<_>>();
                 for packed in sessions {
-                    let worker_id = store.route_session(packed.session_prefix());
-                    grouped[worker_id].push(packed);
+                    let (worker_id, route) = store.routed_session(packed.session_prefix());
+                    grouped[worker_id].push((route, packed));
                 }
 
                 let mut pending = Vec::new();
@@ -1651,15 +1990,20 @@ impl StoreCore {
                     let wal_records = if store.wal_enabled_for_shard(worker_id) {
                         group
                             .iter()
-                            .flat_map(PackedSessionWrite::cloned_records)
+                            .flat_map(|(_, packed)| packed.cloned_records())
                             .collect::<Vec<_>>()
                     } else {
                         Vec::new()
                     };
+                    let caller_local_routes = store.uses_caller_local_routes();
 
                     let rx = store.workers[worker_id].run_store_async(move |inner| {
-                        for packed in group {
-                            inner.batch_set_session_packed_no_ttl(packed);
+                        for (route, packed) in group {
+                            if caller_local_routes {
+                                inner.batch_set_session_packed_no_ttl_routed_local(route, packed);
+                            } else {
+                                inner.batch_set_session_packed_no_ttl(packed);
+                            }
                         }
                     });
                     pending.push((worker_id, rx, wal_records));
@@ -1700,9 +2044,15 @@ impl StoreCore {
         match self {
             Self::Shared(core) => core.store.get(key),
             Self::Threaded(store) => {
-                let worker_id = store.route_key(key);
+                let (worker_id, route) = store.routed_key(key);
                 let key = key.to_vec();
-                store.workers[worker_id].run_store(move |inner| inner.get(&key))
+                if store.uses_caller_local_routes() {
+                    store.workers[worker_id].run_store(move |inner| {
+                        inner.get_ref_routed_local(route, &key).map(<[u8]>::to_vec)
+                    })
+                } else {
+                    store.workers[worker_id].run_store(move |inner| inner.get(&key))
+                }
             }
         }
     }
@@ -1711,12 +2061,19 @@ impl StoreCore {
         match self {
             Self::Shared(core) => PyReadViewInner::Shared(core.store.get_view(key)),
             Self::Threaded(store) => {
-                let worker_id = store.route_key(key);
+                let (worker_id, route) = store.routed_key(key);
                 let key = key.to_vec();
-                PyReadViewInner::Owned(
-                    store.workers[worker_id]
-                        .run_store(move |inner| inner.get_owned_view_local(&key)),
-                )
+                if store.uses_caller_local_routes() {
+                    PyReadViewInner::Owned(
+                        store.workers[worker_id]
+                            .run_store(move |inner| inner.get_owned_view_routed_local(route, &key)),
+                    )
+                } else {
+                    PyReadViewInner::Owned(
+                        store.workers[worker_id]
+                            .run_store(move |inner| inner.get_owned_view_local(&key)),
+                    )
+                }
             }
         }
     }
@@ -1729,6 +2086,39 @@ impl StoreCore {
                 if total == 0 {
                     return Vec::new();
                 }
+                if store.uses_caller_local_routes() {
+                    let mut groups = vec![
+                        Vec::<(usize, EmbeddedKeyRoute, Vec<u8>)>::new();
+                        store.worker_count()
+                    ];
+                    for (index, key) in keys.into_iter().enumerate() {
+                        let (worker_id, route) = store.routed_key(&key);
+                        groups[worker_id].push((index, route, key));
+                    }
+                    let mut values = vec![None; total];
+                    for (worker_id, group) in groups.into_iter().enumerate() {
+                        if group.is_empty() {
+                            continue;
+                        }
+                        let group_keys = group
+                            .iter()
+                            .map(|(_, route, key)| (*route, key.clone()))
+                            .collect::<Vec<_>>();
+                        let results = store.workers[worker_id].run_store(move |inner| {
+                            group_keys
+                                .iter()
+                                .map(|(route, key)| {
+                                    inner.get_ref_routed_local(*route, key).map(<[u8]>::to_vec)
+                                })
+                                .collect::<Vec<_>>()
+                        });
+                        for ((index, _, _), value) in group.into_iter().zip(results) {
+                            values[index] = value;
+                        }
+                    }
+                    return values;
+                }
+
                 let mut groups = vec![Vec::<(usize, Vec<u8>)>::new(); store.worker_count()];
                 for (index, key) in keys.into_iter().enumerate() {
                     let worker_id = store.route_key(&key);
@@ -1765,6 +2155,54 @@ impl StoreCore {
                         lengths: Vec::new(),
                         hit_count: 0,
                         total_bytes: 0,
+                    };
+                }
+
+                if store.uses_caller_local_routes() {
+                    let mut groups =
+                        vec![Vec::<(usize, EmbeddedKeyRoute, Bytes)>::new(); store.worker_count()];
+                    for (index, key) in keys.iter().enumerate() {
+                        let (worker_id, route) = store.routed_key(key);
+                        groups[worker_id].push((index, route, key.clone()));
+                    }
+
+                    let mut batches = Vec::new();
+                    let mut entries = vec![None; total];
+                    let mut lengths = vec![0usize; total];
+                    let mut hit_count = 0usize;
+                    let mut total_bytes = 0usize;
+
+                    for (worker_id, group) in groups.into_iter().enumerate() {
+                        if group.is_empty() {
+                            continue;
+                        }
+                        let group_keys = group
+                            .iter()
+                            .map(|(_, route, key)| (*route, key.clone()))
+                            .collect::<Vec<_>>();
+                        let batch = store.workers[worker_id].run_store(move |inner| {
+                            inner.batch_get_owned_view_routed_local(&group_keys)
+                        });
+                        let batch_index = batches.len();
+                        let batch_lengths = batch.lengths();
+                        for (local_index, (original_index, _, _)) in group.iter().enumerate() {
+                            let length = batch_lengths[local_index];
+                            lengths[*original_index] = length;
+                            if length > 0 {
+                                entries[*original_index] = Some((batch_index, local_index));
+                                hit_count += 1;
+                                total_bytes += length;
+                            }
+                        }
+                        batches.push(PyReadBatchViewInner::Owned(batch));
+                    }
+
+                    return PyReadBatchInner::Routed {
+                        batches,
+                        entries,
+                        lengths,
+                        hit_count,
+                        total_bytes,
                     };
                 }
 
@@ -1822,12 +2260,18 @@ impl StoreCore {
                 core.store.batch_get_session_view(session_prefix, keys),
             ),
             Self::Threaded(store) => {
-                let worker_id = store.route_session(session_prefix);
+                let (worker_id, route) = store.routed_session(session_prefix);
                 let session_prefix = session_prefix.to_vec();
                 let keys = keys.to_vec();
-                PyReadBatchViewInner::Owned(store.workers[worker_id].run_store(move |inner| {
-                    inner.batch_get_session_owned_view_local(&session_prefix, &keys)
-                }))
+                if store.uses_caller_local_routes() {
+                    PyReadBatchViewInner::Owned(store.workers[worker_id].run_store(move |inner| {
+                        inner.batch_get_session_owned_view_routed_local(route, &keys)
+                    }))
+                } else {
+                    PyReadBatchViewInner::Owned(store.workers[worker_id].run_store(move |inner| {
+                        inner.batch_get_session_owned_view_local(&session_prefix, &keys)
+                    }))
+                }
             }
         }
     }
@@ -1844,17 +2288,27 @@ impl StoreCore {
                     .batch_get_session_view_prehashed(session_prefix, keys, key_hashes),
             ),
             Self::Threaded(store) => {
-                let worker_id = store.route_session(session_prefix);
+                let (worker_id, route) = store.routed_session(session_prefix);
                 let session_prefix = session_prefix.to_vec();
                 let keys = keys.to_vec();
                 let key_hashes = key_hashes.to_vec();
-                PyReadBatchViewInner::Owned(store.workers[worker_id].run_store(move |inner| {
-                    inner.batch_get_session_owned_view_prehashed_local(
-                        &session_prefix,
-                        &keys,
-                        &key_hashes,
-                    )
-                }))
+                if store.uses_caller_local_routes() {
+                    PyReadBatchViewInner::Owned(store.workers[worker_id].run_store(move |inner| {
+                        inner.batch_get_session_owned_view_prehashed_routed_local(
+                            route,
+                            &keys,
+                            &key_hashes,
+                        )
+                    }))
+                } else {
+                    PyReadBatchViewInner::Owned(store.workers[worker_id].run_store(move |inner| {
+                        inner.batch_get_session_owned_view_prehashed_local(
+                            &session_prefix,
+                            &keys,
+                            &key_hashes,
+                        )
+                    }))
+                }
             }
         }
     }
@@ -1863,11 +2317,18 @@ impl StoreCore {
         match self {
             Self::Shared(core) => core.store.batch_get_session_packed(session_prefix, keys),
             Self::Threaded(store) => {
-                let worker_id = store.route_session(session_prefix);
+                let (worker_id, route) = store.routed_session(session_prefix);
                 let session_prefix = session_prefix.to_vec();
                 let keys = keys.to_vec();
-                store.workers[worker_id]
-                    .run_store(move |inner| inner.batch_get_session_packed(&session_prefix, &keys))
+                if store.uses_caller_local_routes() {
+                    store.workers[worker_id].run_store(move |inner| {
+                        inner.batch_get_session_packed_routed_local(route, &keys)
+                    })
+                } else {
+                    store.workers[worker_id].run_store(move |inner| {
+                        inner.batch_get_session_packed(&session_prefix, &keys)
+                    })
+                }
             }
         }
     }
@@ -1946,10 +2407,15 @@ impl StoreCore {
                 deleted
             }
             Self::Threaded(store) => {
-                let worker_id = store.route_key(key);
+                let (worker_id, route) = store.routed_key(key);
                 let key = key.to_vec();
                 let wal_key = key.clone();
-                let deleted = store.workers[worker_id].run_store(move |inner| inner.delete(&key));
+                let deleted = if store.uses_caller_local_routes() {
+                    store.workers[worker_id]
+                        .run_store(move |inner| inner.delete_routed_local(route, &key))
+                } else {
+                    store.workers[worker_id].run_store(move |inner| inner.delete(&key))
+                };
                 if deleted {
                     store.append_wal(
                         worker_id,
@@ -1969,9 +2435,14 @@ impl StoreCore {
         match self {
             Self::Shared(core) => core.store.exists(key),
             Self::Threaded(store) => {
-                let worker_id = store.route_key(key);
+                let (worker_id, route) = store.routed_key(key);
                 let key = key.to_vec();
-                store.workers[worker_id].run_store(move |inner| inner.exists(&key))
+                if store.uses_caller_local_routes() {
+                    store.workers[worker_id]
+                        .run_store(move |inner| inner.exists_routed_local(route, &key))
+                } else {
+                    store.workers[worker_id].run_store(move |inner| inner.exists(&key))
+                }
             }
         }
     }
@@ -2698,7 +3169,7 @@ type VllmLayerRestoreSummary = (u32, usize, usize, usize, bool);
 #[pymethods]
 impl PyStore {
     #[new]
-    #[pyo3(signature = (cores=1, wal_path=None, compress_wal=true, max_memory_bytes=None, eviction_policy="none", route_mode="full_key", enable_metrics=false, client_architecture="local_embedded", prefer_session_tags=false))]
+    #[pyo3(signature = (cores=1, wal_path=None, compress_wal=true, max_memory_bytes=None, eviction_policy="none", route_mode="full_key", enable_metrics=false, client_architecture="local_embedded", prefer_session_tags=false, numa_policy="off"))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         cores: usize,
@@ -2710,9 +3181,11 @@ impl PyStore {
         enable_metrics: bool,
         client_architecture: &str,
         prefer_session_tags: bool,
+        numa_policy: &str,
     ) -> PyResult<Self> {
         let route_mode = parse_route_mode(route_mode)?;
         let eviction_policy = parse_eviction_policy(eviction_policy)?;
+        let numa_policy = parse_numa_policy(numa_policy)?;
         let inner = Arc::new(StoreCore::new(
             cores,
             wal_path.as_deref(),
@@ -2723,6 +3196,7 @@ impl PyStore {
             enable_metrics,
             client_architecture,
             prefer_session_tags,
+            numa_policy,
         )?);
 
         Ok(Self {
@@ -3902,8 +4376,36 @@ fn parse_eviction_policy(eviction_policy: &str) -> PyResult<EvictionPolicy> {
         "none" => Ok(EvictionPolicy::None),
         "lru" => Ok(EvictionPolicy::Lru),
         "lfu" => Ok(EvictionPolicy::Lfu),
+        #[cfg(feature = "prefix-eviction")]
+        "prefix" | "prefix_eviction" | "prefix-lru" | "prefix_lru" => Ok(EvictionPolicy::Prefix),
+        #[cfg(not(feature = "prefix-eviction"))]
+        "prefix" | "prefix_eviction" | "prefix-lru" | "prefix_lru" => Err(PyValueError::new_err(
+            "eviction_policy 'prefix' requires the 'prefix-eviction' cargo feature",
+        )),
         other => Err(PyValueError::new_err(format!(
-            "unsupported eviction_policy {other:?}; expected 'none', 'lru', or 'lfu'"
+            "unsupported eviction_policy {other:?}; expected {}",
+            expected_eviction_policy_values()
+        ))),
+    }
+}
+
+#[cfg(feature = "prefix-eviction")]
+fn expected_eviction_policy_values() -> &'static str {
+    "'none', 'lru', 'lfu', or 'prefix'"
+}
+
+#[cfg(not(feature = "prefix-eviction"))]
+fn expected_eviction_policy_values() -> &'static str {
+    "'none', 'lru', or 'lfu'"
+}
+
+fn parse_numa_policy(numa_policy: &str) -> PyResult<NumaRoutePolicy> {
+    match numa_policy {
+        "off" | "none" | "disabled" => Ok(NumaRoutePolicy::Off),
+        "worker_pinned" | "pin_workers" | "pinned" => Ok(NumaRoutePolicy::WorkerPinned),
+        "caller_local" | "thread_local" | "local" => Ok(NumaRoutePolicy::CallerLocal),
+        other => Err(PyValueError::new_err(format!(
+            "unsupported numa_policy {other:?}; expected 'off', 'worker_pinned', or 'caller_local'"
         ))),
     }
 }

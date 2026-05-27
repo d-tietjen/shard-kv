@@ -816,6 +816,21 @@ fn memory_cap_lfu_preserves_hot_generic_entry_over_session_slot() {
     assert!(store.stored_bytes() <= 8);
 }
 
+#[cfg(feature = "prefix-eviction")]
+#[test]
+fn memory_cap_prefix_eviction_drops_cold_session_group() {
+    let store = EmbeddedStore::with_route_mode(1, EmbeddedRouteMode::SessionPrefix);
+    store.configure_memory_policy(Some(12), EvictionPolicy::Prefix);
+
+    store.batch_set_session_slices_no_ttl(b"s:cold", [(&b"s:cold:c:0"[..], &b"x"[..])]);
+    store.batch_set_session_slices_no_ttl(b"s:hot", [(&b"s:hot:c:0"[..], &b"y"[..])]);
+
+    assert_eq!(store.get(b"s:cold:c:0"), None);
+    assert_eq!(store.get(b"s:hot:c:0"), Some(b"y".to_vec()));
+    assert_eq!(store.len(), 1);
+    assert!(store.stored_bytes() <= 12);
+}
+
 #[cfg(feature = "telemetry")]
 #[test]
 fn telemetry_snapshot_tracks_basic_ops() {

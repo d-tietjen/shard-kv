@@ -773,6 +773,14 @@ python benchmarks/python/shardcache_lmcache_bench.py --with-local-cpu \
   --duration 10
 ```
 
+For a dual-socket embedded run, pin the benchmark process or worker launcher to
+the intended CPU set and add `--numa-policy worker_pinned` or
+`--numa-policy caller_local`. `worker_pinned` keeps shardcache owner threads on
+discovered NUMA CPUs while preserving one global keyspace. `caller_local` routes
+embedded keys and LMCache session groups to the calling thread's NUMA node, so
+the same logical key may have one local copy per socket. Keep WAL disabled for
+`caller_local` runs.
+
 `LMCACHE=1 ./scripts/run-python.sh` runs both Python harnesses.
 
 Use `--latency-sample-rate 0` for logical payload GB/s saturation runs where latency
@@ -789,7 +797,8 @@ server with a larger cap, for example
 
 The benchmark defaults to `--client-architecture shared` because it uses
 arbitrary multi-client keys. `local_embedded` is for shard-owned caller
-routing, such as the vLLM direct connector path. Use
+routing, such as the vLLM direct connector path; combine it with
+`--numa-policy caller_local` for socket-local duplicated benchmark shapes. Use
 `--connection embedded` for the in-process LMCache path, or
 `--connection tcp --scnp-addr 127.0.0.1:6500` to drive the LMCache plugin
 through a shardcache SCNP/TCP server. `--client-architecture` remains available
@@ -799,7 +808,10 @@ for low-level benchmark shapes such as `shared`, `local_embedded`,
 LMCache's wire-level types (`CacheEngineKey`, `BytesBufferMemoryObj`)
 vary between releases; the harness probes the common constructor
 shapes and will surface a clear error if a newer LMCache changes the
-signature.
+signature. The `LocalCPUBackend` path is wrapped in a small compatibility
+adapter so releases that expose `put`, `put_blocking`, `submit_put_task`, or
+`batched_submit_put_task` can still be measured through the same saturation
+loop.
 
 ## Comparing two backends
 
