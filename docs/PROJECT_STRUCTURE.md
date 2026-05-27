@@ -78,10 +78,12 @@ stay aligned.
 
 New contributors should be able to answer the first set of questions from:
 
-- `README.md`: what the project is, how to run it, feature flags, Docker, and
-  benchmark claims.
-- `crates/shardmap/README.md`: published crate API guide.
-- `crates/shardcache/README.md`: source-only server usage.
+- `README.md`: project overview and links to the four public docs.
+- `crates/shardmap/README.md`: published embedded crate guide.
+- `crates/shardcache-client-rs/README.md`: published native Rust client guide.
+- `docs/SHARDCACHE_DOCKER.md`: source-built server and Docker runbook.
+- `integrations/lmcache_storage_backend/README.md`: LMCache storage backend guide.
+- `crates/shardcache/README.md`: source-only server package notes.
 - `crates/shardmap/SAFETY.md`: reviewed unsafe inventory and invariants.
 - `CONTRIBUTING.md`: setup, pull-request expectations, and verification
   commands.

@@ -1,4 +1,4 @@
-"""Shared bench utilities for the Python harnesses (fc-py, fc-lmcache).
+"""Shared bench utilities for the Python harnesses (fc-py, shardcache-lmcache).
 
 Matches the Rust drivers' CSV schema so all rows live in the same file.
 """
