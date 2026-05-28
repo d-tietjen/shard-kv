@@ -285,6 +285,7 @@ impl EmbeddedShard {
         self.enforce_memory_limit(now_ms);
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     pub(crate) fn set_semantic_slice_hashed(
         &mut self,
@@ -314,6 +315,7 @@ impl EmbeddedShard {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[inline(always)]
     pub(crate) fn set_semantic_slice_hashed_with_governance(
         &mut self,

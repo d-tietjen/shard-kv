@@ -23,6 +23,7 @@ impl FlatMap {
     }
 
     /// Inserts or replaces a value and attaches semantic embedding plus governance metadata.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_semantic_slice_hashed_with_governance(
         &mut self,
         hash: u64,
@@ -44,6 +45,7 @@ impl FlatMap {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn set_semantic_slice_hashed_inner(
         &mut self,
         hash: u64,
@@ -156,9 +158,7 @@ impl FlatMap {
         if entry.is_expired(now_ms) {
             return None;
         }
-        let Some(token) = entry.semantic_index_token else {
-            return None;
-        };
+        let token = entry.semantic_index_token?;
         if token.id() != candidate.id {
             return None;
         }

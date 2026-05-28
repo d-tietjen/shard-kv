@@ -736,6 +736,7 @@ fn run_load<const SHARDS: usize>(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure_latency<const SHARDS: usize>(
     mode: &'static str,
     cache: &ShardMapWithShards<SHARDS>,

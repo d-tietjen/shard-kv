@@ -83,25 +83,6 @@ impl SemanticEmbedding {
     pub(crate) fn as_slice(&self) -> &[f32] {
         &self.vector
     }
-
-    #[inline(always)]
-    fn stored_bytes(&self) -> usize {
-        self.vector.len().saturating_mul(std::mem::size_of::<f32>())
-    }
-
-    #[inline(always)]
-    pub(crate) fn cosine_similarity(&self, query: &Self) -> Option<f32> {
-        if self.vector.len() != query.vector.len() {
-            return None;
-        }
-        Some(dot_product(self.vector.as_ref(), query.vector.as_ref()))
-    }
-}
-
-#[inline(always)]
-pub(crate) fn dot_product(left: &[f32], right: &[f32]) -> f32 {
-    debug_assert_eq!(left.len(), right.len());
-    dot_product_same_len(left, right)
 }
 
 #[inline(always)]
@@ -542,6 +523,7 @@ impl SemanticIndexPartition {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_lsh_rows<const USE_POPCNT: bool, I, T>(
         &self,
         rows: I,

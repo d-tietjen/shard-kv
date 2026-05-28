@@ -132,15 +132,14 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         let min_score = validate_similarity_threshold(min_score)?;
         let generation = self.semantic_generation();
         let query_cache_enabled = self.semantic_query_cache_enabled();
-        if query_cache_enabled {
-            if let Some(cached) = self
+        if query_cache_enabled
+            && let Some(cached) = self
                 .inner
                 .semantic_query_cache
                 .read()
                 .lookup(&query, min_score, generation)
-            {
-                return Ok(cached);
-            }
+        {
+            return Ok(cached);
         }
 
         let now_ms = ttl_now_millis();
