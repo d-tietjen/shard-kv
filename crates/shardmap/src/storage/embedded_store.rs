@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use crate::config::EvictionPolicy;
 use crate::storage::{
-    Bytes, PackedBatch, PreparedPointKey, StoredEntry, hash_key, hash_key_tag_from_hash, now_millis,
+    Bytes, PackedBatch, PreparedPointKey, SemanticCacheError, SemanticEmbedding, SemanticMatch,
+    StoredEntry, hash_key, hash_key_tag_from_hash, now_millis, validate_similarity_threshold,
 };
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
@@ -38,6 +39,7 @@ mod objects;
 mod owned;
 mod point;
 mod routing;
+mod semantic;
 mod session_slots;
 mod shard;
 mod views;

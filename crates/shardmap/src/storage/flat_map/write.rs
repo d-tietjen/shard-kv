@@ -47,14 +47,14 @@ impl FlatMap {
                 let (result, value) = transform(Some(entry.value.as_ref()))?;
                 let value = SharedBytes::from(value);
                 let had_ttl = entry.expire_at_ms.is_some();
-                let previous_value_len = entry.value.len();
-                let new_value_len = value.len();
+                let previous_entry_bytes = entry.stored_bytes();
                 let retired_value = mem::replace(&mut entry.value, value);
+                entry.clear_semantic_embedding();
                 entry.access.record_access(access_tick);
                 self.stored_bytes = self
                     .stored_bytes
-                    .saturating_sub(previous_value_len)
-                    .saturating_add(new_value_len);
+                    .saturating_sub(previous_entry_bytes)
+                    .saturating_add(entry.stored_bytes());
                 entry.expire_at_ms = None;
                 self.adjust_ttl_count(had_ttl, false);
                 self.retire_value(retired_value);
@@ -73,6 +73,7 @@ impl FlatMap {
                     key: key.to_vec().into_boxed_slice(),
                     value,
                     expire_at_ms: None,
+                    semantic_index_token: None,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -120,14 +121,14 @@ impl FlatMap {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
                 let had_ttl = entry.expire_at_ms.is_some();
-                let previous_value_len = entry.value.len();
-                let new_value_len = value.len();
+                let previous_entry_bytes = entry.stored_bytes();
                 let retired_value = mem::replace(&mut entry.value, value);
+                entry.clear_semantic_embedding();
                 entry.access.record_access(access_tick);
                 self.stored_bytes = self
                     .stored_bytes
-                    .saturating_sub(previous_value_len)
-                    .saturating_add(new_value_len);
+                    .saturating_sub(previous_entry_bytes)
+                    .saturating_add(entry.stored_bytes());
                 entry.expire_at_ms = expire_at_ms;
                 self.adjust_ttl_count(had_ttl, expire_at_ms.is_some());
                 self.retire_value(retired_value);
@@ -142,6 +143,7 @@ impl FlatMap {
                     key: key.to_vec().into_boxed_slice(),
                     value,
                     expire_at_ms,
+                    semantic_index_token: None,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -198,19 +200,20 @@ impl FlatMap {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
                 let had_ttl = entry.expire_at_ms.is_some();
-                let previous_value_len = entry.value.len();
+                let previous_entry_bytes = entry.stored_bytes();
                 let retired_value =
                     Some(mem::replace(&mut entry.value, replacement.take().unwrap()));
+                entry.clear_semantic_embedding();
                 #[cfg(feature = "telemetry")]
                 {
                     key_delta = 0isize;
-                    memory_delta = entry.value.len() as isize - previous_value_len as isize;
+                    memory_delta = entry.stored_bytes() as isize - previous_entry_bytes as isize;
                 }
                 entry.access.record_access(access_tick);
                 self.stored_bytes = self
                     .stored_bytes
-                    .saturating_sub(previous_value_len)
-                    .saturating_add(entry.value.len());
+                    .saturating_sub(previous_entry_bytes)
+                    .saturating_add(entry.stored_bytes());
                 entry.expire_at_ms = expire_at_ms;
                 self.adjust_ttl_count(had_ttl, expire_at_ms.is_some());
                 if let Some(old_value) = retired_value {
@@ -227,6 +230,7 @@ impl FlatMap {
                     key: key.into_boxed_slice(),
                     value: replacement.take().unwrap(),
                     expire_at_ms,
+                    semantic_index_token: None,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -295,6 +299,7 @@ impl FlatMap {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
                 let had_ttl = entry.expire_at_ms.is_some();
+                let previous_entry_bytes = entry.stored_bytes();
                 let previous_value_len = entry.value.len();
                 let should_replace_value = previous_value_len != value.len() || has_active_readers;
                 let mut retired_value = None;
@@ -333,20 +338,25 @@ impl FlatMap {
                 #[cfg(feature = "telemetry")]
                 {
                     key_delta = 0isize;
-                    memory_delta = entry.value.len() as isize - previous_value_len as isize;
                 }
                 if should_touch_access {
                     entry.access.record_access(access_tick);
                 }
-                if previous_value_len != entry.value.len() {
-                    self.stored_bytes = self
-                        .stored_bytes
-                        .saturating_sub(previous_value_len)
-                        .saturating_add(entry.value.len());
-                }
+                entry.clear_semantic_embedding();
                 if had_ttl {
                     entry.expire_at_ms = None;
-                    self.adjust_ttl_count(true, false);
+                    self.ttl_entries = self.ttl_entries.saturating_sub(1);
+                }
+                let new_entry_bytes = entry.stored_bytes();
+                #[cfg(feature = "telemetry")]
+                {
+                    memory_delta = new_entry_bytes as isize - previous_entry_bytes as isize;
+                }
+                if previous_entry_bytes != new_entry_bytes {
+                    self.stored_bytes = self
+                        .stored_bytes
+                        .saturating_sub(previous_entry_bytes)
+                        .saturating_add(new_entry_bytes);
                 }
                 match retired_value {
                     Some(old_value) if has_active_readers => self.retire_value(old_value),
@@ -380,6 +390,7 @@ impl FlatMap {
                     key: key.to_vec().into_boxed_slice(),
                     value: stored_value,
                     expire_at_ms: None,
+                    semantic_index_token: None,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -455,6 +466,7 @@ impl FlatMap {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
                 let had_ttl = entry.expire_at_ms.is_some();
+                let previous_entry_bytes = entry.stored_bytes();
                 let previous_value_len = entry.value.len();
                 let should_replace_value = previous_value_len != value.len() || has_active_readers;
                 let mut retired_value = None;
@@ -493,20 +505,33 @@ impl FlatMap {
                 #[cfg(feature = "telemetry")]
                 {
                     key_delta = 0isize;
-                    memory_delta = entry.value.len() as isize - previous_value_len as isize;
                 }
                 if should_touch_access {
                     entry.access.record_access(access_tick);
                 }
-                if previous_value_len != entry.value.len() {
-                    self.stored_bytes = self
-                        .stored_bytes
-                        .saturating_sub(previous_value_len)
-                        .saturating_add(entry.value.len());
-                }
+                entry.clear_semantic_embedding();
                 if had_ttl || expire_at_ms.is_some() {
                     entry.expire_at_ms = expire_at_ms;
-                    self.adjust_ttl_count(had_ttl, expire_at_ms.is_some());
+                    match (had_ttl, expire_at_ms.is_some()) {
+                        (false, true) => {
+                            self.ttl_entries = self.ttl_entries.saturating_add(1);
+                        }
+                        (true, false) => {
+                            self.ttl_entries = self.ttl_entries.saturating_sub(1);
+                        }
+                        _ => {}
+                    }
+                }
+                let new_entry_bytes = entry.stored_bytes();
+                #[cfg(feature = "telemetry")]
+                {
+                    memory_delta = new_entry_bytes as isize - previous_entry_bytes as isize;
+                }
+                if previous_entry_bytes != new_entry_bytes {
+                    self.stored_bytes = self
+                        .stored_bytes
+                        .saturating_sub(previous_entry_bytes)
+                        .saturating_add(new_entry_bytes);
                 }
                 match retired_value {
                     Some(old_value) if has_active_readers => self.retire_value(old_value),
@@ -540,6 +565,7 @@ impl FlatMap {
                     key: key.to_vec().into_boxed_slice(),
                     value: stored_value,
                     expire_at_ms,
+                    semantic_index_token: None,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,

@@ -84,3 +84,7 @@ path = "src/bin/redis_command_report.rs"
 [[bin]]
 name = "scnp_scan_matrix"
 path = "src/bin/scnp_scan_matrix.rs"
+
+[[bin]]
+name = "semantic_cache_matrix"
+path = "src/bin/semantic_cache_matrix.rs"

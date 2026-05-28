@@ -11,7 +11,10 @@ use crate::config::EvictionPolicy;
 #[cfg(feature = "telemetry")]
 use crate::storage::CacheTelemetryHandle;
 use crate::storage::stats::TierStatsSnapshot;
-use crate::storage::{Bytes, StoredEntry, hash_key, hash_key_tag_from_hash};
+use crate::storage::{
+    Bytes, SemanticCacheError, SemanticEmbedding, SemanticIndex, SemanticIndexToken, SemanticMatch,
+    StoredEntry, hash_key, hash_key_tag_from_hash,
+};
 use bytes::Bytes as SharedBytes;
 
 #[derive(Debug)]
@@ -24,6 +27,7 @@ struct FlatEntry {
     /// `as_ref()` gives `&[u8]`; storage size = `value.len()`.
     value: SharedBytes,
     expire_at_ms: Option<u64>,
+    semantic_index_token: Option<SemanticIndexToken>,
     access: EntryAccessMeta,
 }
 
@@ -51,6 +55,24 @@ impl FlatEntry {
     #[inline(always)]
     fn is_expired(&self, now_ms: u64) -> bool {
         self.expire_at_ms.is_some_and(|deadline| deadline <= now_ms)
+    }
+
+    #[inline(always)]
+    fn semantic_bytes(&self) -> usize {
+        self.semantic_index_token
+            .map_or(0, SemanticIndexToken::stored_bytes)
+    }
+
+    #[inline(always)]
+    fn stored_bytes(&self) -> usize {
+        self.key_len
+            .saturating_add(self.value.len())
+            .saturating_add(self.semantic_bytes())
+    }
+
+    #[inline(always)]
+    fn clear_semantic_embedding(&mut self) {
+        self.semantic_index_token = None;
     }
 }
 
@@ -296,6 +318,7 @@ const MAX_REUSABLE_VALUE_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Default)]
 pub struct FlatMap {
     entries: HashTable<FlatEntry>,
+    semantic_index: SemanticIndex,
     #[cfg(feature = "experimental-no-ttl-point-hot-path")]
     fast_points: FastPointMap,
     ttl_entries: usize,
@@ -336,6 +359,7 @@ mod fast_point;
 mod core;
 mod lifecycle;
 mod read;
+mod semantic;
 mod write;
 mod write_hot;
 mod write_local;

@@ -60,6 +60,27 @@ cache.insert_slice_with_ttl(b"session:1", b"active", Some(30_000));
 assert!(cache.contains_key(b"session:1"));
 ```
 
+Semantic cache entries attach a normalized embedding to the same point-key
+value. Lookups perform an exact cosine search across live entries and return
+the best match at or above the requested score:
+
+```rust
+use shardmap::ShardMap;
+
+let cache = ShardMap::new();
+cache.insert_semantic_slice(b"prompt:cat", b"cached cat answer", &[1.0, 0.0])?;
+cache.insert_semantic_slice(b"prompt:dog", b"cached dog answer", &[0.0, 1.0])?;
+
+let matched = cache.semantic_search(&[0.9, 0.1], 0.75)?.unwrap();
+
+assert_eq!(matched.key.as_slice(), b"prompt:cat");
+assert_eq!(matched.value.as_ref(), b"cached cat answer");
+# Ok::<(), shardmap::SemanticCacheError>(())
+```
+
+Plain writes to a key clear its semantic embedding, so semantic hits cannot
+return a value whose embedding describes an older payload.
+
 For repeated hot lookups, prepare the key once and reuse the route metadata:
 
 ```rust

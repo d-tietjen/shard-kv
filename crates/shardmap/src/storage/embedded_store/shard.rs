@@ -1,7 +1,7 @@
 use crate::config::EvictionPolicy;
 #[cfg(feature = "redis")]
 use crate::storage::Bytes;
-use crate::storage::FlatMap;
+use crate::storage::{FlatMap, SemanticCacheError, SemanticEmbedding, SemanticMatch};
 
 use super::{EmbeddedRouteMode, SessionSlotMap, derived_session_storage_prefix};
 
@@ -10,6 +10,7 @@ pub(crate) struct EmbeddedShard {
     pub(super) map: FlatMap,
     pub(super) session_slots: SessionSlotMap,
     pub(super) memory_limit_bytes: Option<usize>,
+    pub(super) semantic_memory_limit_bytes: Option<usize>,
     pub(super) eviction_policy: EvictionPolicy,
 }
 
@@ -25,6 +26,7 @@ impl EmbeddedShard {
             map,
             session_slots: SessionSlotMap::default(),
             memory_limit_bytes: None,
+            semantic_memory_limit_bytes: None,
             eviction_policy: EvictionPolicy::None,
         };
         shard.configure_memory_policy(memory_limit_bytes, eviction_policy, 0);
@@ -284,6 +286,55 @@ impl EmbeddedShard {
     }
 
     #[inline(always)]
+    pub(crate) fn set_semantic_slice_hashed(
+        &mut self,
+        route_mode: EmbeddedRouteMode,
+        key_hash: u64,
+        key: &[u8],
+        value: &[u8],
+        embedding: &[f32],
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) -> Result<(), SemanticCacheError> {
+        if route_mode == EmbeddedRouteMode::SessionPrefix
+            && let Some(session_prefix) = derived_session_storage_prefix(key)
+        {
+            self.session_slots
+                .delete_hashed(&session_prefix, key_hash, key);
+        }
+        self.map.set_semantic_slice_hashed(
+            key_hash,
+            key,
+            value,
+            embedding,
+            expire_at_ms,
+            now_ms,
+        )?;
+        self.enforce_semantic_memory_limit(now_ms);
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(crate) fn semantic_search(
+        &self,
+        query: &SemanticEmbedding,
+        min_score: f32,
+        now_ms: u64,
+    ) -> Option<SemanticMatch> {
+        self.map.semantic_search(query, min_score, now_ms)
+    }
+
+    #[inline(always)]
+    pub(crate) fn semantic_search_exact(
+        &self,
+        query: &SemanticEmbedding,
+        min_score: f32,
+        now_ms: u64,
+    ) -> Option<SemanticMatch> {
+        self.map.semantic_search_exact(query, min_score, now_ms)
+    }
+
+    #[inline(always)]
     pub(crate) fn remove_value_hashed(
         &mut self,
         key_hash: u64,
@@ -391,12 +442,34 @@ impl EmbeddedShard {
         self.enforce_memory_limit(now_ms);
     }
 
+    pub(crate) fn configure_semantic_memory_policy(
+        &mut self,
+        memory_limit_bytes: Option<usize>,
+        now_ms: u64,
+    ) {
+        self.semantic_memory_limit_bytes = memory_limit_bytes.filter(|limit| *limit > 0);
+        self.enforce_semantic_memory_limit(now_ms);
+    }
+
     #[inline(always)]
     pub(super) fn enforce_memory_limit(&mut self, now_ms: u64) {
-        self.update_lazy_read_sampling();
         let Some(limit) = self.memory_limit_bytes else {
             return;
         };
+        self.enforce_memory_limit_to(limit, now_ms);
+    }
+
+    #[inline(always)]
+    pub(super) fn enforce_semantic_memory_limit(&mut self, now_ms: u64) {
+        let Some(limit) = self.semantic_memory_limit_bytes.or(self.memory_limit_bytes) else {
+            return;
+        };
+        self.enforce_memory_limit_to(limit, now_ms);
+    }
+
+    #[inline(always)]
+    fn enforce_memory_limit_to(&mut self, limit: usize, now_ms: u64) {
+        self.update_lazy_read_sampling();
         if self.stored_bytes() <= limit {
             return;
         }

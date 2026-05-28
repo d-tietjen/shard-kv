@@ -34,9 +34,12 @@ mod monoio_runtime;
 
 #[cfg(feature = "embedded")]
 pub use cache::{
-    CacheOptions, ShardCache, ShardCacheWithShards, ShardMap, ShardMapWithShards, SharedCache,
+    CacheOptions, CacheSemanticError, CacheSemanticMatch, ShardCache, ShardCacheWithShards,
+    ShardMap, ShardMapWithShards, SharedCache,
 };
 #[cfg(feature = "embedded")]
 pub use error::{Result, ShardCacheError};
 #[cfg(all(feature = "telemetry", feature = "embedded"))]
 pub use storage::{CacheMetrics, CacheMetricsSnapshot, CacheTelemetry};
+#[cfg(feature = "embedded")]
+pub use storage::{SemanticCacheError, SemanticMatch};

@@ -89,6 +89,8 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             key: SharedBytes::copy_from_slice(key),
             key_hash: route.key_hash,
             expire_at_ms,
+            semantic_generation: &self.inner.semantic_generation,
+            semantic_shadow: self.semantic_shadow(route),
             _not_send: PhantomData,
         })
     }
@@ -105,14 +107,39 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     #[inline(always)]
     pub fn insert(&self, key: SharedBytes, value: SharedBytes) {
         let route = self.route_key(key.as_ref());
-        self.stripe(route.shard_id)
-            .write()
-            .set_value_bytes_hashed_no_ttl(
-                self.inner.route_mode,
-                route.key_hash,
-                key.as_ref(),
-                value,
-            );
+        {
+            self.stripe(route.shard_id)
+                .write()
+                .set_value_bytes_hashed_no_ttl(
+                    self.inner.route_mode,
+                    route.key_hash,
+                    key.as_ref(),
+                    value,
+                );
+        }
+        self.invalidate_semantic_shadow(route, key.as_ref(), 0);
+        self.bump_semantic_generation();
+    }
+
+    pub(super) fn insert_point_shadow(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        value: &[u8],
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) {
+        if route.shard_id == self.semantic_shard_id() {
+            return;
+        }
+        self.stripe(route.shard_id).write().set_slice_hashed(
+            self.inner.route_mode,
+            route.key_hash,
+            key,
+            value,
+            expire_at_ms,
+            now_ms,
+        );
     }
 
     /// Inserts or replaces a point-key value with an optional relative TTL.
@@ -138,14 +165,19 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             let now_ms = ttl_now_millis();
             let expire_at_ms = Some(now_ms.saturating_add(ttl_ms));
             let route = self.route_key(key.as_ref());
-            self.stripe(route.shard_id).write().set_value_bytes_hashed(
-                self.inner.route_mode,
-                route.key_hash,
-                key.as_ref(),
-                value,
-                expire_at_ms,
-                now_ms,
-            );
+            self.disable_semantic_query_cache();
+            {
+                self.stripe(route.shard_id).write().set_value_bytes_hashed(
+                    self.inner.route_mode,
+                    route.key_hash,
+                    key.as_ref(),
+                    value,
+                    expire_at_ms,
+                    now_ms,
+                );
+            }
+            self.invalidate_semantic_shadow(route, key.as_ref(), now_ms);
+            self.bump_semantic_generation();
         }
     }
 
@@ -171,6 +203,9 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             key.as_ref(),
             value,
         );
+        drop(guard);
+        self.invalidate_semantic_shadow(route, key.as_ref(), 0);
+        self.bump_semantic_generation();
         true
     }
 
@@ -178,12 +213,16 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     #[inline(always)]
     pub fn insert_slice(&self, key: &[u8], value: &[u8]) {
         let route = self.route_key(key);
-        self.stripe(route.shard_id).write().set_slice_hashed_no_ttl(
-            self.inner.route_mode,
-            route.key_hash,
-            key,
-            value,
-        );
+        {
+            self.stripe(route.shard_id).write().set_slice_hashed_no_ttl(
+                self.inner.route_mode,
+                route.key_hash,
+                key,
+                value,
+            );
+        }
+        self.invalidate_semantic_shadow(route, key, 0);
+        self.bump_semantic_generation();
     }
 
     /// Inserts a borrowed point-key value only when the key is absent or expired.
@@ -203,6 +242,9 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             return false;
         }
         guard.set_slice_hashed_no_ttl(self.inner.route_mode, route.key_hash, key, value);
+        drop(guard);
+        self.invalidate_semantic_shadow(route, key, 0);
+        self.bump_semantic_generation();
         true
     }
 
@@ -213,14 +255,18 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     /// route mode.
     #[inline(always)]
     pub fn insert_prepared_slice(&self, prepared: &PreparedPointKey, value: &[u8]) {
-        self.stripe(prepared.route().shard_id)
-            .write()
-            .set_slice_hashed_no_ttl(
-                self.inner.route_mode,
-                prepared.route().key_hash,
-                prepared.key(),
-                value,
-            );
+        {
+            self.stripe(prepared.route().shard_id)
+                .write()
+                .set_slice_hashed_no_ttl(
+                    self.inner.route_mode,
+                    prepared.route().key_hash,
+                    prepared.key(),
+                    value,
+                );
+        }
+        self.invalidate_semantic_shadow(prepared.route(), prepared.key(), 0);
+        self.bump_semantic_generation();
     }
 
     /// Inserts or replaces a point-key value from borrowed bytes with an
@@ -247,14 +293,19 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             let now_ms = ttl_now_millis();
             let expire_at_ms = Some(now_ms.saturating_add(ttl_ms));
             let route = self.route_key(key);
-            self.stripe(route.shard_id).write().set_slice_hashed(
-                self.inner.route_mode,
-                route.key_hash,
-                key,
-                value,
-                expire_at_ms,
-                now_ms,
-            );
+            self.disable_semantic_query_cache();
+            {
+                self.stripe(route.shard_id).write().set_slice_hashed(
+                    self.inner.route_mode,
+                    route.key_hash,
+                    key,
+                    value,
+                    expire_at_ms,
+                    now_ms,
+                );
+            }
+            self.invalidate_semantic_shadow(route, key, now_ms);
+            self.bump_semantic_generation();
         }
     }
 
@@ -289,6 +340,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             {
                 return false;
             }
+            self.disable_semantic_query_cache();
             guard.set_slice_hashed(
                 self.inner.route_mode,
                 route.key_hash,
@@ -297,6 +349,9 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 Some(now_ms.saturating_add(ttl_ms)),
                 now_ms,
             );
+            drop(guard);
+            self.invalidate_semantic_shadow(route, key, now_ms);
+            self.bump_semantic_generation();
             true
         }
     }
@@ -329,16 +384,21 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             };
             let now_ms = ttl_now_millis();
             let expire_at_ms = Some(now_ms.saturating_add(ttl_ms));
-            self.stripe(prepared.route().shard_id)
-                .write()
-                .set_slice_hashed(
-                    self.inner.route_mode,
-                    prepared.route().key_hash,
-                    prepared.key(),
-                    value,
-                    expire_at_ms,
-                    now_ms,
-                );
+            self.disable_semantic_query_cache();
+            {
+                self.stripe(prepared.route().shard_id)
+                    .write()
+                    .set_slice_hashed(
+                        self.inner.route_mode,
+                        prepared.route().key_hash,
+                        prepared.key(),
+                        value,
+                        expire_at_ms,
+                        now_ms,
+                    );
+            }
+            self.invalidate_semantic_shadow(prepared.route(), prepared.key(), now_ms);
+            self.bump_semantic_generation();
         }
     }
 
@@ -348,17 +408,28 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         let route = self.route_key(key);
         #[cfg(feature = "no-ttl")]
         {
-            self.stripe(route.shard_id)
-                .write()
-                .remove_value_hashed(route.key_hash, key, 0)
+            let removed =
+                self.stripe(route.shard_id)
+                    .write()
+                    .remove_value_hashed(route.key_hash, key, 0);
+            let semantic_removed = self.invalidate_semantic_shadow(route, key, 0);
+            if removed.is_some() || semantic_removed.is_some() {
+                self.bump_semantic_generation();
+            }
+            removed.or(semantic_removed)
         }
         #[cfg(not(feature = "no-ttl"))]
         {
-            self.stripe(route.shard_id).write().remove_value_hashed(
+            let removed = self.stripe(route.shard_id).write().remove_value_hashed(
                 route.key_hash,
                 key,
                 ttl_now_millis(),
-            )
+            );
+            let semantic_removed = self.invalidate_semantic_shadow(route, key, ttl_now_millis());
+            if removed.is_some() || semantic_removed.is_some() {
+                self.bump_semantic_generation();
+            }
+            removed.or(semantic_removed)
         }
     }
 
@@ -389,6 +460,9 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             return false;
         }
         guard.remove_value_hashed(route.key_hash, key, now_ms);
+        drop(guard);
+        self.invalidate_semantic_shadow(route, key, now_ms);
+        self.bump_semantic_generation();
         true
     }
 
@@ -414,6 +488,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             if !matches {
                 return false;
             }
+            self.disable_semantic_query_cache();
             guard.set_slice_hashed(
                 self.inner.route_mode,
                 route.key_hash,
@@ -422,6 +497,9 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 Some(now_ms.saturating_add(ttl_ms)),
                 now_ms,
             );
+            drop(guard);
+            self.invalidate_semantic_shadow(route, key, now_ms);
+            self.bump_semantic_generation();
             true
         }
     }
@@ -443,6 +521,8 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 key,
                 key_hash: route.key_hash,
                 expire_at_ms,
+                semantic_generation: &self.inner.semantic_generation,
+                semantic_shadow: self.semantic_shadow(route),
                 _not_send: PhantomData,
             })
         } else {
@@ -451,6 +531,8 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 route_mode: self.inner.route_mode,
                 key,
                 key_hash: route.key_hash,
+                semantic_generation: &self.inner.semantic_generation,
+                semantic_shadow: self.semantic_shadow(route),
                 _not_send: PhantomData,
             })
         }
