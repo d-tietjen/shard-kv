@@ -107,6 +107,10 @@ This is the mode for claims like "Repeated prompt latency is X times lower."
 - Include both `ShardCache Embedded` and `ShardCache Server` rows whenever the
   report makes a ShardCache performance claim. The embedded row measures native
   library use; the server row measures TCP/RESP service-mode overhead.
+- If peer rows are already captured, add the missing server-mode rows with
+  `RUN_SCOPE=shardcache-server` and pass those result directories alongside the
+  existing 1-vCPU and 16-vCPU result directories to the report renderer. This
+  preserves the original Redis/BetterDB/Qdrant measurements.
 - Use the same fixture order for every adapter.
 - Convert thresholds explicitly:
   - cosine similarity `>= 1 - distance_threshold`

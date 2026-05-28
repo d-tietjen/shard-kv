@@ -114,15 +114,7 @@ def render_single_report(results_dir: Path) -> None:
 
 def render_combined_report(results_dirs: list[Path], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    runs = [
-        {
-            "path": results_dir,
-            "rows": load_rows(results_dir),
-            "metadata": load_metadata(results_dir / "metadata.txt"),
-        }
-        for results_dir in results_dirs
-    ]
-    runs.sort(key=lambda run: sut_vcpus(run["metadata"]))
+    runs = merged_runs(results_dirs)
 
     (output_dir / "report.md").write_text(render_combined_markdown(runs), encoding="utf-8")
     section = render_combined_latex_section(runs, output_dir)
@@ -141,6 +133,44 @@ def render_combined_report(results_dirs: list[Path], output_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def load_run(results_dir: Path) -> dict[str, object]:
+    return {
+        "path": results_dir,
+        "paths": [results_dir],
+        "rows": load_rows(results_dir),
+        "metadata": load_metadata(results_dir / "metadata.txt"),
+    }
+
+
+def merged_runs(results_dirs: list[Path]) -> list[dict[str, object]]:
+    by_vcpu: dict[int, dict[str, object]] = {}
+    for results_dir in results_dirs:
+        run = load_run(results_dir)
+        vcpus = sut_vcpus(run["metadata"])
+        existing = by_vcpu.get(vcpus)
+        if existing is None:
+            by_vcpu[vcpus] = run
+            continue
+
+        existing_rows = existing["rows"]
+        new_rows = run["rows"]
+        if isinstance(existing_rows, dict) and isinstance(new_rows, dict):
+            existing_rows.update(new_rows)
+
+        existing_metadata = existing["metadata"]
+        new_metadata = run["metadata"]
+        if isinstance(existing_metadata, dict) and isinstance(new_metadata, dict):
+            for key, value in new_metadata.items():
+                existing_metadata.setdefault(key, value)
+            existing_metadata["merged_result_dirs"] = ",".join(
+                str(path) for path in [*existing.get("paths", []), results_dir]
+            )
+
+        existing.setdefault("paths", []).append(results_dir)
+
+    return sorted(by_vcpu.values(), key=lambda run: sut_vcpus(run["metadata"]))
 
 
 def latex_report_preamble() -> list[str]:

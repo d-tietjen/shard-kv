@@ -45,6 +45,7 @@ qdrant_image="${QDRANT_IMAGE:-qdrant/qdrant:latest}"
 keep_services="${KEEP_SERVICES:-0}"
 python_bin="${PYTHON:-python3}"
 semantic_server_shards="${SEMANTIC_SERVER_SHARDS:-1}"
+run_scope="${RUN_SCOPE:-all}"
 shardcache_pid=""
 
 if [[ -z "$pairs_csv" ]]; then
@@ -64,8 +65,21 @@ fi
 
 mkdir -p "$out_dir"
 
-cargo build --release -p shardcache-benchmarks --bin semantic_cache_matrix
-cargo build --release -p shardcache --bin shardcache
+case "$run_scope" in
+  all|shardcache|shardcache-server|server-only)
+    ;;
+  *)
+    echo "RUN_SCOPE must be one of: all, shardcache, shardcache-server, server-only" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$run_scope" == "all" || "$run_scope" == "shardcache" ]]; then
+  cargo build --release -p shardcache-benchmarks --bin semantic_cache_matrix
+fi
+if [[ "$run_scope" == "all" || "$run_scope" == "shardcache" || "$run_scope" == "shardcache-server" || "$run_scope" == "server-only" ]]; then
+  cargo build --release -p shardcache --bin shardcache
+fi
 
 cleanup() {
   stop_shardcache_server
@@ -168,6 +182,7 @@ write_metadata() {
     echo "shardcache_url=$shardcache_url"
     echo "semantic_server_shards=$semantic_server_shards"
     echo "python=$python_bin"
+    echo "run_scope=$run_scope"
     echo "redis_image_id=$(docker image inspect "$redis_image" --format '{{.Id}}' 2>/dev/null || echo unavailable)"
     echo "qdrant_image_id=$(docker image inspect "$qdrant_image" --format '{{.Id}}' 2>/dev/null || echo unavailable)"
     echo "notes=Networked rows pin Redis/Qdrant/ShardCache servers to SUT_CPUSET and Python load processes to LOAD_CPUSET. Embedded rows pin the benchmark process to SUT_CPUSET because there is no separate server process."
@@ -252,40 +267,61 @@ run_embedded_adapter() {
   run_peer "$adapter" "$scenario" "$sut_cpuset" "" "$@"
 }
 
+run_shardcache_embedded_rows() {
+  echo "Running ShardCache isolated rows into $out_dir"
+  run_shardcache miss-cold \
+    --load-query-pool "$entries" \
+    --load-warmup-queries 0 \
+    --load-unique-queries \
+    --load-miss-random \
+    --disable-semantic-query-cache
+  run_shardcache hit-cold-unique \
+    --load-query-pool "$entries" \
+    --load-warmup-queries 0 \
+    --load-unique-queries \
+    --disable-semantic-query-cache
+  run_shardcache hit-hot-cached \
+    --load-query-pool 1024 \
+    --load-warmup-queries 1024 \
+    --load-exact-hits
+}
+
+run_shardcache_server_rows() {
+  echo "Running ShardCache server semantic rows into $out_dir"
+  run_shardcache_server_adapter miss-cold \
+    --query-source miss-random \
+    --query-pool "$entries" \
+    --warmup-queries 0 \
+    --unique-queries
+  run_shardcache_server_adapter hit-cold-unique \
+    --query-source fixture \
+    --query-pool "$entries" \
+    --warmup-queries 0 \
+    --unique-queries
+  run_shardcache_server_adapter hit-hot-cached \
+    --query-source exact \
+    --query-pool 1024 \
+    --warmup-queries 1024
+}
+
 write_metadata
 
-echo "Running ShardCache isolated rows into $out_dir"
-run_shardcache miss-cold \
-  --load-query-pool "$entries" \
-  --load-warmup-queries 0 \
-  --load-unique-queries \
-  --load-miss-random \
-  --disable-semantic-query-cache
-run_shardcache hit-cold-unique \
-  --load-query-pool "$entries" \
-  --load-warmup-queries 0 \
-  --load-unique-queries \
-  --disable-semantic-query-cache
-run_shardcache hit-hot-cached \
-  --load-query-pool 1024 \
-  --load-warmup-queries 1024 \
-  --load-exact-hits
+if [[ "$run_scope" == "all" || "$run_scope" == "shardcache" ]]; then
+  run_shardcache_embedded_rows
+fi
 
-echo "Running ShardCache server semantic rows"
-run_shardcache_server_adapter miss-cold \
-  --query-source miss-random \
-  --query-pool "$entries" \
-  --warmup-queries 0 \
-  --unique-queries
-run_shardcache_server_adapter hit-cold-unique \
-  --query-source fixture \
-  --query-pool "$entries" \
-  --warmup-queries 0 \
-  --unique-queries
-run_shardcache_server_adapter hit-hot-cached \
-  --query-source exact \
-  --query-pool 1024 \
-  --warmup-queries 1024
+if [[ "$run_scope" == "all" || "$run_scope" == "shardcache" || "$run_scope" == "shardcache-server" || "$run_scope" == "server-only" ]]; then
+  run_shardcache_server_rows
+fi
+
+if [[ "$run_scope" == "shardcache" || "$run_scope" == "shardcache-server" || "$run_scope" == "server-only" ]]; then
+  cat <<EOF
+isolated semantic shardcache benchmark complete:
+  $out_dir/metadata.txt
+  $out_dir
+EOF
+  exit 0
+fi
 
 echo "Running Redis-backed semantic-cache rows"
 for adapter in betterdb redisvl langchain-redis redis-flat redis-hnsw; do
