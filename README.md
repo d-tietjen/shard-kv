@@ -71,6 +71,32 @@ Local Docker image:
 docker compose up --build shardcache
 ```
 
+## Semantic Cache Governance
+
+The native semantic-cache path supports cross-user cache reuse without baking
+authorization logic into the cache engine. Default semantic entries have
+`governance: None`. Customers that need governed reuse opt into
+`insert_semantic_slice_with_governance` or
+`insert_semantic_slice_with_ttl_and_governance`, store opaque policy bytes with
+the cached response, and then call `semantic_search_with_governance_filter`.
+
+A typical application model is:
+
+```text
+key        = semantic:tenant/acme/faq/refund-policy
+value      = cached response bytes
+embedding  = normalized prompt embedding
+governance = {tenant: acme, policy_version: 7,
+              allowed_groups: [support, billing],
+              source_docs: [doc_481, doc_902]}
+ttl        = optional freshness window
+```
+
+The filter receives `Option<&[u8]>` for each semantic candidate and must approve
+the metadata before ShardCache releases the cached value. If no candidate is
+both semantically close and authorized for the requesting user, the application
+treats the lookup as a miss and computes a fresh answer.
+
 ## Workspace
 
 - `crates/shardmap`: published embedded sharded map/cache crate plus shared internals.

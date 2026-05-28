@@ -403,6 +403,54 @@ def render_optimization_markdown(
     ]
 
 
+def render_governance_markdown() -> list[str]:
+    return [
+        "## Cross-User Governance Model",
+        "",
+        "Most production semantic-cache hits are cross-user: one user stores a response, and another user later asks a similar question. ShardCache therefore treats governance metadata as an opt-in semantic-cache layer rather than a default point-key field. Entries written through the default semantic APIs have `governance: None`. Entries written through the governance APIs carry opaque bytes that the application can interpret as tenant, subject, policy, source-document, or ACL context.",
+        "",
+        "The request process is:",
+        "",
+        "1. On store, the application computes the prompt embedding and builds governance metadata from the source data used to answer the prompt.",
+        "2. The application stores the answer with `insert_semantic_slice_with_governance` or `insert_semantic_slice_with_ttl_and_governance`.",
+        "3. On lookup, the requesting user's prompt is embedded and searched with `semantic_search_with_governance_filter`.",
+        "4. ShardCache evaluates semantic candidates, but releases a cached value only when the caller's governance predicate approves the candidate metadata.",
+        "5. If no semantically close candidate is authorized, the caller treats the lookup as a miss and computes a fresh answer.",
+        "",
+        "Example customer data model:",
+        "",
+        "```text",
+        "key        = semantic:tenant/acme/faq/refund-policy",
+        "value      = cached response bytes",
+        "embedding  = normalized prompt embedding",
+        "governance = {tenant: acme, policy_version: 7,",
+        "              allowed_groups: [support, billing],",
+        "              source_docs: [doc_481, doc_902]}",
+        "ttl        = optional freshness window",
+        "```",
+        "",
+        "In Rust, the authorization boundary is explicit:",
+        "",
+        "```rust",
+        "cache.insert_semantic_slice_with_governance(",
+        "    b\"semantic:tenant/acme/faq/refund-policy\",",
+        "    response_bytes,",
+        "    &embedding,",
+        "    governance_json,",
+        ")?;",
+        "",
+        "let hit = cache.semantic_search_with_governance_filter(",
+        "    &request_embedding,",
+        "    0.75,",
+        "    |metadata| metadata.is_some_and(|bytes| authorize(user, bytes)),",
+        ")?;",
+        "```",
+        "",
+        "The important behavior is that `SemanticMatch.governance` is `None` by default and `Some(bytes)` only when the caller used the governance API. Governed searches receive `Option<&[u8]>`, so applications can reject entries without metadata, require a specific policy version, or validate document-level access before any cross-user cached response is served.",
+        "",
+    ]
+
+
 def render_scenario_markdown(
     rows: dict[tuple[str, str], dict[str, object]],
     scenario: str,
@@ -518,6 +566,56 @@ def render_optimization_latex(
     ]
 
 
+def render_governance_latex() -> list[str]:
+    return [
+        r"\subsection{Cross-User Governance Model}",
+        "",
+        "Most production semantic-cache hits are cross-user: one user stores a response, and another user later asks a similar question. ShardCache therefore treats governance metadata as an opt-in semantic-cache layer rather than a default point-key field. Entries written through the default semantic APIs have \\texttt{governance: None}. Entries written through the governance APIs carry opaque bytes that the application can interpret as tenant, subject, policy, source-document, or ACL context.",
+        "",
+        "The request process is:",
+        "",
+        r"\begin{enumerate}",
+        r"\item On store, the application computes the prompt embedding and builds governance metadata from the source data used to answer the prompt.",
+        r"\item The application stores the answer with one of the governance insert APIs.",
+        r"\item On lookup, the requesting user's prompt is embedded and searched through the governed semantic-search API.",
+        r"\item ShardCache evaluates semantic candidates, but releases a cached value only when the caller's governance predicate approves the candidate metadata.",
+        r"\item If no semantically close candidate is authorized, the caller treats the lookup as a miss and computes a fresh answer.",
+        r"\end{enumerate}",
+        "",
+        "A representative customer data model is:",
+        "",
+        r"\begin{verbatim}",
+        "key        = semantic:tenant/acme/faq/refund-policy",
+        "value      = cached response bytes",
+        "embedding  = normalized prompt embedding",
+        "governance = {tenant: acme, policy_version: 7,",
+        "              allowed_groups: [support, billing],",
+        "              source_docs: [doc_481, doc_902]}",
+        "ttl        = optional freshness window",
+        r"\end{verbatim}",
+        "",
+        "In Rust, the authorization boundary is explicit:",
+        "",
+        r"\begin{verbatim}",
+        "cache.insert_semantic_slice_with_governance(",
+        '    b"semantic:tenant/acme/faq/refund-policy",',
+        "    response_bytes,",
+        "    &embedding,",
+        "    governance_json,",
+        ")?;",
+        "",
+        "let hit = cache.semantic_search_with_governance_filter(",
+        "    &request_embedding,",
+        "    0.75,",
+        "    |metadata| metadata.is_some_and(|bytes| authorize(user, bytes)),",
+        ")?;",
+        r"\end{verbatim}",
+        "",
+        "The important behavior is that \\texttt{SemanticMatch.governance} is \\texttt{None} by default and \\texttt{Some(bytes)} only when the caller used the governance API. Governed searches receive \\texttt{Option<\\&[u8]>}, so applications can reject entries without metadata, require a specific policy version, or validate document-level access before any cross-user cached response is served.",
+        "",
+    ]
+
+
 def render_scenario_latex(
     rows: dict[tuple[str, str], dict[str, object]],
     scenario: str,
@@ -567,6 +665,7 @@ def render_markdown(rows: dict[tuple[str, str], dict[str, object]], metadata: di
     out.extend(render_methodology_markdown(rows, metadata))
     out.extend(render_table_guide_markdown(rows))
     out.extend(render_optimization_markdown(rows))
+    out.extend(render_governance_markdown())
     out.extend(render_claim_boundary_markdown(rows, metadata))
 
     for meta in SCENARIOS:
@@ -633,6 +732,7 @@ def render_latex_section(
     out.extend(render_methodology_latex(rows, metadata))
     out.extend(render_table_guide_latex(rows))
     out.extend(render_optimization_latex(rows))
+    out.extend(render_governance_latex())
     out.extend(render_claim_boundary_latex(rows, metadata))
 
     for meta in SCENARIOS:

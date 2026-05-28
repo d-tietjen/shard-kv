@@ -109,6 +109,35 @@ assert_eq!(
 # Ok::<(), shardmap::SemanticCacheError>(())
 ```
 
+The intended customer data model is:
+
+| Field | Example | Purpose |
+| --- | --- | --- |
+| `key` | `semantic:tenant/acme/faq/refund-policy` | Stable cache identity for the answer. |
+| `value` | cached response bytes | The answer that may be reused. |
+| `embedding` | normalized prompt embedding | Semantic lookup vector. |
+| `governance` | `{tenant, policy_version, allowed_groups, source_docs}` | Opaque authorization context owned by the application. |
+| `ttl` | `Some(300_000)` | Optional freshness bound for the cached answer. |
+
+The cross-user request flow is:
+
+1. User A asks a question and the application generates an answer from source
+   documents.
+2. The application stores the answer with `insert_semantic_slice_with_governance`
+   or `insert_semantic_slice_with_ttl_and_governance`, using governance bytes
+   that identify the tenant, policy version, allowed groups, source documents,
+   or any other application-specific access context.
+3. User B asks a similar question. The application embeds the request and calls
+   `semantic_search_with_governance_filter`.
+4. ShardMap considers semantic candidates, but it returns a cached value only
+   when the filter approves the candidate's `Option<&[u8]>` governance metadata
+   for User B.
+5. If no semantically close and authorized entry exists, the application treats
+   the lookup as a miss and generates a fresh answer.
+
+This keeps governance policy outside the cache engine while making the
+authorization boundary explicit in the cache API.
+
 Plain writes to a key clear its semantic embedding, so semantic hits cannot
 return a value whose embedding describes an older payload.
 
