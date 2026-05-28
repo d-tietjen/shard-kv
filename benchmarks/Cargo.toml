@@ -88,3 +88,7 @@ path = "src/bin/scnp_scan_matrix.rs"
 [[bin]]
 name = "semantic_cache_matrix"
 path = "src/bin/semantic_cache_matrix.rs"
+
+[[bin]]
+name = "semantic_server_load"
+path = "src/bin/semantic_server_load.rs"

@@ -63,7 +63,7 @@ keep_services="${KEEP_SERVICES:-0}"
 python_bin="${PYTHON:-python3}"
 semantic_server_shards="${SEMANTIC_SERVER_SHARDS:-1}"
 semantic_server_workers="${SEMANTIC_SERVER_WORKERS:-$(cpuset_width "$sut_cpuset")}"
-shardcache_query_pipeline="${SHARDCACHE_QUERY_PIPELINE:-1}"
+shardcache_query_pipeline="${SHARDCACHE_QUERY_PIPELINE:-64}"
 run_scope="${RUN_SCOPE:-all}"
 shardcache_pid=""
 
@@ -97,6 +97,7 @@ if [[ "$run_scope" == "all" || "$run_scope" == "shardcache" ]]; then
   cargo build --release -p shardcache-benchmarks --bin semantic_cache_matrix
 fi
 if [[ "$run_scope" == "all" || "$run_scope" == "shardcache" || "$run_scope" == "shardcache-server" || "$run_scope" == "server-only" ]]; then
+  cargo build --release -p shardcache-benchmarks --bin semantic_server_load
   cargo build --release -p shardcache --bin shardcache
 fi
 
@@ -238,7 +239,6 @@ run_peer() {
     --redis-url "$redis_url" \
     --qdrant-url "$qdrant_url" \
     --shardcache-url "$shardcache_url" \
-    --shardcache-query-pipeline "$shardcache_query_pipeline" \
     --adapters "$adapter" \
     --scenario "$scenario" \
     --entries "$entries" \
@@ -276,9 +276,24 @@ run_qdrant_adapter() {
 
 run_shardcache_server_adapter() {
   local scenario="$1"
+  local out="$out_dir/peers-shardcache-server-$scenario.csv"
   shift
   start_shardcache_server
-  run_peer shardcache-server "$scenario" "$load_cpuset" "$shardcache_pid" "$@"
+  taskset -c "$load_cpuset" "$ws_root/target/release/semantic_server_load" \
+    --addr "127.0.0.1:$shardcache_port" \
+    --scenario "$scenario" \
+    --entries "$entries" \
+    --dims "$dims" \
+    --pairs-csv "$pairs_csv" \
+    --dataset "$dataset" \
+    --workers "$workers" \
+    --seconds "$seconds" \
+    --threshold "$threshold" \
+    --pipeline "$shardcache_query_pipeline" \
+    --process-cpuset "$load_cpuset" \
+    --external-pids "$shardcache_pid" \
+    --output "$out" \
+    "$@"
   stop_shardcache_server
 }
 

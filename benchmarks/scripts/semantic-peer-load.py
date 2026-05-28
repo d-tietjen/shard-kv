@@ -15,7 +15,6 @@ import csv
 import os
 import resource
 import shutil
-import socket
 import statistics
 import tempfile
 import threading
@@ -23,7 +22,6 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse
 
 import numpy as np
 
@@ -855,9 +853,6 @@ def run_shardcache_server(args: argparse.Namespace, fixture: VectorFixture) -> L
         for query in query_vectors[: args.warmup_queries]:
             client.execute_command("SEMANTIC.SEARCH", query, min_score)
 
-        if args.shardcache_raw_resp or args.shardcache_query_pipeline > 1:
-            return run_shardcache_server_raw_load(args, query_vectors, min_score)
-
         end = time.perf_counter() + args.seconds
         latencies_ms: list[float] = []
         lat_lock = threading.Lock()
@@ -918,175 +913,6 @@ def run_shardcache_server(args: argparse.Namespace, fixture: VectorFixture) -> L
         )
     finally:
         client.close()
-
-
-def encode_resp_command(*parts: bytes) -> bytes:
-    encoded = bytearray()
-    encoded.extend(f"*{len(parts)}\r\n".encode())
-    for part in parts:
-        encoded.extend(f"${len(part)}\r\n".encode())
-        encoded.extend(part)
-        encoded.extend(b"\r\n")
-    return bytes(encoded)
-
-
-def shardcache_socket_addr(url: str) -> tuple[str, int]:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"redis", "rediss", ""}:
-        raise ValueError(f"unsupported shardcache URL scheme: {parsed.scheme}")
-    return parsed.hostname or "127.0.0.1", parsed.port or 6379
-
-
-class RespFrameReader:
-    def __init__(self, sock: socket.socket):
-        self.sock = sock
-        self.buffer = bytearray()
-        self.offset = 0
-
-    def read_hit(self) -> bool:
-        while True:
-            parsed = self._parse_frame(self.offset)
-            if parsed is not None:
-                hit, next_offset = parsed
-                self.offset = next_offset
-                if self.offset > 65536 and self.offset * 2 > len(self.buffer):
-                    del self.buffer[: self.offset]
-                    self.offset = 0
-                return hit
-            chunk = self.sock.recv(65536)
-            if not chunk:
-                raise ConnectionError("ShardCache socket closed while reading response")
-            self.buffer.extend(chunk)
-
-    def _parse_frame(self, offset: int) -> tuple[bool, int] | None:
-        if offset >= len(self.buffer):
-            return None
-        prefix = self.buffer[offset]
-        if prefix == ord("$"):
-            line_end = self._line_end(offset)
-            if line_end is None:
-                return None
-            length = int(self.buffer[offset + 1 : line_end])
-            payload_start = line_end + 2
-            if length < 0:
-                return False, payload_start
-            frame_end = payload_start + length + 2
-            if len(self.buffer) < frame_end:
-                return None
-            return True, frame_end
-        if prefix == ord("*"):
-            line_end = self._line_end(offset)
-            if line_end is None:
-                return None
-            count = int(self.buffer[offset + 1 : line_end])
-            if count < 0:
-                return False, line_end + 2
-            item_offset = line_end + 2
-            for _ in range(count):
-                parsed = self._parse_frame(item_offset)
-                if parsed is None:
-                    return None
-                _, item_offset = parsed
-            return True, item_offset
-        if prefix in (ord("+"), ord(":"), ord("-")):
-            line_end = self._line_end(offset)
-            if line_end is None:
-                return None
-            if prefix == ord("-"):
-                message = bytes(self.buffer[offset + 1 : line_end]).decode(
-                    "utf-8",
-                    errors="replace",
-                )
-                raise RuntimeError(f"ShardCache RESP error: {message}")
-            return True, line_end + 2
-        raise RuntimeError(f"unexpected RESP prefix: {prefix!r}")
-
-    def _line_end(self, offset: int) -> int | None:
-        index = self.buffer.find(b"\r\n", offset)
-        return None if index < 0 else index
-
-
-def run_shardcache_server_raw_load(
-    args: argparse.Namespace,
-    query_vectors: list[bytes],
-    min_score: bytes,
-) -> LoadResult:
-    host, port = shardcache_socket_addr(args.shardcache_url)
-    pipeline = max(1, args.shardcache_query_pipeline)
-    query_commands = [
-        encode_resp_command(b"SEMANTIC.SEARCH", query, min_score) for query in query_vectors
-    ]
-    end = time.perf_counter() + args.seconds
-    latencies_ms: list[float] = []
-    lat_lock = threading.Lock()
-    counts = [0 for _ in range(args.workers)]
-    hits = [0 for _ in range(args.workers)]
-
-    def worker(worker_id: int) -> None:
-        sock = socket.create_connection((host, port), timeout=5.0)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        reader = RespFrameReader(sock)
-        index = worker_id % len(query_commands)
-        local_latencies: list[float] = []
-        local_hits = 0
-        local_count = 0
-        try:
-            while time.perf_counter() < end:
-                batch: list[bytes] = []
-                for _ in range(pipeline):
-                    if args.unique_queries and index >= len(query_commands):
-                        break
-                    batch.append(query_commands[index])
-                    if args.unique_queries:
-                        index += args.workers
-                    else:
-                        index = (index + 1) % len(query_commands)
-                if not batch:
-                    break
-                start = time.perf_counter()
-                sock.sendall(b"".join(batch))
-                batch_hits = 0
-                for _ in batch:
-                    if reader.read_hit():
-                        batch_hits += 1
-                elapsed_ms = (time.perf_counter() - start) * 1000
-                per_op_ms = elapsed_ms / len(batch)
-                local_latencies.extend([per_op_ms] * len(batch))
-                local_count += len(batch)
-                local_hits += batch_hits
-        finally:
-            sock.close()
-        counts[worker_id] = local_count
-        hits[worker_id] = local_hits
-        with lat_lock:
-            latencies_ms.extend(local_latencies)
-
-    threads = [threading.Thread(target=worker, args=(i,)) for i in range(args.workers)]
-    cpu_start = cpu_snapshot(args)
-    start = time.perf_counter()
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    elapsed = time.perf_counter() - start
-    cpu_end = cpu_snapshot(args)
-
-    return summarize(
-        args.scenario,
-        "shardcache-server",
-        args.workers,
-        args.entries,
-        args.dims,
-        args.query_pool,
-        elapsed,
-        sum(counts),
-        sum(hits),
-        latencies_ms,
-        cpu_start,
-        cpu_end,
-        args.process_cpuset,
-        args.external_pids,
-    )
 
 
 def run_gptcache(args: argparse.Namespace, fixture: VectorFixture) -> LoadResult:
@@ -1429,8 +1255,6 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, default=0.35)
     parser.add_argument("--seed", type=int, default=0x5EED)
     parser.add_argument("--pipeline", type=int, default=1000)
-    parser.add_argument("--shardcache-query-pipeline", type=int, default=1)
-    parser.add_argument("--shardcache-raw-resp", action="store_true")
     parser.add_argument("--progress-every", type=int, default=10_000)
     parser.add_argument("--hnsw-m", type=int, default=16)
     parser.add_argument("--hnsw-ef-construction", type=int, default=200)
