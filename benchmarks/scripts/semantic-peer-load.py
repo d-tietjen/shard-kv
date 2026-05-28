@@ -819,6 +819,102 @@ def run_langchain_redis(args: argparse.Namespace, fixture: VectorFixture) -> Loa
         cache.clear()
 
 
+def run_shardcache_server(args: argparse.Namespace, fixture: VectorFixture) -> LoadResult:
+    import redis
+
+    client = redis.Redis.from_url(args.shardcache_url)
+    try:
+        client.ping()
+        pipe = client.pipeline(transaction=False)
+        for i in range(args.entries):
+            if args.progress_every and i > 0 and i % args.progress_every == 0:
+                print(f"shardcache-server queued {i}/{args.entries}", flush=True)
+            pipe.execute_command(
+                "SEMANTIC.SET",
+                f"entry:{i}".encode(),
+                f"value:{i}".encode(),
+                np.ascontiguousarray(
+                    fixture.cache_vectors[i % len(fixture.cache_vectors)],
+                    dtype=np.float32,
+                ).tobytes(),
+            )
+            if (i + 1) % args.pipeline == 0:
+                pipe.execute()
+        pipe.execute()
+
+        query_vectors = [
+            np.ascontiguousarray(
+                fixture.query_vectors[index % len(fixture.query_vectors)],
+                dtype=np.float32,
+            ).tobytes()
+            for index in range(args.query_pool)
+        ]
+        min_score = f"{min_score_from_distance(args.threshold):.8f}".encode()
+        for query in query_vectors[: args.warmup_queries]:
+            client.execute_command("SEMANTIC.SEARCH", query, min_score)
+
+        end = time.perf_counter() + args.seconds
+        latencies_ms: list[float] = []
+        lat_lock = threading.Lock()
+        counts = [0 for _ in range(args.workers)]
+        hits = [0 for _ in range(args.workers)]
+
+        def worker(worker_id: int) -> None:
+            worker_client = redis.Redis.from_url(args.shardcache_url)
+            index = worker_id % len(query_vectors)
+            local_latencies: list[float] = []
+            local_hits = 0
+            local_count = 0
+            while time.perf_counter() < end:
+                if args.unique_queries and index >= len(query_vectors):
+                    break
+                query = query_vectors[index]
+                if args.unique_queries:
+                    index += args.workers
+                else:
+                    index = (index + 1) % len(query_vectors)
+                start = time.perf_counter()
+                result = worker_client.execute_command("SEMANTIC.SEARCH", query, min_score)
+                local_latencies.append((time.perf_counter() - start) * 1000)
+                local_count += 1
+                if result:
+                    local_hits += 1
+            worker_client.close()
+            counts[worker_id] = local_count
+            hits[worker_id] = local_hits
+            with lat_lock:
+                latencies_ms.extend(local_latencies)
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(args.workers)]
+        cpu_start = cpu_snapshot(args)
+        start = time.perf_counter()
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        elapsed = time.perf_counter() - start
+        cpu_end = cpu_snapshot(args)
+
+        return summarize(
+            args.scenario,
+            "shardcache-server",
+            args.workers,
+            args.entries,
+            args.dims,
+            args.query_pool,
+            elapsed,
+            sum(counts),
+            sum(hits),
+            latencies_ms,
+            cpu_start,
+            cpu_end,
+            args.process_cpuset,
+            args.external_pids,
+        )
+    finally:
+        client.close()
+
+
 def run_gptcache(args: argparse.Namespace, fixture: VectorFixture) -> LoadResult:
     from gptcache import cache
     from gptcache.adapter.api import get, put
@@ -1140,6 +1236,7 @@ def write_csv(path: Path, rows: list[LoadResult]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--redis-url", default="redis://127.0.0.1:6384")
+    parser.add_argument("--shardcache-url", default="redis://127.0.0.1:6390")
     parser.add_argument("--adapters", default="betterdb,redis")
     parser.add_argument("--scenario", default="fixture")
     parser.add_argument("--entries", type=int, default=100_000)
@@ -1216,8 +1313,11 @@ def main() -> None:
                 "faiss-hnsw",
                 "hnswlib",
                 "qdrant",
+                "shardcache-server",
             }
         )
+    if "shardcache-server" in adapters:
+        rows.append(run_shardcache_server(args, fixture))
     if "betterdb" in adapters:
         rows.append(asyncio.run(run_betterdb(args, fixture)))
     if "redis" in adapters or "redis-flat" in adapters:

@@ -40,6 +40,7 @@ SCENARIOS = {
 
 ORDER = [
     "shardcache",
+    "shardcache-server",
     "betterdb",
     "redisvl-semantic-cache",
     "langchain-redis-semantic-cache",
@@ -52,6 +53,7 @@ ORDER = [
 ]
 
 NETWORKED_ADAPTERS = {
+    "shardcache-server",
     "betterdb",
     "redisvl-semantic-cache",
     "langchain-redis-semantic-cache",
@@ -61,7 +63,8 @@ NETWORKED_ADAPTERS = {
 }
 
 LABELS = {
-    "shardcache": "ShardCache",
+    "shardcache": "ShardCache Embedded",
+    "shardcache-server": "ShardCache Server",
     "betterdb": "BetterDB",
     "redisvl-semantic-cache": "RedisVL SC",
     "langchain-redis-semantic-cache": "LangChain Redis SC",
@@ -83,7 +86,9 @@ def main() -> None:
     sut_vcpu_cap = cpuset_width(metadata.get("sut_cpuset", "0-15")) or 16
     rows = load_rows(args.results_dir)
     for scenario, meta in SCENARIOS.items():
-        chart_rows = [rows[(scenario, adapter)] for adapter in ORDER]
+        chart_rows = [rows[(scenario, adapter)] for adapter in ORDER if (scenario, adapter) in rows]
+        if not chart_rows:
+            continue
         subtitle = scenario_subtitle(chart_rows, str(meta["subtitle_suffix"]))
         svg = render_chart(meta["title"], subtitle, chart_rows)
         (args.results_dir / meta["output"]).write_text(svg, encoding="utf-8")

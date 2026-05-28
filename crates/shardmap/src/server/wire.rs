@@ -647,7 +647,7 @@ impl ServerWire {
 
     #[cfg(feature = "embedded")]
     #[inline(always)]
-    pub(super) fn write_resp_array_header(out: &mut BytesMut, len: usize) {
+    pub(crate) fn write_resp_array_header(out: &mut BytesMut, len: usize) {
         out.extend_from_slice(b"*");
         let mut len_buf = itoa::Buffer::new();
         out.extend_from_slice(len_buf.format(len).as_bytes());

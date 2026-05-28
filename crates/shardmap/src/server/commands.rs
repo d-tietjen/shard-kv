@@ -353,6 +353,8 @@ pub(super) static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::getex::COMMAND,
     &crate::commands::setex::COMMAND,
     &crate::commands::psetex::COMMAND,
+    &crate::commands::semantic::SEMANTIC_SET_COMMAND,
+    &crate::commands::semantic::SEMANTIC_SEARCH_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::ASKING_COMMAND,
     #[cfg(feature = "redis")]
@@ -923,6 +925,7 @@ static RAW_DIRECT_LEN_11: &[&dyn RawDirectCommand] = &[
 
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_12: &[&dyn RawDirectCommand] = &[
+    &crate::commands::semantic::SEMANTIC_SET_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::BGREWRITEAOF_COMMAND,
     #[cfg(feature = "redis")]
@@ -947,6 +950,7 @@ static RAW_DIRECT_LEN_14: &[&dyn RawDirectCommand] = &[
 
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_15: &[&dyn RawDirectCommand] = &[
+    &crate::commands::semantic::SEMANTIC_SEARCH_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::zremrangebyrank::COMMAND,
 ];

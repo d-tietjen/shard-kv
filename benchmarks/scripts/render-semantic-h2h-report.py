@@ -32,6 +32,7 @@ SCENARIOS = [
 
 ORDER = [
     "shardcache",
+    "shardcache-server",
     "betterdb",
     "redisvl-semantic-cache",
     "langchain-redis-semantic-cache",
@@ -44,6 +45,7 @@ ORDER = [
 ]
 
 NETWORKED_ADAPTERS = {
+    "shardcache-server",
     "betterdb",
     "redisvl-semantic-cache",
     "langchain-redis-semantic-cache",
@@ -53,7 +55,8 @@ NETWORKED_ADAPTERS = {
 }
 
 LABELS = {
-    "shardcache": "ShardCache",
+    "shardcache": "ShardCache Embedded",
+    "shardcache-server": "ShardCache Server",
     "betterdb": "BetterDB",
     "redisvl-semantic-cache": "RedisVL SemanticCache",
     "langchain-redis-semantic-cache": "LangChain Redis SC",
@@ -396,6 +399,13 @@ def row_metric(row: dict[str, object], key: str) -> str:
     return format_int(row[key])
 
 
+def execution_mode_note(rows: dict[tuple[str, str], dict[str, object]]) -> str:
+    has_server = any(adapter == "shardcache-server" for _, adapter in rows)
+    if has_server:
+        return "The ShardCache Embedded row uses the in-process native semantic-cache API. The ShardCache Server row uses the shardcache TCP server through the RESP semantic commands, so it includes client/server wire overhead and separate server CPU accounting."
+    return "The ShardCache row in this data set is the embedded/in-process native semantic-cache API. This run does not include a ShardCache Server row; rerunning the isolated harness after the server-mode semantic commands are enabled will add that row beside the embedded result."
+
+
 def render_methodology_markdown(
     rows: dict[tuple[str, str], dict[str, object]],
     metadata: dict[str, str],
@@ -407,9 +417,11 @@ def render_methodology_markdown(
         "",
         "This is a semantic-cache lookup benchmark, not an embedding-model or LLM benchmark. Each system receives the same precomputed, normalized embeddings and the timed section starts after the cache/index has been populated.",
         "",
+        execution_mode_note(rows),
+        "",
         f"The run uses {format_int(metadata.get('entries', cold['entries']))} entries, {metadata.get('dims', cold['dims'])} dimensions, a cosine-distance threshold of {metadata.get('threshold', '0.35')}, {worker_label(metadata.get('workers', cold['workers']))}, and a {metadata.get('seconds', '10')} second measured window. The SUT is pinned to {logical_cpu_label(sut_vcpus(metadata), metadata.get('sut_cpuset', '0-15'))}; networked load clients are pinned to {metadata.get('load_cpuset', '16-31')}.",
         "",
-        f"The cold rows measure the cost that an application pays before deciding whether to reuse a cached response or fall through to an LLM. The hot row measures a warmed exact-query cache hit path and reached {row_metric(hot, 'ops')} ops/s for ShardCache in this run.",
+        f"The cold rows measure the cost that an application pays before deciding whether to reuse a cached response or fall through to an LLM. The hot row measures a warmed exact-query cache hit path and reached {row_metric(hot, 'ops')} ops/s for the embedded ShardCache path in this run.",
         "",
         "Ops/SUT-vCPU excludes the Python load/client process. Total and client vCPU are retained as audit columns so the denominator is visible rather than hidden.",
         "",
@@ -425,11 +437,11 @@ def render_table_guide_markdown(
     return [
         "## How To Read The Tables",
         "",
-        "The primary comparison is `Ops/s`: how many semantic-cache lookups completed during the measured window. Latency columns (`p50 ms` and `p99 ms`) show the request-level distribution observed by the benchmark worker. `Speedup` is always ShardCache throughput divided by the peer throughput for the same row; values below `1.0x` mean the peer was faster for that scenario.",
+        "The primary comparison is `Ops/s`: how many semantic-cache lookups completed during the measured window. Latency columns (`p50 ms` and `p99 ms`) show the request-level distribution observed by the benchmark worker. `Speedup` is always the ShardCache Embedded throughput divided by the peer throughput for the same row; values below `1.0x` mean the peer was faster for that scenario.",
         "",
         "`Ops/SUT-vCPU` is a CPU-efficiency view of the database or embedded index only. For networked systems it divides throughput by the Redis/Qdrant container CPU, not by the Python load generator. This makes the efficiency denominator fair, but it also means throughput remains the decisive capacity metric when client-side work is the limiting factor.",
         "",
-        f"In this run, ShardCache's no-memo semantic path is stable across both cold cases: {row_metric(cold, 'ops')} cold misses/s and {row_metric(unique, 'ops')} cold unique hits/s. The hot exact-query row is intentionally different: it measures repeated application traffic and reaches {row_metric(hot, 'ops')} ops/s because the semantic decision is cached in process.",
+        f"In this run, ShardCache Embedded's no-memo semantic path is stable across both cold cases: {row_metric(cold, 'ops')} cold misses/s and {row_metric(unique, 'ops')} cold unique hits/s. The hot exact-query row is intentionally different: it measures repeated application traffic and reaches {row_metric(hot, 'ops')} ops/s because the semantic decision is cached in process.",
         "",
     ]
 
@@ -446,7 +458,7 @@ def render_claim_boundary_markdown(
     return [
         "## Claim Boundary",
         "",
-        f"This {vcpus}-vCPU run supports a precise claim: ShardCache is substantially faster than BetterDB and RedisVL semantic-cache integrations on all measured workloads, and it is {hot_betterdb} on the hot exact-query path. Against raw Redis HNSW, the cold-vector result is workload- and CPU-shape-dependent: ShardCache is {cold_redis} on cold misses and {unique_redis} on cold unique hits in this run, while it is {hot_redis} on hot cached exact queries.",
+        f"This {vcpus}-vCPU run supports a precise claim for the embedded ShardCache path: it is substantially faster than BetterDB and RedisVL semantic-cache integrations on all measured workloads, and it is {hot_betterdb} on the hot exact-query path. Against raw Redis HNSW, the cold-vector result is workload- and CPU-shape-dependent: embedded ShardCache is {cold_redis} on cold misses and {unique_redis} on cold unique hits in this run, while it is {hot_redis} on hot cached exact queries.",
         "",
         "That distinction matters. A raw vector index can be competitive on first-time vector lookup, especially on a single worker. A native semantic cache also needs to optimize repeated application questions, query-result invalidation, cache memory policy, and integration overhead. The report therefore separates cold no-memo lookup from warmed application-cache behavior instead of collapsing them into one number.",
         "",
@@ -565,7 +577,7 @@ def render_scenario_markdown(
         return [
             "This row uses unique random negative queries with the query-result cache disabled. It measures the fall-through cost of asking the semantic cache a question that should not match anything.",
             "",
-            f"ShardCache completed {row_metric(shard, 'ops')} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms. That is {comparison_text(rows, scenario, 'betterdb', 'BetterDB')}, {comparison_text(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}, and {comparison_text(rows, scenario, 'faiss-hnsw', 'FAISS HNSW')}.",
+            f"ShardCache Embedded completed {row_metric(shard, 'ops')} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms. That is {comparison_text(rows, scenario, 'betterdb', 'BetterDB')}, {comparison_text(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}, and {comparison_text(rows, scenario, 'faiss-hnsw', 'FAISS HNSW')}.",
             "",
             "This is the harshest semantic-cache workload because every request still has to prove that there is no reusable answer. ShardCache's LSH shortlist plus SIMD verification keeps that negative lookup path short.",
             "",
@@ -574,7 +586,7 @@ def render_scenario_markdown(
         return [
             "This row uses unique positive/paraphrase queries with the query-result cache disabled. It measures a first-time semantic cache hit, where the system must search semantically and return the cached value without exact-query memo help.",
             "",
-            f"ShardCache completed {row_metric(shard, 'ops')} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms. That is {comparison_text(rows, scenario, 'betterdb', 'BetterDB')}, {comparison_text(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}, and {comparison_text(rows, scenario, 'faiss-hnsw', 'FAISS HNSW')}.",
+            f"ShardCache Embedded completed {row_metric(shard, 'ops')} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms. That is {comparison_text(rows, scenario, 'betterdb', 'BetterDB')}, {comparison_text(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}, and {comparison_text(rows, scenario, 'faiss-hnsw', 'FAISS HNSW')}.",
             "",
             "The result is close to the cold-miss row, which is useful: successful semantic reuse is not materially more expensive than proving a miss in this fixture.",
             "",
@@ -582,7 +594,7 @@ def render_scenario_markdown(
     return [
         "This row warms a repeated exact-query pool before the measured window. It represents the common production case where users ask the same or identical normalized question repeatedly and the semantic cache can return a cached decision immediately.",
         "",
-        f"ShardCache completed {row_metric(shard, 'ops')} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms, or {row_metric(shard, 'ops_per_sut_cpu')} ops/SUT-vCPU. That is {comparison_text(rows, scenario, 'betterdb', 'BetterDB')}, {comparison_text(rows, scenario, 'redisvl-semantic-cache', 'RedisVL SemanticCache')}, and {comparison_text(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}.",
+        f"ShardCache Embedded completed {row_metric(shard, 'ops')} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms, or {row_metric(shard, 'ops_per_sut_cpu')} ops/SUT-vCPU. That is {comparison_text(rows, scenario, 'betterdb', 'BetterDB')}, {comparison_text(rows, scenario, 'redisvl-semantic-cache', 'RedisVL SemanticCache')}, and {comparison_text(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}.",
         "",
         "This row should be read separately from the cold rows: it is intentionally measuring the warmed exact-query path, not first-time vector search. The huge gap comes from keeping the query-result cache in process and invalidating it by semantic generation on writes.",
         "",
@@ -600,9 +612,11 @@ def render_methodology_latex(
         "",
         "This is a semantic-cache lookup benchmark, not an embedding-model or LLM benchmark. Each system receives the same precomputed, normalized embeddings and the timed section starts after the cache/index has been populated.",
         "",
+        tex_escape(execution_mode_note(rows)),
+        "",
         f"The run uses {tex_count(metadata.get('entries', cold['entries']))} entries, {tex_escape(str(metadata.get('dims', cold['dims'])))} dimensions, a cosine-distance threshold of {tex_escape(metadata.get('threshold', '0.35'))}, {tex_escape(worker_label(metadata.get('workers', cold['workers'])))}, and a {tex_escape(metadata.get('seconds', '10'))} second measured window. The SUT is pinned to {tex_escape(logical_cpu_label(sut_vcpus(metadata), metadata.get('sut_cpuset', '0-15')))}; networked load clients are pinned to {tex_escape(metadata.get('load_cpuset', '16-31'))}.",
         "",
-        f"The cold rows measure the cost that an application pays before deciding whether to reuse a cached response or fall through to an LLM. The hot row measures a warmed exact-query cache hit path and reached {tex_count(hot['ops'])} ops/s for ShardCache in this run.",
+        f"The cold rows measure the cost that an application pays before deciding whether to reuse a cached response or fall through to an LLM. The hot row measures a warmed exact-query cache hit path and reached {tex_count(hot['ops'])} ops/s for the embedded ShardCache path in this run.",
         "",
         "Ops/SUT-vCPU excludes the Python load/client process. Total and client vCPU are retained as audit columns so the denominator is visible rather than hidden.",
         "",
@@ -618,11 +632,11 @@ def render_table_guide_latex(
     return [
         r"\subsection{How To Read The Tables}",
         "",
-        r"The primary comparison is \texttt{Ops/s}: how many semantic-cache lookups completed during the measured window. Latency columns (\texttt{p50 ms} and \texttt{p99 ms}) show the request-level distribution observed by the benchmark worker. \texttt{Speedup} is always ShardCache throughput divided by the peer throughput for the same row; values below \texttt{1.0x} mean the peer was faster for that scenario.",
+        r"The primary comparison is \texttt{Ops/s}: how many semantic-cache lookups completed during the measured window. Latency columns (\texttt{p50 ms} and \texttt{p99 ms}) show the request-level distribution observed by the benchmark worker. \texttt{Speedup} is always ShardCache Embedded throughput divided by the peer throughput for the same row; values below \texttt{1.0x} mean the peer was faster for that scenario.",
         "",
         r"\texttt{Ops/SUT-vCPU} is a CPU-efficiency view of the database or embedded index only. For networked systems it divides throughput by the Redis/Qdrant container CPU, not by the Python load generator. This makes the efficiency denominator fair, but it also means throughput remains the decisive capacity metric when client-side work is the limiting factor.",
         "",
-        f"In this run, ShardCache's no-memo semantic path is stable across both cold cases: {tex_count(cold['ops'])} cold misses/s and {tex_count(unique['ops'])} cold unique hits/s. The hot exact-query row is intentionally different: it measures repeated application traffic and reaches {tex_count(hot['ops'])} ops/s because the semantic decision is cached in process.",
+        f"In this run, ShardCache Embedded's no-memo semantic path is stable across both cold cases: {tex_count(cold['ops'])} cold misses/s and {tex_count(unique['ops'])} cold unique hits/s. The hot exact-query row is intentionally different: it measures repeated application traffic and reaches {tex_count(hot['ops'])} ops/s because the semantic decision is cached in process.",
         "",
     ]
 
@@ -639,7 +653,7 @@ def render_claim_boundary_latex(
     return [
         r"\subsection{Claim Boundary}",
         "",
-        f"This {vcpus}-vCPU run supports a precise claim: ShardCache is substantially faster than BetterDB and RedisVL semantic-cache integrations on all measured workloads, and it is {hot_betterdb} on the hot exact-query path. Against raw Redis HNSW, the cold-vector result is workload- and CPU-shape-dependent: ShardCache is {cold_redis} on cold misses and {unique_redis} on cold unique hits in this run, while it is {hot_redis} on hot cached exact queries.",
+        f"This {vcpus}-vCPU run supports a precise claim for the embedded ShardCache path: it is substantially faster than BetterDB and RedisVL semantic-cache integrations on all measured workloads, and it is {hot_betterdb} on the hot exact-query path. Against raw Redis HNSW, the cold-vector result is workload- and CPU-shape-dependent: embedded ShardCache is {cold_redis} on cold misses and {unique_redis} on cold unique hits in this run, while it is {hot_redis} on hot cached exact queries.",
         "",
         "That distinction matters. A raw vector index can be competitive on first-time vector lookup, especially on a single worker. A native semantic cache also needs to optimize repeated application questions, query-result invalidation, cache memory policy, and integration overhead. The report therefore separates cold no-memo lookup from warmed application-cache behavior instead of collapsing them into one number.",
         "",
@@ -765,7 +779,7 @@ def render_scenario_latex(
         return [
             "This row uses unique random negative queries with the query-result cache disabled. It measures the fall-through cost of asking the semantic cache a question that should not match anything.",
             "",
-            f"ShardCache completed {tex_count(shard['ops'])} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms. That is {tex_comparison(rows, scenario, 'betterdb', 'BetterDB')}, {tex_comparison(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}, and {tex_comparison(rows, scenario, 'faiss-hnsw', 'FAISS HNSW')}.",
+            f"ShardCache Embedded completed {tex_count(shard['ops'])} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms. That is {tex_comparison(rows, scenario, 'betterdb', 'BetterDB')}, {tex_comparison(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}, and {tex_comparison(rows, scenario, 'faiss-hnsw', 'FAISS HNSW')}.",
             "",
             "This is the harshest semantic-cache workload because every request still has to prove that there is no reusable answer. ShardCache's LSH shortlist plus SIMD verification keeps that negative lookup path short.",
             "",
@@ -774,7 +788,7 @@ def render_scenario_latex(
         return [
             "This row uses unique positive/paraphrase queries with the query-result cache disabled. It measures a first-time semantic cache hit, where the system must search semantically and return the cached value without exact-query memo help.",
             "",
-            f"ShardCache completed {tex_count(shard['ops'])} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms. That is {tex_comparison(rows, scenario, 'betterdb', 'BetterDB')}, {tex_comparison(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}, and {tex_comparison(rows, scenario, 'faiss-hnsw', 'FAISS HNSW')}.",
+            f"ShardCache Embedded completed {tex_count(shard['ops'])} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms. That is {tex_comparison(rows, scenario, 'betterdb', 'BetterDB')}, {tex_comparison(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}, and {tex_comparison(rows, scenario, 'faiss-hnsw', 'FAISS HNSW')}.",
             "",
             "The result is close to the cold-miss row, which is useful: successful semantic reuse is not materially more expensive than proving a miss in this fixture.",
             "",
@@ -782,7 +796,7 @@ def render_scenario_latex(
     return [
         "This row warms a repeated exact-query pool before the measured window. It represents the common production case where users ask the same or identical normalized question repeatedly and the semantic cache can return a cached decision immediately.",
         "",
-        f"ShardCache completed {tex_count(shard['ops'])} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms, or {tex_count(shard['ops_per_sut_cpu'])} ops/SUT-vCPU. That is {tex_comparison(rows, scenario, 'betterdb', 'BetterDB')}, {tex_comparison(rows, scenario, 'redisvl-semantic-cache', 'RedisVL SemanticCache')}, and {tex_comparison(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}.",
+        f"ShardCache Embedded completed {tex_count(shard['ops'])} ops/s at p50 {float(shard['p50']):.4f} ms and p99 {float(shard['p99']):.4f} ms, or {tex_count(shard['ops_per_sut_cpu'])} ops/SUT-vCPU. That is {tex_comparison(rows, scenario, 'betterdb', 'BetterDB')}, {tex_comparison(rows, scenario, 'redisvl-semantic-cache', 'RedisVL SemanticCache')}, and {tex_comparison(rows, scenario, 'redis-vector-hnsw', 'Redis HNSW')}.",
         "",
         "This row should be read separately from the cold rows: it is intentionally measuring the warmed exact-query path, not first-time vector search. The huge gap comes from keeping the query-result cache in process and invalidating it by semantic generation on writes.",
         "",
@@ -862,7 +876,9 @@ def render_combined_markdown(runs: list[dict[str, object]]) -> str:
         f"- 1-vCPU SUT CPU set: {run_metadata_value(one, 'sut_cpuset', '0')}",
         f"- 16-vCPU SUT CPU set: {run_metadata_value(sixteen, 'sut_cpuset', '0-15')}",
         "",
-        "The `Speedup` columns are ShardCache throughput divided by the peer throughput for the same CPU shape. The `Scale` column is each system's 16-vCPU throughput divided by its 1-vCPU throughput.",
+        combined_execution_mode_note(runs),
+        "",
+        "The `Speedup` columns are ShardCache Embedded throughput divided by the peer throughput for the same CPU shape. The `Scale` column is each system's 16-vCPU throughput divided by its 1-vCPU throughput.",
         "",
     ]
 
@@ -1084,7 +1100,9 @@ def render_combined_latex_section(runs: list[dict[str, object]], output_dir: Pat
         "",
         rf"All rows use {tex_count(combined_metadata_value(runs, 'entries', '100000'))} entries, {tex_escape(str(combined_metadata_value(runs, 'dims', '384')))}-dimensional normalized embeddings, and a cosine-distance threshold of {tex_escape(str(combined_metadata_value(runs, 'threshold', '0.35')))}. The 1-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(one, 'sut_cpuset', '0'))}; the 16-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(sixteen, 'sut_cpuset', '0-15'))}.",
         "",
-        r"The \texttt{Speedup} columns are ShardCache throughput divided by the peer throughput for the same CPU shape. The \texttt{Scale} column is each system's 16-vCPU throughput divided by its 1-vCPU throughput.",
+        tex_escape(combined_execution_mode_note(runs)),
+        "",
+        r"The \texttt{Speedup} columns are ShardCache Embedded throughput divided by the peer throughput for the same CPU shape. The \texttt{Scale} column is each system's 16-vCPU throughput divided by its 1-vCPU throughput.",
         "",
     ]
 
@@ -1129,6 +1147,17 @@ def combined_metadata_value(runs: list[dict[str, object]], key: str, fallback: s
         if value:
             return str(value)
     return fallback
+
+
+def combined_execution_mode_note(runs: list[dict[str, object]]) -> str:
+    has_server = any(
+        adapter == "shardcache-server"
+        for run in runs
+        for _, adapter in run["rows"].keys()
+    )
+    if has_server:
+        return "ShardCache Embedded is the in-process native semantic-cache API. ShardCache Server is the shardcache TCP server through RESP semantic commands, so the same report shows both library-mode performance and service-mode performance."
+    return "These Adam result files currently include ShardCache Embedded only. The harness now has a ShardCache Server semantic adapter; rerunning the isolated benchmark will add server rows next to the embedded rows."
 
 
 def combined_row(

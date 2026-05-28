@@ -34,14 +34,18 @@ load_cpuset="${LOAD_CPUSET:-16-31}"
 cache_shards="${CACHE_SHARDS:-64}"
 redis_port="${REDIS_PORT:-6384}"
 qdrant_port="${QDRANT_PORT:-6333}"
+shardcache_port="${SHARDCACHE_PORT:-6390}"
 redis_url="${REDIS_URL:-redis://127.0.0.1:$redis_port}"
 qdrant_url="${QDRANT_URL:-http://127.0.0.1:$qdrant_port}"
+shardcache_url="${SHARDCACHE_URL:-redis://127.0.0.1:$shardcache_port}"
 redis_container="${REDIS_CONTAINER:-bench-semantic-redis}"
 qdrant_container="${QDRANT_CONTAINER:-bench-semantic-qdrant}"
 redis_image="${REDIS_IMAGE:-redis/redis-stack-server:latest}"
 qdrant_image="${QDRANT_IMAGE:-qdrant/qdrant:latest}"
 keep_services="${KEEP_SERVICES:-0}"
 python_bin="${PYTHON:-python3}"
+semantic_server_shards="${SEMANTIC_SERVER_SHARDS:-1}"
+shardcache_pid=""
 
 if [[ -z "$pairs_csv" ]]; then
   echo "PAIRS_CSV is required; pass the shared semantic fixture CSV" >&2
@@ -61,14 +65,24 @@ fi
 mkdir -p "$out_dir"
 
 cargo build --release -p shardcache-benchmarks --bin semantic_cache_matrix
+cargo build --release -p shardcache --bin shardcache
 
 cleanup() {
+  stop_shardcache_server
   if [[ "$keep_services" != "1" ]]; then
     docker rm -f "$redis_container" >/dev/null 2>&1 || true
     docker rm -f "$qdrant_container" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
+
+stop_shardcache_server() {
+  if [[ -n "$shardcache_pid" ]]; then
+    kill "$shardcache_pid" >/dev/null 2>&1 || true
+    wait "$shardcache_pid" >/dev/null 2>&1 || true
+    shardcache_pid=""
+  fi
+}
 
 start_redis() {
   docker rm -f "$redis_container" >/dev/null 2>&1 || true
@@ -104,6 +118,31 @@ start_qdrant() {
   return 1
 }
 
+start_shardcache_server() {
+  stop_shardcache_server
+  local log="$out_dir/shardcache-server.log"
+  SHARDCACHE_DIRECT_SHARD_PORTS=0 taskset -c "$sut_cpuset" \
+    "$ws_root/target/release/shardcache" \
+    --bind-addr "127.0.0.1:$shardcache_port" \
+    --disable-persistence \
+    --server-mode direct \
+    --shard-count "$semantic_server_shards" \
+    >"$log" 2>&1 &
+  shardcache_pid="$!"
+  for _ in $(seq 1 60); do
+    if "$python_bin" -c 'import socket, sys; s=socket.create_connection(("127.0.0.1", int(sys.argv[1])), 1); s.close()' "$shardcache_port" >/dev/null 2>&1; then
+      return 0
+    fi
+    if ! kill -0 "$shardcache_pid" >/dev/null 2>&1; then
+      echo "ShardCache server exited before becoming ready; see $log" >&2
+      return 1
+    fi
+    sleep 1
+  done
+  echo "ShardCache server did not become ready; see $log" >&2
+  return 1
+}
+
 container_pid() {
   docker inspect --format '{{.State.Pid}}' "$1"
 }
@@ -126,10 +165,12 @@ write_metadata() {
     echo "load_cpuset=$load_cpuset"
     echo "redis_image=$redis_image"
     echo "qdrant_image=$qdrant_image"
+    echo "shardcache_url=$shardcache_url"
+    echo "semantic_server_shards=$semantic_server_shards"
     echo "python=$python_bin"
     echo "redis_image_id=$(docker image inspect "$redis_image" --format '{{.Id}}' 2>/dev/null || echo unavailable)"
     echo "qdrant_image_id=$(docker image inspect "$qdrant_image" --format '{{.Id}}' 2>/dev/null || echo unavailable)"
-    echo "notes=Networked rows pin Redis/Qdrant servers to SUT_CPUSET and Python load processes to LOAD_CPUSET. Embedded rows pin the benchmark process to SUT_CPUSET because there is no separate server process."
+    echo "notes=Networked rows pin Redis/Qdrant/ShardCache servers to SUT_CPUSET and Python load processes to LOAD_CPUSET. Embedded rows pin the benchmark process to SUT_CPUSET because there is no separate server process."
   } >"$out_dir/metadata.txt"
 }
 
@@ -160,6 +201,7 @@ run_peer() {
   taskset -c "$cpuset" "$python_bin" "$here/semantic-peer-load.py" \
     --redis-url "$redis_url" \
     --qdrant-url "$qdrant_url" \
+    --shardcache-url "$shardcache_url" \
     --adapters "$adapter" \
     --scenario "$scenario" \
     --entries "$entries" \
@@ -195,6 +237,14 @@ run_qdrant_adapter() {
   docker rm -f "$qdrant_container" >/dev/null
 }
 
+run_shardcache_server_adapter() {
+  local scenario="$1"
+  shift
+  start_shardcache_server
+  run_peer shardcache-server "$scenario" "$load_cpuset" "$shardcache_pid" "$@"
+  stop_shardcache_server
+}
+
 run_embedded_adapter() {
   local adapter="$1"
   local scenario="$2"
@@ -220,6 +270,22 @@ run_shardcache hit-hot-cached \
   --load-query-pool 1024 \
   --load-warmup-queries 1024 \
   --load-exact-hits
+
+echo "Running ShardCache server semantic rows"
+run_shardcache_server_adapter miss-cold \
+  --query-source miss-random \
+  --query-pool "$entries" \
+  --warmup-queries 0 \
+  --unique-queries
+run_shardcache_server_adapter hit-cold-unique \
+  --query-source fixture \
+  --query-pool "$entries" \
+  --warmup-queries 0 \
+  --unique-queries
+run_shardcache_server_adapter hit-hot-cached \
+  --query-source exact \
+  --query-pool 1024 \
+  --warmup-queries 1024
 
 echo "Running Redis-backed semantic-cache rows"
 for adapter in betterdb redisvl langchain-redis redis-flat redis-hnsw; do

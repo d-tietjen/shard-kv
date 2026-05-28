@@ -15,6 +15,7 @@ cache APIs rather than only vector search APIs.
 | Target | Mode | Notes |
 | --- | --- | --- |
 | ShardCache native semantic cache | Embedded Rust | Run with query-result cache disabled for no-memo rows and enabled for cached rows. |
+| ShardCache server semantic cache | TCP RESP server | Run through `SEMANTIC.SET` / `SEMANTIC.SEARCH` so the report shows service-mode overhead beside embedded performance. |
 | BetterDB semantic cache | Python package + Valkey/Redis-compatible backend | Use precomputed embedding stub for backend rows; use the real product API for cached prompt rows. |
 | RedisVL `SemanticCache` | Python package + Redis/Valkey vector index | Run through the official `check` / `store` surface. |
 | Redis LangCache | Managed HTTP semantic-cache service | Separate cloud/HTTP section; do not mix with local in-process rankings unless labeled. |
@@ -103,6 +104,9 @@ This is the mode for claims like "Repeated prompt latency is X times lower."
   `SUT_CPUSET=0-15`, pin external load/client workers to `LOAD_CPUSET=16-31`,
   and use `WORKERS=16`. Embedded/in-process adapters must be marked as such
   because their benchmark process is also the system under test.
+- Include both `ShardCache Embedded` and `ShardCache Server` rows whenever the
+  report makes a ShardCache performance claim. The embedded row measures native
+  library use; the server row measures TCP/RESP service-mode overhead.
 - Use the same fixture order for every adapter.
 - Convert thresholds explicitly:
   - cosine similarity `>= 1 - distance_threshold`

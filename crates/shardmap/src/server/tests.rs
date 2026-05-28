@@ -1,5 +1,7 @@
+#[cfg(feature = "redis")]
+use super::commands::RawCommandDispatcher;
 #[cfg(feature = "embedded")]
-use super::commands::{RAW_DIRECT_CATALOG, RawCommandDispatcher, find_primary_raw_command};
+use super::commands::{RAW_DIRECT_CATALOG, find_primary_raw_command};
 use super::direct_protocol::*;
 use super::transactions::{TransactionCoordinator, TransactionState};
 use super::wire::*;
@@ -312,6 +314,76 @@ fn key_for_shard(store: &EmbeddedStore, shard_id: usize) -> Vec<u8> {
         }
     }
     panic!("unable to find key for shard {shard_id}");
+}
+
+fn f32_bytes(values: &[f32]) -> Vec<u8> {
+    values
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+#[test]
+fn semantic_resp_commands_return_cached_match() {
+    let store = EmbeddedStore::new(1);
+    let stored = f32_bytes(&[1.0, 0.0]);
+    let query = f32_bytes(&[0.99, 0.01]);
+
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[b"SEMANTIC.SET", b"semantic:cat", b"meow", stored.as_slice()],
+        ),
+        b"+OK\r\n"
+    );
+
+    let response = decode_resp_stream(&RespTestHarness::exec_resp(
+        &store,
+        &[b"SEMANTIC.SEARCH", query.as_slice(), b"0.75"],
+    ));
+    match response.as_slice() {
+        [Frame::Array(items)] => {
+            assert_eq!(items.len(), 4);
+            assert_eq!(items[0], Frame::BlobString(b"semantic:cat".to_vec()));
+            assert_eq!(items[1], Frame::BlobString(b"meow".to_vec()));
+            assert!(matches!(items[2], Frame::BlobString(_)));
+            assert_eq!(items[3], Frame::Null);
+        }
+        other => panic!("unexpected semantic search response: {other:?}"),
+    }
+}
+
+#[test]
+fn semantic_resp_commands_return_governance_metadata() {
+    let store = EmbeddedStore::new(1);
+    let stored = f32_bytes(&[0.0, 1.0]);
+
+    assert_eq!(
+        RespTestHarness::exec_resp(
+            &store,
+            &[
+                b"SEMANTIC.SET",
+                b"semantic:dog",
+                b"woof",
+                stored.as_slice(),
+                b"tenant=acme",
+            ],
+        ),
+        b"+OK\r\n"
+    );
+
+    let response = decode_resp_stream(&RespTestHarness::exec_resp(
+        &store,
+        &[b"SEMANTIC.SEARCH", stored.as_slice(), b"0.75"],
+    ));
+    match response.as_slice() {
+        [Frame::Array(items)] => {
+            assert_eq!(items[0], Frame::BlobString(b"semantic:dog".to_vec()));
+            assert_eq!(items[1], Frame::BlobString(b"woof".to_vec()));
+            assert_eq!(items[3], Frame::BlobString(b"tenant=acme".to_vec()));
+        }
+        other => panic!("unexpected governed semantic search response: {other:?}"),
+    }
 }
 
 #[test]

@@ -121,6 +121,19 @@ let hit = cache.semantic_search_with_governance_filter(
 )?;
 ```
 
+Server deployments can use the RESP semantic commands when the cache is running
+as `shardcache`:
+
+```text
+SEMANTIC.SET <key> <value> <embedding-f32le> [governance-bytes]
+SEMANTIC.SEARCH <embedding-f32le> <min-score>
+```
+
+`embedding-f32le` is the normalized vector encoded as little-endian `f32`
+bytes. `SEMANTIC.SEARCH` returns `nil` on miss or `[key, value, score,
+governance]` on hit; `governance` is `nil` unless the entry was stored with the
+optional metadata argument.
+
 ## Workspace
 
 - `crates/shardmap`: published embedded sharded map/cache crate plus shared internals.
