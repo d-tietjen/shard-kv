@@ -6,6 +6,9 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -115,9 +118,13 @@ def render_single_report(results_dir: Path) -> None:
 def render_combined_report(results_dirs: list[Path], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     runs = merged_runs(results_dirs)
+    chart_assets = render_combined_chart_assets(runs, output_dir)
 
-    (output_dir / "report.md").write_text(render_combined_markdown(runs), encoding="utf-8")
-    section = render_combined_latex_section(runs, output_dir)
+    (output_dir / "report.md").write_text(
+        render_combined_markdown(runs, chart_assets),
+        encoding="utf-8",
+    )
+    section = render_combined_latex_section(runs, output_dir, chart_assets)
     (output_dir / "shardcache-semantic-head-to-head-combined-section.tex").write_text(
         section,
         encoding="utf-8",
@@ -133,6 +140,45 @@ def render_combined_report(results_dirs: list[Path], output_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def render_combined_chart_assets(
+    runs: list[dict[str, object]],
+    output_dir: Path,
+) -> dict[tuple[int, str], dict[str, str]]:
+    chart_script = Path(__file__).with_name("render-semantic-h2h-charts.py")
+    converter = shutil.which("rsvg-convert")
+    assets: dict[tuple[int, str], dict[str, str]] = {}
+    if not chart_script.exists():
+        return assets
+
+    for run in runs:
+        vcpus = sut_vcpus(run["metadata"])  # type: ignore[arg-type]
+        if vcpus not in (1, 16):
+            continue
+        results_dir = Path(run["path"])  # type: ignore[arg-type]
+        subprocess.run(
+            [sys.executable, str(chart_script), str(results_dir)],
+            check=True,
+        )
+        for meta in SCENARIOS:
+            scenario = str(meta["key"])
+            source_svg = results_dir / str(meta["throughput_pdf"]).replace(".pdf", ".svg")
+            if not source_svg.exists():
+                continue
+            base_name = f"semantic-h2h-combined-{vcpus}vcpu-{scenario}-throughput"
+            svg_path = output_dir / f"{base_name}.svg"
+            pdf_path = output_dir / f"{base_name}.pdf"
+            shutil.copyfile(source_svg, svg_path)
+            asset = {"svg": svg_path.name}
+            if converter:
+                subprocess.run(
+                    [converter, "-f", "pdf", "-o", str(pdf_path), str(svg_path)],
+                    check=True,
+                )
+                asset["pdf"] = pdf_path.name
+            assets[(vcpus, scenario)] = asset
+    return assets
 
 
 def load_run(results_dir: Path) -> dict[str, object]:
@@ -175,6 +221,7 @@ def merged_runs(results_dirs: list[Path]) -> list[dict[str, object]]:
 
 def latex_report_preamble() -> list[str]:
     return [
+        r"\pdfminorversion=7",
         r"\documentclass[11pt]{article}",
         r"\usepackage[margin=0.75in]{geometry}",
         r"\usepackage{graphicx}",
@@ -888,7 +935,10 @@ def render_markdown(rows: dict[tuple[str, str], dict[str, object]], metadata: di
     return "\n".join(out)
 
 
-def render_combined_markdown(runs: list[dict[str, object]]) -> str:
+def render_combined_markdown(
+    runs: list[dict[str, object]],
+    chart_assets: dict[tuple[int, str], dict[str, str]] | None = None,
+) -> str:
     title = combined_report_title(runs)
     one = run_by_vcpu(runs, 1)
     sixteen = run_by_vcpu(runs, 16)
@@ -923,8 +973,28 @@ def render_combined_markdown(runs: list[dict[str, object]]) -> str:
     for meta in SCENARIOS:
         scenario = str(meta["key"])
         out.extend(render_combined_scenario_markdown(one, sixteen, scenario, str(meta["title"])))
+        out.extend(render_combined_chart_markdown(chart_assets or {}, scenario, str(meta["title"])))
         out.append("")
     return "\n".join(out)
+
+
+def render_combined_chart_markdown(
+    chart_assets: dict[tuple[int, str], dict[str, str]],
+    scenario: str,
+    title: str,
+) -> list[str]:
+    out: list[str] = []
+    for vcpus in (1, 16):
+        asset = chart_assets.get((vcpus, scenario))
+        if not asset or "svg" not in asset:
+            continue
+        out.extend(
+            [
+                f"![{vcpus}-vCPU {title} throughput]({asset['svg']})",
+                "",
+            ]
+        )
+    return out
 
 
 def render_combined_scenario_markdown(
@@ -964,6 +1034,7 @@ def render_combined_scenario_latex(
     sixteen: dict[str, object] | None,
     scenario: str,
     title: str,
+    chart_assets: dict[tuple[int, str], dict[str, str]] | None = None,
 ) -> list[str]:
     out = [
         rf"\subsection{{{tex_escape(title)}}}",
@@ -1008,6 +1079,31 @@ def render_combined_scenario_latex(
             "",
         ]
     )
+    out.extend(render_combined_chart_latex(chart_assets or {}, scenario, title))
+    return out
+
+
+def render_combined_chart_latex(
+    chart_assets: dict[tuple[int, str], dict[str, str]],
+    scenario: str,
+    title: str,
+) -> list[str]:
+    out: list[str] = []
+    for vcpus in (1, 16):
+        asset = chart_assets.get((vcpus, scenario))
+        if not asset or "pdf" not in asset:
+            continue
+        out.extend(
+            [
+                r"\begin{figure}[htbp]",
+                r"\centering",
+                rf"\includegraphics[width=\linewidth]{{{asset['pdf']}}}",
+                rf"\caption{{{tex_escape(title)} throughput head-to-head with the SUT limited to {vcpus} vCPU and load clients isolated on the client CPU set.}}",
+                rf"\label{{fig:semantic-h2h-combined-{scenario}-{vcpus}vcpu-throughput}}",
+                r"\end{figure}",
+                "",
+            ]
+        )
     return out
 
 
@@ -1123,7 +1219,11 @@ def render_latex_section(
     return "\n".join(out)
 
 
-def render_combined_latex_section(runs: list[dict[str, object]], output_dir: Path) -> str:
+def render_combined_latex_section(
+    runs: list[dict[str, object]],
+    output_dir: Path,
+    chart_assets: dict[tuple[int, str], dict[str, str]] | None = None,
+) -> str:
     one = run_by_vcpu(runs, 1)
     sixteen = run_by_vcpu(runs, 16)
     out: list[str] = [
@@ -1147,14 +1247,22 @@ def render_combined_latex_section(runs: list[dict[str, object]], output_dir: Pat
     out.extend(render_governance_latex())
 
     for meta in SCENARIOS:
-        out.extend(render_combined_scenario_latex(one, sixteen, str(meta["key"]), str(meta["title"])))
+        out.extend(
+            render_combined_scenario_latex(
+                one,
+                sixteen,
+                str(meta["key"]),
+                str(meta["title"]),
+                chart_assets or {},
+            )
+        )
         out.append("")
 
     out.extend(
         [
             r"\subsection{Caveats}",
             "",
-            "This combined report uses the same underlying result CSV files as the standalone 1-vCPU and 16-vCPU reports, but it intentionally removes the duplicated per-run peer tables. The chart PDFs remain in each run directory; the unified tables are the authoritative combined view for head-to-head and scaling interpretation.",
+            "This combined report uses the same underlying result CSV files as the standalone 1-vCPU and 16-vCPU reports. The unified tables are the authoritative combined view for head-to-head and scaling interpretation, and the embedded charts visualize the same rows on a linear throughput axis.",
             "",
         ]
     )
