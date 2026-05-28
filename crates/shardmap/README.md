@@ -38,10 +38,14 @@ sharded store and can be moved into worker threads.
 | Point-key map | Insert, get, mutate, remove, and entry-style access for byte keys. | [`basic_map.rs`](examples/basic_map.rs) |
 | TTL cache | Relative TTL writes and memory-limit eviction. | [`ttl_and_locks.rs`](examples/ttl_and_locks.rs) |
 | Prepared keys | Route metadata for repeated hot-key lookups. | [`prepared_keys_threads.rs`](examples/prepared_keys_threads.rs) |
+| Entry API | Occupied/vacant mutation without a separate lookup. | [`entry_api.rs`](examples/entry_api.rs) |
+| Route inspection | See which shard owns a key before sending work to a worker. | [`route_inspection.rs`](examples/route_inspection.rs) |
 | Lock helpers | Process-local token locks built on `SET key token NX PX ttl` semantics. | [`ttl_and_locks.rs`](examples/ttl_and_locks.rs) |
 | Configuration | Capacity hints, memory budgets, eviction policy, routing, and lock policy. | [`configured_cache.rs`](examples/configured_cache.rs) |
 | Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
+| Semantic TTL | Combine semantic reuse with freshness windows. | [`semantic_ttl.rs`](examples/semantic_ttl.rs) |
 | Governance metadata | Attach application-owned authorization context to semantic hits. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
+| Mini app | A small feature-flag cache combining TTL, prepared keys, and locks. | [`mini_feature_flags.rs`](examples/mini_feature_flags.rs) |
 
 Run any example with:
 
@@ -127,6 +131,34 @@ assert_eq!(value.as_ref(), b"enabled");
 
 Cloned handles share the same storage, so applications can move a clone into
 each worker thread and keep using normal map operations.
+
+## Entry API And Routing
+
+Use `entry` when the update naturally depends on whether the key is already
+present.
+
+```rust
+use bytes::Bytes;
+use shardmap::ShardMap;
+
+let cache = ShardMap::new();
+let value = cache.entry(Bytes::from_static(b"job:42"))
+    .or_insert(Bytes::from_static(b"queued"));
+
+assert_eq!(value.value().unwrap(), b"queued");
+```
+
+Use `route_key` when your application already partitions work by shard and
+wants to send a key to its owning worker.
+
+```rust
+use shardmap::ShardMapWithShards;
+
+let cache = ShardMapWithShards::<8>::new();
+let route = cache.route_key(b"user:42");
+
+assert!(route.shard_id < cache.shard_count());
+```
 
 ## Lock Helpers
 

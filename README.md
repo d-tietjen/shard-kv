@@ -71,6 +71,22 @@ Local Docker image:
 docker compose up --build shardcache
 ```
 
+## Examples
+
+The embedded crate includes runnable examples for the major API areas:
+
+```sh
+cargo run -p shardmap --example basic_map
+cargo run -p shardmap --example configured_cache
+cargo run -p shardmap --example prepared_keys_threads
+cargo run -p shardmap --example ttl_and_locks
+cargo run -p shardmap --example semantic_cache
+```
+
+See [`crates/shardmap/examples`](crates/shardmap/examples/README.md) for the
+full list, including entry API, route inspection, semantic TTL, and a small
+feature-flag cache app.
+
 ## Semantic Cache Governance
 
 The native semantic-cache path supports cross-user cache reuse without baking
@@ -158,15 +174,3 @@ optional metadata argument.
 - `crates/shardcache-py`: source-only PyO3 bindings for Python integrations.
 - `integrations`: LMCache and model-serving integration adapters.
 - `benchmarks`: benchmark and compatibility harnesses.
-
-## Release Checks
-
-```sh
-cargo fmt --check
-cargo test -p shardmap
-cargo test -p shardcache-client-rs
-cargo check -p shardcache
-cargo package -p shardmap --locked
-cargo package -p shardcache-client-rs --locked
-docker compose config
-```

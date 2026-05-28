@@ -41,6 +41,44 @@ Experimental queue path behind the `gpu-direct-api` feature:
 
 - `GpuDirectProxy` and queue/descriptor scaffolding
 
+## CPU Restore Example
+
+Use the CPU path when the destination is host memory or when building a serving
+connector before wiring GPU allocations.
+
+```rust,ignore
+use shardcache_runtime::{
+    stream_session_to_cpu, CpuTransferTarget, SessionRestoreSpec,
+};
+
+let spec = SessionRestoreSpec {
+    session_id: b"request-7".to_vec(),
+    chunks: vec![b"layer-0/page-0".to_vec()],
+};
+let mut target = CpuTransferTarget::with_capacity(1 << 20);
+
+let report = stream_session_to_cpu(&store, &spec, &mut target)?;
+assert_eq!(report.missing_chunks, 0);
+```
+
+## vLLM-Shaped Restore Example
+
+The vLLM layer builds an explicit restore plan before moving bytes, so
+connectors can inspect which blocks will be loaded.
+
+```rust,ignore
+use shardcache_runtime::{VllmKvConnector, VllmRestoreRequest};
+
+let connector = VllmKvConnector::new(store);
+let request = VllmRestoreRequest::for_session("request-7");
+let plan = connector.plan_restore(&request)?;
+
+if !plan.blocks.is_empty() {
+    let report = connector.restore(plan, allocator)?;
+    assert_eq!(report.failed_blocks, 0);
+}
+```
+
 ## CUDA path
 
 With `--features cuda` on Linux, the runtime uses `cust` for:

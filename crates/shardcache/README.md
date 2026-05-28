@@ -25,6 +25,41 @@ Run with a config file:
 shardcache --config shardcache.toml.example
 ```
 
+## Basic Usage
+
+The server accepts RESP clients on the configured bind address. For a quick
+local check, start the server and use `redis-cli` or `valkey-cli`:
+
+```sh
+redis-cli -p 6380 SET user:42 ready
+redis-cli -p 6380 GET user:42
+```
+
+The same server also exposes the native SCNP path used by
+`shardcache-client-rs`:
+
+```rust,no_run
+use shardcache_client_rs::ShardCacheClient;
+
+fn main() -> shardcache_client_rs::Result<()> {
+    let mut client = ShardCacheClient::connect("127.0.0.1:6380")?;
+    let mut value = Vec::new();
+
+    client.set(b"user:42", b"ready")?;
+    assert!(client.get_into(b"user:42", &mut value)?);
+    assert_eq!(value, b"ready");
+    Ok(())
+}
+```
+
+Semantic cache commands are available through RESP when the server is used as a
+networked semantic cache:
+
+```text
+SEMANTIC.SET prompt:refunds <answer-bytes> <embedding-f32le> <governance-bytes>
+SEMANTIC.SEARCH <embedding-f32le> 0.75
+```
+
 ## Docker
 
 The repository Dockerfile builds the same `shardcache` binary into a local
