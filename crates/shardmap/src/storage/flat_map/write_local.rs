@@ -65,7 +65,7 @@ impl FlatMap {
                     value: replacement.take().unwrap(),
                     expire_at_ms,
                     semantic_index_token: None,
-                    semantic_governance: SharedBytes::new(),
+                    semantic_governance: None,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -265,7 +265,7 @@ impl FlatMap {
                     value: stored_value,
                     expire_at_ms: None,
                     semantic_index_token: None,
-                    semantic_governance: SharedBytes::new(),
+                    semantic_governance: None,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -396,7 +396,7 @@ impl FlatMap {
                     value: shared_bytes_from_slice(value),
                     expire_at_ms,
                     semantic_index_token: None,
-                    semantic_governance: SharedBytes::new(),
+                    semantic_governance: None,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,

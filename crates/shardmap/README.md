@@ -79,8 +79,9 @@ assert_eq!(matched.value.as_ref(), b"cached cat answer");
 ```
 
 Cross-user semantic cache entries can also carry opaque governance metadata.
-Applications can return the metadata with a match and validate it themselves,
-or pass a predicate that must approve the metadata before the cached value is
+Entries written through the default semantic APIs return `None`; applications
+that need cross-user authorization can opt into the governance API layer and
+pass a predicate that must approve the metadata before the cached value is
 released:
 
 ```rust
@@ -96,12 +97,15 @@ cache.insert_semantic_slice_with_governance(
 
 let matched = cache
     .semantic_search_with_governance_filter(&[1.0, 0.0], 0.75, |metadata| {
-        metadata == b"tenant=acme;doc=cat-faq;policy=v1"
+        metadata == Some(b"tenant=acme;doc=cat-faq;policy=v1".as_slice())
     })?
     .unwrap();
 
 assert_eq!(matched.value.as_ref(), b"cached cat answer");
-assert_eq!(matched.governance.as_ref(), b"tenant=acme;doc=cat-faq;policy=v1");
+assert_eq!(
+    matched.governance.as_deref(),
+    Some(b"tenant=acme;doc=cat-faq;policy=v1".as_slice())
+);
 # Ok::<(), shardmap::SemanticCacheError>(())
 ```
 

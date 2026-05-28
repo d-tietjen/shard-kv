@@ -28,7 +28,7 @@ struct FlatEntry {
     value: SharedBytes,
     expire_at_ms: Option<u64>,
     semantic_index_token: Option<SemanticIndexToken>,
-    semantic_governance: SharedBytes,
+    semantic_governance: Option<SharedBytes>,
     access: EntryAccessMeta,
 }
 
@@ -61,9 +61,11 @@ impl FlatEntry {
     #[inline(always)]
     fn semantic_bytes(&self) -> usize {
         self.semantic_index_token.map_or(0, |token| {
-            token
-                .stored_bytes()
-                .saturating_add(self.semantic_governance.len())
+            token.stored_bytes().saturating_add(
+                self.semantic_governance
+                    .as_ref()
+                    .map_or(0, SharedBytes::len),
+            )
         })
     }
 
@@ -77,7 +79,7 @@ impl FlatEntry {
     #[inline(always)]
     fn clear_semantic_embedding(&mut self) {
         self.semantic_index_token = None;
-        self.semantic_governance = SharedBytes::new();
+        self.semantic_governance = None;
     }
 }
 

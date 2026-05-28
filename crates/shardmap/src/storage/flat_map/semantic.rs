@@ -11,12 +11,12 @@ impl FlatMap {
         expire_at_ms: Option<u64>,
         now_ms: u64,
     ) -> Result<(), SemanticCacheError> {
-        self.set_semantic_slice_hashed_with_governance(
+        self.set_semantic_slice_hashed_inner(
             hash,
             key,
             value,
             embedding,
-            &[],
+            None,
             expire_at_ms,
             now_ms,
         )
@@ -33,10 +33,31 @@ impl FlatMap {
         expire_at_ms: Option<u64>,
         now_ms: u64,
     ) -> Result<(), SemanticCacheError> {
+        self.set_semantic_slice_hashed_inner(
+            hash,
+            key,
+            value,
+            embedding,
+            Some(governance_metadata),
+            expire_at_ms,
+            now_ms,
+        )
+    }
+
+    fn set_semantic_slice_hashed_inner(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        value: &[u8],
+        embedding: &[f32],
+        governance_metadata: Option<&[u8]>,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) -> Result<(), SemanticCacheError> {
         let embedding = SemanticEmbedding::from_slice(embedding)?;
         self.set_slice_hashed(hash, key, value, expire_at_ms, now_ms);
         let token = self.semantic_index.insert(hash, key, &embedding);
-        let governance = shared_bytes_from_slice(governance_metadata);
+        let governance = governance_metadata.map(shared_bytes_from_slice);
 
         let Some(entry) = self
             .entries
@@ -82,7 +103,7 @@ impl FlatMap {
         query: &SemanticEmbedding,
         min_score: f32,
         now_ms: u64,
-        mut governance_filter: impl FnMut(&[u8]) -> bool,
+        mut governance_filter: impl FnMut(Option<&[u8]>) -> bool,
     ) -> Option<SemanticMatch> {
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
@@ -110,7 +131,7 @@ impl FlatMap {
         query: &SemanticEmbedding,
         min_score: f32,
         now_ms: u64,
-        mut governance_filter: impl FnMut(&[u8]) -> bool,
+        mut governance_filter: impl FnMut(Option<&[u8]>) -> bool,
     ) -> Option<SemanticMatch> {
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
@@ -127,7 +148,7 @@ impl FlatMap {
         &self,
         candidate: SemanticIndexCandidate<'_>,
         now_ms: u64,
-        governance_filter: &mut impl FnMut(&[u8]) -> bool,
+        governance_filter: &mut impl FnMut(Option<&[u8]>) -> bool,
     ) -> Option<SemanticMatch> {
         let entry = self.entries.find(candidate.hash, |entry| {
             entry.matches_hashed_key(candidate.hash, candidate.key)
@@ -141,7 +162,7 @@ impl FlatMap {
         if token.id() != candidate.id {
             return None;
         }
-        if !governance_filter(entry.semantic_governance.as_ref()) {
+        if !governance_filter(entry.semantic_governance.as_deref()) {
             return None;
         }
         Some(SemanticMatch {

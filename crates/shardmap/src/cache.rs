@@ -334,15 +334,16 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
 
     /// Returns the best semantic match accepted by `governance_filter`.
     ///
-    /// The filter receives the stored governance metadata and must return true
-    /// before the cached value is released. This path bypasses exact-query
-    /// result caching because access policy is request-specific.
+    /// The filter receives the stored governance metadata, or `None` when the
+    /// entry was written through the default semantic APIs, and must return
+    /// true before the cached value is released. This path bypasses
+    /// exact-query result caching because access policy is request-specific.
     #[inline(always)]
     pub fn semantic_search_with_governance_filter(
         &self,
         embedding: &[f32],
         min_score: f32,
-        governance_filter: impl FnMut(&[u8]) -> bool,
+        governance_filter: impl FnMut(Option<&[u8]>) -> bool,
     ) -> Result<Option<SemanticMatch>, SemanticCacheError> {
         self.inner
             .semantic_search_with_governance_filter(embedding, min_score, governance_filter)
@@ -488,7 +489,7 @@ mod tests {
 
         assert_eq!(matched.key.as_slice(), b"cat");
         assert_eq!(matched.value.as_ref(), b"meow");
-        assert!(matched.governance.is_empty());
+        assert!(matched.governance.is_none());
         assert!(matched.score > 0.99);
     }
 
@@ -509,9 +510,27 @@ mod tests {
         assert_eq!(matched.key.as_slice(), b"cat");
         assert_eq!(matched.value.as_ref(), b"meow");
         assert_eq!(
-            matched.governance.as_ref(),
-            b"tenant=acme;doc=cat-faq;policy=v1"
+            matched.governance.as_deref(),
+            Some(b"tenant=acme;doc=cat-faq;policy=v1".as_slice())
         );
+    }
+
+    #[test]
+    fn semantic_governance_defaults_to_none() {
+        let cache = SharedCache::<4>::new();
+        cache
+            .insert_semantic_slice(b"default", b"value", &[1.0, 0.0])
+            .unwrap();
+
+        let matched = cache
+            .semantic_search_with_governance_filter(&[1.0, 0.0], 0.75, |metadata| {
+                metadata.is_none()
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(matched.key.as_slice(), b"default");
+        assert!(matched.governance.is_none());
     }
 
     #[test]
@@ -539,19 +558,22 @@ mod tests {
 
         let filtered = cache
             .semantic_search_with_governance_filter(&[1.0, 0.0], 0.0, |metadata| {
-                metadata == b"tenant=acme"
+                metadata == Some(b"tenant=acme".as_slice())
             })
             .unwrap()
             .unwrap();
 
         assert_eq!(filtered.key.as_slice(), b"allowed");
         assert_eq!(filtered.value.as_ref(), b"public");
-        assert_eq!(filtered.governance.as_ref(), b"tenant=acme");
+        assert_eq!(
+            filtered.governance.as_deref(),
+            Some(b"tenant=acme".as_slice())
+        );
 
         assert!(
             cache
                 .semantic_search_with_governance_filter(&[1.0, 0.0], 0.0, |metadata| {
-                    metadata == b"tenant=missing"
+                    metadata == Some(b"tenant=missing".as_slice())
                 })
                 .unwrap()
                 .is_none()

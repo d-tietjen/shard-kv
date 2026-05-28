@@ -296,16 +296,22 @@ impl EmbeddedShard {
         expire_at_ms: Option<u64>,
         now_ms: u64,
     ) -> Result<(), SemanticCacheError> {
-        self.set_semantic_slice_hashed_with_governance(
-            route_mode,
+        if route_mode == EmbeddedRouteMode::SessionPrefix
+            && let Some(session_prefix) = derived_session_storage_prefix(key)
+        {
+            self.session_slots
+                .delete_hashed(&session_prefix, key_hash, key);
+        }
+        self.map.set_semantic_slice_hashed(
             key_hash,
             key,
             value,
             embedding,
-            &[],
             expire_at_ms,
             now_ms,
-        )
+        )?;
+        self.enforce_semantic_memory_limit(now_ms);
+        Ok(())
     }
 
     #[inline(always)]
@@ -355,7 +361,7 @@ impl EmbeddedShard {
         query: &SemanticEmbedding,
         min_score: f32,
         now_ms: u64,
-        governance_filter: impl FnMut(&[u8]) -> bool,
+        governance_filter: impl FnMut(Option<&[u8]>) -> bool,
     ) -> Option<SemanticMatch> {
         self.map
             .semantic_search_with_governance_filter(query, min_score, now_ms, governance_filter)
@@ -377,7 +383,7 @@ impl EmbeddedShard {
         query: &SemanticEmbedding,
         min_score: f32,
         now_ms: u64,
-        governance_filter: impl FnMut(&[u8]) -> bool,
+        governance_filter: impl FnMut(Option<&[u8]>) -> bool,
     ) -> Option<SemanticMatch> {
         self.map.semantic_search_exact_with_governance_filter(
             query,

@@ -22,12 +22,13 @@ pub struct SemanticMatch {
     pub key: Bytes,
     /// Cached value stored for `key`.
     pub value: SharedBytes,
-    /// Opaque governance metadata stored with the semantic cache entry.
+    /// Opaque governance metadata stored with the semantic cache entry, when present.
     ///
     /// Applications can encode tenant, subject, ACL, policy version, source
     /// document IDs, or other authorization context here and validate it before
-    /// serving a cross-user semantic cache hit.
-    pub governance: SharedBytes,
+    /// serving a cross-user semantic cache hit. Entries written through the
+    /// default semantic APIs return `None`.
+    pub governance: Option<SharedBytes>,
     /// Cosine similarity score between the query and stored embedding.
     pub score: f32,
 }

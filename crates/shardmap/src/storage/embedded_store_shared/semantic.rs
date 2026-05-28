@@ -45,7 +45,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         embedding: &[f32],
         ttl_ms: Option<u64>,
     ) -> Result<(), SemanticCacheError> {
-        self.insert_semantic_slice_with_ttl_and_governance(key, value, embedding, ttl_ms, &[])
+        self.insert_semantic_slice_with_ttl_governance_option(key, value, embedding, ttl_ms, None)
     }
 
     /// Inserts or replaces a point-key value with embedding, TTL, and governance metadata.
@@ -59,6 +59,23 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         embedding: &[f32],
         ttl_ms: Option<u64>,
         governance_metadata: &[u8],
+    ) -> Result<(), SemanticCacheError> {
+        self.insert_semantic_slice_with_ttl_governance_option(
+            key,
+            value,
+            embedding,
+            ttl_ms,
+            Some(governance_metadata),
+        )
+    }
+
+    fn insert_semantic_slice_with_ttl_governance_option(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        embedding: &[f32],
+        ttl_ms: Option<u64>,
+        governance_metadata: Option<&[u8]>,
     ) -> Result<(), SemanticCacheError> {
         #[cfg(feature = "no-ttl")]
         {
@@ -78,9 +95,9 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         }
         let route = self.route_key(key);
         self.insert_point_shadow(route, key, value, expire_at_ms, now_ms);
-        self.stripe(self.semantic_shard_id())
-            .write()
-            .set_semantic_slice_hashed_with_governance(
+        let mut semantic_shard = self.stripe(self.semantic_shard_id()).write();
+        if let Some(governance_metadata) = governance_metadata {
+            semantic_shard.set_semantic_slice_hashed_with_governance(
                 self.inner.route_mode,
                 route.key_hash,
                 key,
@@ -90,6 +107,17 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 expire_at_ms,
                 now_ms,
             )?;
+        } else {
+            semantic_shard.set_semantic_slice_hashed(
+                self.inner.route_mode,
+                route.key_hash,
+                key,
+                value,
+                embedding,
+                expire_at_ms,
+                now_ms,
+            )?;
+        }
         self.bump_semantic_generation();
         Ok(())
     }
@@ -141,14 +169,15 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
 
     /// Returns the best semantic match accepted by `governance_filter`.
     ///
-    /// The filter receives the stored governance metadata and must return true
-    /// before the cached value is released. This method bypasses exact-query
-    /// result caching because governance policy is request-specific.
+    /// The filter receives the stored governance metadata, or `None` when the
+    /// entry was written through the default semantic APIs, and must return
+    /// true before the cached value is released. This method bypasses
+    /// exact-query result caching because governance policy is request-specific.
     pub fn semantic_search_with_governance_filter(
         &self,
         embedding: &[f32],
         min_score: f32,
-        mut governance_filter: impl FnMut(&[u8]) -> bool,
+        mut governance_filter: impl FnMut(Option<&[u8]>) -> bool,
     ) -> Result<Option<SemanticMatch>, SemanticCacheError> {
         let query = SemanticEmbedding::from_slice(embedding)?;
         let min_score = validate_similarity_threshold(min_score)?;

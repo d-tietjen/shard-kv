@@ -12,7 +12,42 @@ impl EmbeddedStore {
         embedding: &[f32],
         ttl_ms: Option<u64>,
     ) -> Result<(), SemanticCacheError> {
-        self.set_semantic_slice_with_governance(key, value, embedding, ttl_ms, &[])
+        let now_ms = now_millis();
+        let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        let route = self.route_key(key);
+        #[cfg(feature = "redis")]
+        if self.objects.shard_has_objects(route.shard_id) {
+            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+            let mut shard = self.shards[route.shard_id].write();
+            if bucket.delete_any(key) {
+                self.objects.note_deleted(route.shard_id);
+            }
+            shard.set_semantic_slice_hashed(
+                self.route_mode,
+                route.key_hash,
+                key,
+                value,
+                embedding,
+                expire_at_ms,
+                now_ms,
+            )?;
+            self.refresh_string_key_count(route.shard_id, &shard);
+            return Ok(());
+        }
+
+        let mut shard = self.shards[route.shard_id].write();
+        shard.set_semantic_slice_hashed(
+            self.route_mode,
+            route.key_hash,
+            key,
+            value,
+            embedding,
+            expire_at_ms,
+            now_ms,
+        )?;
+        #[cfg(feature = "redis")]
+        self.refresh_string_key_count(route.shard_id, &shard);
+        Ok(())
     }
 
     /// Inserts or replaces a byte-string value with embedding and governance metadata.
@@ -106,13 +141,14 @@ impl EmbeddedStore {
 
     /// Returns the best semantic match accepted by `governance_filter`.
     ///
-    /// The filter receives the stored governance metadata and must approve the
-    /// entry before the cached value is returned.
+    /// The filter receives the stored governance metadata, or `None` when the
+    /// entry was written through the default semantic APIs, and must approve
+    /// the entry before the cached value is returned.
     pub fn semantic_search_with_governance_filter(
         &self,
         embedding: &[f32],
         min_score: f32,
-        mut governance_filter: impl FnMut(&[u8]) -> bool,
+        mut governance_filter: impl FnMut(Option<&[u8]>) -> bool,
     ) -> Result<Option<SemanticMatch>, SemanticCacheError> {
         let query = SemanticEmbedding::from_slice(embedding)?;
         let min_score = validate_similarity_threshold(min_score)?;
