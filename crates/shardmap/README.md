@@ -2,11 +2,11 @@
 
 `shardmap` is the embedded Rust map/cache crate for `shard-kv`. It gives
 applications a cloneable, sharded in-process handle with byte-oriented keys and
-values, TTL support, memory-limit eviction, and route-aware lower-level APIs
-for callers that already partition work by shard.
+values, TTL support, memory-limit eviction, lock helpers, prepared-key lookups,
+and native semantic-cache APIs.
 
-Use `shardmap` when you want the embedded surface. Use `shardcache` from the
-repository when you need a TCP server.
+Use `shardmap` when you want an embedded Rust cache. Use the repository's
+`shardcache` server package when you need a TCP service.
 
 ## Install
 
@@ -31,7 +31,29 @@ assert_eq!(value.as_ref(), b"ready");
 `ShardMap` is a cheap cloneable handle. Clones share the same underlying
 sharded store and can be moved into worker threads.
 
-## Common Operations
+## Feature Overview
+
+| Area | What it gives you | Example |
+| --- | --- | --- |
+| Point-key map | Insert, get, mutate, remove, and entry-style access for byte keys. | [`basic_map.rs`](examples/basic_map.rs) |
+| TTL cache | Relative TTL writes and memory-limit eviction. | [`ttl_and_locks.rs`](examples/ttl_and_locks.rs) |
+| Prepared keys | Route metadata for repeated hot-key lookups. | [`prepared_keys_threads.rs`](examples/prepared_keys_threads.rs) |
+| Lock helpers | Process-local token locks built on `SET key token NX PX ttl` semantics. | [`ttl_and_locks.rs`](examples/ttl_and_locks.rs) |
+| Configuration | Capacity hints, memory budgets, eviction policy, routing, and lock policy. | [`configured_cache.rs`](examples/configured_cache.rs) |
+| Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
+| Governance metadata | Attach application-owned authorization context to semantic hits. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
+
+Run any example with:
+
+```bash
+cargo run -p shardmap --example basic_map
+```
+
+## Point-Key Map Operations
+
+Use the default `ShardMap` for a 64-stripe shared embedded map, or
+`ShardMapWithShards<N>` when you want to choose the stripe count at compile
+time.
 
 ```rust
 use shardmap::ShardMap;
@@ -49,7 +71,13 @@ assert_eq!(cache.remove(b"job:1").unwrap().as_ref(), b"running");
 assert!(!cache.contains_key(b"job:1"));
 ```
 
-TTL values are expressed in milliseconds:
+Use `get_owned` when you want refcounted bytes after the shard read lock has
+been released. Use `get`/`get_ref` when a short borrowed guard is enough.
+
+## TTL, Eviction, And Cache Configuration
+
+TTL values are relative milliseconds. A `None` TTL means the value does not
+expire because of time.
 
 ```rust
 use shardmap::ShardMap;
@@ -60,9 +88,71 @@ cache.insert_slice_with_ttl(b"session:1", b"active", Some(30_000));
 assert!(cache.contains_key(b"session:1"));
 ```
 
+`CacheOptions` configures the shared-handle cache. Memory limits are enforced
+inside each stripe, using the selected eviction policy.
+
+```rust
+use shardmap::{CacheOptions, ShardMap};
+use shardmap::config::EvictionPolicy;
+
+let cache = ShardMap::with_options(CacheOptions {
+    capacity_hint: Some(32_768),
+    total_memory_bytes: Some(256 * 1024 * 1024),
+    eviction_policy: EvictionPolicy::Lru,
+    ..CacheOptions::default()
+});
+
+assert_eq!(cache.shard_count(), 64);
+```
+
+`EvictionPolicy::Lru` and `EvictionPolicy::Lfu` are available in the default
+crate. `EvictionPolicy::Prefix` is available with the `prefix-eviction`
+feature for prefix-group cache workloads.
+
+## Prepared Keys And Concurrency
+
+For repeated hot lookups, prepare the key once and reuse the route metadata.
+
+```rust
+use shardmap::ShardMap;
+
+let cache = ShardMap::new();
+cache.insert_slice(b"feature:alpha", b"enabled");
+
+let prepared = cache.prepare_key(b"feature:alpha");
+let value = cache.get_prepared_owned(&prepared).unwrap();
+
+assert_eq!(value.as_ref(), b"enabled");
+```
+
+Cloned handles share the same storage, so applications can move a clone into
+each worker thread and keep using normal map operations.
+
+## Lock Helpers
+
+The lock helpers are useful for process-local coordination in embedded mode.
+They acquire only when the key is absent or expired, release only when the
+stored token matches, and renew by extending the TTL for the matching token.
+
+```rust
+use shardmap::ShardMap;
+
+let cache = ShardMap::new();
+
+assert!(cache.try_acquire_lock(b"lock:job:1", b"worker-a", 5_000));
+assert!(!cache.try_acquire_lock(b"lock:job:1", b"worker-b", 5_000));
+assert!(cache.renew_lock(b"lock:job:1", b"worker-a", 5_000));
+assert!(cache.release_lock(b"lock:job:1", b"worker-a"));
+```
+
+Use the server surface when multiple processes or machines need to coordinate
+through one lock table.
+
+## Semantic Cache
+
 Semantic cache entries attach a normalized embedding to the same point-key
-value. Lookups perform an exact cosine search across live entries and return
-the best match at or above the requested score:
+value. Lookups search live semantic entries and return the best match at or
+above the requested score.
 
 ```rust
 use shardmap::ShardMap;
@@ -78,11 +168,17 @@ assert_eq!(matched.value.as_ref(), b"cached cat answer");
 # Ok::<(), shardmap::SemanticCacheError>(())
 ```
 
-Cross-user semantic cache entries can also carry opaque governance metadata.
-Entries written through the default semantic APIs return `None`; applications
-that need cross-user authorization can opt into the governance API layer and
-pass a predicate that must approve the metadata before the cached value is
-released:
+Plain writes to a key clear its semantic embedding, so semantic hits cannot
+return a value whose embedding describes an older payload. Repeated exact
+semantic queries use an internal query-result cache; call
+`disable_semantic_query_cache` when benchmarking the cold vector path.
+
+## Governance Metadata
+
+Cross-user semantic cache entries can carry opaque governance metadata. Entries
+written through the default semantic APIs return `None`; applications that need
+cross-user authorization can opt into the governance API layer and pass a
+predicate that must approve the metadata before the cached value is released.
 
 ```rust
 use shardmap::ShardMap;
@@ -109,7 +205,7 @@ assert_eq!(
 # Ok::<(), shardmap::SemanticCacheError>(())
 ```
 
-The intended customer data model is:
+The intended data model is:
 
 | Field | Example | Purpose |
 | --- | --- | --- |
@@ -119,163 +215,21 @@ The intended customer data model is:
 | `governance` | `{tenant, policy_version, allowed_groups, source_docs}` | Opaque authorization context owned by the application. |
 | `ttl` | `Some(300_000)` | Optional freshness bound for the cached answer. |
 
-The cross-user request flow is:
+The cache does not parse governance bytes. Callers can encode tenant, group,
+source document, policy version, retention tier, region, or audit context in
+whatever format they already use, then decide whether a semantically close
+candidate may release its cached value.
 
-1. User A asks a question and the application generates an answer from source
-   documents.
-2. The application stores the answer with `insert_semantic_slice_with_governance`
-   or `insert_semantic_slice_with_ttl_and_governance`, using governance bytes
-   that identify the tenant, policy version, allowed groups, source documents,
-   or any other application-specific access context.
-3. User B asks a similar question. The application embeds the request and calls
-   `semantic_search_with_governance_filter`.
-4. ShardMap considers semantic candidates, but it returns a cached value only
-   when the filter approves the candidate's `Option<&[u8]>` governance metadata
-   for User B.
-5. If no semantically close and authorized entry exists, the application treats
-   the lookup as a miss and generates a fresh answer.
+## Optional Server, Protocol, And Persistence Internals
 
-This keeps governance policy outside the cache engine while making the
-authorization boundary explicit in the cache API.
+The crate also contains the storage internals used by the `shardcache` server:
+command parsing, RESP/SCNP protocol code, persistence, replication, and server
+transport modules. Those surfaces are feature-gated so embedded users do not
+compile server code by default.
 
-Governance metadata is also useful beyond the allow/deny decision. Because the
-bytes are application-owned, callers can encode tenant, policy version, source
-document IDs, retention tier, region, or other context that explains why a
-cached answer is eligible for reuse. That context can power audit logs, targeted
-invalidation after ACL or policy changes, and hit-rate reporting by tenant or
-document class. The default semantic APIs remain metadata-free; the extra bytes
-and predicate only enter the path when the application opts into governed
-semantic reuse.
-
-Here is a complete in-process authorization example using compact metadata
-bytes. A production application could use JSON, protobuf, bitsets, signed
-policy claims, or any other application-owned format; ShardMap only stores and
-returns the opaque bytes.
-
-```rust
-use shardmap::ShardMap;
-
-struct RequestUser<'a> {
-    tenant: &'a str,
-    groups: &'a [&'a str],
-    allowed_docs: &'a [&'a str],
-    min_policy_version: u32,
-}
-
-fn csv_has_any(csv: &str, allowed: &[&str]) -> bool {
-    csv.split(',').any(|value| allowed.contains(&value))
-}
-
-fn csv_all_allowed(csv: &str, allowed: &[&str]) -> bool {
-    csv.split(',').all(|value| allowed.contains(&value))
-}
-
-fn can_use_cached_answer(user: &RequestUser<'_>, metadata: &[u8]) -> bool {
-    let Ok(metadata) = std::str::from_utf8(metadata) else {
-        return false;
-    };
-
-    let mut tenant_ok = false;
-    let mut group_ok = false;
-    let mut docs_ok = false;
-    let mut policy_ok = false;
-
-    for field in metadata.split(';') {
-        let Some((name, value)) = field.split_once('=') else {
-            continue;
-        };
-        match name {
-            "tenant" => tenant_ok = value == user.tenant,
-            "groups" => group_ok = csv_has_any(value, user.groups),
-            "docs" => docs_ok = csv_all_allowed(value, user.allowed_docs),
-            "policy" => {
-                policy_ok = matches!(
-                    value.parse::<u32>(),
-                    Ok(version) if version >= user.min_policy_version
-                );
-            }
-            _ => {}
-        }
-    }
-
-    tenant_ok && group_ok && docs_ok && policy_ok
-}
-
-let cache = ShardMap::new();
-cache.insert_semantic_slice_with_governance(
-    b"semantic:tenant/acme/faq/refund-policy",
-    b"Refunds are available within 30 days.",
-    &[1.0, 0.0],
-    b"tenant=acme;groups=support,billing;docs=doc_481,doc_902;policy=7",
-)?;
-
-let support_user = RequestUser {
-    tenant: "acme",
-    groups: &["support"],
-    allowed_docs: &["doc_481", "doc_902"],
-    min_policy_version: 7,
-};
-
-let hit = cache
-    .semantic_search_with_governance_filter(&[0.95, 0.05], 0.75, |metadata| {
-        metadata.is_some_and(|bytes| can_use_cached_answer(&support_user, bytes))
-    })?
-    .unwrap();
-
-assert_eq!(hit.value.as_ref(), b"Refunds are available within 30 days.");
-
-let sales_user = RequestUser {
-    tenant: "acme",
-    groups: &["sales"],
-    allowed_docs: &["doc_481", "doc_902"],
-    min_policy_version: 7,
-};
-
-let blocked = cache.semantic_search_with_governance_filter(
-    &[0.95, 0.05],
-    0.75,
-    |metadata| metadata.is_some_and(|bytes| can_use_cached_answer(&sales_user, bytes)),
-)?;
-
-assert!(blocked.is_none());
-# Ok::<(), shardmap::SemanticCacheError>(())
-```
-
-Plain writes to a key clear its semantic embedding, so semantic hits cannot
-return a value whose embedding describes an older payload.
-
-For repeated hot lookups, prepare the key once and reuse the route metadata:
-
-```rust
-use shardmap::ShardMap;
-
-let cache = ShardMap::new();
-cache.insert_slice(b"feature:alpha", b"enabled");
-
-let prepared = cache.prepare_key(b"feature:alpha");
-let value = cache.get_prepared_owned(&prepared).unwrap();
-
-assert_eq!(value.as_ref(), b"enabled");
-```
-
-## Configuration
-
-`CacheOptions` controls the shared-handle embedded cache. The default
-`ShardMap` uses 64 stripes.
-
-```rust
-use shardmap::{CacheOptions, ShardMap};
-use shardmap::config::EvictionPolicy;
-
-let cache = ShardMap::with_options(CacheOptions {
-    capacity_hint: Some(32_768),
-    total_memory_bytes: Some(256 * 1024 * 1024),
-    eviction_policy: EvictionPolicy::Lru,
-    ..CacheOptions::default()
-});
-
-assert_eq!(cache.shard_count(), 64);
-```
+Most applications should start with `ShardMap`. Use lower-level modules only
+when you are building a custom server, embedding the protocol layer, or wiring
+storage into a specialized runtime.
 
 ## API Shape
 
@@ -285,10 +239,8 @@ assert_eq!(cache.shard_count(), 64);
 - `CacheOptions`: embedded capacity, memory, routing, and lock options.
 - `get_owned` and `get_prepared_owned`: return refcounted bytes after releasing the shard read lock.
 - `entry`, `get_mut`, `try_insert_slice`, and lock helpers: DashMap-style mutation and coordination APIs.
-
-Lower-level modules expose the same storage engine used by the `shardcache`
-server for direct shard ownership, SCNP/RESP protocol support, persistence,
-and replication. Most embedded applications should start with `ShardMap`.
+- `insert_semantic_slice` and `semantic_search`: native semantic-cache APIs.
+- `semantic_search_with_governance_filter`: semantic cache lookup with request-specific authorization.
 
 ## Features
 
