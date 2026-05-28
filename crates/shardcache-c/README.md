@@ -60,6 +60,41 @@ int main(void) {
 }
 ```
 
+## Prepared-Key Example
+
+Prepare hot keys once when a C or C++ service repeatedly reads the same cache
+entry. The prepared handle carries route metadata for that cache instance.
+
+```c
+shardcache_prepared_key_t *key = NULL;
+shardcache_bytes_t value = {0};
+
+if (shardcache_prepare_key(db, (const unsigned char *)"feature:alpha", 13, &key)
+    == SHARDCACHE_OK) {
+    if (shardcache_get_prepared(db, key, &value) == SHARDCACHE_OK) {
+        shardcache_bytes_free(&value);
+    }
+    shardcache_prepared_key_free(key);
+}
+```
+
+## Session Block Example
+
+Session-prefixed APIs keep LMCache-style chunks grouped by session routing
+instead of treating every chunk as an unrelated key.
+
+```c
+const unsigned char session[] = "request-7";
+const unsigned char key[] = "layer-0/page-0";
+const unsigned char block[] = "kv-cache-page";
+
+shardcache_session_set(
+    db,
+    session, sizeof(session) - 1,
+    key, sizeof(key) - 1,
+    block, sizeof(block) - 1);
+```
+
 ## ABI Notes
 
 `shardcache_bytes_t` is borrowed from the returned owner. The pointer remains

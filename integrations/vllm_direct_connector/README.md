@@ -33,3 +33,14 @@ Selected through `SHARDCACHE_VLLM_PATH_VERSION`:
 
 - `host_direct_v1` (default): direct Rust restore path.
 - `gpu_direct_api_v0`: experimental queue-based GPU-originated path.
+
+## Example configuration
+
+```bash
+export SHARDCACHE_VLLM_PATH_VERSION=host_direct_v1
+export SHARDCACHE_VLLM_CONNECTOR=shardcache_vllm_connector.kv_connector_v1.ShardCacheKVConnectorV1
+```
+
+In a vLLM integration, register `ShardCacheKVConnectorV1` as the KV connector
+class and let Python handle lifecycle hooks while Rust executes the restore
+plan.

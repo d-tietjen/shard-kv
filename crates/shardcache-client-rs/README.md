@@ -157,6 +157,27 @@ fn main() -> shardcache_client_rs::Result<()> {
 }
 ```
 
+## TTL And Delete
+
+Use `set_ex` for cache entries that should expire on the server, and `del`
+when the application invalidates a key explicitly.
+
+```rust,no_run
+use shardcache_client_rs::ShardCacheClient;
+
+fn main() -> shardcache_client_rs::Result<()> {
+    let mut client = ShardCacheClient::connect("127.0.0.1:6380")?;
+    let mut value = Vec::new();
+
+    client.set_ex(b"session:1", b"active", 30_000)?;
+    assert!(client.get_into(b"session:1", &mut value)?);
+    assert!(client.del(b"session:1")?);
+    assert!(!client.get_into(b"session:1", &mut value)?);
+
+    Ok(())
+}
+```
+
 ## Native Redis Commands
 
 Enable the optional `redis` feature to use native SCNP Redis commands. Commands

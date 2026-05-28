@@ -101,7 +101,7 @@ All keys use the `storage_plugin.<name>.` prefix. With the examples above,
 `scnp_tcp_python`. The Python TCP adapter is retained for debugging and
 regression checks; the Rust SCNP adapter is the default TCP path.
 
-## Smoke Test
+## Minimal Embedded Backend
 
 ```bash
 python - <<'PY'
@@ -116,12 +116,6 @@ config = type("Cfg", (), {"extra_config": {
 backend = ShardCacheStorageBackend(config=config)
 print(type(backend).__name__)
 PY
-```
-
-Expected output:
-
-```text
-ShardCacheStorageBackend
 ```
 
 ## Benchmarks
