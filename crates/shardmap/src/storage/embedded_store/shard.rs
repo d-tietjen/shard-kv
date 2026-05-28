@@ -296,17 +296,42 @@ impl EmbeddedShard {
         expire_at_ms: Option<u64>,
         now_ms: u64,
     ) -> Result<(), SemanticCacheError> {
+        self.set_semantic_slice_hashed_with_governance(
+            route_mode,
+            key_hash,
+            key,
+            value,
+            embedding,
+            &[],
+            expire_at_ms,
+            now_ms,
+        )
+    }
+
+    #[inline(always)]
+    pub(crate) fn set_semantic_slice_hashed_with_governance(
+        &mut self,
+        route_mode: EmbeddedRouteMode,
+        key_hash: u64,
+        key: &[u8],
+        value: &[u8],
+        embedding: &[f32],
+        governance_metadata: &[u8],
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) -> Result<(), SemanticCacheError> {
         if route_mode == EmbeddedRouteMode::SessionPrefix
             && let Some(session_prefix) = derived_session_storage_prefix(key)
         {
             self.session_slots
                 .delete_hashed(&session_prefix, key_hash, key);
         }
-        self.map.set_semantic_slice_hashed(
+        self.map.set_semantic_slice_hashed_with_governance(
             key_hash,
             key,
             value,
             embedding,
+            governance_metadata,
             expire_at_ms,
             now_ms,
         )?;
@@ -325,6 +350,18 @@ impl EmbeddedShard {
     }
 
     #[inline(always)]
+    pub(crate) fn semantic_search_with_governance_filter(
+        &self,
+        query: &SemanticEmbedding,
+        min_score: f32,
+        now_ms: u64,
+        governance_filter: impl FnMut(&[u8]) -> bool,
+    ) -> Option<SemanticMatch> {
+        self.map
+            .semantic_search_with_governance_filter(query, min_score, now_ms, governance_filter)
+    }
+
+    #[inline(always)]
     pub(crate) fn semantic_search_exact(
         &self,
         query: &SemanticEmbedding,
@@ -332,6 +369,22 @@ impl EmbeddedShard {
         now_ms: u64,
     ) -> Option<SemanticMatch> {
         self.map.semantic_search_exact(query, min_score, now_ms)
+    }
+
+    #[inline(always)]
+    pub(crate) fn semantic_search_exact_with_governance_filter(
+        &self,
+        query: &SemanticEmbedding,
+        min_score: f32,
+        now_ms: u64,
+        governance_filter: impl FnMut(&[u8]) -> bool,
+    ) -> Option<SemanticMatch> {
+        self.map.semantic_search_exact_with_governance_filter(
+            query,
+            min_score,
+            now_ms,
+            governance_filter,
+        )
     }
 
     #[inline(always)]

@@ -169,6 +169,7 @@ impl FlatMap {
                     value: stored_value,
                     expire_at_ms: None,
                     semantic_index_token: None,
+                    semantic_governance: SharedBytes::new(),
                     access: EntryAccessMeta {
                         last_touch: 0,
                         frequency: 1,

@@ -12,8 +12,8 @@ use crate::config::EvictionPolicy;
 use crate::storage::CacheTelemetryHandle;
 use crate::storage::stats::TierStatsSnapshot;
 use crate::storage::{
-    Bytes, SemanticCacheError, SemanticEmbedding, SemanticIndex, SemanticIndexToken, SemanticMatch,
-    StoredEntry, hash_key, hash_key_tag_from_hash,
+    Bytes, SemanticCacheError, SemanticEmbedding, SemanticIndex, SemanticIndexCandidate,
+    SemanticIndexToken, SemanticMatch, StoredEntry, hash_key, hash_key_tag_from_hash,
 };
 use bytes::Bytes as SharedBytes;
 
@@ -28,6 +28,7 @@ struct FlatEntry {
     value: SharedBytes,
     expire_at_ms: Option<u64>,
     semantic_index_token: Option<SemanticIndexToken>,
+    semantic_governance: SharedBytes,
     access: EntryAccessMeta,
 }
 
@@ -59,8 +60,11 @@ impl FlatEntry {
 
     #[inline(always)]
     fn semantic_bytes(&self) -> usize {
-        self.semantic_index_token
-            .map_or(0, SemanticIndexToken::stored_bytes)
+        self.semantic_index_token.map_or(0, |token| {
+            token
+                .stored_bytes()
+                .saturating_add(self.semantic_governance.len())
+        })
     }
 
     #[inline(always)]
@@ -73,6 +77,7 @@ impl FlatEntry {
     #[inline(always)]
     fn clear_semantic_embedding(&mut self) {
         self.semantic_index_token = None;
+        self.semantic_governance = SharedBytes::new();
     }
 }
 

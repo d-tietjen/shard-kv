@@ -78,6 +78,33 @@ assert_eq!(matched.value.as_ref(), b"cached cat answer");
 # Ok::<(), shardmap::SemanticCacheError>(())
 ```
 
+Cross-user semantic cache entries can also carry opaque governance metadata.
+Applications can return the metadata with a match and validate it themselves,
+or pass a predicate that must approve the metadata before the cached value is
+released:
+
+```rust
+use shardmap::ShardMap;
+
+let cache = ShardMap::new();
+cache.insert_semantic_slice_with_governance(
+    b"prompt:cat",
+    b"cached cat answer",
+    &[1.0, 0.0],
+    b"tenant=acme;doc=cat-faq;policy=v1",
+)?;
+
+let matched = cache
+    .semantic_search_with_governance_filter(&[1.0, 0.0], 0.75, |metadata| {
+        metadata == b"tenant=acme;doc=cat-faq;policy=v1"
+    })?
+    .unwrap();
+
+assert_eq!(matched.value.as_ref(), b"cached cat answer");
+assert_eq!(matched.governance.as_ref(), b"tenant=acme;doc=cat-faq;policy=v1");
+# Ok::<(), shardmap::SemanticCacheError>(())
+```
+
 Plain writes to a key clear its semantic embedding, so semantic hits cannot
 return a value whose embedding describes an older payload.
 
