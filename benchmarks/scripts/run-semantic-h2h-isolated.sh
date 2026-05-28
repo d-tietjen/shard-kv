@@ -19,6 +19,23 @@ ws_root="$(cd "$bench_root/.." && pwd)"
 
 cd "$ws_root"
 
+cpuset_width() {
+  local cpuset="$1"
+  local total=0
+  local part
+  IFS=',' read -ra parts <<<"$cpuset"
+  for part in "${parts[@]}"; do
+    if [[ "$part" == *-* ]]; then
+      local start="${part%-*}"
+      local end="${part#*-}"
+      total=$((total + end - start + 1))
+    elif [[ -n "$part" ]]; then
+      total=$((total + 1))
+    fi
+  done
+  echo "$total"
+}
+
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
 out_dir="${OUT_DIR:-$bench_root/results/adam-semantic-h2h-isolated-$stamp}"
 
@@ -45,6 +62,7 @@ qdrant_image="${QDRANT_IMAGE:-qdrant/qdrant:latest}"
 keep_services="${KEEP_SERVICES:-0}"
 python_bin="${PYTHON:-python3}"
 semantic_server_shards="${SEMANTIC_SERVER_SHARDS:-1}"
+semantic_server_workers="${SEMANTIC_SERVER_WORKERS:-$(cpuset_width "$sut_cpuset")}"
 run_scope="${RUN_SCOPE:-all}"
 shardcache_pid=""
 
@@ -135,7 +153,7 @@ start_qdrant() {
 start_shardcache_server() {
   stop_shardcache_server
   local log="$out_dir/shardcache-server.log"
-  SHARDCACHE_DIRECT_SHARD_PORTS=0 taskset -c "$sut_cpuset" \
+  SHARDCACHE_DIRECT_SHARD_PORTS=0 SHARDCACHE_WORKER_COUNT="$semantic_server_workers" taskset -c "$sut_cpuset" \
     "$ws_root/target/release/shardcache" \
     --bind-addr "127.0.0.1:$shardcache_port" \
     --disable-persistence \
@@ -181,6 +199,7 @@ write_metadata() {
     echo "qdrant_image=$qdrant_image"
     echo "shardcache_url=$shardcache_url"
     echo "semantic_server_shards=$semantic_server_shards"
+    echo "semantic_server_workers=$semantic_server_workers"
     echo "python=$python_bin"
     echo "run_scope=$run_scope"
     echo "redis_image_id=$(docker image inspect "$redis_image" --format '{{.Id}}' 2>/dev/null || echo unavailable)"
