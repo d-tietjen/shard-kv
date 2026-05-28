@@ -63,6 +63,7 @@ keep_services="${KEEP_SERVICES:-0}"
 python_bin="${PYTHON:-python3}"
 semantic_server_shards="${SEMANTIC_SERVER_SHARDS:-1}"
 semantic_server_workers="${SEMANTIC_SERVER_WORKERS:-$(cpuset_width "$sut_cpuset")}"
+shardcache_query_pipeline="${SHARDCACHE_QUERY_PIPELINE:-1}"
 run_scope="${RUN_SCOPE:-all}"
 shardcache_pid=""
 
@@ -200,6 +201,7 @@ write_metadata() {
     echo "shardcache_url=$shardcache_url"
     echo "semantic_server_shards=$semantic_server_shards"
     echo "semantic_server_workers=$semantic_server_workers"
+    echo "shardcache_query_pipeline=$shardcache_query_pipeline"
     echo "python=$python_bin"
     echo "run_scope=$run_scope"
     echo "redis_image_id=$(docker image inspect "$redis_image" --format '{{.Id}}' 2>/dev/null || echo unavailable)"
@@ -236,6 +238,7 @@ run_peer() {
     --redis-url "$redis_url" \
     --qdrant-url "$qdrant_url" \
     --shardcache-url "$shardcache_url" \
+    --shardcache-query-pipeline "$shardcache_query_pipeline" \
     --adapters "$adapter" \
     --scenario "$scenario" \
     --entries "$entries" \
