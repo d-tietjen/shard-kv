@@ -17,18 +17,24 @@ SCENARIOS = [
         "key": "miss-cold",
         "title": "Cold Miss",
         "throughput_pdf": "semantic-h2h-miss-cold-throughput.pdf",
+        "show_hit_rate_chart": False,
+        "hit_rate_pdf": "semantic-h2h-miss-cold-hit-rate.pdf",
         "vcpu_pdf": "semantic-h2h-miss-cold-vcpu.pdf",
     },
     {
         "key": "hit-cold-unique",
         "title": "Cold Unique Semantic Hit",
         "throughput_pdf": "semantic-h2h-hit-cold-unique-throughput.pdf",
+        "show_hit_rate_chart": True,
+        "hit_rate_pdf": "semantic-h2h-hit-cold-unique-hit-rate.pdf",
         "vcpu_pdf": "semantic-h2h-hit-cold-unique-vcpu.pdf",
     },
     {
         "key": "hit-hot-cached",
         "title": "Hot Cached Exact Query",
         "throughput_pdf": "semantic-h2h-hit-hot-cached-throughput.pdf",
+        "show_hit_rate_chart": True,
+        "hit_rate_pdf": "semantic-h2h-hit-hot-cached-hit-rate.pdf",
         "vcpu_pdf": "semantic-h2h-hit-hot-cached-vcpu.pdf",
     },
 ]
@@ -177,6 +183,19 @@ def render_combined_chart_assets(
                     check=True,
                 )
                 asset["pdf"] = pdf_path.name
+            hit_rate_source = results_dir / str(meta["hit_rate_pdf"]).replace(".pdf", ".svg")
+            if bool(meta.get("show_hit_rate_chart", True)) and hit_rate_source.exists():
+                hit_rate_base = f"semantic-h2h-combined-{vcpus}vcpu-{scenario}-hit-rate"
+                hit_rate_svg = output_dir / f"{hit_rate_base}.svg"
+                hit_rate_pdf = output_dir / f"{hit_rate_base}.pdf"
+                shutil.copyfile(hit_rate_source, hit_rate_svg)
+                asset["hit_rate_svg"] = hit_rate_svg.name
+                if converter:
+                    subprocess.run(
+                        [converter, "-f", "pdf", "-o", str(hit_rate_pdf), str(hit_rate_svg)],
+                        check=True,
+                    )
+                    asset["hit_rate_pdf"] = hit_rate_pdf.name
             assets[(vcpus, scenario)] = asset
     return assets
 
@@ -222,11 +241,13 @@ def merged_runs(results_dirs: list[Path]) -> list[dict[str, object]]:
 def latex_report_preamble() -> list[str]:
     return [
         r"\pdfminorversion=7",
+        r"\pdfsuppresswarningpagegroup=1",
         r"\documentclass[11pt]{article}",
         r"\usepackage[margin=0.75in]{geometry}",
         r"\usepackage{graphicx}",
         r"\usepackage{xcolor}",
         r"\usepackage{listings}",
+        r"\usepackage{placeins}",
         r"\definecolor{codebg}{HTML}{F7F8FA}",
         r"\definecolor{codeborder}{HTML}{D0D7DE}",
         r"\definecolor{codecomment}{HTML}{57606A}",
@@ -276,6 +297,8 @@ def load_rows(results_dir: Path) -> dict[tuple[str, str], dict[str, object]]:
                     entries = int(row.get("index_entries") or 0)
 
                 ops = as_float(row.get("ops_per_sec"))
+                hits = int(row.get("hits") or 0)
+                queries = int(row.get("queries") or 0)
                 process_vcpu = as_float(row.get("process_vcpu"))
                 external_vcpu = as_float(row.get("external_vcpu"))
                 total_vcpu = as_float(row.get("total_vcpu"))
@@ -300,6 +323,9 @@ def load_rows(results_dir: Path) -> dict[tuple[str, str], dict[str, object]]:
                     "entries": entries,
                     "dims": int(row.get("dims") or 0),
                     "ops": ops,
+                    "hits": hits,
+                    "queries": queries,
+                    "hit_rate": ratio(float(hits), float(queries)) * 100.0,
                     "ops_per_sut_cpu": as_float(row.get("ops_per_sut_cpu")) or ratio(ops, sut_vcpu),
                     "ops_per_total_cpu": as_float(row.get("ops_per_total_cpu"))
                     or as_float(row.get("ops_per_cpu"))
@@ -514,7 +540,7 @@ def render_table_guide_markdown(
     return [
         "## How To Read The Tables",
         "",
-        "The primary comparison is `Ops/s`: how many semantic-cache lookups completed during the measured window. Latency columns (`p50 ms` and `p99 ms`) show the request-level distribution observed by the benchmark worker. `Speedup` is always the ShardCache Embedded throughput divided by the peer throughput for the same row; values below `1.0x` mean the peer was faster for that scenario.",
+        "The primary comparison is `Ops/s`: how many semantic-cache lookups completed during the measured window. `Hit rate` is measured hits divided by measured lookups in that same row, so it shows how often the system actually returned a reusable cached value at the configured threshold. Latency columns (`p50 ms` and `p99 ms`) show the request-level distribution observed by the benchmark worker. `Speedup` is always the ShardCache Embedded throughput divided by the peer throughput for the same row; values below `1.0x` mean the peer was faster for that scenario.",
         "",
         "`Ops/SUT-vCPU` is a CPU-efficiency view of the database or embedded index only. For networked systems it divides throughput by the Redis/Qdrant container CPU, not by the Python load generator. This makes the efficiency denominator fair, but it also means throughput remains the decisive capacity metric when client-side work is the limiting factor.",
         "",
@@ -553,12 +579,16 @@ def render_optimization_markdown(
         "",
         f"ShardCache now sustains {row_metric(cold, 'ops')} cold misses/s and {row_metric(unique, 'ops')} cold unique semantic hits/s in the no-memo lookup path, then jumps to {row_metric(hot, 'ops')} lookups/s when the exact-query cache is warm. Earlier exploratory no-memo profiling was around 452 ops/s, so the optimized cold path is {baseline_improvement_text(float(cold['ops']))} that baseline in this Adam run.",
         "",
+        "The performance improvement comes from moving semantic caching into the cache engine instead of treating it as an application-side wrapper around a vector database:",
+        "",
         "- Semantic search is native and in-process, so the timed lookup avoids Python framework dispatch, Redis protocol round trips, and JSON/vector serialization in the critical path.",
         "- Semantic entries are searched through one semantic index instead of fanning every semantic query across every data shard; the semantic index is allowed to use the full semantic memory budget rather than one slice per shard.",
         "- Embeddings are normalized at insert/query boundaries, turning cosine comparison into a dot product over contiguous `f32` vectors.",
         "- The dot product path uses AVX2/FMA when available, with an unrolled scalar fallback.",
         "- Locality-sensitive hashing builds 64-bit signatures and band buckets, then verifies only a capped candidate set with the exact dot product.",
         "- Repeated exact queries use an exact-vector fingerprint and a generation-checked semantic query cache, which explains the multi-million ops/s hot row.",
+        "",
+        "There are explicit tradeoffs. The current cold path is optimized for a semantic-cache workload: bounded candidate collection, fast inserts, exact verification of shortlisted candidates, and simple memory accounting. Redis HNSW is a stronger single-core ANN primitive in the 1-vCPU cold-vector row, but the benchmark also shows that HNSW did not use the larger CPU allocation in this workload and returned a much lower hit rate on the positive/paraphrase stream. A future hybrid could use HNSW for candidate discovery while preserving ShardCache's exact verification, value release, governance predicate, and hot exact-query cache.",
         "",
         "The most important interpretation is that ShardCache is faster on both sides of the semantic-cache split: it is fast when there is no memoized query result, and it is dramatically faster when application traffic repeats the same questions.",
         "",
@@ -645,6 +675,23 @@ def render_governance_markdown() -> list[str]:
     ]
 
 
+def render_metadata_value_markdown() -> list[str]:
+    return [
+        "## Metadata Utility Beyond Access Control",
+        "",
+        "Governance metadata is intentionally opaque to ShardCache, but that does not make it incidental. It lets a customer attach the application context that determines whether a semantic hit is useful, safe, fresh, and explainable.",
+        "",
+        "- Authorization: metadata can encode tenant, group, document, row-level scope, region, retention tier, or policy version, and the caller's predicate decides whether the candidate may release a cached value.",
+        "- Auditability: a cache hit can be tied back to the policy and source-document context that made the answer eligible, which is important when a reused answer crosses user boundaries.",
+        "- Targeted invalidation: applications can encode policy versions or source-document IDs, then reject stale entries after an ACL, source document, or compliance rule changes without disabling semantic caching globally.",
+        "- Measurement: hit rate can be segmented by governed versus ungoverned traffic, tenant, policy version, or document class. That makes semantic caching observable as a product behavior, not just a throughput number.",
+        "- Safety controls: governed search can intentionally convert a semantically close candidate into a miss when the candidate is not authorized. A lower governed hit rate can therefore be a sign that the system is preventing unsafe reuse, not a performance failure.",
+        "",
+        "The default path stays lightweight. Entries inserted through the normal semantic APIs carry no governance metadata, and governed metadata is only consulted on candidate acceptance before the cached value is released. The vector math and shortlist construction do not need to parse customer policy data, so customers can add governance without turning every lookup into an application-layer policy scan.",
+        "",
+    ]
+
+
 def render_scenario_markdown(
     rows: dict[tuple[str, str], dict[str, object]],
     scenario: str,
@@ -709,7 +756,7 @@ def render_table_guide_latex(
     return [
         r"\subsection{How To Read The Tables}",
         "",
-        r"The primary comparison is \texttt{Ops/s}: how many semantic-cache lookups completed during the measured window. Latency columns (\texttt{p50 ms} and \texttt{p99 ms}) show the request-level distribution observed by the benchmark worker. \texttt{Speedup} is always ShardCache Embedded throughput divided by the peer throughput for the same row; values below \texttt{1.0x} mean the peer was faster for that scenario.",
+        r"The primary comparison is \texttt{Ops/s}: how many semantic-cache lookups completed during the measured window. \texttt{Hit rate} is measured hits divided by measured lookups in that same row, so it shows how often the system actually returned a reusable cached value at the configured threshold. Latency columns (\texttt{p50 ms} and \texttt{p99 ms}) show the request-level distribution observed by the benchmark worker. \texttt{Speedup} is always ShardCache Embedded throughput divided by the peer throughput for the same row; values below \texttt{1.0x} mean the peer was faster for that scenario.",
         "",
         r"\texttt{Ops/SUT-vCPU} is a CPU-efficiency view of the database or embedded index only. For networked systems it divides throughput by the Redis/Qdrant container CPU, not by the Python load generator. This makes the efficiency denominator fair, but it also means throughput remains the decisive capacity metric when client-side work is the limiting factor.",
         "",
@@ -748,6 +795,8 @@ def render_optimization_latex(
         "",
         f"ShardCache now sustains {tex_count(cold['ops'])} cold misses/s and {tex_count(unique['ops'])} cold unique semantic hits/s in the no-memo lookup path, then jumps to {tex_count(hot['ops'])} lookups/s when the exact-query cache is warm. Earlier exploratory no-memo profiling was around 452 ops/s, so the optimized cold path is {tex_baseline_improvement(float(cold['ops']))} that baseline in this Adam run.",
         "",
+        "The performance improvement comes from moving semantic caching into the cache engine instead of treating it as an application-side wrapper around a vector database:",
+        "",
         r"\begin{itemize}",
         r"\item Semantic search is native and in-process, so the timed lookup avoids Python framework dispatch, Redis protocol round trips, and JSON/vector serialization in the critical path.",
         r"\item Semantic entries are searched through one semantic index instead of fanning every semantic query across every data shard; the semantic index is allowed to use the full semantic memory budget rather than one slice per shard.",
@@ -756,6 +805,8 @@ def render_optimization_latex(
         r"\item Locality-sensitive hashing builds 64-bit signatures and band buckets, then verifies only a capped candidate set with the exact dot product.",
         r"\item Repeated exact queries use an exact-vector fingerprint and a generation-checked semantic query cache, which explains the multi-million ops/s hot row.",
         r"\end{itemize}",
+        "",
+        "There are explicit tradeoffs. The current cold path is optimized for a semantic-cache workload: bounded candidate collection, fast inserts, exact verification of shortlisted candidates, and simple memory accounting. Redis HNSW is a stronger single-core ANN primitive in the 1-vCPU cold-vector row, but the benchmark also shows that HNSW did not use the larger CPU allocation in this workload and returned a much lower hit rate on the positive/paraphrase stream. A future hybrid could use HNSW for candidate discovery while preserving ShardCache's exact verification, value release, governance predicate, and hot exact-query cache.",
         "",
         "The most important interpretation is that ShardCache is faster on both sides of the semantic-cache split: it is fast when there is no memoized query result, and it is dramatically faster when application traffic repeats the same questions.",
         "",
@@ -847,6 +898,25 @@ def render_governance_latex() -> list[str]:
     ]
 
 
+def render_metadata_value_latex() -> list[str]:
+    return [
+        r"\subsection{Metadata Utility Beyond Access Control}",
+        "",
+        "Governance metadata is intentionally opaque to ShardCache, but that does not make it incidental. It lets a customer attach the application context that determines whether a semantic hit is useful, safe, fresh, and explainable.",
+        "",
+        r"\begin{itemize}",
+        r"\item Authorization: metadata can encode tenant, group, document, row-level scope, region, retention tier, or policy version, and the caller's predicate decides whether the candidate may release a cached value.",
+        r"\item Auditability: a cache hit can be tied back to the policy and source-document context that made the answer eligible, which is important when a reused answer crosses user boundaries.",
+        r"\item Targeted invalidation: applications can encode policy versions or source-document IDs, then reject stale entries after an ACL, source document, or compliance rule changes without disabling semantic caching globally.",
+        r"\item Measurement: hit rate can be segmented by governed versus ungoverned traffic, tenant, policy version, or document class. That makes semantic caching observable as a product behavior, not just a throughput number.",
+        r"\item Safety controls: governed search can intentionally convert a semantically close candidate into a miss when the candidate is not authorized. A lower governed hit rate can therefore be a sign that the system is preventing unsafe reuse, not a performance failure.",
+        r"\end{itemize}",
+        "",
+        "The default path stays lightweight. Entries inserted through the normal semantic APIs carry no governance metadata, and governed metadata is only consulted on candidate acceptance before the cached value is released. The vector math and shortlist construction do not need to parse customer policy data, so customers can add governance without turning every lookup into an application-layer policy scan.",
+        "",
+    ]
+
+
 def render_scenario_latex(
     rows: dict[tuple[str, str], dict[str, object]],
     scenario: str,
@@ -897,6 +967,7 @@ def render_markdown(rows: dict[tuple[str, str], dict[str, object]], metadata: di
     out.extend(render_table_guide_markdown(rows))
     out.extend(render_optimization_markdown(rows))
     out.extend(render_governance_markdown())
+    out.extend(render_metadata_value_markdown())
     out.extend(render_claim_boundary_markdown(rows, metadata))
 
     for meta in SCENARIOS:
@@ -913,15 +984,16 @@ def render_markdown(rows: dict[tuple[str, str], dict[str, object]], metadata: di
         out.extend(render_scenario_markdown(rows, str(meta["key"])))
         out.extend(
             [
-                "| System | Ops/s | Ops/SUT-vCPU | p50 ms | p99 ms | SUT vCPU | Client vCPU | Total vCPU | Speedup |",
-                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+                "| System | Ops/s | Hit rate | Ops/SUT-vCPU | p50 ms | p99 ms | SUT vCPU | Client vCPU | Total vCPU | Speedup |",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
             ]
         )
         for row in table_rows:
             out.append(
-                "| {label} | {ops} | {ops_cpu} | {p50:.4f} | {p99:.4f} | {sut:.2f} | {client:.2f} | {total:.2f} | {speedup:.1f}x |".format(
+                "| {label} | {ops} | {hit_rate:.1f}% | {ops_cpu} | {p50:.4f} | {p99:.4f} | {sut:.2f} | {client:.2f} | {total:.2f} | {speedup:.1f}x |".format(
                     label=row["label"],
                     ops=format_int(row["ops"]),
+                    hit_rate=float(row["hit_rate"]),
                     ops_cpu=format_int(row["ops_per_sut_cpu"]),
                     p50=float(row["p50"]),
                     p99=float(row["p99"]),
@@ -964,11 +1036,13 @@ def render_combined_markdown(
         "",
         "For networked rows, the SUT/database is limited to the SUT CPU set and load/client workers run on the separate load CPU set. The 1-vCPU networked run therefore limits only the database to one logical CPU; the client still has the full client CPU set available. Embedded rows are in-process, so their benchmark process is pinned to the SUT CPU set and has no separate client CPU.",
         "",
-        "The `Speedup` columns are ShardCache Embedded throughput divided by the peer throughput for the same CPU shape. The `Scale` column is each system's 16-vCPU throughput divided by its 1-vCPU throughput.",
+        "The `Hit rate` columns are measured hits divided by measured lookups for the same row. The `Speedup` columns are ShardCache Embedded throughput divided by the peer throughput for the same CPU shape. The `Scale` column is each system's 16-vCPU throughput divided by its 1-vCPU throughput. This is especially important for Redis vector HNSW: it can post higher raw lookup throughput in some rows while accepting a smaller share of positive/paraphrase queries as reusable cached answers.",
         "",
     ]
 
+    out.extend(render_combined_technical_markdown(one, sixteen))
     out.extend(render_governance_markdown())
+    out.extend(render_metadata_value_markdown())
 
     for meta in SCENARIOS:
         scenario = str(meta["key"])
@@ -994,7 +1068,54 @@ def render_combined_chart_markdown(
                 "",
             ]
         )
+        if "hit_rate_svg" in asset:
+            out.extend(
+                [
+                    f"![{vcpus}-vCPU {title} hit rate]({asset['hit_rate_svg']})",
+                    "",
+                ]
+            )
     return out
+
+
+def render_combined_technical_markdown(
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+) -> list[str]:
+    cold_16 = combined_row(sixteen, "miss-cold", "shardcache")
+    unique_16 = combined_row(sixteen, "hit-cold-unique", "shardcache")
+    hot_16 = combined_row(sixteen, "hit-hot-cached", "shardcache")
+    cold_1 = combined_row(one, "miss-cold", "shardcache")
+    redis_hnsw_1 = combined_row(one, "hit-cold-unique", "redis-vector-hnsw")
+    redis_hnsw_16 = combined_row(sixteen, "hit-cold-unique", "redis-vector-hnsw")
+
+    return [
+        "## Technical Design And Performance Tradeoffs",
+        "",
+        "ShardCache's semantic-cache path is built as cache-engine functionality rather than as a framework wrapper around a separate vector search system. The benchmark is therefore measuring lookup mechanics that are usually hidden behind a semantic-cache integration layer: candidate discovery, exact similarity verification, value retrieval, cache-memory policy, governance filtering, and hot-query reuse.",
+        "",
+        "The main improvements were:",
+        "",
+        "- Native execution: the embedded path avoids Python dispatch, vector serialization, JSON marshalling, and external protocol round trips. The server path keeps the same native semantic engine behind RESP semantic commands.",
+        "- One semantic index: semantic entries are concentrated into a single semantic index instead of being split across data shards. That avoids fanout, prevents each shard from receiving only a fraction of the semantic memory budget, and matches the observation that semantic search quality and speed degrade when the candidate space is needlessly partitioned.",
+        "- Full semantic memory budget: semantic caching can use the cache's semantic allocation as a whole rather than being constrained to one slab out of many. This is important for high-cardinality prompt caches because fewer retained embeddings means lower reuse and more fall-through.",
+        "- Normalized vectors and SIMD verification: embeddings are normalized at boundaries, so cosine similarity becomes a dot product over contiguous `f32` arrays. AVX2/FMA accelerates the verification step after candidate selection.",
+        "- LSH shortlist plus exact verification: locality-sensitive hashing narrows the candidate set, but ShardCache still verifies shortlisted candidates with the exact dot product before returning a value.",
+        "- Generation-checked exact-query cache: repeated identical normalized queries hit a small exact-query result cache that is invalidated by semantic generation on writes, which is why the hot exact-query row is several orders of magnitude above framework-backed semantic-cache integrations.",
+        "",
+        f"The tradeoff is that the current cold path is not an HNSW graph index. Redis HNSW is faster on the 1-vCPU raw vector-search primitive, but it returns a much lower measured hit rate on the cold unique positive/paraphrase stream: {markdown_percent(redis_hnsw_1, 'hit_rate')} at 1 vCPU and {markdown_percent(redis_hnsw_16, 'hit_rate')} at 16 vCPU, compared with ShardCache Embedded at {markdown_percent(unique_16, 'hit_rate')} in the 16-vCPU run. That means Redis HNSW's higher raw throughput in some rows should be read as a speed/recall tradeoff, not as an unqualified semantic-cache win. ShardCache's current design favors cache semantics: full value release, bounded candidate work, simple insert/update behavior, exact verification, governance filtering, and high multicore throughput. A future hybrid could add HNSW as candidate discovery while keeping ShardCache's verification and governance boundary.",
+        "",
+        "The observed result is the shape we wanted from a native semantic cache: the optimized no-memo path is stable across misses and first-time hits, and the hot exact-query path becomes a very fast cache lookup rather than repeated vector search.",
+        "",
+        "Key ShardCache data points from the combined run:",
+        "",
+        f"- 1-vCPU cold miss: {markdown_metric(cold_1, 'ops')} ops/s.",
+        f"- 16-vCPU cold miss: {markdown_metric(cold_16, 'ops')} ops/s.",
+        f"- 16-vCPU cold unique semantic hit: {markdown_metric(unique_16, 'ops')} ops/s at {markdown_percent(unique_16, 'hit_rate')} hit rate.",
+        f"- 16-vCPU hot exact cached lookup: {markdown_metric(hot_16, 'ops')} ops/s at {markdown_percent(hot_16, 'hit_rate')} hit rate.",
+        f"- Redis HNSW cold unique hit rate: {markdown_percent(redis_hnsw_1, 'hit_rate')} at 1 vCPU and {markdown_percent(redis_hnsw_16, 'hit_rate')} at 16 vCPU.",
+        "",
+    ]
 
 
 def render_combined_scenario_markdown(
@@ -1008,14 +1129,18 @@ def render_combined_scenario_markdown(
         "",
         combined_scenario_description(title),
         "",
-        "| System | 1-vCPU ops/s | 16-vCPU ops/s | Scale | 1-vCPU ops/SUT-vCPU | 16-vCPU ops/SUT-vCPU | 1-vCPU p50 ms | 16-vCPU p50 ms | 1-vCPU speedup | 16-vCPU speedup |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        combined_hit_rate_note(scenario),
+        "",
+        "| System | 1-vCPU ops/s | 16-vCPU ops/s | Scale | 1-vCPU hit rate | 16-vCPU hit rate | 1-vCPU ops/SUT-vCPU | 16-vCPU ops/SUT-vCPU | 1-vCPU p50 ms | 16-vCPU p50 ms | 1-vCPU speedup | 16-vCPU speedup |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
         *[
-            "| {label} | {one_ops} | {sixteen_ops} | {scale} | {one_cpu} | {sixteen_cpu} | {one_p50} | {sixteen_p50} | {one_speedup} | {sixteen_speedup} |".format(
+            "| {label} | {one_ops} | {sixteen_ops} | {scale} | {one_hit_rate} | {sixteen_hit_rate} | {one_cpu} | {sixteen_cpu} | {one_p50} | {sixteen_p50} | {one_speedup} | {sixteen_speedup} |".format(
                 label=combined_label(adapter, one, sixteen, scenario),
                 one_ops=markdown_metric(combined_row(one, scenario, adapter), "ops"),
                 sixteen_ops=markdown_metric(combined_row(sixteen, scenario, adapter), "ops"),
                 scale=markdown_scale(combined_row(one, scenario, adapter), combined_row(sixteen, scenario, adapter)),
+                one_hit_rate=markdown_percent(combined_row(one, scenario, adapter), "hit_rate"),
+                sixteen_hit_rate=markdown_percent(combined_row(sixteen, scenario, adapter), "hit_rate"),
                 one_cpu=markdown_metric(combined_row(one, scenario, adapter), "ops_per_sut_cpu"),
                 sixteen_cpu=markdown_metric(combined_row(sixteen, scenario, adapter), "ops_per_sut_cpu"),
                 one_p50=markdown_float(combined_row(one, scenario, adapter), "p50"),
@@ -1029,6 +1154,14 @@ def render_combined_scenario_markdown(
     ]
 
 
+def combined_hit_rate_note(scenario: str) -> str:
+    if scenario == "miss-cold":
+        return "For cold misses, the hit-rate columns are a false-positive check. Every system reported 0.0%, so there was no accidental semantic reuse on the negative-query workload."
+    if scenario == "hit-cold-unique":
+        return "For cold unique semantic hits, the hit-rate columns show how often each system accepted a positive/paraphrase query as reusable at the configured threshold."
+    return "For hot cached exact queries, the hit-rate columns show whether repeated normalized traffic stays on the cached-answer path or falls through to vector search."
+
+
 def render_combined_scenario_latex(
     one: dict[str, object] | None,
     sixteen: dict[str, object] | None,
@@ -1039,7 +1172,9 @@ def render_combined_scenario_latex(
     out = [
         rf"\subsection{{{tex_escape(title)}}}",
         "",
-        combined_scenario_description(title),
+        tex_escape(combined_scenario_description(title)),
+        "",
+        tex_escape(combined_hit_rate_note(scenario)),
         "",
         r"\begin{table}[htbp]",
         r"\centering",
@@ -1048,20 +1183,22 @@ def render_combined_scenario_latex(
         rf"\caption{{{tex_escape(title)} unified head-to-head and 1-vCPU to 16-vCPU scaling.}}",
         rf"\label{{tab:semantic-h2h-combined-{scenario}}}",
         r"\resizebox{\linewidth}{!}{%",
-        r"\begin{tabular}{lrrrrrrrrr}",
+        r"\begin{tabular}{lrrrrrrrrrrr}",
         r"\hline",
-        r"System & 1-vCPU ops/s & 16-vCPU ops/s & Scale & 1-vCPU ops/CPU & 16-vCPU ops/CPU & 1-vCPU p50 & 16-vCPU p50 & 1-vCPU Speedup & 16-vCPU Speedup \\",
+        r"System & 1-vCPU ops/s & 16-vCPU ops/s & Scale & 1-vCPU hit rate & 16-vCPU hit rate & 1-vCPU ops/CPU & 16-vCPU ops/CPU & 1-vCPU p50 & 16-vCPU p50 & 1-vCPU Speedup & 16-vCPU Speedup \\",
         r"\hline",
     ]
     for adapter in combined_adapters(one, sixteen, scenario):
         one_row = combined_row(one, scenario, adapter)
         sixteen_row = combined_row(sixteen, scenario, adapter)
         out.append(
-            "{label} & {one_ops} & {sixteen_ops} & {scale} & {one_cpu} & {sixteen_cpu} & {one_p50} & {sixteen_p50} & {one_speedup} & {sixteen_speedup} \\\\".format(
+            "{label} & {one_ops} & {sixteen_ops} & {scale} & {one_hit_rate} & {sixteen_hit_rate} & {one_cpu} & {sixteen_cpu} & {one_p50} & {sixteen_p50} & {one_speedup} & {sixteen_speedup} \\\\".format(
                 label=tex_escape(combined_label(adapter, one, sixteen, scenario)),
                 one_ops=tex_metric(one_row, "ops"),
                 sixteen_ops=tex_metric(sixteen_row, "ops"),
                 scale=tex_scale(one_row, sixteen_row),
+                one_hit_rate=tex_percent(one_row, "hit_rate"),
+                sixteen_hit_rate=tex_percent(sixteen_row, "hit_rate"),
                 one_cpu=tex_metric(one_row, "ops_per_sut_cpu"),
                 sixteen_cpu=tex_metric(sixteen_row, "ops_per_sut_cpu"),
                 one_p50=tex_float(one_row, "p50"),
@@ -1080,6 +1217,8 @@ def render_combined_scenario_latex(
         ]
     )
     out.extend(render_combined_chart_latex(chart_assets or {}, scenario, title))
+    out.append(r"\FloatBarrier")
+    out.append("")
     return out
 
 
@@ -1095,16 +1234,76 @@ def render_combined_chart_latex(
             continue
         out.extend(
             [
-                r"\begin{figure}[htbp]",
+                rf"The {vcpus}-vCPU throughput chart below visualizes the table row as a capacity comparison. It is included here so the throughput claim can be read directly beside the scenario it supports.",
+                "",
+                r"\begin{figure}[!htbp]",
                 r"\centering",
-                rf"\includegraphics[width=\linewidth]{{{asset['pdf']}}}",
+                rf"\includegraphics[width=0.92\linewidth]{{{asset['pdf']}}}",
                 rf"\caption{{{tex_escape(title)} throughput head-to-head with the SUT limited to {vcpus} vCPU and load clients isolated on the client CPU set.}}",
                 rf"\label{{fig:semantic-h2h-combined-{scenario}-{vcpus}vcpu-throughput}}",
                 r"\end{figure}",
                 "",
             ]
         )
+        if "hit_rate_pdf" in asset:
+            out.extend(
+                [
+                    rf"The {vcpus}-vCPU hit-rate chart separates throughput from semantic reuse. This matters because a system can be fast while accepting fewer positive queries as reusable, or can intentionally reject governed candidates.",
+                    "",
+                    r"\begin{figure}[!htbp]",
+                    r"\centering",
+                    rf"\includegraphics[width=0.92\linewidth]{{{asset['hit_rate_pdf']}}}",
+                    rf"\caption{{{tex_escape(title)} measured hit rate with the SUT limited to {vcpus} vCPU. Hit rate is hits divided by lookups in the same measured row.}}",
+                    rf"\label{{fig:semantic-h2h-combined-{scenario}-{vcpus}vcpu-hit-rate}}",
+                    r"\end{figure}",
+                    "",
+                ]
+            )
     return out
+
+
+def render_combined_technical_latex(
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+) -> list[str]:
+    cold_16 = combined_row(sixteen, "miss-cold", "shardcache")
+    unique_16 = combined_row(sixteen, "hit-cold-unique", "shardcache")
+    hot_16 = combined_row(sixteen, "hit-hot-cached", "shardcache")
+    cold_1 = combined_row(one, "miss-cold", "shardcache")
+    redis_hnsw_1 = combined_row(one, "hit-cold-unique", "redis-vector-hnsw")
+    redis_hnsw_16 = combined_row(sixteen, "hit-cold-unique", "redis-vector-hnsw")
+
+    return [
+        r"\subsection{Technical Design And Performance Tradeoffs}",
+        "",
+        "ShardCache's semantic-cache path is built as cache-engine functionality rather than as a framework wrapper around a separate vector search system. The benchmark is therefore measuring lookup mechanics that are usually hidden behind a semantic-cache integration layer: candidate discovery, exact similarity verification, value retrieval, cache-memory policy, governance filtering, and hot-query reuse.",
+        "",
+        "The main improvements were:",
+        "",
+        r"\begin{itemize}",
+        r"\item Native execution: the embedded path avoids Python dispatch, vector serialization, JSON marshalling, and external protocol round trips. The server path keeps the same native semantic engine behind RESP semantic commands.",
+        r"\item One semantic index: semantic entries are concentrated into a single semantic index instead of being split across data shards. That avoids fanout, prevents each shard from receiving only a fraction of the semantic memory budget, and matches the observation that semantic search quality and speed degrade when the candidate space is needlessly partitioned.",
+        r"\item Full semantic memory budget: semantic caching can use the cache's semantic allocation as a whole rather than being constrained to one slab out of many. This is important for high-cardinality prompt caches because fewer retained embeddings means lower reuse and more fall-through.",
+        r"\item Normalized vectors and SIMD verification: embeddings are normalized at boundaries, so cosine similarity becomes a dot product over contiguous \texttt{f32} arrays. AVX2/FMA accelerates the verification step after candidate selection.",
+        r"\item LSH shortlist plus exact verification: locality-sensitive hashing narrows the candidate set, but ShardCache still verifies shortlisted candidates with the exact dot product before returning a value.",
+        r"\item Generation-checked exact-query cache: repeated identical normalized queries hit a small exact-query result cache that is invalidated by semantic generation on writes, which is why the hot exact-query row is several orders of magnitude above framework-backed semantic-cache integrations.",
+        r"\end{itemize}",
+        "",
+        f"The tradeoff is that the current cold path is not an HNSW graph index. Redis HNSW is faster on the 1-vCPU raw vector-search primitive, but it returns a much lower measured hit rate on the cold unique positive/paraphrase stream: {tex_percent(redis_hnsw_1, 'hit_rate')} at 1 vCPU and {tex_percent(redis_hnsw_16, 'hit_rate')} at 16 vCPU, compared with ShardCache Embedded at {tex_percent(unique_16, 'hit_rate')} in the 16-vCPU run. That means Redis HNSW's higher raw throughput in some rows should be read as a speed/recall tradeoff, not as an unqualified semantic-cache win. ShardCache's current design favors cache semantics: full value release, bounded candidate work, simple insert/update behavior, exact verification, governance filtering, and high multicore throughput. A future hybrid could add HNSW as candidate discovery while keeping ShardCache's verification and governance boundary.",
+        "",
+        "The observed result is the shape we wanted from a native semantic cache: the optimized no-memo path is stable across misses and first-time hits, and the hot exact-query path becomes a very fast cache lookup rather than repeated vector search.",
+        "",
+        "Key ShardCache data points from the combined run:",
+        "",
+        r"\begin{itemize}",
+        rf"\item 1-vCPU cold miss: {tex_metric(cold_1, 'ops')} ops/s.",
+        rf"\item 16-vCPU cold miss: {tex_metric(cold_16, 'ops')} ops/s.",
+        rf"\item 16-vCPU cold unique semantic hit: {tex_metric(unique_16, 'ops')} ops/s at {tex_percent(unique_16, 'hit_rate')} hit rate.",
+        rf"\item 16-vCPU hot exact cached lookup: {tex_metric(hot_16, 'ops')} ops/s at {tex_percent(hot_16, 'hit_rate')} hit rate.",
+        rf"\item Redis HNSW cold unique hit rate: {tex_percent(redis_hnsw_1, 'hit_rate')} at 1 vCPU and {tex_percent(redis_hnsw_16, 'hit_rate')} at 16 vCPU.",
+        r"\end{itemize}",
+        "",
+    ]
 
 
 def render_latex_section(
@@ -1139,6 +1338,7 @@ def render_latex_section(
     out.extend(render_table_guide_latex(rows))
     out.extend(render_optimization_latex(rows))
     out.extend(render_governance_latex())
+    out.extend(render_metadata_value_latex())
     out.extend(render_claim_boundary_latex(rows, metadata))
 
     for meta in SCENARIOS:
@@ -1178,17 +1378,18 @@ def render_latex_section(
                 r"\setlength{\tabcolsep}{3pt}",
                 rf"\caption{{{tex_escape(title)} head-to-head at {tex_count(metadata.get('entries', '100000'))} entries with {vcpus}-vCPU isolation.}}",
                 rf"\label{{tab:semantic-h2h-isolated-{label_suffix}}}",
-                r"\begin{tabular}{lrrrrrrrr}",
+                r"\begin{tabular}{lrrrrrrrrr}",
                 r"\hline",
-                r"System & Ops/s & Ops/SUT-vCPU & p50 ms & p99 ms & SUT vCPU & Client vCPU & Total vCPU & Speedup \\",
+                r"System & Ops/s & Hit rate & Ops/SUT-vCPU & p50 ms & p99 ms & SUT vCPU & Client vCPU & Total vCPU & Speedup \\",
                 r"\hline",
             ]
         )
         for row in table_rows:
             out.append(
-                "{label} & {ops} & {ops_cpu} & {p50:.4f} & {p99:.4f} & {sut:.2f} & {client:.2f} & {total:.2f} & {speedup:.1f}$\\times$ \\\\".format(
+                "{label} & {ops} & {hit_rate:.1f}\\% & {ops_cpu} & {p50:.4f} & {p99:.4f} & {sut:.2f} & {client:.2f} & {total:.2f} & {speedup:.1f}$\\times$ \\\\".format(
                     label=tex_escape(str(row["label"])),
                     ops=tex_count(row["ops"]),
+                    hit_rate=float(row["hit_rate"]),
                     ops_cpu=tex_count(row["ops_per_sut_cpu"]),
                     p50=float(row["p50"]),
                     p99=float(row["p99"]),
@@ -1226,25 +1427,25 @@ def render_combined_latex_section(
 ) -> str:
     one = run_by_vcpu(runs, 1)
     sixteen = run_by_vcpu(runs, 16)
-    out: list[str] = [
-        rf"\section{{{tex_escape(combined_report_title(runs))}}}",
-        r"\label{sec:shardcache-semantic-head-to-head-combined}",
-        "",
-        "This report combines the isolated 1-vCPU and 16-vCPU Adam benchmark runs into unified head-to-head tables. Each scenario table shows peer comparison and CPU scaling in the same row, so a reader can see both relative performance and how each system scales with the larger CPU allocation.",
-        "",
-        r"\subsection{Run Shape}",
-        "",
-        rf"All rows use {tex_count(combined_metadata_value(runs, 'entries', '100000'))} entries, {tex_escape(str(combined_metadata_value(runs, 'dims', '384')))}-dimensional normalized embeddings, and a cosine-distance threshold of {tex_escape(str(combined_metadata_value(runs, 'threshold', '0.35')))}. The 1-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(one, 'sut_cpuset', '0'))} and the load client to CPU set {tex_escape(run_metadata_value(one, 'load_cpuset', '16-31'))} with {tex_escape(run_metadata_value(one, 'workers', '16'))} workers. The 16-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(sixteen, 'sut_cpuset', '0-15'))} and the load client to CPU set {tex_escape(run_metadata_value(sixteen, 'load_cpuset', '16-31'))} with {tex_escape(run_metadata_value(sixteen, 'workers', '16'))} workers.",
-        "",
-        tex_escape(combined_execution_mode_note(runs)),
-        "",
-        "For networked rows, the SUT/database is limited to the SUT CPU set and load/client workers run on the separate load CPU set. The 1-vCPU networked run therefore limits only the database to one logical CPU; the client still has the full client CPU set available. Embedded rows are in-process, so their benchmark process is pinned to the SUT CPU set and has no separate client CPU.",
-        "",
-        r"The \texttt{Speedup} columns are ShardCache Embedded throughput divided by the peer throughput for the same CPU shape. The \texttt{Scale} column is each system's 16-vCPU throughput divided by its 1-vCPU throughput.",
-        "",
-    ]
+    out: list[str] = []
 
+    out.extend(render_combined_whitepaper_intro_latex(one, sixteen))
+    out.extend(render_combined_methodology_latex(runs, one, sixteen))
+    out.append(r"\section{Architecture}")
+    out.append(r"\label{sec:semantic-cache-architecture}")
+    out.append("")
+    out.extend(render_combined_technical_latex(one, sixteen))
     out.extend(render_governance_latex())
+    out.extend(render_metadata_value_latex())
+    out.append(r"\section{Benchmark Results}")
+    out.append(r"\label{sec:semantic-cache-benchmark-results}")
+    out.append("")
+    out.extend(render_combined_results_discussion_latex(one, sixteen))
+
+    out.append(r"\subsection{Detailed Scenario Evidence}")
+    out.append("")
+    out.append("The following subsections provide the evidence behind the results interpretation. Each scenario starts with a unified table, then places the corresponding throughput and hit-rate figures directly under the claim they illustrate.")
+    out.append("")
 
     for meta in SCENARIOS:
         out.extend(
@@ -1258,8 +1459,15 @@ def render_combined_latex_section(
         )
         out.append("")
 
+    out.extend(render_combined_conclusion_latex(one, sixteen))
     out.extend(
         [
+            r"\subsection{Limitations And Future Work}",
+            "",
+            "The benchmark uses precomputed embeddings, so it isolates the cache/index lookup path and does not include embedding-model latency or LLM generation latency. That is intentional: semantic-cache infrastructure should be compared on the work it performs after an application has produced a query embedding. The matrix also separates raw vector indexes from semantic-cache integrations. Raw indexes can be useful lower-level baselines, but they do not by themselves model cached answer release, governance filtering, hot-query memoization, or application-facing cache semantics.",
+            "",
+            "The current ShardCache cold path uses LSH-style candidate discovery plus exact verification. A natural next research direction is a hybrid cold path that uses HNSW or another graph-based ANN structure for candidate discovery while preserving ShardCache's value-release, TTL, memory-accounting, governance, and exact-verification semantics. The benchmark should also be extended with governed-hit workloads that report authorized hit rate, rejected semantic matches, and stale-policy miss rate by tenant or document class.",
+            "",
             r"\subsection{Caveats}",
             "",
             "This combined report uses the same underlying result CSV files as the standalone 1-vCPU and 16-vCPU reports. The unified tables are the authoritative combined view for head-to-head and scaling interpretation, and the embedded charts visualize the same rows on a linear throughput axis.",
@@ -1267,6 +1475,100 @@ def render_combined_latex_section(
         ]
     )
     return "\n".join(out)
+
+
+def render_combined_whitepaper_intro_latex(
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+) -> list[str]:
+    cold_16 = combined_row(sixteen, "miss-cold", "shardcache")
+    unique_16 = combined_row(sixteen, "hit-cold-unique", "shardcache")
+    hot_16 = combined_row(sixteen, "hit-hot-cached", "shardcache")
+    server_hot_16 = combined_row(sixteen, "hit-hot-cached", "shardcache-server")
+    redis_hnsw_unique_16 = combined_row(sixteen, "hit-cold-unique", "redis-vector-hnsw")
+    betterdb_hot_16 = combined_row(sixteen, "hit-hot-cached", "betterdb")
+    return [
+        r"\section{Introduction}",
+        r"\label{sec:semantic-cache-introduction}",
+        "",
+        r"\subsection{Abstract}",
+        "",
+        "Semantic caching is usually evaluated as a thin framework layer on top of a vector database. That framing hides the cache-engine work required for production use: deciding whether a candidate is reusable, returning the cached value, invalidating repeated-query decisions, accounting for memory, and preventing cross-user data leakage. This report evaluates ShardCache as a native semantic-cache feature and compares it against BetterDB, RedisVL/LangChain Redis semantic-cache integrations, Redis vector search, FAISS, hnswlib, and Qdrant on an isolated Adam server benchmark.",
+        "",
+        f"In the 16-vCPU run, ShardCache Embedded reached {tex_metric(cold_16, 'ops')} cold misses/s, {tex_metric(unique_16, 'ops')} cold unique semantic hits/s at {tex_percent(unique_16, 'hit_rate')} hit rate, and {tex_metric(hot_16, 'ops')} hot exact cached lookups/s at {tex_percent(hot_16, 'hit_rate')} hit rate. ShardCache Server reached {tex_metric(server_hot_16, 'ops')} hot exact cached lookups/s through the RESP semantic command path. Redis HNSW remained a strong raw ANN baseline, but its cold unique hit rate was {tex_percent(redis_hnsw_unique_16, 'hit_rate')} in the same 16-vCPU run, while BetterDB reached {tex_metric(betterdb_hot_16, 'ops')} hot exact lookups/s.",
+        "",
+        r"\subsection{Research Question}",
+        "",
+        "The central question is whether semantic caching should be implemented as a native cache capability rather than as an external semantic-cache framework layered over a vector index. The hypothesis is that a native implementation can improve throughput and scaling because it can combine candidate search, exact verification, cached-value release, memory policy, hot-query memoization, and governance metadata in one data path.",
+        "",
+        "A secondary question is whether semantic-cache benchmarks should report hit rate alongside throughput. The answer from this run is yes. A vector index can be fast while accepting fewer positive/paraphrase queries as reusable; conversely, a governed cache can intentionally lower hit rate when an otherwise close candidate is not authorized for the requesting user.",
+        "",
+    ]
+
+
+def render_combined_methodology_latex(
+    runs: list[dict[str, object]],
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+) -> list[str]:
+    return [
+        r"\section{Methodology}",
+        r"\label{sec:semantic-cache-methodology}",
+        "",
+        "This report combines the isolated 1-vCPU and 16-vCPU Adam benchmark runs into unified head-to-head tables. Each scenario table shows peer comparison and CPU scaling in the same row, so a reader can see both relative performance and how each system scales with the larger CPU allocation.",
+        "",
+        rf"All rows use {tex_count(combined_metadata_value(runs, 'entries', '100000'))} entries, {tex_escape(str(combined_metadata_value(runs, 'dims', '384')))}-dimensional normalized embeddings, and a cosine-distance threshold of {tex_escape(str(combined_metadata_value(runs, 'threshold', '0.35')))}. The 1-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(one, 'sut_cpuset', '0'))} and the load client to CPU set {tex_escape(run_metadata_value(one, 'load_cpuset', '16-31'))} with {tex_escape(run_metadata_value(one, 'workers', '16'))} workers. The 16-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(sixteen, 'sut_cpuset', '0-15'))} and the load client to CPU set {tex_escape(run_metadata_value(sixteen, 'load_cpuset', '16-31'))} with {tex_escape(run_metadata_value(sixteen, 'workers', '16'))} workers.",
+        "",
+        tex_escape(combined_execution_mode_note(runs)),
+        "",
+        "For networked rows, the SUT/database is limited to the SUT CPU set and load/client workers run on the separate load CPU set. The 1-vCPU networked run therefore limits only the database to one logical CPU; the client still has the full client CPU set available. Embedded rows are in-process, so their benchmark process is pinned to the SUT CPU set and has no separate client CPU.",
+        "",
+        r"The \texttt{Hit rate} columns are measured hits divided by measured lookups for the same row. The \texttt{Speedup} columns are ShardCache Embedded throughput divided by the peer throughput for the same CPU shape. The \texttt{Scale} column is each system's 16-vCPU throughput divided by its 1-vCPU throughput. This is especially important for Redis vector HNSW: it can post higher raw lookup throughput in some rows while accepting a smaller share of positive/paraphrase queries as reusable cached answers.",
+        "",
+        "The workload is split into three scenarios. Cold miss uses unique negative queries with query-result memoization disabled, so the correct hit rate is zero and the row measures false-positive-resistant fall-through cost. Cold unique semantic hit uses unique positive/paraphrase queries with memoization disabled, so it measures first-time semantic reuse. Hot cached exact query warms repeated normalized questions before measurement, so it measures the application-cache path that production systems expect to dominate when common prompts recur.",
+        "",
+    ]
+
+
+def render_combined_results_discussion_latex(
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+) -> list[str]:
+    cold_1 = combined_row(one, "miss-cold", "shardcache")
+    cold_16 = combined_row(sixteen, "miss-cold", "shardcache")
+    unique_16 = combined_row(sixteen, "hit-cold-unique", "shardcache")
+    hot_16 = combined_row(sixteen, "hit-hot-cached", "shardcache")
+    redis_hnsw_cold_1 = combined_row(one, "miss-cold", "redis-vector-hnsw")
+    redis_hnsw_unique_16 = combined_row(sixteen, "hit-cold-unique", "redis-vector-hnsw")
+    betterdb_hot_16 = combined_row(sixteen, "hit-hot-cached", "betterdb")
+    redisvl_hot_16 = combined_row(sixteen, "hit-hot-cached", "redisvl-semantic-cache")
+    return [
+        r"\subsection{Results Interpretation}",
+        "",
+        f"The cold-miss result shows the cost of safely deciding that no reusable answer exists. ShardCache Embedded moved from {tex_metric(cold_1, 'ops')} ops/s at 1 vCPU to {tex_metric(cold_16, 'ops')} ops/s at 16 vCPU, while all systems preserved a 0.0\\% hit rate on negative queries. Redis HNSW is faster on the 1-vCPU raw-vector cold-miss row at {tex_metric(redis_hnsw_cold_1, 'ops')} ops/s, which is expected for a mature HNSW ANN primitive, but the 16-vCPU ShardCache row shows the benefit of a cache-native path that scales across the larger SUT allocation.",
+        "",
+        f"The cold unique hit result separates throughput from semantic acceptance. ShardCache Embedded reached {tex_metric(unique_16, 'ops')} ops/s at {tex_percent(unique_16, 'hit_rate')} hit rate in the 16-vCPU run. Redis HNSW reached {tex_metric(redis_hnsw_unique_16, 'ops')} ops/s at {tex_percent(redis_hnsw_unique_16, 'hit_rate')} hit rate. That distinction matters: a system can be fast while returning fewer reusable answers at the configured threshold.",
+        "",
+        f"The hot exact-query result measures repeated normalized traffic after warmup. ShardCache Embedded reached {tex_metric(hot_16, 'ops')} ops/s at {tex_percent(hot_16, 'hit_rate')} hit rate in the 16-vCPU run, compared with {tex_metric(betterdb_hot_16, 'ops')} ops/s for BetterDB and {tex_metric(redisvl_hot_16, 'ops')} ops/s for RedisVL SemanticCache. This is the strongest evidence for semantic caching as a native cache feature: repeated application questions should become cache lookups, not repeated vector searches.",
+        "",
+    ]
+
+
+def render_combined_conclusion_latex(
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+) -> list[str]:
+    hot_16 = combined_row(sixteen, "hit-hot-cached", "shardcache")
+    unique_16 = combined_row(sixteen, "hit-cold-unique", "shardcache")
+    return [
+        r"\section{Conclusion}",
+        r"\label{sec:semantic-cache-conclusion}",
+        "",
+        f"The benchmark supports the claim that ShardCache's native semantic-cache path is not just faster in a hot microbenchmark; it improves the complete semantic-cache data path. The no-memo path sustains {tex_metric(unique_16, 'ops')} first-time semantic hits/s in the 16-vCPU run, and the hot exact-query path sustains {tex_metric(hot_16, 'ops')} lookups/s once repeated traffic is warmed. The hit-rate columns add an important correctness and utility dimension: cold misses remain at 0.0\\%, cold positives show actual semantic reuse, and hot exact traffic shows whether repeated prompts stay on the cached-answer path.",
+        "",
+        "The governance metadata model extends the performance work into production semantics. It lets customers preserve cross-user cache reuse while enforcing tenant, document, policy, and freshness constraints before any cached value is released. That turns semantic caching from a raw nearest-neighbor lookup into a governed, measurable cache feature.",
+        "",
+    ]
 
 
 def combined_report_title(runs: list[dict[str, object]]) -> str:
@@ -1340,10 +1642,10 @@ def combined_label(
 
 def combined_scenario_description(title: str) -> str:
     if title == "Cold Miss":
-        return "Unique negative queries with query-result caching disabled. This shows the semantic-cache fall-through cost and how each system scales when it must prove that no reusable answer exists."
+        return "Unique negative queries with query-result caching disabled. This shows the semantic-cache fall-through cost and how each system scales when it must prove that no reusable answer exists. Hit rate should be 0%; a nonzero value would indicate false-positive reuse."
     if title == "Cold Unique Semantic Hit":
-        return "Unique positive/paraphrase queries with query-result caching disabled. This shows first-time semantic reuse without exact-query memo help."
-    return "Repeated exact-query traffic after warmup. This shows the application-cache hot path and how much each system benefits from repeated normalized questions."
+        return "Unique positive/paraphrase queries with query-result caching disabled. This shows first-time semantic reuse without exact-query memo help. The hit-rate columns show how much of the positive/paraphrase stream each system actually considers reusable at the configured threshold."
+    return "Repeated exact-query traffic after warmup. This shows the application-cache hot path and how much each system benefits from repeated normalized questions. On this row, less than 100% hit rate means repeated exact traffic is still falling through to semantic/vector search."
 
 
 def markdown_metric(row: dict[str, object] | None, key: str) -> str:
@@ -1352,6 +1654,10 @@ def markdown_metric(row: dict[str, object] | None, key: str) -> str:
 
 def markdown_float(row: dict[str, object] | None, key: str) -> str:
     return f"{float(row[key]):.4f}" if row is not None else "n/a"
+
+
+def markdown_percent(row: dict[str, object] | None, key: str) -> str:
+    return f"{float(row[key]):.1f}%" if row is not None else "n/a"
 
 
 def markdown_scale(one_row: dict[str, object] | None, sixteen_row: dict[str, object] | None) -> str:
@@ -1378,6 +1684,10 @@ def tex_metric(row: dict[str, object] | None, key: str) -> str:
 
 def tex_float(row: dict[str, object] | None, key: str) -> str:
     return f"{float(row[key]):.4f}" if row is not None else "n/a"
+
+
+def tex_percent(row: dict[str, object] | None, key: str) -> str:
+    return f"{float(row[key]):.1f}\\%" if row is not None else "n/a"
 
 
 def tex_scale(one_row: dict[str, object] | None, sixteen_row: dict[str, object] | None) -> str:

@@ -18,23 +18,29 @@ SCENARIOS = {
     "miss-cold": {
         "title": "Cold miss lookup throughput",
         "cpu_title": "Cold miss lookup SUT CPU use",
+        "hit_rate_title": "Cold miss lookup hit rate",
         "subtitle_suffix": "query-result memo disabled",
         "output": "semantic-h2h-miss-cold-throughput.svg",
         "cpu_output": "semantic-h2h-miss-cold-vcpu.svg",
+        "hit_rate_output": "semantic-h2h-miss-cold-hit-rate.svg",
     },
     "hit-cold-unique": {
         "title": "Cold unique semantic-hit throughput",
         "cpu_title": "Cold unique semantic-hit SUT CPU use",
+        "hit_rate_title": "Cold unique semantic-hit rate",
         "subtitle_suffix": "unique semantic queries",
         "output": "semantic-h2h-hit-cold-unique-throughput.svg",
         "cpu_output": "semantic-h2h-hit-cold-unique-vcpu.svg",
+        "hit_rate_output": "semantic-h2h-hit-cold-unique-hit-rate.svg",
     },
     "hit-hot-cached": {
         "title": "Hot cached exact-query throughput",
         "cpu_title": "Hot cached exact-query SUT CPU use",
+        "hit_rate_title": "Hot cached exact-query hit rate",
         "subtitle_suffix": "warmed exact-query cache",
         "output": "semantic-h2h-hit-hot-cached-throughput.svg",
         "cpu_output": "semantic-h2h-hit-hot-cached-vcpu.svg",
+        "hit_rate_output": "semantic-h2h-hit-hot-cached-hit-rate.svg",
     },
 }
 
@@ -92,6 +98,8 @@ def main() -> None:
         subtitle = scenario_subtitle(chart_rows, str(meta["subtitle_suffix"]))
         svg = render_chart(meta["title"], subtitle, chart_rows)
         (args.results_dir / meta["output"]).write_text(svg, encoding="utf-8")
+        hit_rate_svg = render_hit_rate_chart(str(meta["hit_rate_title"]), subtitle, chart_rows)
+        (args.results_dir / meta["hit_rate_output"]).write_text(hit_rate_svg, encoding="utf-8")
         if any(row.get("total_vcpu") is not None for row in chart_rows):
             cpu_svg = render_cpu_chart(
                 str(meta["cpu_title"]),
@@ -189,6 +197,7 @@ def load_rows(results_dir: Path) -> dict[tuple[str, str], dict[str, object]]:
                     "ops": ops,
                     "hits": hits,
                     "queries": queries,
+                    "hit_rate": (hits / queries * 100.0) if queries > 0 else 0.0,
                     "workers": workers,
                     "entries": entries,
                     "dims": dims,
@@ -334,6 +343,77 @@ def render_chart(title: str, subtitle: str, rows: list[dict[str, object]]) -> st
         out.append(f'<text x="{min(width - right + 8, x1 + 10):.2f}" y="{y_mid + 5:.2f}" class="value">{format_ops(ops)} ops/s</text>')
 
     out.append(f'<text x="{left}" y="{height - 10}" class="note">Linear throughput axis. Longer bars indicate higher lookup throughput.</text>')
+    out.append("</svg>")
+    return "\n".join(out)
+
+
+def render_hit_rate_chart(title: str, subtitle: str, rows: list[dict[str, object]]) -> str:
+    width = 1060
+    height = 660
+    left = 230
+    right = 150
+    top = 92
+    bottom = 74
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    row_h = plot_h / len(rows)
+    bar_h = min(30, row_h * 0.58)
+    axis_max = 100.0
+    tick_step = 20.0
+
+    def x_for(value: float) -> float:
+        return left + (value / axis_max) * plot_w
+
+    ticks = linear_ticks(axis_max, tick_step)
+    out = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" width="{width}" height="{height}">',
+        "<defs>",
+        '<style><![CDATA[',
+        "text{font-family:Inter,Arial,Helvetica,sans-serif;fill:#16202a}",
+        ".title{font-size:28px;font-weight:700}",
+        ".subtitle{font-size:14px;fill:#4c5967}",
+        ".axis{stroke:#d8dde4;stroke-width:1}",
+        ".tick{font-size:12px;fill:#687585}",
+        ".label{font-size:15px;fill:#24303d}",
+        ".value{font-size:13px;font-weight:650;fill:#16202a}",
+        ".note{font-size:12px;fill:#596777}",
+        "]]></style>",
+        "</defs>",
+        '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{left}" y="38" class="title">{esc(title)}</text>',
+        f'<text x="{left}" y="63" class="subtitle">{esc(subtitle)}</text>',
+    ]
+
+    for tick in ticks:
+        x = x_for(tick)
+        out.append(f'<line x1="{x:.2f}" y1="{top}" x2="{x:.2f}" y2="{top + plot_h}" class="axis"/>')
+        out.append(f'<text x="{x:.2f}" y="{height - 35}" text-anchor="middle" class="tick">{tick:.0f}%</text>')
+    out.append(f'<line x1="{left}" y1="{top + plot_h}" x2="{left + plot_w}" y2="{top + plot_h}" class="axis"/>')
+
+    for index, row in enumerate(rows):
+        adapter = str(row["adapter"])
+        label = str(row["label"])
+        hit_rate = float(row.get("hit_rate") or 0.0)
+        y_mid = top + row_h * index + row_h / 2
+        x0 = x_for(0.0)
+        x1 = x_for(hit_rate)
+        fill = "#d94f30" if adapter == "shardcache" else "#3a78b7" if "semantic-cache" in adapter or adapter == "betterdb" else "#758392"
+        if adapter == "shardcache":
+            stroke = "#9f2f1a"
+        elif "hnsw" in adapter:
+            stroke = "#255d8c"
+            fill = "#4d8cc7"
+        else:
+            stroke = "#596777"
+        out.append(f'<text x="{left - 14}" y="{y_mid + 5:.2f}" text-anchor="end" class="label">{esc(label)}</text>')
+        out.append(
+            f'<rect x="{x0:.2f}" y="{y_mid - bar_h / 2:.2f}" width="{max(2.0, x1 - x0):.2f}" '
+            f'height="{bar_h:.2f}" rx="4" fill="{fill}" stroke="{stroke}" stroke-width="1"/>'
+        )
+        out.append(f'<text x="{min(width - right + 8, x1 + 10):.2f}" y="{y_mid + 5:.2f}" class="value">{hit_rate:.1f}%</text>')
+
+    out.append(f'<text x="{left}" y="{height - 10}" class="note">Hit rate is measured hits divided by measured lookups for the same benchmark row.</text>')
     out.append("</svg>")
     return "\n".join(out)
 

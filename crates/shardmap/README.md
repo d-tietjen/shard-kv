@@ -138,6 +138,15 @@ The cross-user request flow is:
 This keeps governance policy outside the cache engine while making the
 authorization boundary explicit in the cache API.
 
+Governance metadata is also useful beyond the allow/deny decision. Because the
+bytes are application-owned, callers can encode tenant, policy version, source
+document IDs, retention tier, region, or other context that explains why a
+cached answer is eligible for reuse. That context can power audit logs, targeted
+invalidation after ACL or policy changes, and hit-rate reporting by tenant or
+document class. The default semantic APIs remain metadata-free; the extra bytes
+and predicate only enter the path when the application opts into governed
+semantic reuse.
+
 Here is a complete in-process authorization example using compact metadata
 bytes. A production application could use JSON, protobuf, bitsets, signed
 policy claims, or any other application-owned format; ShardMap only stores and

@@ -97,6 +97,21 @@ the metadata before ShardCache releases the cached value. If no candidate is
 both semantically close and authorized for the requesting user, the application
 treats the lookup as a miss and computes a fresh answer.
 
+The metadata also makes semantic caching more useful operationally:
+
+- It gives each cache hit an application-owned reason for reuse: tenant,
+  groups, source documents, policy version, retention tier, or region.
+- It lets applications reject stale hits after ACL, document, or policy changes
+  without disabling semantic caching for everyone.
+- It creates an audit trail for cross-user reuse, which is the common
+  production semantic-cache case.
+- It lets teams measure hit rate by tenant, policy, or document class instead
+  of treating the semantic cache as a single opaque counter.
+
+The default path stays lightweight. Entries written through the normal semantic
+APIs have no governance metadata, and governed metadata is only checked when a
+candidate is being considered for release.
+
 Example usage:
 
 ```rust
