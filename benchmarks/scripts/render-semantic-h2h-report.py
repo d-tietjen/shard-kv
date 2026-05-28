@@ -98,11 +98,8 @@ def render_single_report(results_dir: Path) -> None:
     )
     (results_dir / "shardcache-semantic-head-to-head-isolated-report.tex").write_text(
         "\n".join(
-            [
-                r"\documentclass[11pt]{article}",
-                r"\usepackage[margin=0.75in]{geometry}",
-                r"\usepackage{graphicx}",
-                r"\begin{document}",
+            latex_report_preamble()
+            + [
                 r"\input{shardcache-semantic-head-to-head-isolated-section.tex}",
                 r"\end{document}",
                 "",
@@ -132,11 +129,8 @@ def render_combined_report(results_dirs: list[Path], output_dir: Path) -> None:
     )
     (output_dir / "shardcache-semantic-head-to-head-combined-report.tex").write_text(
         "\n".join(
-            [
-                r"\documentclass[11pt]{article}",
-                r"\usepackage[margin=0.75in]{geometry}",
-                r"\usepackage{graphicx}",
-                r"\begin{document}",
+            latex_report_preamble()
+            + [
                 r"\input{shardcache-semantic-head-to-head-combined-section.tex}",
                 r"\end{document}",
                 "",
@@ -144,6 +138,36 @@ def render_combined_report(results_dirs: list[Path], output_dir: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def latex_report_preamble() -> list[str]:
+    return [
+        r"\documentclass[11pt]{article}",
+        r"\usepackage[margin=0.75in]{geometry}",
+        r"\usepackage{graphicx}",
+        r"\usepackage{xcolor}",
+        r"\usepackage{listings}",
+        r"\definecolor{codebg}{HTML}{F7F8FA}",
+        r"\definecolor{codeborder}{HTML}{D0D7DE}",
+        r"\definecolor{codecomment}{HTML}{57606A}",
+        r"\lstdefinestyle{shardcachecode}{%",
+        r"  basicstyle=\ttfamily\footnotesize,",
+        r"  backgroundcolor=\color{codebg},",
+        r"  frame=single,",
+        r"  rulecolor=\color{codeborder},",
+        r"  commentstyle=\color{codecomment},",
+        r"  breaklines=true,",
+        r"  columns=fullflexible,",
+        r"  keepspaces=true,",
+        r"  showstringspaces=false,",
+        r"  tabsize=2,",
+        r"  framerule=0.4pt,",
+        r"  framesep=0.45em,",
+        r"  xleftmargin=0.5em,",
+        r"  xrightmargin=0.5em",
+        r"}",
+        r"\begin{document}",
+    ]
 
 
 def load_metadata(path: Path) -> dict[str, str]:
@@ -665,7 +689,7 @@ def render_governance_latex() -> list[str]:
         "",
         "A representative customer data model is:",
         "",
-        r"\begin{verbatim}",
+        r"\begin{lstlisting}[style=shardcachecode]",
         "key        = semantic:tenant/acme/faq/refund-policy",
         "value      = cached response bytes",
         "embedding  = normalized prompt embedding",
@@ -673,11 +697,11 @@ def render_governance_latex() -> list[str]:
         "              allowed_groups: [support, billing],",
         "              source_docs: [doc_481, doc_902]}",
         "ttl        = optional freshness window",
-        r"\end{verbatim}",
+        r"\end{lstlisting}",
         "",
         "In Rust, the authorization boundary is explicit:",
         "",
-        r"\begin{verbatim}",
+        r"\begin{lstlisting}[style=shardcachecode]",
         "struct RequestUser<'a> {",
         "    tenant: &'a str,",
         "    groups: &'a [&'a str],",
@@ -725,7 +749,7 @@ def render_governance_latex() -> list[str]:
         "        metadata.is_some_and(|bytes| can_use_cached_answer(&user, bytes))",
         "    },",
         ")?;",
-        r"\end{verbatim}",
+        r"\end{lstlisting}",
         "",
         "The important behavior is that \\texttt{SemanticMatch.governance} is \\texttt{None} by default and \\texttt{Some(bytes)} only when the caller used the governance API. Governed searches receive \\texttt{Option<\\&[u8]>}, so applications can reject entries without metadata, require a specific policy version, or validate document-level access before any cross-user cached response is served.",
         "",
