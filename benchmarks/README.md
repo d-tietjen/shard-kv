@@ -134,6 +134,16 @@ LOAD_SECONDS=10 \
 ./benchmarks/scripts/run-adam-semantic-cache-benchmark.sh
 ```
 
+To place the isolated 1-vCPU and 16-vCPU semantic-cache head-to-head results in
+one Markdown/LaTeX report, pass both result directories to the report renderer:
+
+```bash
+python3 benchmarks/scripts/render-semantic-h2h-report.py \
+  --combined-output-dir benchmarks/results/adam-semantic-h2h-isolated-combined \
+  benchmarks/results/adam-semantic-h2h-isolated-1vcpu-YYYYMMDDTHHMMSSZ \
+  benchmarks/results/adam-semantic-h2h-isolated-YYYYMMDDTHHMMSSZ
+```
+
 ## Redis Command Matrix
 
 `redis_command_matrix` runs a deterministic RESP command script and reports

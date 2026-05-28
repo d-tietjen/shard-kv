@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 from pathlib import Path
 
 
@@ -69,19 +70,33 @@ PROFILE_BASELINE_OPS = 452.0
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("results_dir", type=Path)
+    parser.add_argument("results_dir", nargs="+", type=Path)
+    parser.add_argument(
+        "--combined-output-dir",
+        type=Path,
+        help="Output directory when rendering a combined multi-run report.",
+    )
     args = parser.parse_args()
 
-    rows = load_rows(args.results_dir)
-    metadata = load_metadata(args.results_dir / "metadata.txt")
+    if len(args.results_dir) == 1:
+        render_single_report(args.results_dir[0])
+        return
 
-    (args.results_dir / "report.md").write_text(render_markdown(rows, metadata), encoding="utf-8")
+    output_dir = args.combined_output_dir or args.results_dir[0].parent / "adam-semantic-h2h-isolated-combined"
+    render_combined_report(args.results_dir, output_dir)
+
+
+def render_single_report(results_dir: Path) -> None:
+    rows = load_rows(results_dir)
+    metadata = load_metadata(results_dir / "metadata.txt")
+
+    (results_dir / "report.md").write_text(render_markdown(rows, metadata), encoding="utf-8")
     section = render_latex_section(rows, metadata)
-    (args.results_dir / "shardcache-semantic-head-to-head-isolated-section.tex").write_text(
+    (results_dir / "shardcache-semantic-head-to-head-isolated-section.tex").write_text(
         section,
         encoding="utf-8",
     )
-    (args.results_dir / "shardcache-semantic-head-to-head-isolated-report.tex").write_text(
+    (results_dir / "shardcache-semantic-head-to-head-isolated-report.tex").write_text(
         "\n".join(
             [
                 r"\documentclass[11pt]{article}",
@@ -89,6 +104,40 @@ def main() -> None:
                 r"\usepackage{graphicx}",
                 r"\begin{document}",
                 r"\input{shardcache-semantic-head-to-head-isolated-section.tex}",
+                r"\end{document}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def render_combined_report(results_dirs: list[Path], output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    runs = [
+        {
+            "path": results_dir,
+            "rows": load_rows(results_dir),
+            "metadata": load_metadata(results_dir / "metadata.txt"),
+        }
+        for results_dir in results_dirs
+    ]
+    runs.sort(key=lambda run: sut_vcpus(run["metadata"]))
+
+    (output_dir / "report.md").write_text(render_combined_markdown(runs), encoding="utf-8")
+    section = render_combined_latex_section(runs, output_dir)
+    (output_dir / "shardcache-semantic-head-to-head-combined-section.tex").write_text(
+        section,
+        encoding="utf-8",
+    )
+    (output_dir / "shardcache-semantic-head-to-head-combined-report.tex").write_text(
+        "\n".join(
+            [
+                r"\documentclass[11pt]{article}",
+                r"\usepackage[margin=0.75in]{geometry}",
+                r"\usepackage{graphicx}",
+                r"\begin{document}",
+                r"\input{shardcache-semantic-head-to-head-combined-section.tex}",
                 r"\end{document}",
                 "",
             ]
@@ -704,15 +753,55 @@ def render_markdown(rows: dict[tuple[str, str], dict[str, object]], metadata: di
     return "\n".join(out)
 
 
+def render_combined_markdown(runs: list[dict[str, object]]) -> str:
+    title = combined_report_title(runs)
+    out: list[str] = [
+        f"# {title}",
+        "",
+        "This report places the isolated 1-vCPU and 16-vCPU Adam benchmark runs in one artifact. Each run still keeps its own peer tables, CPU accounting, charts, and claim boundary, because the CPU shape changes both throughput and relative ranking.",
+        "",
+        "## Cross-Run Scaling",
+        "",
+        "| Scenario | ShardCache 1-vCPU ops/s | ShardCache 16-vCPU ops/s | Scale factor | 1-vCPU p50 ms | 16-vCPU p50 ms |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    one = run_by_vcpu(runs, 1)
+    sixteen = run_by_vcpu(runs, 16)
+    if one is not None and sixteen is not None:
+        one_rows = one["rows"]
+        sixteen_rows = sixteen["rows"]
+        for meta in SCENARIOS:
+            scenario = str(meta["key"])
+            one_shard = row_for(one_rows, scenario, "shardcache")
+            sixteen_shard = row_for(sixteen_rows, scenario, "shardcache")
+            scale = ratio(float(sixteen_shard["ops"]), float(one_shard["ops"]))
+            out.append(
+                f"| {meta['title']} | {format_int(one_shard['ops'])} | {format_int(sixteen_shard['ops'])} | {scale:.1f}x | {float(one_shard['p50']):.4f} | {float(sixteen_shard['p50']):.4f} |"
+            )
+    else:
+        out.append("| n/a | n/a | n/a | n/a | n/a | n/a |")
+    out.append("")
+
+    for run in runs:
+        metadata = run["metadata"]
+        rows = run["rows"]
+        out.append(f"---\n\n{render_markdown(rows, metadata)}")
+        out.append("")
+    return "\n".join(out)
+
+
 def render_latex_section(
     rows: dict[tuple[str, str], dict[str, object]],
     metadata: dict[str, str],
+    *,
+    asset_prefix: str = "",
+    label_scope: str = "isolated",
 ) -> str:
     vcpus = sut_vcpus(metadata)
     workers = metadata.get("workers", "16")
     out: list[str] = [
         rf"\section{{{tex_escape(report_title(metadata))}}}",
-        r"\label{sec:shardcache-semantic-head-to-head-isolated}",
+        rf"\label{{sec:shardcache-semantic-head-to-head-{tex_escape(label_scope)}}}",
         "",
         "We reran the semantic-cache head-to-head on the Adam Ubuntu server with explicit CPU isolation. "
         f"The system under test was limited to {vcpus} logical CPU(s) ({tex_escape(metadata.get('sut_cpuset', '0-15'))}), "
@@ -742,7 +831,7 @@ def render_latex_section(
             continue
         shard_ops = float(table_rows[0]["ops"])
         title = str(meta["title"])
-        label_suffix = key.replace("-", "-")
+        label_suffix = f"{label_scope}-{key.replace('-', '-')}"
         out.extend(
             [
                 rf"\subsection{{{tex_escape(title)}}}",
@@ -754,14 +843,14 @@ def render_latex_section(
             [
                 r"\begin{figure}[htbp]",
                 r"\centering",
-                rf"\includegraphics[width=\linewidth]{{{meta['throughput_pdf']}}}",
+                rf"\includegraphics[width=\linewidth]{{{asset_prefix}{meta['throughput_pdf']}}}",
                 rf"\caption{{{tex_escape(title)} throughput with {tex_escape(worker_label(workers))} and explicit CPU isolation.}}",
                 rf"\label{{fig:semantic-h2h-isolated-{label_suffix}-throughput}}",
                 r"\end{figure}",
                 "",
                 r"\begin{figure}[htbp]",
                 r"\centering",
-                rf"\includegraphics[width=\linewidth]{{{meta['vcpu_pdf']}}}",
+                rf"\includegraphics[width=\linewidth]{{{asset_prefix}{meta['vcpu_pdf']}}}",
                 rf"\caption{{{tex_escape(title)} measured SUT CPU use during the query window.}}",
                 rf"\label{{fig:semantic-h2h-isolated-{label_suffix}-vcpu}}",
                 r"\end{figure}",
@@ -811,6 +900,93 @@ def render_latex_section(
         ]
     )
     return "\n".join(out)
+
+
+def render_combined_latex_section(runs: list[dict[str, object]], output_dir: Path) -> str:
+    out: list[str] = [
+        rf"\section{{{tex_escape(combined_report_title(runs))}}}",
+        r"\label{sec:shardcache-semantic-head-to-head-combined}",
+        "",
+        "This report places the isolated 1-vCPU and 16-vCPU Adam benchmark runs in one artifact. Each run still keeps its own peer tables, CPU accounting, charts, and claim boundary, because the CPU shape changes both throughput and relative ranking.",
+        "",
+        r"\subsection{Cross-Run Scaling}",
+        "",
+        "The table below compares ShardCache against itself across the two CPU limits before the full peer tables. It should be read as a scaling view, not a replacement for the per-run head-to-head sections.",
+        "",
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\small",
+        r"\caption{ShardCache 1-vCPU versus 16-vCPU isolated scaling on Adam.}",
+        r"\label{tab:semantic-h2h-combined-scaling}",
+        r"\begin{tabular}{lrrrrr}",
+        r"\hline",
+        r"Scenario & 1-vCPU ops/s & 16-vCPU ops/s & Scale & 1-vCPU p50 ms & 16-vCPU p50 ms \\",
+        r"\hline",
+    ]
+    one = run_by_vcpu(runs, 1)
+    sixteen = run_by_vcpu(runs, 16)
+    if one is not None and sixteen is not None:
+        one_rows = one["rows"]
+        sixteen_rows = sixteen["rows"]
+        for meta in SCENARIOS:
+            scenario = str(meta["key"])
+            one_shard = row_for(one_rows, scenario, "shardcache")
+            sixteen_shard = row_for(sixteen_rows, scenario, "shardcache")
+            scale = ratio(float(sixteen_shard["ops"]), float(one_shard["ops"]))
+            out.append(
+                "{scenario} & {one_ops} & {sixteen_ops} & {scale:.1f}$\\times$ & {one_p50:.4f} & {sixteen_p50:.4f} \\\\".format(
+                    scenario=tex_escape(str(meta["title"])),
+                    one_ops=tex_count(one_shard["ops"]),
+                    sixteen_ops=tex_count(sixteen_shard["ops"]),
+                    scale=scale,
+                    one_p50=float(one_shard["p50"]),
+                    sixteen_p50=float(sixteen_shard["p50"]),
+                )
+            )
+    out.extend(
+        [
+            r"\hline",
+            r"\end{tabular}",
+            r"\end{table}",
+            "",
+        ]
+    )
+
+    for run in runs:
+        metadata = run["metadata"]
+        rows = run["rows"]
+        vcpus = sut_vcpus(metadata)
+        out.append(r"\clearpage")
+        out.append("")
+        out.append(
+            render_latex_section(
+                rows,
+                metadata,
+                asset_prefix=latex_asset_prefix(output_dir, Path(run["path"])),
+                label_scope=f"{vcpus}vcpu",
+            )
+        )
+        out.append("")
+    return "\n".join(out)
+
+
+def combined_report_title(runs: list[dict[str, object]]) -> str:
+    vcpus = sorted(sut_vcpus(run["metadata"]) for run in runs)
+    if vcpus == [1, 16]:
+        return "ShardCache Semantic Cache Head-to-Head: 1-vCPU and 16-vCPU Isolated"
+    labels = " and ".join(f"{vcpu}-vCPU" for vcpu in vcpus)
+    return f"ShardCache Semantic Cache Head-to-Head: {labels} Isolated"
+
+
+def run_by_vcpu(runs: list[dict[str, object]], target: int) -> dict[str, object] | None:
+    return next((run for run in runs if sut_vcpus(run["metadata"]) == target), None)
+
+
+def latex_asset_prefix(output_dir: Path, asset_dir: Path) -> str:
+    relative = os.path.relpath(asset_dir, output_dir).replace(os.sep, "/")
+    if relative == ".":
+        return ""
+    return f"{relative}/"
 
 
 def render_summary(
