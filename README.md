@@ -97,6 +97,30 @@ the metadata before ShardCache releases the cached value. If no candidate is
 both semantically close and authorized for the requesting user, the application
 treats the lookup as a miss and computes a fresh answer.
 
+Example usage:
+
+```rust
+cache.insert_semantic_slice_with_governance(
+    b"semantic:tenant/acme/faq/refund-policy",
+    response_bytes,
+    &embedding,
+    b"tenant=acme;groups=support;docs=doc_481;policy=7",
+)?;
+
+let hit = cache.semantic_search_with_governance_filter(
+    &request_embedding,
+    0.75,
+    |metadata| {
+        metadata.is_some_and(|bytes| {
+            user.tenant == "acme"
+                && user.groups.contains(&"support")
+                && std::str::from_utf8(bytes)
+                    .is_ok_and(|text| text.contains("docs=doc_481"))
+        })
+    },
+)?;
+```
+
 ## Workspace
 
 - `crates/shardmap`: published embedded sharded map/cache crate plus shared internals.

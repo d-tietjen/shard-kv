@@ -138,6 +138,100 @@ The cross-user request flow is:
 This keeps governance policy outside the cache engine while making the
 authorization boundary explicit in the cache API.
 
+Here is a complete in-process authorization example using compact metadata
+bytes. A production application could use JSON, protobuf, bitsets, signed
+policy claims, or any other application-owned format; ShardMap only stores and
+returns the opaque bytes.
+
+```rust
+use shardmap::ShardMap;
+
+struct RequestUser<'a> {
+    tenant: &'a str,
+    groups: &'a [&'a str],
+    allowed_docs: &'a [&'a str],
+    min_policy_version: u32,
+}
+
+fn csv_has_any(csv: &str, allowed: &[&str]) -> bool {
+    csv.split(',').any(|value| allowed.contains(&value))
+}
+
+fn csv_all_allowed(csv: &str, allowed: &[&str]) -> bool {
+    csv.split(',').all(|value| allowed.contains(&value))
+}
+
+fn can_use_cached_answer(user: &RequestUser<'_>, metadata: &[u8]) -> bool {
+    let Ok(metadata) = std::str::from_utf8(metadata) else {
+        return false;
+    };
+
+    let mut tenant_ok = false;
+    let mut group_ok = false;
+    let mut docs_ok = false;
+    let mut policy_ok = false;
+
+    for field in metadata.split(';') {
+        let Some((name, value)) = field.split_once('=') else {
+            continue;
+        };
+        match name {
+            "tenant" => tenant_ok = value == user.tenant,
+            "groups" => group_ok = csv_has_any(value, user.groups),
+            "docs" => docs_ok = csv_all_allowed(value, user.allowed_docs),
+            "policy" => {
+                policy_ok = matches!(
+                    value.parse::<u32>(),
+                    Ok(version) if version >= user.min_policy_version
+                );
+            }
+            _ => {}
+        }
+    }
+
+    tenant_ok && group_ok && docs_ok && policy_ok
+}
+
+let cache = ShardMap::new();
+cache.insert_semantic_slice_with_governance(
+    b"semantic:tenant/acme/faq/refund-policy",
+    b"Refunds are available within 30 days.",
+    &[1.0, 0.0],
+    b"tenant=acme;groups=support,billing;docs=doc_481,doc_902;policy=7",
+)?;
+
+let support_user = RequestUser {
+    tenant: "acme",
+    groups: &["support"],
+    allowed_docs: &["doc_481", "doc_902"],
+    min_policy_version: 7,
+};
+
+let hit = cache
+    .semantic_search_with_governance_filter(&[0.95, 0.05], 0.75, |metadata| {
+        metadata.is_some_and(|bytes| can_use_cached_answer(&support_user, bytes))
+    })?
+    .unwrap();
+
+assert_eq!(hit.value.as_ref(), b"Refunds are available within 30 days.");
+
+let sales_user = RequestUser {
+    tenant: "acme",
+    groups: &["sales"],
+    allowed_docs: &["doc_481", "doc_902"],
+    min_policy_version: 7,
+};
+
+let blocked = cache.semantic_search_with_governance_filter(
+    &[0.95, 0.05],
+    0.75,
+    |metadata| metadata.is_some_and(|bytes| can_use_cached_answer(&sales_user, bytes)),
+)?;
+
+assert!(blocked.is_none());
+# Ok::<(), shardmap::SemanticCacheError>(())
+```
+
 Plain writes to a key clear its semantic embedding, so semantic hits cannot
 return a value whose embedding describes an older payload.
 
