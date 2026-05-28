@@ -9,9 +9,9 @@ use bytes::Bytes as SharedBytes;
 
 use crate::config::EvictionPolicy;
 use crate::storage::{
-    EmbeddedKeyRoute, EmbeddedRouteMode, PreparedPointKey, SharedEmbeddedConfig,
-    SharedEmbeddedEntry, SharedEmbeddedLockPolicy, SharedEmbeddedRef, SharedEmbeddedRefMut,
-    SharedEmbeddedStore, SharedEmbeddedVacantEntry,
+    EmbeddedKeyRoute, EmbeddedRouteMode, PreparedPointKey, SemanticCacheError, SemanticMatch,
+    SharedEmbeddedConfig, SharedEmbeddedEntry, SharedEmbeddedLockPolicy, SharedEmbeddedRef,
+    SharedEmbeddedRefMut, SharedEmbeddedStore, SharedEmbeddedVacantEntry,
 };
 
 /// Default number of stripes for [`ShardMap`].
@@ -84,6 +84,10 @@ pub type CacheRefMut<'a> = SharedEmbeddedRefMut<'a>;
 pub type CacheEntry<'a> = SharedEmbeddedEntry<'a>;
 /// Vacant entry guard used by [`CacheEntry`].
 pub type CacheVacantEntry<'a> = SharedEmbeddedVacantEntry<'a>;
+/// Best-match result returned by semantic cache lookups.
+pub type CacheSemanticMatch = SemanticMatch;
+/// Error returned by semantic cache APIs.
+pub type CacheSemanticError = SemanticCacheError;
 
 /// Cloneable DashMap-like embedded cache.
 ///
@@ -258,6 +262,109 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
         self.inner.insert_slice_with_ttl(key, value, ttl_ms);
     }
 
+    /// Inserts or replaces a point-key value with an embedding for semantic lookup.
+    #[inline(always)]
+    pub fn insert_semantic_slice(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        embedding: &[f32],
+    ) -> Result<(), SemanticCacheError> {
+        self.inner.insert_semantic_slice(key, value, embedding)
+    }
+
+    /// Inserts or replaces a point-key value with embedding and governance metadata.
+    ///
+    /// Governance metadata is returned with semantic matches so applications
+    /// can validate cross-user cache hits against tenant, ACL, or document
+    /// access policy before serving the cached value.
+    #[inline(always)]
+    pub fn insert_semantic_slice_with_governance(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        embedding: &[f32],
+        governance_metadata: &[u8],
+    ) -> Result<(), SemanticCacheError> {
+        self.inner
+            .insert_semantic_slice_with_governance(key, value, embedding, governance_metadata)
+    }
+
+    /// Inserts or replaces a point-key value with an embedding and optional TTL.
+    #[inline(always)]
+    pub fn insert_semantic_slice_with_ttl(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        embedding: &[f32],
+        ttl_ms: Option<u64>,
+    ) -> Result<(), SemanticCacheError> {
+        self.inner
+            .insert_semantic_slice_with_ttl(key, value, embedding, ttl_ms)
+    }
+
+    /// Inserts or replaces a point-key value with embedding, TTL, and governance metadata.
+    #[inline(always)]
+    pub fn insert_semantic_slice_with_ttl_and_governance(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        embedding: &[f32],
+        ttl_ms: Option<u64>,
+        governance_metadata: &[u8],
+    ) -> Result<(), SemanticCacheError> {
+        self.inner.insert_semantic_slice_with_ttl_and_governance(
+            key,
+            value,
+            embedding,
+            ttl_ms,
+            governance_metadata,
+        )
+    }
+
+    /// Returns the best semantic match at or above `min_score`.
+    #[inline(always)]
+    pub fn semantic_search(
+        &self,
+        embedding: &[f32],
+        min_score: f32,
+    ) -> Result<Option<SemanticMatch>, SemanticCacheError> {
+        self.inner.semantic_search(embedding, min_score)
+    }
+
+    /// Returns the best semantic match accepted by `governance_filter`.
+    ///
+    /// The filter receives the stored governance metadata, or `None` when the
+    /// entry was written through the default semantic APIs, and must return
+    /// true before the cached value is released. This path bypasses
+    /// exact-query result caching because access policy is request-specific.
+    #[inline(always)]
+    pub fn semantic_search_with_governance_filter(
+        &self,
+        embedding: &[f32],
+        min_score: f32,
+        governance_filter: impl FnMut(Option<&[u8]>) -> bool,
+    ) -> Result<Option<SemanticMatch>, SemanticCacheError> {
+        self.inner
+            .semantic_search_with_governance_filter(embedding, min_score, governance_filter)
+    }
+
+    /// Returns whether exact semantic query result caching is enabled.
+    ///
+    /// This cache accelerates repeated identical semantic queries. Disabling it
+    /// is useful for cold-query benchmarks that should time the full vector
+    /// search path on every lookup.
+    #[inline(always)]
+    pub fn semantic_query_cache_enabled(&self) -> bool {
+        self.inner.semantic_query_cache_enabled()
+    }
+
+    /// Disables exact semantic query result caching for this shared cache.
+    #[inline(always)]
+    pub fn disable_semantic_query_cache(&self) {
+        self.inner.disable_semantic_query_cache();
+    }
+
     /// Inserts a point-key value only when the key is absent or expired.
     #[inline(always)]
     pub fn try_insert<K, V>(&self, key: K, value: V) -> bool
@@ -333,6 +440,18 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
 mod tests {
     use super::*;
 
+    fn key_routed_away_from_semantic_shard<const SHARDS: usize>(
+        cache: &SharedCache<SHARDS>,
+    ) -> Vec<u8> {
+        for index in 0..4096 {
+            let key = format!("semantic-cross-shard-{index}").into_bytes();
+            if cache.route_key(&key).shard_id != 0 {
+                return key;
+            }
+        }
+        panic!("could not find key routed away from semantic shard");
+    }
+
     #[test]
     fn fast_map_round_trips_like_a_shared_map() {
         let cache = SharedCache::<4>::with_capacity(16);
@@ -354,6 +473,200 @@ mod tests {
         assert!(cache.try_insert_slice(b"alpha", b"one"));
         assert!(!cache.try_insert_slice(b"alpha", b"two"));
         assert_eq!(cache.get(b"alpha").unwrap().value(), b"one");
+    }
+
+    #[test]
+    fn semantic_cache_returns_best_live_match() {
+        let cache = SharedCache::<4>::new();
+        cache
+            .insert_semantic_slice(b"cat", b"meow", &[1.0, 0.0])
+            .unwrap();
+        cache
+            .insert_semantic_slice(b"dog", b"woof", &[0.0, 1.0])
+            .unwrap();
+
+        let matched = cache.semantic_search(&[0.9, 0.1], 0.75).unwrap().unwrap();
+
+        assert_eq!(matched.key.as_slice(), b"cat");
+        assert_eq!(matched.value.as_ref(), b"meow");
+        assert!(matched.governance.is_none());
+        assert!(matched.score > 0.99);
+    }
+
+    #[test]
+    fn semantic_cache_returns_governance_metadata() {
+        let cache = SharedCache::<4>::new();
+        cache
+            .insert_semantic_slice_with_governance(
+                b"cat",
+                b"meow",
+                &[1.0, 0.0],
+                b"tenant=acme;doc=cat-faq;policy=v1",
+            )
+            .unwrap();
+
+        let matched = cache.semantic_search(&[1.0, 0.0], 0.75).unwrap().unwrap();
+
+        assert_eq!(matched.key.as_slice(), b"cat");
+        assert_eq!(matched.value.as_ref(), b"meow");
+        assert_eq!(
+            matched.governance.as_deref(),
+            Some(b"tenant=acme;doc=cat-faq;policy=v1".as_slice())
+        );
+    }
+
+    #[test]
+    fn semantic_governance_defaults_to_none() {
+        let cache = SharedCache::<4>::new();
+        cache
+            .insert_semantic_slice(b"default", b"value", &[1.0, 0.0])
+            .unwrap();
+
+        let matched = cache
+            .semantic_search_with_governance_filter(&[1.0, 0.0], 0.75, |metadata| {
+                metadata.is_none()
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(matched.key.as_slice(), b"default");
+        assert!(matched.governance.is_none());
+    }
+
+    #[test]
+    fn semantic_governance_filter_runs_before_value_release() {
+        let cache = SharedCache::<4>::new();
+        cache
+            .insert_semantic_slice_with_governance(
+                b"restricted",
+                b"secret",
+                &[1.0, 0.0],
+                b"tenant=internal",
+            )
+            .unwrap();
+        cache
+            .insert_semantic_slice_with_governance(
+                b"allowed",
+                b"public",
+                &[0.8, 0.2],
+                b"tenant=acme",
+            )
+            .unwrap();
+
+        let unfiltered = cache.semantic_search(&[1.0, 0.0], 0.0).unwrap().unwrap();
+        assert_eq!(unfiltered.key.as_slice(), b"restricted");
+
+        let filtered = cache
+            .semantic_search_with_governance_filter(&[1.0, 0.0], 0.0, |metadata| {
+                metadata == Some(b"tenant=acme".as_slice())
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(filtered.key.as_slice(), b"allowed");
+        assert_eq!(filtered.value.as_ref(), b"public");
+        assert_eq!(
+            filtered.governance.as_deref(),
+            Some(b"tenant=acme".as_slice())
+        );
+
+        assert!(
+            cache
+                .semantic_search_with_governance_filter(&[1.0, 0.0], 0.0, |metadata| {
+                    metadata == Some(b"tenant=missing".as_slice())
+                })
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn semantic_insert_preserves_routed_point_lookup() {
+        let cache = SharedCache::<4>::new();
+        let key = key_routed_away_from_semantic_shard(&cache);
+
+        cache
+            .insert_semantic_slice(&key, b"value", &[1.0, 0.0])
+            .unwrap();
+
+        assert_eq!(cache.get(&key).unwrap().value(), b"value");
+        assert_eq!(cache.get_owned(&key).unwrap().as_ref(), b"value");
+        let matched = cache.semantic_search(&[1.0, 0.0], 0.5).unwrap().unwrap();
+        assert_eq!(matched.key.as_slice(), key.as_slice());
+        assert_eq!(matched.value.as_ref(), b"value");
+    }
+
+    #[test]
+    fn ordinary_write_invalidates_semantic_embedding() {
+        let cache = SharedCache::<4>::new();
+        let key = key_routed_away_from_semantic_shard(&cache);
+        cache
+            .insert_semantic_slice(&key, b"meow", &[1.0, 0.0])
+            .unwrap();
+
+        cache.insert_slice(&key, b"purr");
+
+        assert!(cache.semantic_search(&[1.0, 0.0], 0.5).unwrap().is_none());
+        assert_eq!(cache.get(&key).unwrap().value(), b"purr");
+    }
+
+    #[test]
+    fn mutable_guard_invalidates_semantic_embedding() {
+        let cache = SharedCache::<4>::new();
+        let key = key_routed_away_from_semantic_shard(&cache);
+        cache
+            .insert_semantic_slice(&key, b"meow", &[1.0, 0.0])
+            .unwrap();
+
+        cache.get_mut(&key).unwrap().set_slice(b"purr");
+
+        assert!(cache.semantic_search(&[1.0, 0.0], 0.5).unwrap().is_none());
+        assert_eq!(cache.get(&key).unwrap().value(), b"purr");
+    }
+
+    #[test]
+    fn ordinary_remove_invalidates_semantic_embedding() {
+        let cache = SharedCache::<4>::new();
+        let key = key_routed_away_from_semantic_shard(&cache);
+        cache
+            .insert_semantic_slice(&key, b"meow", &[1.0, 0.0])
+            .unwrap();
+
+        assert_eq!(cache.remove(&key).unwrap().as_ref(), b"meow");
+
+        assert!(cache.semantic_search(&[1.0, 0.0], 0.5).unwrap().is_none());
+        assert!(cache.get(&key).is_none());
+    }
+
+    #[cfg(not(feature = "no-ttl"))]
+    #[test]
+    fn semantic_cache_does_not_replay_expired_ttl_hit() {
+        let cache = SharedCache::<4>::new();
+        cache
+            .insert_semantic_slice_with_ttl(b"cat", b"meow", &[1.0, 0.0], Some(50))
+            .unwrap();
+
+        assert!(cache.semantic_search(&[1.0, 0.0], 0.5).unwrap().is_some());
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(cache.semantic_search(&[1.0, 0.0], 0.5).unwrap().is_none());
+    }
+
+    #[test]
+    fn semantic_cache_rejects_invalid_embeddings() {
+        let cache = SharedCache::<4>::new();
+
+        assert_eq!(
+            cache.insert_semantic_slice(b"empty", b"value", &[]),
+            Err(SemanticCacheError::EmptyEmbedding)
+        );
+        assert_eq!(
+            cache.insert_semantic_slice(b"zero", b"value", &[0.0, 0.0]),
+            Err(SemanticCacheError::ZeroMagnitude)
+        );
+        assert_eq!(
+            cache.semantic_search(&[f32::NAN], 0.5),
+            Err(SemanticCacheError::NonFinite)
+        );
     }
 
     #[cfg(not(feature = "no-ttl"))]

@@ -346,7 +346,7 @@ impl ShardCacheServer {
         let available_workers = std::thread::available_parallelism()
             .map(|available| available.get())
             .unwrap_or(shard_count)
-            .clamp(1, shard_count);
+            .max(1);
         let worker_count = if direct_shard_ports {
             shard_count
         } else {
@@ -354,7 +354,6 @@ impl ShardCacheServer {
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
                 .filter(|value| *value > 0)
-                .map(|value| value.min(shard_count))
                 .unwrap_or(available_workers)
         };
         let direct_base_port = direct_shard_ports

@@ -142,6 +142,9 @@ pub mod mset;
 pub mod msetnx;
 #[path = "commands/string/psetex.rs"]
 pub mod psetex;
+#[cfg(feature = "server")]
+#[path = "commands/semantic.rs"]
+pub(crate) mod semantic;
 #[path = "commands/string/set.rs"]
 pub mod set;
 #[cfg(feature = "redis")]

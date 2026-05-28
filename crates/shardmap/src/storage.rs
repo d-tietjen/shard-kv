@@ -34,6 +34,7 @@ mod records;
 #[cfg(feature = "redis")]
 #[path = "../../shardcache-redis/src/storage/redis_objects.rs"]
 mod redis_objects;
+mod semantic;
 mod stats;
 #[cfg(feature = "telemetry")]
 mod telemetry;
@@ -97,6 +98,11 @@ pub(crate) use redis_objects::{
 };
 #[cfg(feature = "redis")]
 pub use redis_objects::{RedisObjectError, RedisObjectResult, RedisStringLookup};
+pub use semantic::{SemanticCacheError, SemanticMatch};
+pub(crate) use semantic::{
+    SemanticEmbedding, SemanticIndex, SemanticIndexCandidate, SemanticIndexToken,
+    validate_similarity_threshold,
+};
 pub use stats::{GlobalStatsSnapshot, ShardStatsSnapshot, TierStatsSnapshot, WalStatsSnapshot};
 use std::collections::{HashMap, HashSet};
 use std::sync::Once;

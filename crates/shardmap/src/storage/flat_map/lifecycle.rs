@@ -27,21 +27,14 @@ impl FlatMap {
             return None;
         }
 
-        let removed_key_len = entry.get().key.len();
-        let removed_value_len = entry.get().value.len();
+        let removed_bytes = entry.get().stored_bytes();
         if entry.get().expire_at_ms.is_some() {
             self.ttl_entries = self.ttl_entries.saturating_sub(1);
         }
         let (removed, _) = entry.remove();
-        self.stored_bytes = self
-            .stored_bytes
-            .saturating_sub(removed_key_len.saturating_add(removed_value_len));
+        self.stored_bytes = self.stored_bytes.saturating_sub(removed_bytes);
         #[cfg(feature = "telemetry")]
-        self.record_delete_metrics(
-            DeleteReason::Explicit,
-            -1,
-            -((removed_key_len + removed_value_len) as isize),
-        );
+        self.record_delete_metrics(DeleteReason::Explicit, -1, -(removed_bytes as isize));
         Some(removed.value)
     }
 
@@ -67,25 +60,18 @@ impl FlatMap {
             return false;
         };
 
-        let removed_key_len = entry.get().key.len();
-        let removed_value_len = entry.get().value.len();
+        let removed_bytes = entry.get().stored_bytes();
         if entry.get().expire_at_ms.is_some() {
             self.ttl_entries = self.ttl_entries.saturating_sub(1);
         }
         let (removed, _) = entry.remove();
-        self.stored_bytes = self
-            .stored_bytes
-            .saturating_sub(removed_key_len.saturating_add(removed_value_len));
+        self.stored_bytes = self.stored_bytes.saturating_sub(removed_bytes);
         self.retire_value(removed.value);
         if reason == DeleteReason::Evicted {
             self.evictions = self.evictions.saturating_add(1);
         }
         #[cfg(feature = "telemetry")]
-        self.record_delete_metrics(
-            reason,
-            -1,
-            -((removed_key_len + removed_value_len) as isize),
-        );
+        self.record_delete_metrics(reason, -1, -(removed_bytes as isize));
         true
     }
 
@@ -106,25 +92,18 @@ impl FlatMap {
             return false;
         };
 
-        let removed_key_len = entry.get().key.len();
-        let removed_value_len = entry.get().value.len();
+        let removed_bytes = entry.get().stored_bytes();
         if entry.get().expire_at_ms.is_some() {
             self.ttl_entries = self.ttl_entries.saturating_sub(1);
         }
         let (removed, _) = entry.remove();
         drop(removed);
-        self.stored_bytes = self
-            .stored_bytes
-            .saturating_sub(removed_key_len.saturating_add(removed_value_len));
+        self.stored_bytes = self.stored_bytes.saturating_sub(removed_bytes);
         if reason == DeleteReason::Evicted {
             self.evictions = self.evictions.saturating_add(1);
         }
         #[cfg(feature = "telemetry")]
-        self.record_delete_metrics(
-            reason,
-            -1,
-            -((removed_key_len + removed_value_len) as isize),
-        );
+        self.record_delete_metrics(reason, -1, -(removed_bytes as isize));
         true
     }
 

@@ -30,8 +30,17 @@ impl FlatMap {
         let entry = self
             .entries
             .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))?;
+        let previous_entry_bytes = entry.stored_bytes();
         if should_touch_access {
             entry.access.record_access(access_tick);
+        }
+        entry.clear_semantic_embedding();
+        let new_entry_bytes = entry.stored_bytes();
+        if previous_entry_bytes != new_entry_bytes {
+            self.stored_bytes = self
+                .stored_bytes
+                .saturating_sub(previous_entry_bytes)
+                .saturating_add(new_entry_bytes);
         }
         shared_bytes_as_unique_slice_mut(&mut entry.value)
     }
@@ -65,8 +74,17 @@ impl FlatMap {
         let entry = self
             .entries
             .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))?;
+        let previous_entry_bytes = entry.stored_bytes();
         if should_touch_access {
             entry.access.record_access(access_tick);
+        }
+        entry.clear_semantic_embedding();
+        let new_entry_bytes = entry.stored_bytes();
+        if previous_entry_bytes != new_entry_bytes {
+            self.stored_bytes = self
+                .stored_bytes
+                .saturating_sub(previous_entry_bytes)
+                .saturating_add(new_entry_bytes);
         }
 
         let value = mem::take(&mut entry.value);

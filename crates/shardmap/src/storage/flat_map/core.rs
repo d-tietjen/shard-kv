@@ -4,6 +4,7 @@ impl FlatMap {
     pub fn new() -> Self {
         Self {
             entries: HashTable::new(),
+            semantic_index: SemanticIndex::default(),
             #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             fast_points: FastPointMap::default(),
             ttl_entries: 0,
@@ -393,24 +394,17 @@ impl FlatMap {
             else {
                 continue;
             };
-            let removed_key_len = entry.get().key.len();
-            let removed_value_len = entry.get().value.len();
+            let removed_bytes = entry.get().stored_bytes();
             let had_ttl = entry.get().expire_at_ms.is_some();
             let (removed, _) = entry.remove();
             if had_ttl {
                 self.ttl_entries = self.ttl_entries.saturating_sub(1);
             }
-            self.stored_bytes = self
-                .stored_bytes
-                .saturating_sub(removed_key_len.saturating_add(removed_value_len));
+            self.stored_bytes = self.stored_bytes.saturating_sub(removed_bytes);
             self.retire_value(removed.value);
             self.evictions = self.evictions.saturating_add(1);
             #[cfg(feature = "telemetry")]
-            self.record_delete_metrics(
-                DeleteReason::Evicted,
-                -1,
-                -((removed_key_len + removed_value_len) as isize),
-            );
+            self.record_delete_metrics(DeleteReason::Evicted, -1, -(removed_bytes as isize));
             evicted = true;
         }
         evicted

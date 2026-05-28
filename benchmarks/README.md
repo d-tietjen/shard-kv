@@ -12,8 +12,9 @@ Two modes, parallel and independent:
 | `saturation` | Closed-loop, push as hard as possible | Peak ops/sec, logical payload GB/s, CPU and p99 at peak |
 | `curve` | Open-loop, target rate sweep | How CPU and p99 scale with load up to saturation |
 | `redis_command_matrix` | RESP command script, per command | Head-to-head command throughput for shardcache vs Redis/Valkey |
+| `semantic_cache_matrix` | Pairwise embedding sweep plus lookup latency | Semantic cache F1/FPR across thresholds and unique/cycling lookup latency |
 
-Both drivers share the same backend list, the same workload axes, and
+The throughput drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `shardcache-lmcache`
 emit rows in the same schema.
 
@@ -30,6 +31,7 @@ artifact or still needs a fresh run.
 | Embedded release matrix | [`SHARDMAP_EMBEDDED_RELEASE.md`](SHARDMAP_EMBEDDED_RELEASE.md) | Direct, shared, TTL, LRU, and selected Rust-cache baselines | Publishable as a release proof, not a single competitor-only report. |
 | LMCache plugin vs Redis TCP | [`LMCACHE_VS_REDIS.md`](LMCACHE_VS_REDIS.md) | shardcache LMCache embedded and SCNP/TCP against Redis TCP | Publishable for the recorded Linux run; rerun before making new M5 or 5MiB LMCache claims. |
 | Local hardware memory ceiling | [`SHARDMAP_MEMORY_WRITE_COST.md`](SHARDMAP_MEMORY_WRITE_COST.md) | Pure read, pure write, and copy/materialization probes | Use as the denominator for hardware-scaled bandwidth claims. |
+| Semantic cache head-to-head plan | [`SEMANTIC_CACHE_HEAD_TO_HEAD.md`](SEMANTIC_CACHE_HEAD_TO_HEAD.md) | ShardCache vs BetterDB, RedisVL, Redis LangCache, LangChain, GPTCache, and vector-backed cache equivalents | Benchmark design for publishable semantic-cache claims; execute before making broad "fastest semantic cache" claims. |
 
 Known gaps before saying "all caching solutions":
 
@@ -43,6 +45,104 @@ Known gaps before saying "all caching solutions":
   plugin report is CPU/LMCache storage API focused.
 - The new 5MiB local memory ceiling is documented, but LMCache and Redis
   head-to-head runs have not yet been repeated at 5MiB.
+
+## Semantic Cache Matrix
+
+`semantic_cache_matrix` is shaped after BetterDB's 2026-05-25 semantic cache
+benchmark against RedisVL: SemBenchmarkLmArena and PAWS-Wiki, 5,000 query
+pairs per dataset, cosine-distance thresholds from `0.05` through `0.45`, and
+unique/cycling lookup latency after 50 warm-up queries.
+
+This driver measures shardmap's native semantic cache path with precomputed
+embeddings. It does not measure embedding model runtime, Python client overhead,
+or a networked RedisVL/Valkey path. For a full end-to-end comparison, generate
+the same pair CSV and feed it to this binary plus an external RedisVL/BetterDB
+adapter. Repeated-query lookups use shardmap's native exact-query result cache,
+which is invalidated by point writes and semantic writes.
+
+Synthetic smoke run:
+
+```bash
+cargo run -p shardcache-benchmarks --bin semantic_cache_matrix -- \
+  --pairs 5000 \
+  --dims 384 \
+  --index-entries 5000 \
+  --quality-csv benchmarks/results/semantic-quality.csv \
+  --latency-csv benchmarks/results/semantic-latency.csv
+```
+
+Dataset-driven run:
+
+```bash
+cargo run --release -p shardcache-benchmarks --bin semantic_cache_matrix -- \
+  --pairs-csv benchmarks/fixtures/semantic/sembenchmark_lmarena_minilm.csv \
+  --dataset SemBenchmarkLmArena \
+  --quality-csv benchmarks/results/semantic-quality.csv \
+  --latency-csv benchmarks/results/semantic-latency.csv
+```
+
+Pair CSV rows are either
+`dataset,pair_id,label,cache_embedding,query_embedding` or
+`pair_id,label,cache_embedding,query_embedding`. Labels accept `true`/`false`,
+`1`/`0`, `positive`/`negative`, or `match`/`miss`. Embedding components are
+separated by whitespace, `;`, or `|`.
+
+For scale and saturation checks, run hot-query load mode against a larger
+semantic index:
+
+```bash
+cargo run --release -p shardcache-benchmarks --bin semantic_cache_matrix -- \
+  --mode load \
+  --pairs 5000 \
+  --dims 384 \
+  --index-entries 100000 \
+  --load-workers 16 \
+  --load-seconds 5 \
+  --load-query-pool 64 \
+  --load-csv benchmarks/results/semantic-load.csv
+```
+
+Hot-query load mode primes the query-result cache before measuring, then reports
+aggregate ops/sec plus merged p50/p95/p99 lookup latency across workers.
+
+For Adam/publishable runs, prefer the bundle wrapper so metadata, quality,
+latency, scale, and hot-load artifacts stay together:
+
+```bash
+OUT_DIR=benchmarks/results/adam-semantic-cache-$(date -u +%Y%m%dT%H%M%SZ) \
+PAIRS=5000 \
+DIMS=384 \
+INDEX_ENTRIES=5000 \
+SCALE_INDEX_ENTRIES=50000,100000 \
+LOAD_INDEX_ENTRIES=100000 \
+LOAD_WORKERS=16 \
+LOAD_SECONDS=5 \
+./benchmarks/scripts/run-semantic-cache-benchmark-bundle.sh
+```
+
+Set `PAIRS_CSV=benchmarks/fixtures/semantic/sembenchmark_lmarena_minilm.csv`
+and `DATASET=SemBenchmarkLmArena` when running against a real fixture. Set
+`PEER_CSVS=/path/to/redisvl.csv,/path/to/betterdb.csv` to record externally
+generated RedisVL/BetterDB artifacts in the report bundle.
+
+If Adam is reachable by SSH, the remote wrapper syncs the current checkout,
+runs the same bundle there, and fetches artifacts back:
+
+```bash
+ADAM_HOST=adam.example.com \
+LOAD_SECONDS=10 \
+./benchmarks/scripts/run-adam-semantic-cache-benchmark.sh
+```
+
+To place the isolated 1-vCPU and 16-vCPU semantic-cache head-to-head results in
+one Markdown/LaTeX report, pass both result directories to the report renderer:
+
+```bash
+python3 benchmarks/scripts/render-semantic-h2h-report.py \
+  --combined-output-dir benchmarks/results/adam-semantic-h2h-isolated-combined \
+  benchmarks/results/adam-semantic-h2h-isolated-1vcpu-YYYYMMDDTHHMMSSZ \
+  benchmarks/results/adam-semantic-h2h-isolated-YYYYMMDDTHHMMSSZ
+```
 
 ## Redis Command Matrix
 

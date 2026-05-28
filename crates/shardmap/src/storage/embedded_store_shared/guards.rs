@@ -48,10 +48,25 @@ pub struct RefMut<'a> {
     pub(super) key_hash: u64,
     #[cfg_attr(feature = "no-ttl", allow(dead_code))]
     pub(super) expire_at_ms: Option<u64>,
+    pub(super) semantic_generation: &'a AtomicU64,
+    pub(super) semantic_shadow: Option<&'a SharedShardLock<EmbeddedShard>>,
     pub(super) _not_send: PhantomData<*const ()>,
 }
 
 impl RefMut<'_> {
+    #[inline(always)]
+    fn bump_semantic_generation(&self) {
+        self.semantic_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[inline(always)]
+    fn invalidate_semantic_shadow(&self, now_ms: u64) -> Option<SharedBytes> {
+        let semantic_shadow = self.semantic_shadow?;
+        semantic_shadow
+            .write()
+            .remove_value_hashed(self.key_hash, self.key.as_ref(), now_ms)
+    }
+
     #[cfg(feature = "no-ttl")]
     #[inline(always)]
     fn live_expire_at(&self) -> Option<Option<u64>> {
@@ -90,10 +105,23 @@ impl RefMut<'_> {
     #[cfg(feature = "mutable-value-slices")]
     #[inline(always)]
     pub fn value_mut_no_ttl(&mut self) -> Option<&mut [u8]> {
+        let semantic_generation = self.semantic_generation;
+        let semantic_shadow = self.semantic_shadow;
+        let key_hash = self.key_hash;
+        let key = self.key.clone();
         match self.live_expire_at()? {
-            None => self
-                .guard
-                .value_mut_hashed_no_ttl(self.key_hash, self.key.as_ref()),
+            None => {
+                let value = self.guard.value_mut_hashed_no_ttl(key_hash, key.as_ref());
+                if value.is_some() {
+                    if let Some(semantic_shadow) = semantic_shadow {
+                        semantic_shadow
+                            .write()
+                            .remove_value_hashed(key_hash, key.as_ref(), 0);
+                    }
+                    semantic_generation.fetch_add(1, Ordering::AcqRel);
+                }
+                value
+            }
             Some(_) => None,
         }
     }
@@ -102,12 +130,15 @@ impl RefMut<'_> {
     #[inline(always)]
     pub fn set(&mut self, value: SharedBytes) {
         match self.live_expire_at() {
-            Some(None) => self.guard.set_value_bytes_hashed_no_ttl(
-                self.route_mode,
-                self.key_hash,
-                self.key.as_ref(),
-                value,
-            ),
+            Some(None) => {
+                self.guard.set_value_bytes_hashed_no_ttl(
+                    self.route_mode,
+                    self.key_hash,
+                    self.key.as_ref(),
+                    value,
+                );
+                self.invalidate_semantic_shadow(0);
+            }
             Some(expire_at_ms) => {
                 let now_ms = ttl_now_millis();
                 self.guard.set_value_bytes_hashed(
@@ -118,15 +149,21 @@ impl RefMut<'_> {
                     expire_at_ms,
                     now_ms,
                 );
+                self.invalidate_semantic_shadow(now_ms);
             }
             None => {
-                let _ = self.guard.remove_value_hashed(
-                    self.key_hash,
-                    self.key.as_ref(),
-                    ttl_now_millis(),
-                );
+                let now_ms = ttl_now_millis();
+                let removed =
+                    self.guard
+                        .remove_value_hashed(self.key_hash, self.key.as_ref(), now_ms);
+                let semantic_removed = self.invalidate_semantic_shadow(now_ms);
+                if removed.is_some() || semantic_removed.is_some() {
+                    self.bump_semantic_generation();
+                }
+                return;
             }
         }
+        self.bump_semantic_generation();
     }
 
     /// Replaces the value from a borrowed slice without changing the existing TTL.
@@ -138,8 +175,15 @@ impl RefMut<'_> {
     /// Removes the entry and returns the stored bytes when present.
     #[inline(always)]
     pub fn remove(mut self) -> Option<SharedBytes> {
-        self.guard
-            .remove_value_hashed(self.key_hash, self.key.as_ref(), ttl_now_millis())
+        let now_ms = ttl_now_millis();
+        let removed = self
+            .guard
+            .remove_value_hashed(self.key_hash, self.key.as_ref(), now_ms);
+        let semantic_removed = self.invalidate_semantic_shadow(now_ms);
+        if removed.is_some() || semantic_removed.is_some() {
+            self.bump_semantic_generation();
+        }
+        removed.or(semantic_removed)
     }
 }
 
@@ -168,6 +212,8 @@ pub struct VacantEntry<'a> {
     pub(super) route_mode: EmbeddedRouteMode,
     pub(super) key: SharedBytes,
     pub(super) key_hash: u64,
+    pub(super) semantic_generation: &'a AtomicU64,
+    pub(super) semantic_shadow: Option<&'a SharedShardLock<EmbeddedShard>>,
     pub(super) _not_send: PhantomData<*const ()>,
 }
 
@@ -181,12 +227,20 @@ impl<'a> VacantEntry<'a> {
             self.key.as_ref(),
             value,
         );
+        if let Some(semantic_shadow) = self.semantic_shadow {
+            semantic_shadow
+                .write()
+                .remove_value_hashed(self.key_hash, self.key.as_ref(), 0);
+        }
+        self.semantic_generation.fetch_add(1, Ordering::AcqRel);
         RefMut {
             guard: self.guard,
             route_mode: self.route_mode,
             key: self.key,
             key_hash: self.key_hash,
             expire_at_ms: None,
+            semantic_generation: self.semantic_generation,
+            semantic_shadow: self.semantic_shadow,
             _not_send: PhantomData,
         }
     }

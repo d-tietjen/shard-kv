@@ -34,6 +34,9 @@ impl LatencyHistogram {
     pub fn p50_ns(&self) -> u64 {
         self.h.value_at_quantile(0.5)
     }
+    pub fn p95_ns(&self) -> u64 {
+        self.h.value_at_quantile(0.95)
+    }
     pub fn p99_ns(&self) -> u64 {
         self.h.value_at_quantile(0.99)
     }

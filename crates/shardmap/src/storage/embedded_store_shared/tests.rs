@@ -290,3 +290,41 @@ fn per_stripe_memory_limit_evicts_independently() {
         assert!(shard.read().stored_bytes() <= limit);
     }
 }
+
+#[test]
+fn semantic_shard_uses_total_memory_budget() {
+    let per_stripe_limit = 64usize;
+    let total_limit = per_stripe_limit * 4;
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig {
+        total_memory_bytes: Some(total_limit),
+        eviction_policy: EvictionPolicy::Lru,
+        ..SharedEmbeddedConfig::default()
+    });
+
+    let mut inserted = 0usize;
+    for index in 0..4096usize {
+        let key = format!("semantic-budget-{index}");
+        if store.route_key(key.as_bytes()).shard_id != 0 {
+            continue;
+        }
+        let embedding = [1.0, index as f32 + 1.0];
+        store
+            .insert_semantic_slice(key.as_bytes(), b"0123456789abcdef", &embedding)
+            .unwrap();
+        inserted += 1;
+        if inserted >= 8 {
+            break;
+        }
+    }
+    assert_eq!(inserted, 8);
+
+    let semantic_bytes = store.stripe(0).read().stored_bytes();
+    assert!(
+        semantic_bytes > per_stripe_limit,
+        "semantic shard should exceed one per-stripe slice of the total budget"
+    );
+    assert!(
+        semantic_bytes <= total_limit,
+        "semantic shard should still obey the total semantic budget"
+    );
+}

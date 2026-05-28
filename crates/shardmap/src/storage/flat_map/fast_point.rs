@@ -61,6 +61,8 @@ impl FastPointEntry {
             key,
             value: self.value,
             expire_at_ms: None,
+            semantic_index_token: None,
+            semantic_governance: None,
             access: EntryAccessMeta {
                 last_touch: 0,
                 frequency: 1,
