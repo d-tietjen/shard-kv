@@ -822,39 +822,117 @@ def render_markdown(rows: dict[tuple[str, str], dict[str, object]], metadata: di
 
 def render_combined_markdown(runs: list[dict[str, object]]) -> str:
     title = combined_report_title(runs)
+    one = run_by_vcpu(runs, 1)
+    sixteen = run_by_vcpu(runs, 16)
     out: list[str] = [
         f"# {title}",
         "",
-        "This report places the isolated 1-vCPU and 16-vCPU Adam benchmark runs in one artifact. Each run still keeps its own peer tables, CPU accounting, charts, and claim boundary, because the CPU shape changes both throughput and relative ranking.",
+        "This report combines the isolated 1-vCPU and 16-vCPU Adam benchmark runs into unified head-to-head tables. Each scenario table shows peer comparison and CPU scaling in the same row, so a reader can see both relative performance and how each system scales with the larger CPU allocation.",
         "",
-        "## Cross-Run Scaling",
+        "## Run Shape",
         "",
-        "| Scenario | ShardCache 1-vCPU ops/s | ShardCache 16-vCPU ops/s | Scale factor | 1-vCPU p50 ms | 16-vCPU p50 ms |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        f"- Host: {combined_metadata_value(runs, 'host', 'adam')}",
+        f"- Entries: {format_int(combined_metadata_value(runs, 'entries', '100000'))}",
+        f"- Dims: {combined_metadata_value(runs, 'dims', '384')}",
+        f"- Threshold distance: {combined_metadata_value(runs, 'threshold', '0.35')}",
+        f"- 1-vCPU SUT CPU set: {run_metadata_value(one, 'sut_cpuset', '0')}",
+        f"- 16-vCPU SUT CPU set: {run_metadata_value(sixteen, 'sut_cpuset', '0-15')}",
+        "",
+        "The `Speedup` columns are ShardCache throughput divided by the peer throughput for the same CPU shape. The `Scale` column is each system's 16-vCPU throughput divided by its 1-vCPU throughput.",
+        "",
     ]
-    one = run_by_vcpu(runs, 1)
-    sixteen = run_by_vcpu(runs, 16)
-    if one is not None and sixteen is not None:
-        one_rows = one["rows"]
-        sixteen_rows = sixteen["rows"]
-        for meta in SCENARIOS:
-            scenario = str(meta["key"])
-            one_shard = row_for(one_rows, scenario, "shardcache")
-            sixteen_shard = row_for(sixteen_rows, scenario, "shardcache")
-            scale = ratio(float(sixteen_shard["ops"]), float(one_shard["ops"]))
-            out.append(
-                f"| {meta['title']} | {format_int(one_shard['ops'])} | {format_int(sixteen_shard['ops'])} | {scale:.1f}x | {float(one_shard['p50']):.4f} | {float(sixteen_shard['p50']):.4f} |"
-            )
-    else:
-        out.append("| n/a | n/a | n/a | n/a | n/a | n/a |")
-    out.append("")
 
-    for run in runs:
-        metadata = run["metadata"]
-        rows = run["rows"]
-        out.append(f"---\n\n{render_markdown(rows, metadata)}")
+    out.extend(render_governance_markdown())
+
+    for meta in SCENARIOS:
+        scenario = str(meta["key"])
+        out.extend(render_combined_scenario_markdown(one, sixteen, scenario, str(meta["title"])))
         out.append("")
     return "\n".join(out)
+
+
+def render_combined_scenario_markdown(
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+    scenario: str,
+    title: str,
+) -> list[str]:
+    return [
+        f"## {title}",
+        "",
+        combined_scenario_description(title),
+        "",
+        "| System | 1-vCPU ops/s | 16-vCPU ops/s | Scale | 1-vCPU ops/SUT-vCPU | 16-vCPU ops/SUT-vCPU | 1-vCPU p50 ms | 16-vCPU p50 ms | 1-vCPU speedup | 16-vCPU speedup |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        *[
+            "| {label} | {one_ops} | {sixteen_ops} | {scale} | {one_cpu} | {sixteen_cpu} | {one_p50} | {sixteen_p50} | {one_speedup} | {sixteen_speedup} |".format(
+                label=combined_label(adapter, one, sixteen, scenario),
+                one_ops=markdown_metric(combined_row(one, scenario, adapter), "ops"),
+                sixteen_ops=markdown_metric(combined_row(sixteen, scenario, adapter), "ops"),
+                scale=markdown_scale(combined_row(one, scenario, adapter), combined_row(sixteen, scenario, adapter)),
+                one_cpu=markdown_metric(combined_row(one, scenario, adapter), "ops_per_sut_cpu"),
+                sixteen_cpu=markdown_metric(combined_row(sixteen, scenario, adapter), "ops_per_sut_cpu"),
+                one_p50=markdown_float(combined_row(one, scenario, adapter), "p50"),
+                sixteen_p50=markdown_float(combined_row(sixteen, scenario, adapter), "p50"),
+                one_speedup=markdown_speedup(one, scenario, adapter),
+                sixteen_speedup=markdown_speedup(sixteen, scenario, adapter),
+            )
+            for adapter in combined_adapters(one, sixteen, scenario)
+        ],
+        "",
+    ]
+
+
+def render_combined_scenario_latex(
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+    scenario: str,
+    title: str,
+) -> list[str]:
+    out = [
+        rf"\subsection{{{tex_escape(title)}}}",
+        "",
+        combined_scenario_description(title),
+        "",
+        r"\begin{table}[htbp]",
+        r"\centering",
+        r"\tiny",
+        r"\setlength{\tabcolsep}{2pt}",
+        rf"\caption{{{tex_escape(title)} unified head-to-head and 1-vCPU to 16-vCPU scaling.}}",
+        rf"\label{{tab:semantic-h2h-combined-{scenario}}}",
+        r"\resizebox{\linewidth}{!}{%",
+        r"\begin{tabular}{lrrrrrrrrr}",
+        r"\hline",
+        r"System & 1-vCPU ops/s & 16-vCPU ops/s & Scale & 1-vCPU ops/CPU & 16-vCPU ops/CPU & 1-vCPU p50 & 16-vCPU p50 & 1-vCPU Speedup & 16-vCPU Speedup \\",
+        r"\hline",
+    ]
+    for adapter in combined_adapters(one, sixteen, scenario):
+        one_row = combined_row(one, scenario, adapter)
+        sixteen_row = combined_row(sixteen, scenario, adapter)
+        out.append(
+            "{label} & {one_ops} & {sixteen_ops} & {scale} & {one_cpu} & {sixteen_cpu} & {one_p50} & {sixteen_p50} & {one_speedup} & {sixteen_speedup} \\\\".format(
+                label=tex_escape(combined_label(adapter, one, sixteen, scenario)),
+                one_ops=tex_metric(one_row, "ops"),
+                sixteen_ops=tex_metric(sixteen_row, "ops"),
+                scale=tex_scale(one_row, sixteen_row),
+                one_cpu=tex_metric(one_row, "ops_per_sut_cpu"),
+                sixteen_cpu=tex_metric(sixteen_row, "ops_per_sut_cpu"),
+                one_p50=tex_float(one_row, "p50"),
+                sixteen_p50=tex_float(sixteen_row, "p50"),
+                one_speedup=tex_speedup_cell(one, scenario, adapter),
+                sixteen_speedup=tex_speedup_cell(sixteen, scenario, adapter),
+            )
+        )
+    out.extend(
+        [
+            r"\hline",
+            r"\end{tabular}",
+            r"}",
+            r"\end{table}",
+            "",
+        ]
+    )
+    return out
 
 
 def render_latex_section(
@@ -970,70 +1048,36 @@ def render_latex_section(
 
 
 def render_combined_latex_section(runs: list[dict[str, object]], output_dir: Path) -> str:
+    one = run_by_vcpu(runs, 1)
+    sixteen = run_by_vcpu(runs, 16)
     out: list[str] = [
         rf"\section{{{tex_escape(combined_report_title(runs))}}}",
         r"\label{sec:shardcache-semantic-head-to-head-combined}",
         "",
-        "This report places the isolated 1-vCPU and 16-vCPU Adam benchmark runs in one artifact. Each run still keeps its own peer tables, CPU accounting, charts, and claim boundary, because the CPU shape changes both throughput and relative ranking.",
+        "This report combines the isolated 1-vCPU and 16-vCPU Adam benchmark runs into unified head-to-head tables. Each scenario table shows peer comparison and CPU scaling in the same row, so a reader can see both relative performance and how each system scales with the larger CPU allocation.",
         "",
-        r"\subsection{Cross-Run Scaling}",
+        r"\subsection{Run Shape}",
         "",
-        "The table below compares ShardCache against itself across the two CPU limits before the full peer tables. It should be read as a scaling view, not a replacement for the per-run head-to-head sections.",
+        rf"All rows use {tex_count(combined_metadata_value(runs, 'entries', '100000'))} entries, {tex_escape(str(combined_metadata_value(runs, 'dims', '384')))}-dimensional normalized embeddings, and a cosine-distance threshold of {tex_escape(str(combined_metadata_value(runs, 'threshold', '0.35')))}. The 1-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(one, 'sut_cpuset', '0'))}; the 16-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(sixteen, 'sut_cpuset', '0-15'))}.",
         "",
-        r"\begin{table}[htbp]",
-        r"\centering",
-        r"\small",
-        r"\caption{ShardCache 1-vCPU versus 16-vCPU isolated scaling on Adam.}",
-        r"\label{tab:semantic-h2h-combined-scaling}",
-        r"\begin{tabular}{lrrrrr}",
-        r"\hline",
-        r"Scenario & 1-vCPU ops/s & 16-vCPU ops/s & Scale & 1-vCPU p50 ms & 16-vCPU p50 ms \\",
-        r"\hline",
+        r"The \texttt{Speedup} columns are ShardCache throughput divided by the peer throughput for the same CPU shape. The \texttt{Scale} column is each system's 16-vCPU throughput divided by its 1-vCPU throughput.",
+        "",
     ]
-    one = run_by_vcpu(runs, 1)
-    sixteen = run_by_vcpu(runs, 16)
-    if one is not None and sixteen is not None:
-        one_rows = one["rows"]
-        sixteen_rows = sixteen["rows"]
-        for meta in SCENARIOS:
-            scenario = str(meta["key"])
-            one_shard = row_for(one_rows, scenario, "shardcache")
-            sixteen_shard = row_for(sixteen_rows, scenario, "shardcache")
-            scale = ratio(float(sixteen_shard["ops"]), float(one_shard["ops"]))
-            out.append(
-                "{scenario} & {one_ops} & {sixteen_ops} & {scale:.1f}$\\times$ & {one_p50:.4f} & {sixteen_p50:.4f} \\\\".format(
-                    scenario=tex_escape(str(meta["title"])),
-                    one_ops=tex_count(one_shard["ops"]),
-                    sixteen_ops=tex_count(sixteen_shard["ops"]),
-                    scale=scale,
-                    one_p50=float(one_shard["p50"]),
-                    sixteen_p50=float(sixteen_shard["p50"]),
-                )
-            )
+
+    out.extend(render_governance_latex())
+
+    for meta in SCENARIOS:
+        out.extend(render_combined_scenario_latex(one, sixteen, str(meta["key"]), str(meta["title"])))
+        out.append("")
+
     out.extend(
         [
-            r"\hline",
-            r"\end{tabular}",
-            r"\end{table}",
+            r"\subsection{Caveats}",
+            "",
+            "This combined report uses the same underlying result CSV files as the standalone 1-vCPU and 16-vCPU reports, but it intentionally removes the duplicated per-run peer tables. The chart PDFs remain in each run directory; the unified tables are the authoritative combined view for head-to-head and scaling interpretation.",
             "",
         ]
     )
-
-    for run in runs:
-        metadata = run["metadata"]
-        rows = run["rows"]
-        vcpus = sut_vcpus(metadata)
-        out.append(r"\clearpage")
-        out.append("")
-        out.append(
-            render_latex_section(
-                rows,
-                metadata,
-                asset_prefix=latex_asset_prefix(output_dir, Path(run["path"])),
-                label_scope=f"{vcpus}vcpu",
-            )
-        )
-        out.append("")
     return "\n".join(out)
 
 
@@ -1047,6 +1091,112 @@ def combined_report_title(runs: list[dict[str, object]]) -> str:
 
 def run_by_vcpu(runs: list[dict[str, object]], target: int) -> dict[str, object] | None:
     return next((run for run in runs if sut_vcpus(run["metadata"]) == target), None)
+
+
+def run_metadata_value(run: dict[str, object] | None, key: str, fallback: str) -> str:
+    if run is None:
+        return fallback
+    return str(run["metadata"].get(key, fallback))
+
+
+def combined_metadata_value(runs: list[dict[str, object]], key: str, fallback: str) -> str:
+    for run in runs:
+        value = run["metadata"].get(key)
+        if value:
+            return str(value)
+    return fallback
+
+
+def combined_row(
+    run: dict[str, object] | None,
+    scenario: str,
+    adapter: str,
+) -> dict[str, object] | None:
+    if run is None:
+        return None
+    return run["rows"].get((scenario, adapter))
+
+
+def combined_adapters(
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+    scenario: str,
+) -> list[str]:
+    adapters = []
+    for adapter in ORDER:
+        if combined_row(one, scenario, adapter) is not None or combined_row(sixteen, scenario, adapter) is not None:
+            adapters.append(adapter)
+    return adapters
+
+
+def combined_label(
+    adapter: str,
+    one: dict[str, object] | None,
+    sixteen: dict[str, object] | None,
+    scenario: str,
+) -> str:
+    row = combined_row(one, scenario, adapter) or combined_row(sixteen, scenario, adapter)
+    return str(row.get("label", LABELS.get(adapter, adapter))) if row else LABELS.get(adapter, adapter)
+
+
+def combined_scenario_description(title: str) -> str:
+    if title == "Cold Miss":
+        return "Unique negative queries with query-result caching disabled. This shows the semantic-cache fall-through cost and how each system scales when it must prove that no reusable answer exists."
+    if title == "Cold Unique Semantic Hit":
+        return "Unique positive/paraphrase queries with query-result caching disabled. This shows first-time semantic reuse without exact-query memo help."
+    return "Repeated exact-query traffic after warmup. This shows the application-cache hot path and how much each system benefits from repeated normalized questions."
+
+
+def markdown_metric(row: dict[str, object] | None, key: str) -> str:
+    return format_int(row[key]) if row is not None else "n/a"
+
+
+def markdown_float(row: dict[str, object] | None, key: str) -> str:
+    return f"{float(row[key]):.4f}" if row is not None else "n/a"
+
+
+def markdown_scale(one_row: dict[str, object] | None, sixteen_row: dict[str, object] | None) -> str:
+    if one_row is None or sixteen_row is None:
+        return "n/a"
+    value = ratio(float(sixteen_row["ops"]), float(one_row["ops"]))
+    return f"{value:.1f}x" if value > 0.0 else "n/a"
+
+
+def markdown_speedup(run: dict[str, object] | None, scenario: str, adapter: str) -> str:
+    if run is None:
+        return "n/a"
+    rows = run["rows"]
+    row = rows.get((scenario, adapter))
+    shard = rows.get((scenario, "shardcache"))
+    if row is None or shard is None:
+        return "n/a"
+    return f"{speedup(row, float(shard['ops'])):.1f}x"
+
+
+def tex_metric(row: dict[str, object] | None, key: str) -> str:
+    return tex_count(row[key]) if row is not None else "n/a"
+
+
+def tex_float(row: dict[str, object] | None, key: str) -> str:
+    return f"{float(row[key]):.4f}" if row is not None else "n/a"
+
+
+def tex_scale(one_row: dict[str, object] | None, sixteen_row: dict[str, object] | None) -> str:
+    if one_row is None or sixteen_row is None:
+        return "n/a"
+    value = ratio(float(sixteen_row["ops"]), float(one_row["ops"]))
+    return f"{value:.1f}$\\times$" if value > 0.0 else "n/a"
+
+
+def tex_speedup_cell(run: dict[str, object] | None, scenario: str, adapter: str) -> str:
+    if run is None:
+        return "n/a"
+    rows = run["rows"]
+    row = rows.get((scenario, adapter))
+    shard = rows.get((scenario, "shardcache"))
+    if row is None or shard is None:
+        return "n/a"
+    return f"{speedup(row, float(shard['ops'])):.1f}$\\times$"
 
 
 def latex_asset_prefix(output_dir: Path, asset_dir: Path) -> str:
