@@ -20,6 +20,15 @@ pub(crate) trait RedisListStore {
         index: i64,
         write: impl FnOnce(Option<&[u8]>),
     ) -> RedisObjectReadOutcome;
+    fn lpos_visit(
+        &self,
+        key: &[u8],
+        element: &[u8],
+        rank: i64,
+        count: Option<i64>,
+        maxlen: i64,
+        write: impl FnOnce(Vec<i64>),
+    ) -> RedisObjectReadOutcome;
     fn lrange(&self, key: &[u8], start: i64, stop: i64) -> RedisObjectResult;
     fn lrange_visit(
         &self,
@@ -101,6 +110,20 @@ impl RedisListStore for EmbeddedStore {
     ) -> RedisObjectReadOutcome {
         self.object_read_hashed_visit(hash_key(key), key, |bucket| {
             bucket.lindex_visit(key, index, write)
+        })
+    }
+
+    fn lpos_visit(
+        &self,
+        key: &[u8],
+        element: &[u8],
+        rank: i64,
+        count: Option<i64>,
+        maxlen: i64,
+        write: impl FnOnce(Vec<i64>),
+    ) -> RedisObjectReadOutcome {
+        self.object_read_hashed_visit(hash_key(key), key, |bucket| {
+            bucket.lpos_visit(key, element, rank, count, maxlen, write)
         })
     }
 

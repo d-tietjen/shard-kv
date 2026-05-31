@@ -57,6 +57,7 @@ for clients in $client_counts; do
       --mix "${MIX:-80-20}" \
       --key-pattern "${KEY_PATTERN:-point}" \
       --vcpu-budget "${VCPU_BUDGET:-1}" \
+      ${SCNP_SHARDS:+--scnp-shards "$SCNP_SHARDS"} \
       --clients "$clients" \
       --pipeline-depth "$pipeline_depth" \
       --key-count "${KEY_COUNT:-100000}" \

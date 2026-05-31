@@ -35,6 +35,7 @@ shardmap = { workspace = true, features = ["sharded"] }
 shardcache-client-rs = { workspace = true }
 bytes = "1"
 clap = { workspace = true }
+core_affinity = { workspace = true }
 crossbeam-channel = { workspace = true }
 dashmap = "6.1"
 hdrhistogram = "7.5"

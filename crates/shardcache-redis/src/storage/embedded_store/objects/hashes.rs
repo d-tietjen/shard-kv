@@ -1,5 +1,6 @@
 use super::super::*;
 use super::access::RedisObjectStoreAccess;
+use crate::storage::HashFieldExpireCond;
 
 #[allow(dead_code)]
 pub(crate) trait RedisHashStore {
@@ -46,6 +47,21 @@ pub(crate) trait RedisHashStore {
         field: &[u8],
         value: &[u8],
     ) -> RedisObjectResult;
+    fn hash_field_expire(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        expire_at_ms: u64,
+        cond: HashFieldExpireCond,
+    ) -> RedisObjectResult;
+    fn hash_field_ttl_query(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        as_millis: bool,
+        absolute: bool,
+    ) -> RedisObjectResult;
+    fn hash_field_persist(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
 }
 
 impl RedisHashStore for EmbeddedStore {
@@ -165,5 +181,36 @@ impl RedisHashStore for EmbeddedStore {
             },
             |bucket, key_hash| bucket.hset_new_unchecked_hashed(key_hash, key, field, value),
         )
+    }
+
+    fn hash_field_expire(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        expire_at_ms: u64,
+        cond: HashFieldExpireCond,
+    ) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| {
+            bucket.hash_field_expire(key, fields, expire_at_ms, cond, now_ms)
+        })
+    }
+
+    fn hash_field_ttl_query(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        as_millis: bool,
+        absolute: bool,
+    ) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_read(key, |bucket| {
+            bucket.hash_field_ttl_query(key, fields, as_millis, absolute, now_ms)
+        })
+    }
+
+    fn hash_field_persist(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| bucket.hash_field_persist(key, fields, now_ms))
     }
 }

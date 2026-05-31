@@ -79,6 +79,9 @@ the Docker/server runbook.
 | `redis-server` | Yes | RESP/SCNP server with Redis/Valkey compatibility. |
 | `server` | No | Lean RESP/SCNP server without the Redis compatibility catalog. |
 | `redis` | No | Redis/Valkey object and command behavior without the server feature. |
+| `redis-functions` | Via `redis-server` | Redis 7 `FUNCTION`/`FCALL` compatibility stubs with an empty function registry. |
+| `redis-modules` | Via `redis-server` | Redis `MODULE` compatibility stubs with an empty module registry and disabled loading. |
+| `redis-modules-all` | No | Aggregate Redis Modules compatibility facades, concrete command discovery metadata, and embedded APIs; individual `redis-module-*` flags can enable one module family at a time. |
 | `monoio` | No | Linux-only transport option for server experiments. |
 
 Build the lean server with:

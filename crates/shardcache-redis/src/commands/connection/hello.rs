@@ -126,7 +126,7 @@ fn hello_array(proto: i64) -> Frame {
         bulk(b"role".to_vec()),
         bulk(b"master".to_vec()),
         bulk(b"modules".to_vec()),
-        Frame::Array(Vec::new()),
+        hello_modules(),
     ])
 }
 
@@ -141,6 +141,17 @@ fn hello_map() -> Frame {
         (bulk(b"id".to_vec()), int(0)),
         (bulk(b"mode".to_vec()), bulk(b"standalone".to_vec())),
         (bulk(b"role".to_vec()), bulk(b"master".to_vec())),
-        (bulk(b"modules".to_vec()), Frame::Array(Vec::new())),
+        (bulk(b"modules".to_vec()), hello_modules()),
     ])
+}
+
+fn hello_modules() -> Frame {
+    #[cfg(feature = "redis-modules")]
+    {
+        crate::commands::redis_modules::module_list_frame()
+    }
+    #[cfg(not(feature = "redis-modules"))]
+    {
+        Frame::Array(Vec::new())
+    }
 }

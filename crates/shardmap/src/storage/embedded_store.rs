@@ -33,6 +33,9 @@ mod core;
 #[path = "../../../shardcache-redis/src/storage/embedded_store/key_scan.rs"]
 mod key_scan;
 mod lifecycle;
+#[cfg(feature = "redis-modules")]
+#[path = "../../../shardcache-redis/src/storage/embedded_store/modules.rs"]
+mod modules;
 #[cfg(feature = "redis")]
 #[path = "../../../shardcache-redis/src/storage/embedded_store/objects.rs"]
 mod objects;
@@ -47,6 +50,10 @@ mod write;
 
 #[cfg(feature = "redis")]
 pub(crate) use key_scan::{DEFAULT_SCAN_COUNT, RedisKeyScanType};
+#[cfg(feature = "redis-module-topk")]
+pub(crate) use modules::TopKError;
+#[cfg(feature = "redis-modules")]
+pub use modules::{RedisModuleApi, RedisModuleApiResult, RedisModuleFamily};
 #[cfg(feature = "redis")]
 pub(crate) use objects::{
     RedisHashStore, RedisKeyStore, RedisListStore, RedisObjectStoreAccess, RedisSetStore,
@@ -90,6 +97,10 @@ pub struct EmbeddedStore {
     shift: u32,
     #[cfg(feature = "redis")]
     objects: RedisObjectStore,
+    #[cfg(feature = "redis-modules")]
+    module_state: modules::RedisModuleState,
+    #[cfg(feature = "redis-module-topk")]
+    topk: modules::TopKStore,
     route_mode: EmbeddedRouteMode,
     #[cfg(feature = "telemetry")]
     metrics: Option<Arc<CacheTelemetry>>,

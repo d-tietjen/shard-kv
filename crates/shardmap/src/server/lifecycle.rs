@@ -373,11 +373,17 @@ impl ShardCacheServer {
             Vec::with_capacity(worker_count);
         let mut handles = Vec::with_capacity(worker_count);
 
-        // Resolve available CPU cores so each worker can be pinned to one.
-        // If we have fewer cores than workers, fall back to round-robin.
-        let core_ids: Vec<core_affinity::CoreId> =
-            core_affinity::get_core_ids().unwrap_or_default();
-        if core_ids.is_empty() {
+        // Resolve available CPU cores for multi-worker pinning. A single worker
+        // inherits the process affinity so taskset/cpuset one-vCPU launches stay
+        // strict.
+        let core_ids: Vec<core_affinity::CoreId> = if worker_count == 1 {
+            Vec::new()
+        } else {
+            core_affinity::get_core_ids().unwrap_or_default()
+        };
+        if worker_count == 1 {
+            tracing::info!("multi-direct: leaving single worker affinity unchanged");
+        } else if core_ids.is_empty() {
             tracing::warn!("multi-direct: no core ids available, workers will not be pinned");
         } else {
             tracing::info!(

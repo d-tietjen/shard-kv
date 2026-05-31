@@ -41,11 +41,13 @@ define_admin_command!(BgRewriteAof, BGREWRITEAOF_COMMAND, "BGREWRITEAOF", false)
 define_admin_command!(BgSave, BGSAVE_COMMAND, "BGSAVE", false);
 define_admin_command!(Cluster, CLUSTER_COMMAND, "CLUSTER", false);
 define_admin_command!(Debug, DEBUG_COMMAND, "DEBUG", false);
+define_admin_command!(Failover, FAILOVER_COMMAND, "FAILOVER", false);
 define_admin_command!(HostWarning, HOST_WARNING_COMMAND, "HOST:", false);
 define_admin_command!(LastSave, LASTSAVE_COMMAND, "LASTSAVE", false);
 define_admin_command!(Latency, LATENCY_COMMAND, "LATENCY", false);
 define_admin_command!(Lolwut, LOLWUT_COMMAND, "LOLWUT", false);
 define_admin_command!(Migrate, MIGRATE_COMMAND, "MIGRATE", true);
+#[cfg(feature = "redis-modules")]
 define_admin_command!(Module, MODULE_COMMAND, "MODULE", false);
 define_admin_command!(Monitor, MONITOR_COMMAND, "MONITOR", false);
 define_admin_command!(Move, MOVE_COMMAND, "MOVE", true);
@@ -60,6 +62,7 @@ define_admin_command!(Save, SAVE_COMMAND, "SAVE", false);
 define_admin_command!(Shutdown, SHUTDOWN_COMMAND, "SHUTDOWN", false);
 define_admin_command!(SlowLog, SLOWLOG_COMMAND, "SLOWLOG", false);
 define_admin_command!(Sort, SORT_COMMAND, "SORT", false);
+define_admin_command!(SortRo, SORT_RO_COMMAND, "SORT_RO", false);
 define_admin_command!(SwapDb, SWAPDB_COMMAND, "SWAPDB", true);
 define_admin_command!(Sync, SYNC_COMMAND, "SYNC", false);
 define_admin_command!(Wait, WAIT_COMMAND, "WAIT", false);
@@ -109,6 +112,11 @@ error_command!(
     Shutdown,
     "SHUTDOWN",
     "ERR SHUTDOWN is disabled by shardcache"
+);
+error_command!(
+    Failover,
+    "FAILOVER",
+    "ERR FAILOVER is not supported by shardcache"
 );
 error_command!(
     Sync,
@@ -192,15 +200,25 @@ impl crate::commands::redis::RedisCommand for Migrate {
     }
 }
 
+#[cfg(feature = "redis-modules")]
 impl crate::commands::redis::RedisCommand for Module {
     fn execute(_store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         match args {
-            [sub] if eq_ignore_ascii_case(sub, b"LIST") => Frame::Array(Vec::new()),
+            [sub] if eq_ignore_ascii_case(sub, b"LIST") => {
+                crate::commands::redis_modules::module_list_frame()
+            }
             [sub] if eq_ignore_ascii_case(sub, b"HELP") => Frame::Array(vec![
                 bulk(b"MODULE LIST".to_vec()),
+                bulk(b"MODULE LOAD path [arg ...]".to_vec()),
+                bulk(b"MODULE LOADEX path [[CONFIG name value] ...] [ARGS arg ...]".to_vec()),
+                bulk(b"MODULE UNLOAD name".to_vec()),
                 bulk(b"MODULE HELP".to_vec()),
             ]),
-            [sub] if eq_ignore_ascii_case(sub, b"LOAD") || eq_ignore_ascii_case(sub, b"UNLOAD") => {
+            [sub, ..]
+                if eq_ignore_ascii_case(sub, b"LOAD")
+                    || eq_ignore_ascii_case(sub, b"LOADEX")
+                    || eq_ignore_ascii_case(sub, b"UNLOAD") =>
+            {
                 error("ERR Redis modules are not supported by shardcache")
             }
             _ => error("ERR unknown MODULE subcommand or wrong number of arguments"),
@@ -291,42 +309,50 @@ impl crate::commands::redis::RedisCommand for Sort {
         let mut index = 0;
         while index < tail.len() {
             let option = tail[index];
-            if eq_ignore_ascii_case(option, b"ASC") {
-                desc = false;
-                index += 1;
-            } else if eq_ignore_ascii_case(option, b"DESC") {
-                desc = true;
-                index += 1;
-            } else if eq_ignore_ascii_case(option, b"ALPHA") {
-                alpha = true;
-                index += 1;
-            } else if eq_ignore_ascii_case(option, b"LIMIT") {
-                let (Some(offset), Some(count)) = (tail.get(index + 1), tail.get(index + 2)) else {
-                    return error("ERR syntax error");
-                };
-                let (Ok(offset), Ok(count)) = (parse_usize(offset), parse_usize(count)) else {
-                    return error("ERR value is not an integer or out of range");
-                };
-                limit = Some((offset, count));
-                index += 3;
-            } else if eq_ignore_ascii_case(option, b"STORE") {
-                let Some(dest) = tail.get(index + 1) else {
-                    return error("ERR syntax error");
-                };
-                store_dest = Some(*dest);
-                index += 2;
-            } else if eq_ignore_ascii_case(option, b"BY") {
-                let Some(pattern) = tail.get(index + 1) else {
-                    return error("ERR syntax error");
-                };
-                if !eq_ignore_ascii_case(pattern, b"nosort") {
-                    return error("ERR SORT BY patterns are not supported by shardcache");
+            match option {
+                option if eq_ignore_ascii_case(option, b"ASC") => {
+                    desc = false;
+                    index += 1;
                 }
-                index += 2;
-            } else if eq_ignore_ascii_case(option, b"GET") {
-                return error("ERR SORT GET patterns are not supported by shardcache");
-            } else {
-                return error("ERR syntax error");
+                option if eq_ignore_ascii_case(option, b"DESC") => {
+                    desc = true;
+                    index += 1;
+                }
+                option if eq_ignore_ascii_case(option, b"ALPHA") => {
+                    alpha = true;
+                    index += 1;
+                }
+                option if eq_ignore_ascii_case(option, b"LIMIT") => {
+                    let (Some(offset), Some(count)) = (tail.get(index + 1), tail.get(index + 2))
+                    else {
+                        return error("ERR syntax error");
+                    };
+                    let (Ok(offset), Ok(count)) = (parse_usize(offset), parse_usize(count)) else {
+                        return error("ERR value is not an integer or out of range");
+                    };
+                    limit = Some((offset, count));
+                    index += 3;
+                }
+                option if eq_ignore_ascii_case(option, b"STORE") => {
+                    let Some(dest) = tail.get(index + 1) else {
+                        return error("ERR syntax error");
+                    };
+                    store_dest = Some(*dest);
+                    index += 2;
+                }
+                option if eq_ignore_ascii_case(option, b"BY") => {
+                    let Some(pattern) = tail.get(index + 1) else {
+                        return error("ERR syntax error");
+                    };
+                    if !eq_ignore_ascii_case(pattern, b"nosort") {
+                        return error("ERR SORT BY patterns are not supported by shardcache");
+                    }
+                    index += 2;
+                }
+                option if eq_ignore_ascii_case(option, b"GET") => {
+                    return error("ERR SORT GET patterns are not supported by shardcache");
+                }
+                _ => return error("ERR syntax error"),
             }
         }
 
@@ -369,6 +395,32 @@ impl crate::commands::redis::RedisCommand for Sort {
             }
             None => array_bulk(values),
         }
+    }
+}
+
+impl crate::commands::redis::RedisCommand for SortRo {
+    fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        let [_key, tail @ ..] = args else {
+            return wrong_arity("SORT_RO");
+        };
+        let mut index = 0;
+        while index < tail.len() {
+            let option = tail[index];
+            match option {
+                option if eq_ignore_ascii_case(option, b"STORE") => {
+                    return error("ERR syntax error");
+                }
+                option
+                    if eq_ignore_ascii_case(option, b"LIMIT")
+                        || eq_ignore_ascii_case(option, b"BY")
+                        || eq_ignore_ascii_case(option, b"GET") =>
+                {
+                    index += 2;
+                }
+                _ => index += 1,
+            };
+        }
+        Sort::execute(store, args)
     }
 }
 

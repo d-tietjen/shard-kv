@@ -10,6 +10,17 @@ impl RedisObjectBucket {
     }
 
     #[inline(always)]
+    pub(crate) fn contains_live_object(&self, key: &[u8], now_ms: u64) -> bool {
+        if self.object_is_expired(key, now_ms) {
+            return false;
+        }
+        self.hash_has_live_fields(key, now_ms)
+            || self.lists.contains_key(key)
+            || self.sets.contains_key(key)
+            || self.zsets.contains_key(key)
+    }
+
+    #[inline(always)]
     pub(crate) fn has_expirations(&self) -> bool {
         !self.expire_at_ms.is_empty()
     }
@@ -32,6 +43,7 @@ impl RedisObjectBucket {
         if let Some(slot) = self.hashes.remove(key) {
             self.hash_slab.remove(slot);
             self.expire_at_ms.remove(key);
+            self.hash_field_expire_at_ms.remove(key);
             return true;
         }
         if let Some(slot) = self.lists.remove(key) {
@@ -75,6 +87,9 @@ impl RedisObjectBucket {
         if self.delete_expired(key, now_ms) {
             return -2;
         }
+        if self.remove_expired_hash_if_empty(key, now_ms) {
+            return -2;
+        }
         if !self.contains_object(key) {
             return -2;
         }
@@ -84,13 +99,23 @@ impl RedisObjectBucket {
             .unwrap_or(-1)
     }
 
-    pub(crate) fn clone_value(&self, key: &[u8]) -> Option<RedisObjectValue> {
+    pub(crate) fn clone_value(&self, key: &[u8], now_ms: u64) -> Option<RedisObjectValue> {
         if let Some(slot) = self.hashes.get(key).copied() {
+            if !self.hash_has_live_fields(key, now_ms) {
+                return None;
+            }
+            let now_ms = self.hash_field_now_ms_for(key);
             return Some(RedisObjectValue::Hash(
                 self.hash_slab
                     .get(slot)
                     .expect("hash slab slot missing")
-                    .entries(),
+                    .entries()
+                    .into_iter()
+                    .filter(|(field, _)| match now_ms {
+                        Some(now_ms) => !self.hash_field_is_expired(key, field, now_ms),
+                        None => true,
+                    })
+                    .collect(),
             ));
         }
         if let Some(slot) = self.lists.get(key).copied() {
@@ -160,9 +185,9 @@ impl RedisObjectBucket {
         !existed
     }
 
-    pub(crate) fn type_name(&self, key: &[u8]) -> Option<&'static str> {
+    pub(crate) fn type_name(&self, key: &[u8], now_ms: u64) -> Option<&'static str> {
         match (
-            self.hashes.contains_key(key),
+            self.hash_has_live_fields(key, now_ms),
             self.lists.contains_key(key),
             self.sets.contains_key(key),
             self.zsets.contains_key(key),
@@ -175,9 +200,9 @@ impl RedisObjectBucket {
         }
     }
 
-    pub(crate) fn encoding(&self, key: &[u8]) -> Option<&'static str> {
+    pub(crate) fn encoding(&self, key: &[u8], now_ms: u64) -> Option<&'static str> {
         match (
-            self.hashes.contains_key(key),
+            self.hash_has_live_fields(key, now_ms),
             self.lists.contains_key(key),
             self.sets.contains_key(key),
             self.zsets.contains_key(key),
@@ -194,6 +219,7 @@ impl RedisObjectBucket {
             self.hashes
                 .keys()
                 .filter(|key| !self.object_is_expired(key, now_ms))
+                .filter(|key| self.hash_has_live_fields(key, now_ms))
                 .cloned()
                 .map(|key| (key, "hash")),
         );
@@ -225,6 +251,7 @@ impl RedisObjectBucket {
             self.hashes
                 .keys()
                 .filter(|key| !self.object_is_expired(key, now_ms))
+                .filter(|key| self.hash_has_live_fields(key, now_ms))
                 .cloned(),
         );
         out.extend(
@@ -247,15 +274,48 @@ impl RedisObjectBucket {
         );
     }
 
+    pub(crate) fn live_object_count(&self, now_ms: u64) -> usize {
+        if self.expire_at_ms.is_empty() && self.hash_field_expire_at_ms.is_empty() {
+            return self.hashes.len() + self.lists.len() + self.sets.len() + self.zsets.len();
+        }
+
+        let hash_count = self
+            .hashes
+            .keys()
+            .filter(|key| !self.object_is_expired(key, now_ms))
+            .filter(|key| self.hash_has_live_fields(key, now_ms))
+            .count();
+        if self.expire_at_ms.is_empty() {
+            return hash_count + self.lists.len() + self.sets.len() + self.zsets.len();
+        }
+
+        hash_count
+            + self
+                .lists
+                .keys()
+                .filter(|key| !self.object_is_expired(key, now_ms))
+                .count()
+            + self
+                .sets
+                .keys()
+                .filter(|key| !self.object_is_expired(key, now_ms))
+                .count()
+            + self
+                .zsets
+                .keys()
+                .filter(|key| !self.object_is_expired(key, now_ms))
+                .count()
+    }
+
     pub(crate) fn visit_keys(&self, now_ms: u64, visitor: &mut impl FnMut(&[u8]) -> bool) -> bool {
         if !self.has_expirations() {
-            return visit_key_iter(self.hashes.keys(), visitor)
+            return visit_live_hash_key_iter(self.hashes.keys(), now_ms, self, visitor)
                 && visit_key_iter(self.lists.keys(), visitor)
                 && visit_key_iter(self.sets.keys(), visitor)
                 && visit_key_iter(self.zsets.keys(), visitor);
         }
 
-        self.visit_unexpired_key_iter(self.hashes.keys(), now_ms, visitor)
+        self.visit_unexpired_live_hash_key_iter(self.hashes.keys(), now_ms, visitor)
             && self.visit_unexpired_key_iter(self.lists.keys(), now_ms, visitor)
             && self.visit_unexpired_key_iter(self.sets.keys(), now_ms, visitor)
             && self.visit_unexpired_key_iter(self.zsets.keys(), now_ms, visitor)
@@ -274,8 +334,8 @@ impl RedisObjectBucket {
         visitor: &mut impl FnMut(&[u8]) -> bool,
     ) -> Option<usize> {
         if let Some(kind) = type_filter {
-            if kind.eq_ignore_ascii_case(b"hash") {
-                return self.scan_key_iter(
+            return match kind {
+                kind if kind.eq_ignore_ascii_case(b"hash") => self.scan_key_iter(
                     self.hashes.keys(),
                     now_ms,
                     cursor_offset,
@@ -283,11 +343,10 @@ impl RedisObjectBucket {
                     visited,
                     emitted,
                     limit,
+                    true,
                     visitor,
-                );
-            }
-            if kind.eq_ignore_ascii_case(b"list") {
-                return self.scan_key_iter(
+                ),
+                kind if kind.eq_ignore_ascii_case(b"list") => self.scan_key_iter(
                     self.lists.keys(),
                     now_ms,
                     cursor_offset,
@@ -295,11 +354,10 @@ impl RedisObjectBucket {
                     visited,
                     emitted,
                     limit,
+                    false,
                     visitor,
-                );
-            }
-            if kind.eq_ignore_ascii_case(b"set") {
-                return self.scan_key_iter(
+                ),
+                kind if kind.eq_ignore_ascii_case(b"set") => self.scan_key_iter(
                     self.sets.keys(),
                     now_ms,
                     cursor_offset,
@@ -307,11 +365,10 @@ impl RedisObjectBucket {
                     visited,
                     emitted,
                     limit,
+                    false,
                     visitor,
-                );
-            }
-            if kind.eq_ignore_ascii_case(b"zset") {
-                return self.scan_key_iter(
+                ),
+                kind if kind.eq_ignore_ascii_case(b"zset") => self.scan_key_iter(
                     self.zsets.keys(),
                     now_ms,
                     cursor_offset,
@@ -319,10 +376,11 @@ impl RedisObjectBucket {
                     visited,
                     emitted,
                     limit,
+                    false,
                     visitor,
-                );
-            }
-            return None;
+                ),
+                _ => None,
+            };
         }
 
         if let Some(offset) = self.scan_key_iter(
@@ -333,6 +391,7 @@ impl RedisObjectBucket {
             visited,
             emitted,
             limit,
+            true,
             visitor,
         ) {
             return Some(offset);
@@ -345,6 +404,7 @@ impl RedisObjectBucket {
             visited,
             emitted,
             limit,
+            false,
             visitor,
         ) {
             return Some(offset);
@@ -357,6 +417,7 @@ impl RedisObjectBucket {
             visited,
             emitted,
             limit,
+            false,
             visitor,
         ) {
             return Some(offset);
@@ -369,6 +430,7 @@ impl RedisObjectBucket {
             visited,
             emitted,
             limit,
+            false,
             visitor,
         )
     }
@@ -383,6 +445,7 @@ impl RedisObjectBucket {
         visited: &mut usize,
         emitted: &mut usize,
         limit: usize,
+        hash_keys: bool,
         visitor: &mut impl FnMut(&[u8]) -> bool,
     ) -> Option<usize> {
         if !self.has_expirations() {
@@ -393,12 +456,16 @@ impl RedisObjectBucket {
                 visited,
                 emitted,
                 limit,
+                hash_keys.then_some((self, now_ms)),
                 visitor,
             );
         }
 
         for key in keys {
             if self.object_is_expired(key, now_ms) {
+                continue;
+            }
+            if hash_keys && !self.hash_has_live_fields(key, now_ms) {
                 continue;
             }
 
@@ -428,6 +495,24 @@ impl RedisObjectBucket {
     ) -> bool {
         for key in keys {
             if !self.object_is_expired(key, now_ms) && !visitor(key) {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline(always)]
+    fn visit_unexpired_live_hash_key_iter<'a>(
+        &self,
+        keys: impl Iterator<Item = &'a Bytes>,
+        now_ms: u64,
+        visitor: &mut impl FnMut(&[u8]) -> bool,
+    ) -> bool {
+        for key in keys {
+            if !self.object_is_expired(key, now_ms)
+                && self.hash_has_live_fields(key, now_ms)
+                && !visitor(key)
+            {
                 return false;
             }
         }
@@ -477,6 +562,21 @@ fn visit_key_iter<'a>(
     true
 }
 
+#[inline(always)]
+fn visit_live_hash_key_iter<'a>(
+    keys: impl Iterator<Item = &'a Bytes>,
+    now_ms: u64,
+    bucket: &RedisObjectBucket,
+    visitor: &mut impl FnMut(&[u8]) -> bool,
+) -> bool {
+    for key in keys {
+        if bucket.hash_has_live_fields(key, now_ms) && !visitor(key) {
+            return false;
+        }
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn scan_key_iter_no_expiration<'a>(
@@ -486,9 +586,15 @@ fn scan_key_iter_no_expiration<'a>(
     visited: &mut usize,
     emitted: &mut usize,
     limit: usize,
+    live_hash_filter: Option<(&RedisObjectBucket, u64)>,
     visitor: &mut impl FnMut(&[u8]) -> bool,
 ) -> Option<usize> {
     for key in keys {
+        if live_hash_filter
+            .is_some_and(|(bucket, now_ms)| !bucket.hash_has_live_fields(key, now_ms))
+        {
+            continue;
+        }
         if *position < cursor_offset {
             *position += 1;
             continue;

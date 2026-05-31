@@ -280,6 +280,9 @@ storage into a specialized runtime.
 | --- | --- | --- |
 | `sharded` | Yes | Embedded sharded map/cache API. |
 | `redis` | No | Redis/Valkey object and command behavior for shared internals. |
+| `redis-functions` | Via `redis-server` | Redis 7 `FUNCTION`/`FCALL` compatibility stubs with an empty function registry. |
+| `redis-modules` | Via `redis-server` | Redis `MODULE` compatibility stubs with an empty module registry and disabled loading. |
+| `redis-modules-all` | No | Aggregate Redis Modules compatibility facades, concrete command discovery metadata, and embedded APIs; individual `redis-module-*` flags can enable one module family at a time. |
 | `server` | No | TCP server internals used by the source-only `shardcache` package. |
 | `redis-server` | No | Server internals plus Redis/Valkey compatibility. |
 | `telemetry` | No | Embedded operational metrics. |

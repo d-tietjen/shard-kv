@@ -18,9 +18,12 @@ For the container-specific runbook, see
 `shardcache` server is a source-only workspace package for local/private
 deployments.
 
-`redis-server` implies both `server` and `redis`. Embedded-only builds
-are expected not to compile the Redis compatibility source package; guard this
-with `./scripts/check-feature-matrix.sh`.
+`redis-server` implies `server`, `redis`, `redis-functions`, and
+`redis-modules`. Embedded-only builds are expected not to compile the Redis
+compatibility source package; guard this with `./scripts/check-feature-matrix.sh`.
+Redis Modules command families stay behind `redis-modules-all` or the
+individual `redis-module-*` features so production builds only compile module
+facades they deliberately expose.
 
 The Dockerfile builds the same `shardcache` binary into a local image.
 Compose names that image `shardcache:local`; there is no Docker Hub or remote

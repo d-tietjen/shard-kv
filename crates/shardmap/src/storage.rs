@@ -42,6 +42,8 @@ mod telemetry;
 pub use command::{BorrowedCommand, Command};
 #[cfg(feature = "sharded")]
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
+#[cfg(feature = "redis-module-topk")]
+pub(crate) use embedded_store::TopKError;
 #[cfg(feature = "redis")]
 pub(crate) use embedded_store::{
     DEFAULT_SCAN_COUNT, RedisHashStore, RedisKeyScanType, RedisKeyStore, RedisListStore,
@@ -55,6 +57,8 @@ pub use embedded_store::{
     OwnedEmbeddedShard, OwnedEmbeddedWorkerReadSession, OwnedEmbeddedWorkerShards,
     PackedSessionWrite, shift_for, stripe_index,
 };
+#[cfg(feature = "redis-modules")]
+pub use embedded_store::{RedisModuleApi, RedisModuleApiResult, RedisModuleFamily};
 #[cfg(feature = "sharded")]
 pub use embedded_store_sharded::{
     LocalRouteError, LocalStoreAccessError, LocalStoreInstallError,
@@ -91,6 +95,8 @@ pub(crate) use engine::{
 };
 pub use flat_map::FlatMap;
 pub use records::{MutationBytes, MutationOp, MutationRecord, StoredEntry};
+#[cfg(feature = "redis")]
+pub(crate) use redis_objects::HashFieldExpireCond;
 #[cfg(feature = "redis")]
 pub(crate) use redis_objects::{
     RedisObjectBucket, RedisObjectReadOutcome, RedisObjectStore, RedisObjectValue,

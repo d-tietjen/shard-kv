@@ -148,12 +148,20 @@ run_depths() {
   local backend="$1"
   local addr="$2"
   local pid="$3"
-  echo "client sweep backend=${backend} vcpu_budget=${vcpu_budget} clients=${client_counts} depths=${pipeline_depths}"
+  # The SCNP direct-shard client must open one connection per server shard and
+  # route each key to its owner, independent of vcpu_budget. Pass the server's
+  # shard_count only for that backend; leave SCNP_SHARDS empty otherwise.
+  local scnp_shards=""
+  if [[ "$backend" == fc-server-scnp-direct* ]]; then
+    scnp_shards="$shard_count"
+  fi
+  echo "client sweep backend=${backend} vcpu_budget=${vcpu_budget} scnp_shards=${scnp_shards:-n/a} clients=${client_counts} depths=${pipeline_depths}"
   CSV="$csv" \
     BACKENDS="$backend" \
     ADDR="$addr" \
     SERVER_PID="$pid" \
     VCPU_BUDGET="$vcpu_budget" \
+    SCNP_SHARDS="$scnp_shards" \
     CLIENT_COUNTS="$client_counts" \
     PIPELINE_DEPTHS="$pipeline_depths" \
     VALUE_SIZE="${VALUE_SIZE:-64}" \

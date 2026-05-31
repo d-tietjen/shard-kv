@@ -425,12 +425,17 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
             return self.process_borrowed_resp(slice);
         };
 
-        if self.can_execute_resp_direct_without_parts(command_name)
-            && let Some(command) =
+        if self.can_execute_resp_direct_without_parts(command_name) {
+            #[cfg(feature = "redis")]
+            if self.try_execute_resp_static_without_parts(command_name, args.as_slice()) {
+                return Ok(RequestBufferStep::Consumed(consumed));
+            }
+            if let Some(command) =
                 DirectProtocol::parse_resp_direct_command(command_name, args.clone())
-        {
-            self.execute_resp_direct_without_parts(command);
-            return Ok(RequestBufferStep::Consumed(consumed));
+            {
+                self.execute_resp_direct_without_parts(command);
+                return Ok(RequestBufferStep::Consumed(consumed));
+            }
         }
 
         let mut parts = crate::protocol::BorrowedCommandParts::new();
@@ -491,6 +496,61 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
             *self.resp_protocol,
             self.started_at,
         );
+    }
+
+    #[cfg(feature = "redis")]
+    #[inline(always)]
+    fn try_execute_resp_static_without_parts(
+        &mut self,
+        command_name: &[u8],
+        args: &[&[u8]],
+    ) -> bool {
+        match command_name.len() {
+            3 if command_name.eq_ignore_ascii_case(b"ACL") => match args {
+                [subcommand, ..] if subcommand.eq_ignore_ascii_case(b"WHOAMI") => {
+                    self.write_buffer.extend_from_slice(b"$7\r\ndefault\r\n");
+                    true
+                }
+                _ => false,
+            },
+            5 if command_name.eq_ignore_ascii_case(b"RESET") => match args {
+                [] => {
+                    self.write_buffer.extend_from_slice(b"+RESET\r\n");
+                    true
+                }
+                _ => false,
+            },
+            6 if command_name.eq_ignore_ascii_case(b"CLIENT") => match args {
+                [subcommand] if subcommand.eq_ignore_ascii_case(b"GETNAME") => {
+                    ServerWire::write_resp_null(self.write_buffer, *self.resp_protocol);
+                    true
+                }
+                [subcommand] if subcommand.eq_ignore_ascii_case(b"ID") => {
+                    self.write_buffer.extend_from_slice(b":0\r\n");
+                    true
+                }
+                _ => false,
+            },
+            6 if command_name.eq_ignore_ascii_case(b"OBJECT") => match args {
+                [subcommand, key] if subcommand.eq_ignore_ascii_case(b"ENCODING") => {
+                    match self.store.object_encoding(key) {
+                        Some("raw") => self.write_buffer.extend_from_slice(b"$3\r\nraw\r\n"),
+                        Some(encoding) => {
+                            ServerWire::write_resp_blob_string(
+                                self.write_buffer,
+                                encoding.as_bytes(),
+                            );
+                        }
+                        None => {
+                            ServerWire::write_resp_null(self.write_buffer, *self.resp_protocol);
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     fn execute_resp_direct_with_parts(

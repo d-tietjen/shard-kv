@@ -175,6 +175,7 @@ fn main() -> Result<(), BoxError> {
                 read_mode: args.read_mode,
                 ..BenchmarkCacheConfig::default()
             },
+            0,
         ) {
             Ok(b) => b,
             Err(e) => {

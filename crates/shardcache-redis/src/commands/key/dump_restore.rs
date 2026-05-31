@@ -237,32 +237,38 @@ fn write_raw_string_bytes(out: &mut BytesMut, value: &[u8]) {
 }
 
 fn write_len(out: &mut Vec<u8>, len: u64) {
-    if len < (1 << 6) {
-        out.push(len as u8);
-    } else if len < (1 << 14) {
-        out.push(((len >> 8) as u8) | 0x40);
-        out.push((len & 0xff) as u8);
-    } else if u32::try_from(len).is_ok() {
-        out.push(0x80);
-        out.extend_from_slice(&(len as u32).to_be_bytes());
-    } else {
-        out.push(0x81);
-        out.extend_from_slice(&len.to_be_bytes());
+    match len {
+        len if len < (1 << 6) => out.push(len as u8),
+        len if len < (1 << 14) => {
+            out.push(((len >> 8) as u8) | 0x40);
+            out.push((len & 0xff) as u8);
+        }
+        len if u32::try_from(len).is_ok() => {
+            out.push(0x80);
+            out.extend_from_slice(&(len as u32).to_be_bytes());
+        }
+        len => {
+            out.push(0x81);
+            out.extend_from_slice(&len.to_be_bytes());
+        }
     }
 }
 
 #[cfg(feature = "server")]
 fn write_len_bytes(out: &mut BytesMut, len: u64) {
-    if len < (1 << 6) {
-        out.extend_from_slice(&[len as u8]);
-    } else if len < (1 << 14) {
-        out.extend_from_slice(&[((len >> 8) as u8) | 0x40, (len & 0xff) as u8]);
-    } else if u32::try_from(len).is_ok() {
-        out.extend_from_slice(&[0x80]);
-        out.extend_from_slice(&(len as u32).to_be_bytes());
-    } else {
-        out.extend_from_slice(&[0x81]);
-        out.extend_from_slice(&len.to_be_bytes());
+    match len {
+        len if len < (1 << 6) => out.extend_from_slice(&[len as u8]),
+        len if len < (1 << 14) => {
+            out.extend_from_slice(&[((len >> 8) as u8) | 0x40, (len & 0xff) as u8]);
+        }
+        len if u32::try_from(len).is_ok() => {
+            out.extend_from_slice(&[0x80]);
+            out.extend_from_slice(&(len as u32).to_be_bytes());
+        }
+        len => {
+            out.extend_from_slice(&[0x81]);
+            out.extend_from_slice(&len.to_be_bytes());
+        }
     }
 }
 
@@ -300,14 +306,11 @@ const fn make_crc64_jones_tables() -> [[u64; 256]; 8] {
 }
 
 fn rdb_len_width(len: u64) -> usize {
-    if len < (1 << 6) {
-        1
-    } else if len < (1 << 14) {
-        2
-    } else if u32::try_from(len).is_ok() {
-        5
-    } else {
-        9
+    match len {
+        len if len < (1 << 6) => 1,
+        len if len < (1 << 14) => 2,
+        len if u32::try_from(len).is_ok() => 5,
+        _ => 9,
     }
 }
 

@@ -346,18 +346,15 @@ pub(super) struct MultiDirectConnection;
 
 #[cfg(feature = "embedded")]
 impl MultiDirectConnection {
-    pub(super) async fn handle<S>(
-        stream: S,
+    pub(super) async fn handle(
+        stream: TcpStream,
         store: Arc<EmbeddedStore>,
         _permit: OwnedSemaphorePermit,
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
         transaction_coordinator: Option<Arc<TransactionCoordinator>>,
-    ) -> Result<()>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + 'static,
-    {
+    ) -> Result<()> {
         match TokioResponseWriterMode::configured() {
             TokioResponseWriterMode::Inline => {
                 Self::handle_inline(
@@ -386,18 +383,15 @@ impl MultiDirectConnection {
         }
     }
 
-    async fn handle_split<S>(
-        stream: S,
+    async fn handle_split(
+        stream: TcpStream,
         store: Arc<EmbeddedStore>,
         _permit: OwnedSemaphorePermit,
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
         transaction_coordinator: Option<Arc<TransactionCoordinator>>,
-    ) -> Result<()>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + 'static,
-    {
+    ) -> Result<()> {
         let (mut read_half, mut write_half) = tokio::io::split(stream);
         let (write_tx, mut write_rx) =
             tokio::sync::mpsc::channel::<bytes::Bytes>(WRITE_HANDOFF_MAX_ITEMS);
@@ -469,18 +463,15 @@ impl MultiDirectConnection {
         result
     }
 
-    async fn handle_inline<S>(
-        mut stream: S,
+    async fn handle_inline(
+        mut stream: TcpStream,
         store: Arc<EmbeddedStore>,
         _permit: OwnedSemaphorePermit,
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
         transaction_coordinator: Option<Arc<TransactionCoordinator>>,
-    ) -> Result<()>
-    where
-        S: AsyncRead + AsyncWrite + Unpin + 'static,
-    {
+    ) -> Result<()> {
         let mut frame_buffer = HandoffBuffer::with_config(HandoffConfig::buffer());
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
         let mut fast_write_queue = FastWriteQueue::default();
@@ -521,7 +512,7 @@ impl MultiDirectConnection {
                     write_buffer.reserve(CONNECTION_BUFFER_CAPACITY);
                 }
             } else if !write_buffer.is_empty() {
-                stream.write_all(&write_buffer).await?;
+                Self::write_inline_response(&mut stream, &write_buffer).await?;
                 write_buffer.clear();
                 if write_buffer.capacity() < READ_RESERVE_THRESHOLD {
                     write_buffer.reserve(CONNECTION_BUFFER_CAPACITY);
@@ -536,6 +527,22 @@ impl MultiDirectConnection {
 
         transaction_state.close(transaction_coordinator.as_deref());
         Ok(())
+    }
+
+    async fn write_inline_response(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
+        match stream.try_write(bytes) {
+            Ok(written) if written == bytes.len() => Ok(()),
+            Ok(written) => {
+                stream.write_all(&bytes[written..]).await?;
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                stream.writable().await?;
+                stream.write_all(bytes).await?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 }
 

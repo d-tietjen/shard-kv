@@ -19,7 +19,13 @@ use crate::storage::EmbeddedStore;
 pub(crate) struct Eval;
 
 #[derive(Debug, Clone, Copy)]
+pub(crate) struct EvalRo;
+
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct EvalSha;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EvalShaRo;
 
 type EvalKeysAndArgv<'a> = (&'a [&'a [u8]], &'a [&'a [u8]]);
 
@@ -27,7 +33,9 @@ type EvalKeysAndArgv<'a> = (&'a [&'a [u8]], &'a [&'a [u8]]);
 pub(crate) struct Script;
 
 pub(crate) static EVAL_COMMAND: Eval = Eval;
+pub(crate) static EVAL_RO_COMMAND: EvalRo = EvalRo;
 pub(crate) static EVALSHA_COMMAND: EvalSha = EvalSha;
+pub(crate) static EVALSHA_RO_COMMAND: EvalShaRo = EvalShaRo;
 pub(crate) static SCRIPT_COMMAND: Script = Script;
 
 impl crate::commands::CommandSpec for Eval {
@@ -35,9 +43,19 @@ impl crate::commands::CommandSpec for Eval {
     const MUTATES_VALUE: bool = true;
 }
 
+impl crate::commands::CommandSpec for EvalRo {
+    const NAME: &'static str = "EVAL_RO";
+    const MUTATES_VALUE: bool = false;
+}
+
 impl crate::commands::CommandSpec for EvalSha {
     const NAME: &'static str = "EVALSHA";
     const MUTATES_VALUE: bool = true;
+}
+
+impl crate::commands::CommandSpec for EvalShaRo {
+    const NAME: &'static str = "EVALSHA_RO";
+    const MUTATES_VALUE: bool = false;
 }
 
 impl crate::commands::CommandSpec for Script {
@@ -47,23 +65,45 @@ impl crate::commands::CommandSpec for Script {
 
 impl crate::commands::redis::RedisCommand for Eval {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        eval(store, args)
+        eval(store, args, "EVAL")
     }
 
     #[cfg(feature = "server")]
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-        write_eval_resp(store, args, out);
+        write_eval_resp(store, args, out, "EVAL");
+    }
+}
+
+impl crate::commands::redis::RedisCommand for EvalRo {
+    fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        eval(store, args, "EVAL_RO")
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_eval_resp(store, args, out, "EVAL_RO");
     }
 }
 
 impl crate::commands::redis::RedisCommand for EvalSha {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        evalsha(store, args)
+        evalsha(store, args, "EVALSHA")
     }
 
     #[cfg(feature = "server")]
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-        write_evalsha_resp(store, args, out);
+        write_evalsha_resp(store, args, out, "EVALSHA");
+    }
+}
+
+impl crate::commands::redis::RedisCommand for EvalShaRo {
+    fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        evalsha(store, args, "EVALSHA_RO")
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_evalsha_resp(store, args, out, "EVALSHA_RO");
     }
 }
 
@@ -87,24 +127,24 @@ pub(crate) fn script_route_key<'a>(args: &[&'a [u8]]) -> Option<&'a [u8]> {
     args.get(2).copied()
 }
 
-fn eval(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+fn eval(store: &EmbeddedStore, args: &[&[u8]], name: &str) -> Frame {
     let Some(script) = args.first().copied() else {
-        return wrong_arity("EVAL");
+        return wrong_arity(name);
     };
-    let Ok((keys, argv)) = eval_keys_and_argv("EVAL", args) else {
-        return eval_args_error("EVAL", args);
+    let Ok((keys, argv)) = eval_keys_and_argv(name, args) else {
+        return eval_args_error(name, args);
     };
     let digest = sha1(script);
     let script = cache_script(digest, script);
     run_script(store, &script, keys, argv)
 }
 
-fn evalsha(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+fn evalsha(store: &EmbeddedStore, args: &[&[u8]], name: &str) -> Frame {
     let Some(raw_sha) = args.first().copied() else {
-        return wrong_arity("EVALSHA");
+        return wrong_arity(name);
     };
-    let Ok((keys, argv)) = eval_keys_and_argv("EVALSHA", args) else {
-        return eval_args_error("EVALSHA", args);
+    let Ok((keys, argv)) = eval_keys_and_argv(name, args) else {
+        return eval_args_error(name, args);
     };
     let Some(digest) = parse_sha1_hex(raw_sha) else {
         return error("NOSCRIPT No matching script. Please use EVAL.");
@@ -116,13 +156,13 @@ fn evalsha(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
 }
 
 #[cfg(feature = "server")]
-fn write_eval_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+fn write_eval_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut, name: &str) {
     let Some(source) = args.first().copied() else {
-        write_frame(out, &wrong_arity("EVAL"));
+        write_frame(out, &wrong_arity(name));
         return;
     };
-    let Ok((keys, argv)) = eval_keys_and_argv("EVAL", args) else {
-        write_frame(out, &eval_args_error("EVAL", args));
+    let Ok((keys, argv)) = eval_keys_and_argv(name, args) else {
+        write_frame(out, &eval_args_error(name, args));
         return;
     };
     let script = cache_script(sha1(source), source);
@@ -130,13 +170,13 @@ fn write_eval_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
 }
 
 #[cfg(feature = "server")]
-fn write_evalsha_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+fn write_evalsha_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut, name: &str) {
     let Some(raw_sha) = args.first().copied() else {
-        write_frame(out, &wrong_arity("EVALSHA"));
+        write_frame(out, &wrong_arity(name));
         return;
     };
-    let Ok((keys, argv)) = eval_keys_and_argv("EVALSHA", args) else {
-        write_frame(out, &eval_args_error("EVALSHA", args));
+    let Ok((keys, argv)) = eval_keys_and_argv(name, args) else {
+        write_frame(out, &eval_args_error(name, args));
         return;
     };
     let Some(digest) = parse_sha1_hex(raw_sha) else {
@@ -522,7 +562,17 @@ impl ScriptRuntime<'_> {
             return Err("ERR Error running script: redis.call requires a command name".into());
         };
         let command = String::from_utf8_lossy(command).to_ascii_uppercase();
-        if command == "EVAL" || command == "EVALSHA" || command == "SCRIPT" {
+        if matches!(
+            command.as_str(),
+            "EVAL"
+                | "EVALSHA"
+                | "EVAL_RO"
+                | "EVALSHA_RO"
+                | "SCRIPT"
+                | "FUNCTION"
+                | "FCALL"
+                | "FCALL_RO"
+        ) {
             return Err("ERR This Redis command is not allowed from scripts".into());
         }
         let refs = args.iter().skip(1).map(Vec::as_slice).collect::<Vec<_>>();

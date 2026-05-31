@@ -39,6 +39,7 @@ macro_rules! define_stream_command {
 
 define_stream_command!(XAck, XACK_COMMAND, "XACK", true);
 define_stream_command!(XAdd, XADD_COMMAND, "XADD", true);
+define_stream_command!(XAutoClaim, XAUTOCLAIM_COMMAND, "XAUTOCLAIM", true);
 define_stream_command!(XClaim, XCLAIM_COMMAND, "XCLAIM", true);
 define_stream_command!(XDel, XDEL_COMMAND, "XDEL", true);
 define_stream_command!(XGroup, XGROUP_COMMAND, "XGROUP", true);
@@ -78,17 +79,15 @@ fn xadd_update(store: &EmbeddedStore, args: &[&[u8]]) -> Result<StreamId, Frame>
     {
         index += 1;
         let mut approximate = false;
-        if args
-            .get(index)
-            .is_some_and(|arg| eq_ignore_ascii_case(arg, b"~"))
-        {
-            approximate = true;
-            index += 1;
-        } else if args
-            .get(index)
-            .is_some_and(|arg| eq_ignore_ascii_case(arg, b"="))
-        {
-            index += 1;
+        match args.get(index) {
+            Some(arg) if eq_ignore_ascii_case(arg, b"~") => {
+                approximate = true;
+                index += 1;
+            }
+            Some(arg) if eq_ignore_ascii_case(arg, b"=") => {
+                index += 1;
+            }
+            _ => {}
         }
         let Some(count) = args.get(index) else {
             return Err(error("ERR syntax error"));
@@ -440,6 +439,27 @@ impl crate::commands::redis::RedisCommand for XClaim {
         if args.len() < 5 {
             write_resp_wrong_arity(out, "XCLAIM");
         } else {
+            write_resp_array_header(out, 0);
+        }
+    }
+}
+
+impl crate::commands::redis::RedisCommand for XAutoClaim {
+    fn execute(_store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        if args.len() < 5 {
+            wrong_arity("XAUTOCLAIM")
+        } else {
+            Frame::Array(vec![bulk(b"0-0".to_vec()), Frame::Array(Vec::new())])
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(_store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        if args.len() < 5 {
+            write_resp_wrong_arity(out, "XAUTOCLAIM");
+        } else {
+            write_resp_array_header(out, 2);
+            ServerWire::write_resp_blob_string(out, b"0-0");
             write_resp_array_header(out, 0);
         }
     }
@@ -1292,21 +1312,20 @@ fn parse_stream_id(raw: &[u8]) -> Result<StreamId, Frame> {
 }
 
 fn parse_range_bound(raw: &[u8], end: bool) -> Result<StreamId, Frame> {
-    if raw == b"-" {
-        Ok(StreamId { ms: 0, seq: 0 })
-    } else if raw == b"+" {
-        Ok(StreamId {
+    match raw {
+        b"-" => Ok(StreamId { ms: 0, seq: 0 }),
+        b"+" => Ok(StreamId {
             ms: u64::MAX,
             seq: u64::MAX,
-        })
-    } else if !raw.contains(&b'-') {
-        let ms = parse_u64(raw).map_err(|_| error("ERR Invalid stream ID specified"))?;
-        Ok(StreamId {
-            ms,
-            seq: if end { u64::MAX } else { 0 },
-        })
-    } else {
-        parse_stream_id(raw)
+        }),
+        raw if !raw.contains(&b'-') => {
+            let ms = parse_u64(raw).map_err(|_| error("ERR Invalid stream ID specified"))?;
+            Ok(StreamId {
+                ms,
+                seq: if end { u64::MAX } else { 0 },
+            })
+        }
+        _ => parse_stream_id(raw),
     }
 }
 

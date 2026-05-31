@@ -27,7 +27,7 @@ impl RedisKeyStore for EmbeddedStore {
                 return None;
             }
         }
-        bucket.clone_value(key)
+        bucket.clone_value(key, now_millis())
     }
 
     fn set_object_value(&self, key: &[u8], value: RedisObjectValue, ttl_ms: Option<u64>) {

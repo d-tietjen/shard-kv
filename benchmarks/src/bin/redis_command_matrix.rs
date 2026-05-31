@@ -1531,8 +1531,8 @@ mod tests {
         assert_eq!(
             expected_errors,
             [
-                "CLUSTER", "HOST:", "MIGRATE", "MONITOR", "MOVE", "POST", "PSYNC", "SHUTDOWN",
-                "SYNC",
+                "CLUSTER", "FAILOVER", "FCALL", "FCALL_RO", "HOST:", "MIGRATE", "MONITOR", "MOVE",
+                "POST", "PSYNC", "SHUTDOWN", "SYNC",
             ]
             .into_iter()
             .collect()

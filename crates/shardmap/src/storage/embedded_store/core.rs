@@ -36,6 +36,10 @@ impl EmbeddedStore {
                 shift,
                 #[cfg(feature = "redis")]
                 objects: RedisObjectStore::new(shard_count),
+                #[cfg(feature = "redis-modules")]
+                module_state: modules::RedisModuleState::new(shard_count),
+                #[cfg(feature = "redis-module-topk")]
+                topk: modules::TopKStore::new(shard_count),
                 route_mode,
             }
         }
@@ -82,6 +86,10 @@ impl EmbeddedStore {
             shift,
             #[cfg(feature = "redis")]
             objects: RedisObjectStore::new(shard_count),
+            #[cfg(feature = "redis-modules")]
+            module_state: modules::RedisModuleState::new(shard_count),
+            #[cfg(feature = "redis-module-topk")]
+            topk: modules::TopKStore::new(shard_count),
             route_mode,
             metrics,
         }
@@ -125,7 +133,7 @@ impl EmbeddedStore {
             .sum::<usize>();
         #[cfg(feature = "redis")]
         {
-            len + self.objects.object_count()
+            len + self.objects.live_object_count(now_millis())
         }
         #[cfg(not(feature = "redis"))]
         {

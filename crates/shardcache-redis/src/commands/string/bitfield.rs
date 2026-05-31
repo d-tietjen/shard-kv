@@ -18,31 +18,47 @@ define_redis_command!(BitField, "BITFIELD", true);
 
 impl crate::commands::redis::RedisCommand for BitField {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        match bitfield_values(store, args) {
-            Ok(values) => Frame::Array(
-                values
-                    .into_iter()
-                    .map(|value| value.map_or(Frame::Null, int))
-                    .collect(),
-            ),
-            Err(frame) => frame,
-        }
+        bitfield_frame(store, args, false)
     }
 
     #[cfg(feature = "server")]
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-        match bitfield_values(store, args) {
-            Ok(values) => {
-                write_resp_array_header(out, values.len());
-                for value in values {
-                    match value {
-                        Some(value) => ServerWire::write_resp_integer(out, value),
-                        None => write_resp_null(out),
-                    }
+        write_bitfield_resp(store, args, false, out);
+    }
+}
+
+/// Build the RESP `Frame` reply for BITFIELD / BITFIELD_RO.
+pub(crate) fn bitfield_frame(store: &EmbeddedStore, args: &[&[u8]], read_only: bool) -> Frame {
+    match bitfield_values(store, args, read_only) {
+        Ok(values) => Frame::Array(
+            values
+                .into_iter()
+                .map(|value| value.map_or(Frame::Null, int))
+                .collect(),
+        ),
+        Err(frame) => frame,
+    }
+}
+
+/// Stream the RESP reply for BITFIELD / BITFIELD_RO.
+#[cfg(feature = "server")]
+pub(crate) fn write_bitfield_resp(
+    store: &EmbeddedStore,
+    args: &[&[u8]],
+    read_only: bool,
+    out: &mut BytesMut,
+) {
+    match bitfield_values(store, args, read_only) {
+        Ok(values) => {
+            write_resp_array_header(out, values.len());
+            for value in values {
+                match value {
+                    Some(value) => ServerWire::write_resp_integer(out, value),
+                    None => write_resp_null(out),
                 }
             }
-            Err(frame) => write_frame(out, &frame),
         }
+        Err(frame) => write_frame(out, &frame),
     }
 }
 
@@ -80,17 +96,24 @@ enum BitFieldOp {
 fn bitfield_values(
     store: &EmbeddedStore,
     args: &[&[u8]],
+    read_only: bool,
 ) -> std::result::Result<Vec<Option<i64>>, Frame> {
+    let name = if read_only { "BITFIELD_RO" } else { "BITFIELD" };
     let [key, tail @ ..] = args else {
-        return Err(wrong_arity("BITFIELD"));
+        return Err(wrong_arity(name));
     };
     if tail.is_empty() {
-        return Err(wrong_arity("BITFIELD"));
+        return Err(wrong_arity(name));
     }
     let ops = parse_ops(tail)?;
     let has_writes = ops
         .iter()
         .any(|op| matches!(op, BitFieldOp::Set { .. } | BitFieldOp::IncrBy { .. }));
+
+    // BITFIELD_RO accepts only GET; any mutating subcommand is an error.
+    if read_only && has_writes {
+        return Err(error("ERR BITFIELD_RO only supports the GET subcommand"));
+    }
 
     if has_writes {
         apply_write_ops(store, key, &ops)

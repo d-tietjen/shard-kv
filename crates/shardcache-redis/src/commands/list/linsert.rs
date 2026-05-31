@@ -31,13 +31,13 @@ impl crate::commands::redis::RedisCommand for LInsert {
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
         match args {
             [key, where_, pivot, value] => {
-                let before = if eq_ignore_ascii_case(where_, b"BEFORE") {
-                    true
-                } else if eq_ignore_ascii_case(where_, b"AFTER") {
-                    false
-                } else {
-                    ServerWire::write_resp_error(out, "ERR syntax error");
-                    return;
+                let before = match *where_ {
+                    value if eq_ignore_ascii_case(value, b"BEFORE") => true,
+                    value if eq_ignore_ascii_case(value, b"AFTER") => false,
+                    _ => {
+                        ServerWire::write_resp_error(out, "ERR syntax error");
+                        return;
+                    }
                 };
                 write_result_resp(out, store.linsert(key, before, pivot, value));
             }

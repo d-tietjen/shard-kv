@@ -1,9 +1,14 @@
 use super::frame::*;
+#[cfg(feature = "redis-modules")]
+use crate::commands::admin::Module;
+#[cfg(feature = "redis-functions")]
+use crate::commands::function_cmd::{FCall, FCallRo, Function};
 use crate::commands::redis::RedisCommand;
 use crate::commands::{
+    acl::Acl,
     admin::{
-        Asking, BgRewriteAof, BgSave, Cluster, Debug, HostWarning, LastSave, Latency, Lolwut,
-        Migrate, Module, Monitor, Move, PSync, PostWarning, ReadOnly, ReadWrite, ReplConf,
+        Asking, BgRewriteAof, BgSave, Cluster, Debug, Failover, HostWarning, LastSave, Latency,
+        Lolwut, Migrate, Monitor, Move, PSync, PostWarning, ReadOnly, ReadWrite, ReplConf,
         ReplicaOf, Role, Save, Shutdown, SlowLog, Sort, SwapDb, Sync, Wait,
     },
     append::Append,
@@ -27,7 +32,7 @@ use crate::commands::{
     flush,
     geo::{
         GeoAdd, GeoDist, GeoHash, GeoPos, GeoRadius, GeoRadiusByMember, GeoRadiusByMemberRo,
-        GeoRadiusRo,
+        GeoRadiusRo, GeoSearch, GeoSearchStore,
     },
     getdel::GetDel,
     getrange::GetRange,
@@ -53,11 +58,13 @@ use crate::commands::{
     incrbyfloat::IncrByFloat,
     info::Info,
     keys::Keys,
+    lcs::Lcs,
     lindex::LIndex,
     linsert::LInsert,
     llen::LLen,
     lmpop::LMPop,
     lpop::LPop,
+    lpos::LPos,
     lpush::LPush,
     lpushx::LPushX,
     lrange::LRange,
@@ -70,8 +77,12 @@ use crate::commands::{
     msetnx::MSetNx,
     pexpiretime::PExpireTime,
     ping::Ping,
-    pubsub::{PSubscribe, PUnsubscribe, PubSub, Publish, Subscribe, Unsubscribe},
+    pubsub::{
+        PSubscribe, PUnsubscribe, PubSub, Publish, SPublish, SSubscribe, SUnsubscribe, Subscribe,
+        Unsubscribe,
+    },
     quit::Quit,
+    reset::Reset,
     restore::Restore,
     rpop::RPop,
     rpush::RPush,
@@ -79,7 +90,7 @@ use crate::commands::{
     sadd::SAdd,
     scan::Scan,
     scard::SCard,
-    scripting::{Eval, EvalSha, Script},
+    scripting::{Eval, EvalRo, EvalSha, EvalShaRo, Script},
     sdiff::SDiff,
     sdiffstore::SDiffStore,
     select::Select,
@@ -94,9 +105,10 @@ use crate::commands::{
     srandmember::SRandMember,
     srem::SRem,
     sscan::SScan,
+    stralgo::StrAlgo,
     stream::{
-        XAck, XAdd, XClaim, XDel, XGroup, XInfo, XLen, XPending, XRange, XRead, XReadGroup,
-        XRevRange, XSetId, XTrim,
+        XAck, XAdd, XAutoClaim, XClaim, XDel, XGroup, XInfo, XLen, XPending, XRange, XRead,
+        XReadGroup, XRevRange, XSetId, XTrim,
     },
     strlen::StrLen,
     sunion::SUnion,
@@ -140,6 +152,11 @@ use crate::protocol::Frame;
 use crate::storage::EmbeddedStore;
 
 pub(crate) fn dispatch(name: &str, store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+    #[cfg(feature = "redis-modules")]
+    if let Some(frame) = crate::commands::redis_modules::dispatch(name, store, args) {
+        return frame;
+    }
+
     match name {
         "PING" => Ping::execute(store, args),
         "AUTH" => Auth::execute(store, args),
@@ -148,7 +165,9 @@ pub(crate) fn dispatch(name: &str, store: &EmbeddedStore, args: &[&[u8]]) -> Fra
         "CONFIG" => Config::execute(store, args),
         "COMMAND" => CommandInfo::execute(store, args),
         "EVAL" => Eval::execute(store, args),
+        "EVAL_RO" => EvalRo::execute(store, args),
         "EVALSHA" => EvalSha::execute(store, args),
+        "EVALSHA_RO" => EvalShaRo::execute(store, args),
         "SCRIPT" => Script::execute(store, args),
         "HELLO" => Hello::execute(store, args),
         "QUIT" => Quit::execute(store, args),
@@ -157,12 +176,16 @@ pub(crate) fn dispatch(name: &str, store: &EmbeddedStore, args: &[&[u8]]) -> Fra
         "BGREWRITEAOF" => BgRewriteAof::execute(store, args),
         "BGSAVE" => BgSave::execute(store, args),
         "CLUSTER" => Cluster::execute(store, args),
+        "ACL" => Acl::execute(store, args),
+        "FAILOVER" => Failover::execute(store, args),
+        "RESET" => Reset::execute(store, args),
         "DEBUG" => Debug::execute(store, args),
         "HOST:" => HostWarning::execute(store, args),
         "LASTSAVE" => LastSave::execute(store, args),
         "LATENCY" => Latency::execute(store, args),
         "LOLWUT" => Lolwut::execute(store, args),
         "MIGRATE" => Migrate::execute(store, args),
+        #[cfg(feature = "redis-modules")]
         "MODULE" => Module::execute(store, args),
         "MONITOR" => Monitor::execute(store, args),
         "MOVE" => Move::execute(store, args),
@@ -183,15 +206,24 @@ pub(crate) fn dispatch(name: &str, store: &EmbeddedStore, args: &[&[u8]]) -> Fra
         "DBSIZE" => DbSize::execute(store, args),
         "FLUSHDB" => flush::FlushDb::execute(store, args),
         "FLUSHALL" => flush::FlushAll::execute(store, args),
+        #[cfg(feature = "redis-functions")]
+        "FUNCTION" => Function::execute(store, args),
+        #[cfg(feature = "redis-functions")]
+        "FCALL" => FCall::execute(store, args),
+        #[cfg(feature = "redis-functions")]
+        "FCALL_RO" => FCallRo::execute(store, args),
         "TIME" => Time::execute(store, args),
         "INFO" => Info::execute(store, args),
         "MEMORY" => Memory::execute(store, args),
         "PUBLISH" => Publish::execute(store, args),
+        "SPUBLISH" => SPublish::execute(store, args),
         "PUBSUB" => PubSub::execute(store, args),
         "SUBSCRIBE" => Subscribe::execute(store, args),
         "UNSUBSCRIBE" => Unsubscribe::execute(store, args),
         "PSUBSCRIBE" => PSubscribe::execute(store, args),
         "PUNSUBSCRIBE" => PUnsubscribe::execute(store, args),
+        "SSUBSCRIBE" => SSubscribe::execute(store, args),
+        "SUNSUBSCRIBE" => SUnsubscribe::execute(store, args),
         "TYPE" => TypeCommand::execute(store, args),
         "KEYS" => Keys::execute(store, args),
         "SCAN" => Scan::execute(store, args),
@@ -205,6 +237,8 @@ pub(crate) fn dispatch(name: &str, store: &EmbeddedStore, args: &[&[u8]]) -> Fra
         "SETRANGE" => SetRange::execute(store, args),
         "GETSET" => GetSet::execute(store, args),
         "GETDEL" => GetDel::execute(store, args),
+        "LCS" => Lcs::execute(store, args),
+        "STRALGO" => StrAlgo::execute(store, args),
         "INCR" => Incr::execute(store, args),
         "INCRBY" => IncrBy::execute(store, args),
         "DECR" => Decr::execute(store, args),
@@ -226,6 +260,8 @@ pub(crate) fn dispatch(name: &str, store: &EmbeddedStore, args: &[&[u8]]) -> Fra
         "GEORADIUS_RO" => GeoRadiusRo::execute(store, args),
         "GEORADIUSBYMEMBER" => GeoRadiusByMember::execute(store, args),
         "GEORADIUSBYMEMBER_RO" => GeoRadiusByMemberRo::execute(store, args),
+        "GEOSEARCH" => GeoSearch::execute(store, args),
+        "GEOSEARCHSTORE" => GeoSearchStore::execute(store, args),
         "HSET" => HSet::execute(store, args),
         "HGET" => HGet::execute(store, args),
         "HMGET" => HMGet::execute(store, args),
@@ -252,6 +288,7 @@ pub(crate) fn dispatch(name: &str, store: &EmbeddedStore, args: &[&[u8]]) -> Fra
         "LINSERT" => LInsert::execute(store, args),
         "LTRIM" => LTrim::execute(store, args),
         "LPOP" => LPop::execute(store, args),
+        "LPOS" => LPos::execute(store, args),
         "RPOP" => RPop::execute(store, args),
         "BLPOP" => BLPop::execute(store, args),
         "BRPOP" => BRPop::execute(store, args),
@@ -311,6 +348,7 @@ pub(crate) fn dispatch(name: &str, store: &EmbeddedStore, args: &[&[u8]]) -> Fra
         "BZMPOP" => BZMPop::execute(store, args),
         "XACK" => XAck::execute(store, args),
         "XADD" => XAdd::execute(store, args),
+        "XAUTOCLAIM" => XAutoClaim::execute(store, args),
         "XCLAIM" => XClaim::execute(store, args),
         "XDEL" => XDel::execute(store, args),
         "XGROUP" => XGroup::execute(store, args),
@@ -332,7 +370,11 @@ pub(super) fn route_key_for_command<'a>(name: &str, args: &[&'a [u8]]) -> Option
         return None;
     }
     match name {
-        "EVAL" | "EVALSHA" => crate::commands::scripting::script_route_key(args),
+        "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" => {
+            crate::commands::scripting::script_route_key(args)
+        }
+        #[cfg(feature = "redis-functions")]
+        "FCALL" | "FCALL_RO" => function_route_key(args),
         _ => args.first().copied(),
     }
 }
@@ -342,7 +384,19 @@ pub(super) fn route_key_for_owned_command<'a>(name: &str, args: &'a [Vec<u8>]) -
         return None;
     }
     match name {
-        "EVAL" | "EVALSHA" => {
+        "EVAL" | "EVALSHA" | "EVAL_RO" | "EVALSHA_RO" => {
+            let numkeys = args
+                .get(1)
+                .and_then(|raw| std::str::from_utf8(raw).ok())
+                .and_then(|raw| raw.parse::<usize>().ok())?;
+            if numkeys == 0 {
+                None
+            } else {
+                args.get(2).map(Vec::as_slice)
+            }
+        }
+        #[cfg(feature = "redis-functions")]
+        "FCALL" | "FCALL_RO" => {
             let numkeys = args
                 .get(1)
                 .and_then(|raw| std::str::from_utf8(raw).ok())
@@ -354,6 +408,19 @@ pub(super) fn route_key_for_owned_command<'a>(name: &str, args: &'a [Vec<u8>]) -
             }
         }
         _ => args.first().map(Vec::as_slice),
+    }
+}
+
+#[cfg(feature = "redis-functions")]
+fn function_route_key<'a>(args: &[&'a [u8]]) -> Option<&'a [u8]> {
+    let numkeys = args
+        .get(1)
+        .and_then(|raw| std::str::from_utf8(raw).ok())
+        .and_then(|raw| raw.parse::<usize>().ok())?;
+    if numkeys == 0 {
+        None
+    } else {
+        args.get(2).copied()
     }
 }
 
@@ -369,6 +436,7 @@ fn command_has_no_route_key(name: &str) -> bool {
             | "COMMAND"
             | "CONFIG"
             | "CLIENT"
+            | "FUNCTION"
             | "DBSIZE"
             | "TIME"
             | "INFO"
@@ -381,6 +449,10 @@ fn command_has_no_route_key(name: &str) -> bool {
             | "BGREWRITEAOF"
             | "BGSAVE"
             | "CLUSTER"
+            | "ACL"
+            | "FAILOVER"
+            | "RESET"
+            | "STRALGO"
             | "DEBUG"
             | "HOST:"
             | "LASTSAVE"
@@ -404,11 +476,14 @@ fn command_has_no_route_key(name: &str) -> bool {
             | "SYNC"
             | "WAIT"
             | "PUBLISH"
+            | "SPUBLISH"
             | "PUBSUB"
             | "SUBSCRIBE"
             | "UNSUBSCRIBE"
             | "PSUBSCRIBE"
             | "PUNSUBSCRIBE"
+            | "SSUBSCRIBE"
+            | "SUNSUBSCRIBE"
             | "PFDEBUG"
             | "PFSELFTEST"
             | "XGROUP"

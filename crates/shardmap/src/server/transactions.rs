@@ -548,6 +548,7 @@ enum SupplementalCommandKeySpec {
     AllShards,
     AllArgs,
     At(usize),
+    FirstN(usize),
     Counted { numkeys_index: usize },
     StreamRead,
     Sort,
@@ -564,6 +565,7 @@ impl SupplementalCommandKeySpec {
                 .copied()
                 .map(|key| FastRedisRouteKeys::Keys(vec![key]))
                 .unwrap_or(FastRedisRouteKeys::None),
+            Self::FirstN(count) => first_n_route_keys(args, count),
             Self::Counted { numkeys_index } => counted_route_keys(args, numkeys_index),
             Self::StreamRead => stream_read_route_keys(args),
             Self::Sort => sort_route_keys(args),
@@ -584,6 +586,7 @@ const SUPPLEMENTAL_COMMAND_KEY_SPECS: &[SupplementalCommandKeyEntry] = &[
             b"BGSAVE",
             b"CLUSTER",
             b"DEBUG",
+            b"FUNCTION",
             b"HOST:",
             b"LASTSAVE",
             b"LATENCY",
@@ -605,7 +608,10 @@ const SUPPLEMENTAL_COMMAND_KEY_SPECS: &[SupplementalCommandKeyEntry] = &[
             b"SHUTDOWN",
             b"SLAVEOF",
             b"SLOWLOG",
+            b"SPUBLISH",
             b"SUBSCRIBE",
+            b"SSUBSCRIBE",
+            b"SUNSUBSCRIBE",
             b"SYNC",
             b"UNSUBSCRIBE",
             b"WAIT",
@@ -613,8 +619,19 @@ const SUPPLEMENTAL_COMMAND_KEY_SPECS: &[SupplementalCommandKeyEntry] = &[
         spec: SupplementalCommandKeySpec::None,
     },
     SupplementalCommandKeyEntry {
-        names: &[b"EVAL", b"EVALSHA"],
+        names: &[
+            b"EVAL",
+            b"EVALSHA",
+            b"EVAL_RO",
+            b"EVALSHA_RO",
+            b"FCALL",
+            b"FCALL_RO",
+        ],
         spec: SupplementalCommandKeySpec::Counted { numkeys_index: 1 },
+    },
+    SupplementalCommandKeyEntry {
+        names: &[b"GEOSEARCHSTORE"],
+        spec: SupplementalCommandKeySpec::FirstN(2),
     },
     SupplementalCommandKeyEntry {
         names: &[b"MIGRATE", b"SWAPDB"],
@@ -637,7 +654,7 @@ const SUPPLEMENTAL_COMMAND_KEY_SPECS: &[SupplementalCommandKeyEntry] = &[
         spec: SupplementalCommandKeySpec::StreamRead,
     },
     SupplementalCommandKeyEntry {
-        names: &[b"SORT"],
+        names: &[b"SORT", b"SORT_RO"],
         spec: SupplementalCommandKeySpec::Sort,
     },
 ];

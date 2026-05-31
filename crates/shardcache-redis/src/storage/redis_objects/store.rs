@@ -44,6 +44,26 @@ impl RedisObjectStore {
         count
     }
 
+    pub(crate) fn live_object_count(&self, now_ms: u64) -> usize {
+        if !self.has_objects() {
+            return 0;
+        }
+
+        self.shards
+            .iter()
+            .map(|shard| {
+                if shard.object_count.load(Ordering::Acquire) <= 0 {
+                    return 0;
+                }
+                shard
+                    .buckets
+                    .iter()
+                    .map(|bucket| bucket.read().live_object_count(now_ms))
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
     #[inline(always)]
     pub(crate) fn read_bucket(
         &self,

@@ -210,6 +210,7 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Connection, "ECHO", "ECHO", ["ECHO", "hello"]),
     case!(Connection, "HELLO", "HELLO 2", ["HELLO", "2"]),
     case!(Connection, "SELECT", "SELECT", ["SELECT", "0"]),
+    case!(Connection, "RESET", "RESET", ["RESET"]),
     case!(
         Connection,
         "CLIENT",
@@ -269,6 +270,12 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "EVAL return bulk",
         ["EVAL", "return 'ok'", "0"]
     ),
+    case!(
+        Scripting,
+        "EVAL_RO",
+        "EVAL_RO return bulk",
+        ["EVAL_RO", "return 'ok'", "0"]
+    ),
     case_with_setup!(
         Scripting,
         "EVALSHA",
@@ -276,6 +283,30 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["EVALSHA", "34f6a80fdc91746367dd8b572351df66b92c67ed", "0"],
         [["SCRIPT", "LOAD", "return 'ok'"]]
     ),
+    case_with_setup!(
+        Scripting,
+        "EVALSHA_RO",
+        "EVALSHA_RO return bulk",
+        [
+            "EVALSHA_RO",
+            "34f6a80fdc91746367dd8b572351df66b92c67ed",
+            "0"
+        ],
+        [["SCRIPT", "LOAD", "return 'ok'"]]
+    ),
+    error_case!(
+        Scripting,
+        "FCALL",
+        "FCALL missing function",
+        ["FCALL", "missing", "0"]
+    ),
+    error_case!(
+        Scripting,
+        "FCALL_RO",
+        "FCALL_RO missing function",
+        ["FCALL_RO", "missing", "0"]
+    ),
+    case!(Scripting, "FUNCTION", "FUNCTION LIST", ["FUNCTION", "LIST"]),
     case!(
         Scripting,
         "SCRIPT",
@@ -323,16 +354,43 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     error_case!(Server, "SHUTDOWN", "SHUTDOWN disabled", ["SHUTDOWN"]),
     case!(Server, "SLOWLOG", "SLOWLOG LEN", ["SLOWLOG", "LEN"]),
     case!(Server, "SORT", "SORT missing", ["SORT", "sort-missing"]),
+    case_with_setup!(
+        Server,
+        "SORT_RO",
+        "SORT_RO list",
+        ["SORT_RO", "sortrok"],
+        [["RPUSH", "sortrok", "3", "1", "2"]]
+    ),
     case!(Server, "SWAPDB", "SWAPDB 0 0", ["SWAPDB", "0", "0"]),
     error_case!(Server, "SYNC", "SYNC unsupported", ["SYNC"]),
     case!(Server, "WAIT", "WAIT", ["WAIT", "1", "1"]),
+    case!(
+        Server,
+        "WAITAOF",
+        "WAITAOF no aof",
+        ["WAITAOF", "0", "0", "0"]
+    ),
+    case!(Server, "ACL", "ACL WHOAMI", ["ACL", "WHOAMI"]),
+    error_case!(Server, "FAILOVER", "FAILOVER unsupported", ["FAILOVER"]),
     case!(
         PubSub,
         "PUBLISH",
         "PUBLISH no subscribers",
         ["PUBLISH", "$key:bench-channel", "payload"]
     ),
+    case!(
+        PubSub,
+        "SPUBLISH",
+        "SPUBLISH no subscribers",
+        ["SPUBLISH", "$key:bench-shard-channel", "payload"]
+    ),
     case!(PubSub, "PUBSUB", "PUBSUB NUMPAT", ["PUBSUB", "NUMPAT"]),
+    case!(
+        PubSub,
+        "PUBSUB",
+        "PUBSUB SHARDNUMSUB",
+        ["PUBSUB", "SHARDNUMSUB", "$key:bench-shard-channel"]
+    ),
     case!(
         PubSub,
         "SUBSCRIBE",
@@ -353,9 +411,21 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(
         PubSub,
+        "SSUBSCRIBE",
+        "SSUBSCRIBE ack",
+        ["SSUBSCRIBE", "$key:bench-shard-channel"]
+    ),
+    case!(
+        PubSub,
         "PUNSUBSCRIBE",
         "PUNSUBSCRIBE ack",
         ["PUNSUBSCRIBE", "$key:bench-*"]
+    ),
+    case!(
+        PubSub,
+        "SUNSUBSCRIBE",
+        "SUNSUBSCRIBE ack",
+        ["SUNSUBSCRIBE", "$key:bench-shard-channel"]
     ),
     case_script!(
         Transaction,
@@ -651,6 +721,13 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ],
         [["SET", "$key:bitfield-bench", "AB"]]
     ),
+    case_with_setup!(
+        String,
+        "BITFIELD_RO",
+        "BITFIELD_RO GET",
+        ["BITFIELD_RO", "$key:bitfield-ro-bench", "GET", "u8", "0"],
+        [["SET", "$key:bitfield-ro-bench", "AB"]]
+    ),
     case!(String, "GETSET", "GETSET", ["GETSET", "s", "old"]),
     case_with_setup!(
         String,
@@ -660,6 +737,23 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         [["SET", "$key:getex-bench", "v"]]
     ),
     case!(String, "GETDEL", "GETDEL", ["GETDEL", "s-del"]),
+    case_with_setup!(
+        String,
+        "LCS",
+        "LCS LEN",
+        ["LCS", "lcs-a", "lcs-b", "LEN"],
+        [["SET", "lcs-a", "ohmytext"], ["SET", "lcs-b", "mynewtext"]]
+    ),
+    case_with_setup!(
+        String,
+        "STRALGO",
+        "STRALGO LCS LEN",
+        ["STRALGO", "LCS", "stralgo-a", "stralgo-b", "LEN"],
+        [
+            ["SET", "stralgo-a", "ohmytext"],
+            ["SET", "stralgo-b", "mynewtext"]
+        ]
+    ),
     case!(String, "INCR", "INCR", ["INCR", "n"]),
     case!(String, "INCRBY", "INCRBY", ["INCRBY", "n", "4"]),
     case!(String, "DECR", "DECR", ["DECR", "n"]),
@@ -774,6 +868,43 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "GEORADIUSBYMEMBER_RO",
         ["GEORADIUSBYMEMBER_RO", "$key:geo", "empire", "2", "km"],
         [["GEOADD", "$key:geo", "-73.9857", "40.7484", "empire"]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEOSEARCH",
+        "GEOSEARCH radius",
+        [
+            "GEOSEARCH",
+            "$key:geo",
+            "FROMMEMBER",
+            "empire",
+            "BYRADIUS",
+            "2",
+            "km"
+        ],
+        [[
+            "GEOADD", "$key:geo", "-73.9857", "40.7484", "empire", "-73.9897", "40.7411",
+            "flatiron"
+        ]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEOSEARCHSTORE",
+        "GEOSEARCHSTORE radius",
+        [
+            "GEOSEARCHSTORE",
+            "$key:geo-store",
+            "$key:geo",
+            "FROMMEMBER",
+            "empire",
+            "BYRADIUS",
+            "2",
+            "km"
+        ],
+        [[
+            "GEOADD", "$key:geo", "-73.9857", "40.7484", "empire", "-73.9897", "40.7411",
+            "flatiron"
+        ]]
     ),
     case!(
         Stream,
@@ -939,6 +1070,24 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case_with_setup!(
         Stream,
+        "XAUTOCLAIM",
+        "XAUTOCLAIM empty",
+        [
+            "XAUTOCLAIM",
+            "$key:stream-xautoclaim",
+            "g",
+            "c2",
+            "0",
+            "0-0"
+        ],
+        [
+            ["DEL", "$key:stream-xautoclaim"],
+            ["XADD", "$key:stream-xautoclaim", "1-0", "field", "value"],
+            ["XGROUP", "CREATE", "$key:stream-xautoclaim", "g", "0-0"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
         "XACK",
         "XACK empty",
         ["XACK", "$key:stream-xack", "g", "1-0"],
@@ -985,6 +1134,69 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(Hash, "HLEN", "HLEN", ["HLEN", "h"]),
     case!(Hash, "HEXISTS", "HEXISTS", ["HEXISTS", "h", "f2"]),
+    case_with_setup!(
+        Hash,
+        "HEXPIRE",
+        "HEXPIRE field",
+        ["HEXPIRE", "hflds", "100", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HTTL",
+        "HTTL field",
+        ["HTTL", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPTTL",
+        "HPTTL field",
+        ["HPTTL", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HEXPIRETIME",
+        "HEXPIRETIME field",
+        ["HEXPIRETIME", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPEXPIRETIME",
+        "HPEXPIRETIME field",
+        ["HPEXPIRETIME", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPERSIST",
+        "HPERSIST field",
+        ["HPERSIST", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPEXPIRE",
+        "HPEXPIRE field",
+        ["HPEXPIRE", "hflds", "100000", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HEXPIREAT",
+        "HEXPIREAT field",
+        ["HEXPIREAT", "hflds", "4102444800", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPEXPIREAT",
+        "HPEXPIREAT field",
+        ["HPEXPIREAT", "hflds", "4102444800000", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
     case!(Hash, "HSETNX", "HSETNX", ["HSETNX", "h", "f3", "v3"]),
     case_with_setup!(
         Hash,
@@ -1044,6 +1256,13 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(List, "LINDEX", "LINDEX", ["LINDEX", "l", "1"]),
     case!(List, "LSET", "LSET", ["LSET", "l", "1", "B"]),
     case!(List, "LREM", "LREM", ["LREM", "l", "0", "B"]),
+    case_with_setup!(
+        List,
+        "LPOS",
+        "LPOS rank count",
+        ["LPOS", "lpos-bench", "b", "RANK", "1", "COUNT", "0"],
+        [["RPUSH", "lpos-bench", "a", "b", "c", "b", "b"]]
+    ),
     case!(
         List,
         "LINSERT",
@@ -1111,6 +1330,12 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Set, "SMEMBERS", "SMEMBERS", ["SMEMBERS", "set-a"]),
     case!(Set, "SUNION", "SUNION", ["SUNION", "set-a", "set-b"]),
     case!(Set, "SINTER", "SINTER", ["SINTER", "set-a", "set-b"]),
+    case!(
+        Set,
+        "SINTERCARD",
+        "SINTERCARD limit",
+        ["SINTERCARD", "2", "set-a", "set-b", "LIMIT", "0"]
+    ),
     case!(Set, "SDIFF", "SDIFF", ["SDIFF", "set-a", "set-b"]),
     case!(
         Set,
@@ -1723,6 +1948,7 @@ pub const REDIS_COMMAND_LARGE_CASES: &[RedisCommandCase] = &[
 ];
 
 pub const BENCHMARKED_COMMANDS: &[&str] = &[
+    "ACL",
     "APPEND",
     "ASKING",
     "AUTH",
@@ -1730,6 +1956,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "BGSAVE",
     "BITCOUNT",
     "BITFIELD",
+    "BITFIELD_RO",
     "BITOP",
     "BITPOS",
     "BLMOVE",
@@ -1754,14 +1981,20 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "DUMP",
     "ECHO",
     "EVAL",
+    "EVAL_RO",
     "EVALSHA",
+    "EVALSHA_RO",
     "EXEC",
     "EXISTS",
     "EXPIRE",
     "EXPIREAT",
     "EXPIRETIME",
+    "FAILOVER",
+    "FCALL",
+    "FCALL_RO",
     "FLUSHALL",
     "FLUSHDB",
+    "FUNCTION",
     "GEOADD",
     "GEODIST",
     "GEOHASH",
@@ -1770,6 +2003,8 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "GEORADIUSBYMEMBER",
     "GEORADIUSBYMEMBER_RO",
     "GEORADIUS_RO",
+    "GEOSEARCH",
+    "GEOSEARCHSTORE",
     "GET",
     "GETBIT",
     "GETDEL",
@@ -1779,6 +2014,15 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "HELLO",
     "HDEL",
     "HEXISTS",
+    "HEXPIRE",
+    "HTTL",
+    "HPTTL",
+    "HEXPIRETIME",
+    "HPEXPIRETIME",
+    "HPERSIST",
+    "HPEXPIRE",
+    "HEXPIREAT",
+    "HPEXPIREAT",
     "HGET",
     "HGETALL",
     "HINCRBY",
@@ -1801,6 +2045,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "KEYS",
     "LASTSAVE",
     "LATENCY",
+    "LCS",
     "LINDEX",
     "LINSERT",
     "LLEN",
@@ -1808,6 +2053,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "LMOVE",
     "LMPOP",
     "LPOP",
+    "LPOS",
     "LPUSH",
     "LPUSHX",
     "LRANGE",
@@ -1849,6 +2095,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "RENAMENX",
     "REPLCONF",
     "REPLICAOF",
+    "RESET",
     "RESTORE",
     "RESTORE-ASKING",
     "ROLE",
@@ -1871,6 +2118,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "SETRANGE",
     "SHUTDOWN",
     "SINTER",
+    "SINTERCARD",
     "SINTERSTORE",
     "SISMEMBER",
     "SLAVEOF",
@@ -1879,15 +2127,20 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "SMISMEMBER",
     "SMOVE",
     "SORT",
+    "SORT_RO",
+    "SPUBLISH",
     "SPOP",
     "SRANDMEMBER",
     "SREM",
+    "SSUBSCRIBE",
     "SSCAN",
+    "STRALGO",
     "STRLEN",
     "SUBSCRIBE",
     "SUBSTR",
     "SUNION",
     "SUNIONSTORE",
+    "SUNSUBSCRIBE",
     "SWAPDB",
     "SYNC",
     "TIME",
@@ -1898,9 +2151,11 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "UNSUBSCRIBE",
     "UNWATCH",
     "WAIT",
+    "WAITAOF",
     "WATCH",
     "XACK",
     "XADD",
+    "XAUTOCLAIM",
     "XCLAIM",
     "XDEL",
     "XGROUP",
@@ -2285,7 +2540,8 @@ mod tests {
             .map(|case| case.command_name)
             .collect::<BTreeSet<_>>();
         let expected = [
-            "CLUSTER", "HOST:", "MIGRATE", "MONITOR", "MOVE", "POST", "PSYNC", "SHUTDOWN", "SYNC",
+            "CLUSTER", "FAILOVER", "FCALL", "FCALL_RO", "HOST:", "MIGRATE", "MONITOR", "MOVE",
+            "POST", "PSYNC", "SHUTDOWN", "SYNC",
         ]
         .into_iter()
         .collect::<BTreeSet<_>>();

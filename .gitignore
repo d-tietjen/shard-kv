@@ -1,5 +1,6 @@
 # Rust build outputs
 /target/
+/target-linux/
 /crates/*/target/
 /crates/fast-cache/src/bin/bench_*.rs
 

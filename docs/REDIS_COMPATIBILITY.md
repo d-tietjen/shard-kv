@@ -10,15 +10,15 @@ cargo run -p shardcache-benchmarks --bin redis_command_manifest -- --output docs
 
 | Metric | Count |
 | --- | ---: |
-| Supported commands | 222 |
+| Supported commands | 252 |
 | Missing commands | 0 |
-| Live benchmark cases | 289 |
-| Expected-error benchmark cases | 9 |
+| Live benchmark cases | 320 |
+| Expected-error benchmark cases | 12 |
 | Large-profile cases | 29 |
 | Destructive-profile cases | 2 |
 | Keyspace-wide benchmark cases | 8 |
 
-`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in shardcache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.1.0 compatibility surface.
+`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in shardcache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, missing function invocation, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.1.0 compatibility surface.
 
 ## Redis 5.0.14 Baseline
 
@@ -30,20 +30,22 @@ Official baseline: Redis 5.0.14 `redisCommandTable` from <https://github.com/red
 | Redis 5.0.14 commands supported and live-benchmarked | 200 |
 | Redis 5.0.14 commands explicitly excluded from 0.1.0 | 0 |
 | Redis 5.0.14 commands missing | 0 |
-| Supported extensions beyond Redis 5.0.14 | 22 |
+| Supported extensions beyond Redis 5.0.14 | 52 |
 
 No Redis 5.0.14 commands are excluded from the compatibility target. Redis 5.0.14 commands that are not supported yet are tracked as missing compatibility work.
 
 Missing Redis 5.0.14 commands: none.
 
-Supported extensions beyond Redis 5.0.14: `BLMOVE`, `BLMPOP`, `BZMPOP`, `COPY`, `EXPIRETIME`, `GETDEL`, `GETEX`, `HELLO`, `HRANDFIELD`, `LMOVE`, `LMPOP`, `PEXPIRETIME`, `SMISMEMBER`, `ZDIFF`, `ZDIFFSTORE`, `ZINTER`, `ZINTERCARD`, `ZMPOP`, `ZMSCORE`, `ZRANDMEMBER`, `ZRANGESTORE`, `ZUNION`.
+Supported extensions beyond Redis 5.0.14: `ACL`, `BITFIELD_RO`, `BLMOVE`, `BLMPOP`, `BZMPOP`, `COPY`, `EVALSHA_RO`, `EVAL_RO`, `EXPIRETIME`, `FAILOVER`, `FCALL`, `FCALL_RO`, `FUNCTION`, `GEOSEARCH`, `GEOSEARCHSTORE`, `GETDEL`, `GETEX`, `HELLO`, `HEXPIRE`, `HEXPIREAT`, `HEXPIRETIME`, `HPERSIST`, `HPEXPIRE`, `HPEXPIREAT`, `HPEXPIRETIME`, `HPTTL`, `HRANDFIELD`, `HTTL`, `LCS`, `LMOVE`, `LMPOP`, `LPOS`, `PEXPIRETIME`, `RESET`, `SINTERCARD`, `SMISMEMBER`, `SORT_RO`, `SPUBLISH`, `SSUBSCRIBE`, `STRALGO`, `SUNSUBSCRIBE`, `WAITAOF`, `XAUTOCLAIM`, `ZDIFF`, `ZDIFFSTORE`, `ZINTER`, `ZINTERCARD`, `ZMPOP`, `ZMSCORE`, `ZRANDMEMBER`, `ZRANGESTORE`, `ZUNION`.
 
 Explicit Redis 5.0.14 exclusions: none.
 
 ## Semantic Compatibility Notes
 
 - The manifest tracks live RESP command acceptance and benchmark coverage, not a promise that every edge case, exact error string, or background subsystem is byte-for-byte identical to Redis.
-- Expected-error commands are part of the compatibility surface in standalone mode. They intentionally return Redis-style errors for disabled cluster, replication, monitor, shutdown, module loading, migration, cross-DB movement, and security-warning paths.
+- Expected-error commands are part of the compatibility surface in standalone mode. They intentionally return Redis-style errors for disabled cluster, replication, monitor, shutdown, module loading, migration, cross-DB movement, missing function invocation, and security-warning paths.
+- Redis Functions and Redis module-loading compatibility live behind the `redis-functions` and `redis-modules` Cargo features. The default `redis-server` feature set enables both so Redis 7 clients can discover those surfaces without loading executable code.
+- Redis Modules command families and embedded API facades live behind `redis-modules-all` or individual `redis-module-*` Cargo features. Enabled module families expose concrete command names through `COMMAND LIST`/`COMMAND INFO`, accept the module namespace, and report enabled modules while returning explicit unsupported-engine errors until each module's storage engine is implemented.
 - Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.1.0 compatibility semantics.
 - Stream coverage includes basic append, length, range, reverse range, delete, trim, set-id, read, and minimal group/readgroup paths. Pending-entry-list, claim, ack, and detailed group/consumer introspection behavior is intentionally lightweight.
 - Scripting uses a constrained evaluator for return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. It is not a general Lua VM.
@@ -55,6 +57,7 @@ Explicit Redis 5.0.14 exclusions: none.
 
 | Family | Command | Status | Cases | Profiles | Keyspace Wide | Expected Error | Notes |
 | --- | --- | --- | ---: | --- | --- | --- | --- |
+| server | `ACL` | supported | 1 | small | no | no | Benchmark cases: ACL WHOAMI |
 | string | `APPEND` | supported | 1 | small | no | no | Benchmark cases: APPEND |
 | server | `ASKING` | supported | 1 | small | no | no | Benchmark cases: ASKING |
 | connection | `AUTH` | supported | 1 | small | no | no | Benchmark cases: AUTH |
@@ -62,6 +65,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | server | `BGSAVE` | supported | 1 | small | no | no | Benchmark cases: BGSAVE |
 | string | `BITCOUNT` | supported | 1 | small | no | no | Benchmark cases: BITCOUNT |
 | string | `BITFIELD` | supported | 1 | small | no | no | Benchmark cases: BITFIELD GET SET |
+| string | `BITFIELD_RO` | supported | 1 | small | no | no | Benchmark cases: BITFIELD_RO GET |
 | string | `BITOP` | supported | 1 | small | no | no | Benchmark cases: BITOP OR |
 | string | `BITPOS` | supported | 1 | small | no | no | Benchmark cases: BITPOS |
 | list | `BLMOVE` | supported | 1 | small | no | no | Benchmark cases: BLMOVE ready |
@@ -87,13 +91,19 @@ Explicit Redis 5.0.14 exclusions: none.
 | connection | `ECHO` | supported | 1 | small | no | no | Benchmark cases: ECHO |
 | scripting | `EVAL` | supported | 1 | small | no | no | Constrained scripting evaluator: return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. Benchmark cases: EVAL return bulk |
 | scripting | `EVALSHA` | supported | 1 | small | no | no | Constrained scripting evaluator: return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. Benchmark cases: EVALSHA return bulk |
+| scripting | `EVALSHA_RO` | supported | 1 | small | no | no | Constrained scripting evaluator: return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. Benchmark cases: EVALSHA_RO return bulk |
+| scripting | `EVAL_RO` | supported | 1 | small | no | no | Constrained scripting evaluator: return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. Benchmark cases: EVAL_RO return bulk |
 | transaction | `EXEC` | supported | 1 | small | no | no | Benchmark cases: MULTI EXEC SET GET |
 | key | `EXISTS` | supported | 1 | small | no | no | Benchmark cases: EXISTS mixed |
 | key | `EXPIRE` | supported | 2 | small | no | no | Benchmark cases: EXPIRE NX, EXPIRE future |
 | key | `EXPIREAT` | supported | 1 | small | no | no | Benchmark cases: EXPIREAT future |
 | key | `EXPIRETIME` | supported | 1 | small | no | no | Benchmark cases: EXPIRETIME future |
+| server | `FAILOVER` | supported | 1 | small | no | yes | Expected RESP error reply in standalone compatibility mode. Benchmark cases: FAILOVER unsupported |
+| scripting | `FCALL` | supported | 1 | small | no | yes | Empty function registry returns a Redis-style missing-function error. Benchmark cases: FCALL missing function |
+| scripting | `FCALL_RO` | supported | 1 | small | no | yes | Empty function registry returns a Redis-style missing-function error. Benchmark cases: FCALL_RO missing function |
 | server | `FLUSHALL` | supported | 1 | destructive | yes | no | Destructive perf matrix case; run separately with `CASES=profile:destructive`. Benchmark cases: FLUSHALL one key |
 | server | `FLUSHDB` | supported | 1 | destructive | yes | no | Destructive perf matrix case; run separately with `CASES=profile:destructive`. Benchmark cases: FLUSHDB one key |
+| scripting | `FUNCTION` | supported | 1 | small | no | no | `redis-functions` feature: empty function registry introspection/stub commands for Redis 7 clients. Benchmark cases: FUNCTION LIST |
 | geo | `GEOADD` | supported | 1 | small | no | no | Benchmark cases: GEOADD |
 | geo | `GEODIST` | supported | 1 | small | no | no | Benchmark cases: GEODIST |
 | geo | `GEOHASH` | supported | 1 | small | no | no | Benchmark cases: GEOHASH |
@@ -102,6 +112,8 @@ Explicit Redis 5.0.14 exclusions: none.
 | geo | `GEORADIUSBYMEMBER` | supported | 1 | small | no | no | Benchmark cases: GEORADIUSBYMEMBER |
 | geo | `GEORADIUSBYMEMBER_RO` | supported | 1 | small | no | no | Benchmark cases: GEORADIUSBYMEMBER_RO |
 | geo | `GEORADIUS_RO` | supported | 1 | small | no | no | Benchmark cases: GEORADIUS_RO |
+| geo | `GEOSEARCH` | supported | 1 | small | no | no | Benchmark cases: GEOSEARCH radius |
+| geo | `GEOSEARCHSTORE` | supported | 1 | small | no | no | Benchmark cases: GEOSEARCHSTORE radius |
 | string | `GET` | supported | 3 | large, small | no | no | Benchmark cases: GET large 4KiB value, GET large 64KiB value, GET string |
 | string | `GETBIT` | supported | 1 | small | no | no | Benchmark cases: GETBIT |
 | string | `GETDEL` | supported | 1 | small | no | no | Benchmark cases: GETDEL |
@@ -111,6 +123,9 @@ Explicit Redis 5.0.14 exclusions: none.
 | hash | `HDEL` | supported | 1 | small | no | no | Benchmark cases: HDEL |
 | connection | `HELLO` | supported | 1 | small | no | no | Benchmark cases: HELLO 2 |
 | hash | `HEXISTS` | supported | 1 | small | no | no | Benchmark cases: HEXISTS |
+| hash | `HEXPIRE` | supported | 1 | small | no | no | Benchmark cases: HEXPIRE field |
+| hash | `HEXPIREAT` | supported | 1 | small | no | no | Benchmark cases: HEXPIREAT field |
+| hash | `HEXPIRETIME` | supported | 1 | small | no | no | Benchmark cases: HEXPIRETIME field |
 | hash | `HGET` | supported | 1 | small | no | no | Benchmark cases: HGET |
 | hash | `HGETALL` | supported | 2 | large, small | no | no | Benchmark cases: HGETALL, HGETALL large 1K fields |
 | hash | `HINCRBY` | supported | 1 | small | no | no | Benchmark cases: HINCRBY |
@@ -120,11 +135,17 @@ Explicit Redis 5.0.14 exclusions: none.
 | hash | `HMGET` | supported | 2 | large, small | no | no | Benchmark cases: HMGET, HMGET large selected fields |
 | hash | `HMSET` | supported | 1 | small | no | no | Benchmark cases: HMSET |
 | server | `HOST:` | supported | 1 | small | no | yes | Expected RESP error reply in standalone compatibility mode. Benchmark cases: HOST attack warning |
+| hash | `HPERSIST` | supported | 1 | small | no | no | Benchmark cases: HPERSIST field |
+| hash | `HPEXPIRE` | supported | 1 | small | no | no | Benchmark cases: HPEXPIRE field |
+| hash | `HPEXPIREAT` | supported | 1 | small | no | no | Benchmark cases: HPEXPIREAT field |
+| hash | `HPEXPIRETIME` | supported | 1 | small | no | no | Benchmark cases: HPEXPIRETIME field |
+| hash | `HPTTL` | supported | 1 | small | no | no | Benchmark cases: HPTTL field |
 | hash | `HRANDFIELD` | supported | 1 | small | no | no | Benchmark cases: HRANDFIELD WITHVALUES |
 | hash | `HSCAN` | supported | 2 | large, small | no | no | Benchmark cases: HSCAN, HSCAN large 1K fields |
 | hash | `HSET` | supported | 1 | small | no | no | Benchmark cases: HSET |
 | hash | `HSETNX` | supported | 1 | small | no | no | Benchmark cases: HSETNX |
 | hash | `HSTRLEN` | supported | 1 | small | no | no | Benchmark cases: HSTRLEN |
+| hash | `HTTL` | supported | 1 | small | no | no | Benchmark cases: HTTL field |
 | hash | `HVALS` | supported | 2 | large, small | no | no | Benchmark cases: HVALS, HVALS large 1K fields |
 | string | `INCR` | supported | 1 | small | no | no | Benchmark cases: INCR |
 | string | `INCRBY` | supported | 1 | small | no | no | Benchmark cases: INCRBY |
@@ -133,6 +154,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | key | `KEYS` | supported | 2 | large, small | yes | no | Benchmark cases: KEYS all, KEYS large keyspace |
 | server | `LASTSAVE` | supported | 1 | small | no | no | Benchmark cases: LASTSAVE |
 | server | `LATENCY` | supported | 1 | small | no | no | Benchmark cases: LATENCY LATEST |
+| string | `LCS` | supported | 1 | small | no | no | Benchmark cases: LCS LEN |
 | list | `LINDEX` | supported | 2 | large, small | no | no | Benchmark cases: LINDEX, LINDEX large middle |
 | list | `LINSERT` | supported | 1 | small | no | no | Benchmark cases: LINSERT |
 | list | `LLEN` | supported | 2 | large, small | no | no | Benchmark cases: LLEN, LLEN large 1K list |
@@ -140,6 +162,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | list | `LMPOP` | supported | 1 | small | no | no | Benchmark cases: LMPOP left count |
 | server | `LOLWUT` | supported | 1 | small | no | no | Benchmark cases: LOLWUT |
 | list | `LPOP` | supported | 1 | small | no | no | Benchmark cases: LPOP |
+| list | `LPOS` | supported | 1 | small | no | no | Benchmark cases: LPOS rank count |
 | list | `LPUSH` | supported | 1 | small | no | no | Benchmark cases: LPUSH |
 | list | `LPUSHX` | supported | 1 | small | no | no | Benchmark cases: LPUSHX missing |
 | list | `LRANGE` | supported | 2 | large, small | no | no | Benchmark cases: LRANGE, LRANGE large 1K full |
@@ -149,7 +172,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | server | `MEMORY` | supported | 1 | small | no | no | Benchmark cases: MEMORY USAGE string |
 | string | `MGET` | supported | 1 | small | no | no | Benchmark cases: MGET order |
 | server | `MIGRATE` | supported | 1 | small | no | yes | Expected RESP error reply in standalone compatibility mode. Benchmark cases: MIGRATE unsupported |
-| server | `MODULE` | supported | 1 | small | no | no | Benchmark cases: MODULE LIST |
+| server | `MODULE` | supported | 1 | small | no | no | `redis-modules` feature: empty module registry introspection and disabled load/unload stubs. Benchmark cases: MODULE LIST |
 | server | `MONITOR` | supported | 1 | small | no | yes | Expected RESP error reply in standalone compatibility mode. Benchmark cases: MONITOR disabled |
 | server | `MOVE` | supported | 1 | small | no | yes | Expected RESP error reply in standalone compatibility mode. Benchmark cases: MOVE same db |
 | string | `MSET` | supported | 1 | small | no | no | Benchmark cases: MSET |
@@ -172,7 +195,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | server | `PSYNC` | supported | 1 | small | no | yes | Expected RESP error reply in standalone compatibility mode. Benchmark cases: PSYNC unsupported |
 | key | `PTTL` | supported | 1 | small | no | no | Benchmark cases: PTTL positive |
 | pubsub | `PUBLISH` | supported | 1 | small | no | no | Benchmark cases: PUBLISH no subscribers |
-| pubsub | `PUBSUB` | supported | 1 | small | no | no | Benchmark cases: PUBSUB NUMPAT |
+| pubsub | `PUBSUB` | supported | 2 | small | no | no | Benchmark cases: PUBSUB NUMPAT, PUBSUB SHARDNUMSUB |
 | pubsub | `PUNSUBSCRIBE` | supported | 1 | small | no | no | Benchmark cases: PUNSUBSCRIBE ack |
 | key | `RANDOMKEY` | supported | 1 | small | yes | no | Benchmark cases: RANDOMKEY nonempty |
 | server | `READONLY` | supported | 1 | small | no | no | Benchmark cases: READONLY |
@@ -181,6 +204,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | key | `RENAMENX` | supported | 1 | small | no | no | Benchmark cases: RENAMENX existing dest |
 | server | `REPLCONF` | supported | 1 | small | no | no | Benchmark cases: REPLCONF ACK |
 | server | `REPLICAOF` | supported | 1 | small | no | no | Benchmark cases: REPLICAOF NO ONE |
+| connection | `RESET` | supported | 1 | small | no | no | Benchmark cases: RESET |
 | key | `RESTORE` | supported | 1 | small | no | no | Benchmark cases: RESTORE string replace |
 | key | `RESTORE-ASKING` | supported | 1 | small | no | no | Benchmark cases: RESTORE-ASKING string replace |
 | server | `ROLE` | supported | 1 | small | no | no | Benchmark cases: ROLE |
@@ -203,6 +227,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | string | `SETRANGE` | supported | 1 | small | no | no | Benchmark cases: SETRANGE |
 | server | `SHUTDOWN` | supported | 1 | small | no | yes | Expected RESP error reply in standalone compatibility mode. Benchmark cases: SHUTDOWN disabled |
 | set | `SINTER` | supported | 1 | small | no | no | Benchmark cases: SINTER |
+| set | `SINTERCARD` | supported | 1 | small | no | no | Benchmark cases: SINTERCARD limit |
 | set | `SINTERSTORE` | supported | 1 | small | no | no | Benchmark cases: SINTERSTORE |
 | set | `SISMEMBER` | supported | 1 | small | no | no | Benchmark cases: SISMEMBER |
 | server | `SLAVEOF` | supported | 1 | small | no | no | Benchmark cases: SLAVEOF NO ONE |
@@ -211,15 +236,20 @@ Explicit Redis 5.0.14 exclusions: none.
 | set | `SMISMEMBER` | supported | 2 | large, small | no | no | Benchmark cases: SMISMEMBER, SMISMEMBER large selected |
 | set | `SMOVE` | supported | 1 | small | no | no | Benchmark cases: SMOVE |
 | server | `SORT` | supported | 1 | small | no | no | Benchmark cases: SORT missing |
+| server | `SORT_RO` | supported | 1 | small | no | no | Benchmark cases: SORT_RO list |
 | set | `SPOP` | supported | 1 | small | no | no | Benchmark cases: SPOP |
+| pubsub | `SPUBLISH` | supported | 1 | small | no | no | Benchmark cases: SPUBLISH no subscribers |
 | set | `SRANDMEMBER` | supported | 2 | large, small | no | no | Benchmark cases: SRANDMEMBER, SRANDMEMBER large 32 |
 | set | `SREM` | supported | 1 | small | no | no | Benchmark cases: SREM |
 | set | `SSCAN` | supported | 2 | large, small | no | no | Benchmark cases: SSCAN, SSCAN large 1K set |
+| pubsub | `SSUBSCRIBE` | supported | 1 | small | no | no | Benchmark cases: SSUBSCRIBE ack |
+| string | `STRALGO` | supported | 1 | small | no | no | Benchmark cases: STRALGO LCS LEN |
 | string | `STRLEN` | supported | 2 | large, small | no | no | Benchmark cases: STRLEN, STRLEN large 64KiB value |
 | pubsub | `SUBSCRIBE` | supported | 1 | small | no | no | Benchmark cases: SUBSCRIBE ack |
 | string | `SUBSTR` | supported | 1 | small | no | no | Benchmark cases: SUBSTR |
 | set | `SUNION` | supported | 1 | small | no | no | Benchmark cases: SUNION |
 | set | `SUNIONSTORE` | supported | 1 | small | no | no | Benchmark cases: SUNIONSTORE |
+| pubsub | `SUNSUBSCRIBE` | supported | 1 | small | no | no | Benchmark cases: SUNSUBSCRIBE ack |
 | server | `SWAPDB` | supported | 1 | small | no | no | Benchmark cases: SWAPDB 0 0 |
 | server | `SYNC` | supported | 1 | small | no | yes | Expected RESP error reply in standalone compatibility mode. Benchmark cases: SYNC unsupported |
 | server | `TIME` | supported | 1 | small | no | no | Benchmark cases: TIME |
@@ -230,9 +260,11 @@ Explicit Redis 5.0.14 exclusions: none.
 | pubsub | `UNSUBSCRIBE` | supported | 1 | small | no | no | Benchmark cases: UNSUBSCRIBE ack |
 | transaction | `UNWATCH` | supported | 1 | small | no | no | Benchmark cases: UNWATCH simple |
 | server | `WAIT` | supported | 1 | small | no | no | Benchmark cases: WAIT |
+| server | `WAITAOF` | supported | 1 | small | no | no | Benchmark cases: WAITAOF no aof |
 | transaction | `WATCH` | supported | 1 | small | no | no | Benchmark cases: WATCH simple |
 | stream | `XACK` | supported | 1 | small | no | no | Benchmark cases: XACK empty |
 | stream | `XADD` | supported | 1 | small | no | no | Benchmark cases: XADD |
+| stream | `XAUTOCLAIM` | supported | 1 | small | no | no | Benchmark cases: XAUTOCLAIM empty |
 | stream | `XCLAIM` | supported | 1 | small | no | no | Benchmark cases: XCLAIM empty |
 | stream | `XDEL` | supported | 1 | small | no | no | Benchmark cases: XDEL |
 | stream | `XGROUP` | supported | 1 | small | no | no | Benchmark cases: XGROUP CREATECONSUMER |

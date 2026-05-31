@@ -107,7 +107,16 @@ pub fn make(
     addr: Option<&str>,
     key_count: usize,
     cache_config: BenchmarkCacheConfig,
+    scnp_shards: usize,
 ) -> Result<Arc<dyn Backend>, BoxError> {
+    // The SCNP direct-shard client must fan out to exactly the server's shard
+    // count so every key's owning shard has a connection. This is decoupled from
+    // vcpu_budget; 0 means "fall back to vcpu_budget" for backward compatibility.
+    let scnp_shard_count = if scnp_shards == 0 {
+        vcpu_budget.max(1).next_power_of_two()
+    } else {
+        scnp_shards.next_power_of_two()
+    };
     Ok(match id {
         "fc-embed" => Arc::new(fc_embed::FcEmbed::new(
             vcpu_budget.max(worker_count).max(1).next_power_of_two(),
@@ -293,7 +302,7 @@ pub fn make(
             })?;
             Arc::new(scnp::ScnpBackend::new_direct_shards(
                 addr,
-                vcpu_budget.max(1).next_power_of_two(),
+                scnp_shard_count,
             )?)
         }
         other => return Err(format!("unknown backend id: {other}").into()),
