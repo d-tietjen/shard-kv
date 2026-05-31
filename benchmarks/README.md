@@ -215,14 +215,46 @@ compatibility manifest captured at the same git SHA. Use
 
 ### Current Adam Command Snapshot
 
-The latest no-keyspace Redis-command matrix was run on `adam` on 2026-05-24
-with 16 clients, 16 key shards, `SHARD_COUNT=16`, shared keyspace fixtures,
-and direct shard ports enabled at `127.0.0.1:6384+16`. The shardcache rows use
-the pass-2 optimized artifacts below; Redis/Valkey/Dragonfly rows are saved
-reference rows from the same Adam setup so shardcache can be rerun without
-rerunning external services. Transaction cases are skipped for direct shard
-ports because transactions are connection-scoped and intentionally unsupported
-on shard-owned listeners.
+The latest single-vCPU, strict request/response Redis-command coverage run was
+run on `adam` on 2026-05-31 at git
+`51c9dcede546310afb97657b81c18c4599d63da8`. Both shardcache and Redis were
+pinned to one server CPU, with 1 client, 1 key shard, `SHARD_COUNT=1`, pipeline
+depth 1, 1s warmup, and 2s measurement. Redis ran as an isolated
+`redis:7.4-alpine` container on `127.0.0.1:6390`; shardcache ran on
+`127.0.0.1:6383`.
+
+The head-to-head matrix intentionally skips operational Redis cases that close,
+stream, terminate, or block the live Redis connection instead of returning a
+normal bounded command reply: `HOST:`, `POST`, `MONITOR`, `PSYNC`, `SYNC`,
+`SHUTDOWN`, and `REPLCONF`. Those commands remain covered by compatibility
+tests, but are not meaningful throughput rows against a live Redis baseline.
+Redis module commands are also outside this vanilla Redis run; module
+head-to-head results need module-specific Redis/Redis Stack baselines.
+
+Artifacts:
+
+- `benchmarks/results/adam-core-no-keyspace-1vcpu-p1-20260531T212743Z/report.md`
+- `benchmarks/results/adam-core-keyspace-1vcpu-p1-20260531T212808Z/report.md`
+- `benchmarks/results/adam-core-destructive-1vcpu-p1-20260531T212831Z/report.md`
+
+| Profile | Cases | shardcache ops/sec | Redis ops/sec | sc/redis | shardcache mean avg us | Redis mean avg us | Errors |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| no-keyspace | 305 | 30,355 | 605 | 50.17x | 32.9 | 1,640.8 | sc 0 / redis 32 |
+| no-keyspace, zero-error common subset | 297 | 29,558 | 589 | 50.18x | 33.1 | 1,678.2 | sc 0 / redis 0 |
+| keyspace-wide | 6 | 3,643 | 2,121 | 1.72x | 274.5 | 471.3 | sc 0 / redis 0 |
+| destructive | 2 | 22,996 | 7,348 | 3.13x | 43.4 | 136.0 | sc 0 / redis 0 |
+
+Redis was not faster by average command latency on any zero-error common case in
+these profiles: 0/297 no-keyspace, 0/6 keyspace-wide, and 0/2 destructive.
+
+The earlier scaling-oriented no-keyspace Redis-command matrix was run on `adam`
+on 2026-05-24 with 16 clients, 16 key shards, `SHARD_COUNT=16`, shared keyspace
+fixtures, and direct shard ports enabled at `127.0.0.1:6384+16`. The shardcache
+rows use the pass-2 optimized artifacts below; Redis/Valkey/Dragonfly rows are
+saved reference rows from the same Adam setup so shardcache can be rerun without
+rerunning external services. Transaction cases are skipped for direct shard ports
+because transactions are connection-scoped and intentionally unsupported on
+shard-owned listeners.
 
 Depth 1, strict request/response:
 
