@@ -28,6 +28,7 @@ artifact or still needs a fresh run.
 | shardcache vs Redis / Valkey / Dragonfly TCP | [`SHARDCACHE_VS_REDIS_TCP.md`](SHARDCACHE_VS_REDIS_TCP.md) | Saturation matrix across value sizes, mixes, clients, and pipeline depths | Publishable for TCP throughput claims. |
 | shardcache vs Redis command-by-command | [`REDIS_HEAD_TO_HEAD_BENCHMARKS.md`](REDIS_HEAD_TO_HEAD_BENCHMARKS.md) | Redis 5.0 compatibility surface and saved per-command rows | Compatibility coverage is complete; some saved head-to-head cells are marked `n/a` where that exact shape has not been rerun. |
 | RESP v6/v7 command surface (LPOS, LCS/STRALGO, XAUTOCLAIM, RESET, ACL, FAILOVER, function commands, Redis 7 hash-field TTL, and other Redis 6/7 extensions) | [`RESP_V6_COMMAND_BENCHMARKS.md`](RESP_V6_COMMAND_BENCHMARKS.md), [`RESP_V7_HASH_TTL_BENCHMARKS.md`](RESP_V7_HASH_TTL_BENCHMARKS.md) | In-process/server throughput snapshots plus 2026-05-31 Adam command-matrix coverage for the full v6/v7 extension set and full Hash family | Publishable for the focused rows; use the full matrix as coverage/broad mixed-loop comparison and isolate blocking commands for single-command claims. |
+| Redis module command surface | [`REDIS_MODULE_COMMAND_BENCHMARKS.md`](REDIS_MODULE_COMMAND_BENCHMARKS.md) | 2026-05-31 Adam command-matrix coverage for 227 feature-gated module command cases against Redis Stack | Full shardcache module coverage recorded; Redis Stack unsupported-module rows are baseline-error coverage, not performance claims. |
 | shardmap embedded vs Moka | [`SHARDMAP_VS_MOKA_EMBEDDED.md`](SHARDMAP_VS_MOKA_EMBEDDED.md) | Embedded owner-local shardmap against `moka::sync::Cache` | Publishable for this embedded comparison. |
 | Embedded release matrix | [`SHARDMAP_EMBEDDED_RELEASE.md`](SHARDMAP_EMBEDDED_RELEASE.md) | Direct, shared, TTL, LRU, and selected Rust-cache baselines | Publishable as a release proof, not a single competitor-only report. |
 | LMCache plugin vs Redis TCP | [`LMCACHE_VS_REDIS.md`](LMCACHE_VS_REDIS.md) | shardcache LMCache embedded and SCNP/TCP against Redis TCP | Publishable for the recorded Linux run; rerun before making new M5 or 5MiB LMCache claims. |
@@ -229,7 +230,7 @@ normal bounded command reply: `HOST:`, `POST`, `MONITOR`, `PSYNC`, `SYNC`,
 `SHUTDOWN`, and `REPLCONF`. Those commands remain covered by compatibility
 tests, but are not meaningful throughput rows against a live Redis baseline.
 Redis module commands are also outside this vanilla Redis run; module
-head-to-head results need module-specific Redis/Redis Stack baselines.
+head-to-head results are tracked in the Redis Stack module-command matrix.
 
 Artifacts:
 
@@ -246,6 +247,31 @@ Artifacts:
 
 Redis was not faster by average command latency on any zero-error common case in
 these profiles: 0/297 no-keyspace, 0/6 keyspace-wide, and 0/2 destructive.
+
+### Current Adam Module Command Snapshot
+
+The Redis Stack module-command matrix was run on `adam` on 2026-05-31 at git
+`9db56cb9fe575daa363478074d582708a6d10948`. shardcache was built with
+`redis-server,redis-modules-all`; both servers were pinned to one server CPU
+with 1 client, 1 key shard, pipeline depth 1, 1s warmup, and 2s measurement.
+The baseline was `redis/redis-stack-server:latest` on `127.0.0.1:6391`.
+
+Artifacts:
+
+- `benchmarks/results/adam-module-command-matrix-1vcpu-p1-20260531T214753Z/report.md`
+- [`REDIS_MODULE_COMMAND_BENCHMARKS.md`](REDIS_MODULE_COMMAND_BENCHMARKS.md)
+
+| Scope | Cases | shardcache ops/sec | Redis Stack ops/sec | sc/redis | shardcache mean avg us | Redis Stack mean avg us | Redis faster cases |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all module cases | 227 | 25,127.5 | 14,580.0 | 1.72x | 39.7 | 68.5 | n/a |
+| clean non-error common subset | 96 | 10,623.0 | 6,165.5 | 1.72x | 44.7 | 77.9 | 0 |
+| zero-unexpected-error common subset | 109 | 12,061.5 | 6,999.5 | 1.72x | 42.8 | 78.1 | 0 |
+
+shardcache completed all 227 module command cases with zero unexpected errors.
+Redis Stack returned unexpected errors on 118 command cases from modules or
+command shapes not supported by that image, so those rows prove coverage and
+baseline behavior rather than performance. For command-level rows, see the
+module benchmark document.
 
 The earlier scaling-oriented no-keyspace Redis-command matrix was run on `adam`
 on 2026-05-24 with 16 clients, 16 key shards, `SHARD_COUNT=16`, shared keyspace
