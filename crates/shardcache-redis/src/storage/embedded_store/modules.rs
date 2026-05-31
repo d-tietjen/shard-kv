@@ -3,6 +3,8 @@
 use super::EmbeddedStore;
 #[cfg(feature = "redis-modules")]
 use parking_lot::RwLock;
+#[cfg(feature = "redis-modules")]
+use std::borrow::Cow;
 #[cfg(feature = "redis-module-topk")]
 use std::cmp::Ordering;
 #[cfg(feature = "redis-modules")]
@@ -56,6 +58,13 @@ pub enum RedisModuleApiResult {
 pub struct RedisModuleApi<'a> {
     store: &'a EmbeddedStore,
     family: RedisModuleFamily,
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+pub(crate) trait TimeSeriesMultiRangeWriter {
+    fn begin_rows(&mut self, rows: usize);
+    fn begin_series(&mut self, key: &[u8], samples: usize);
+    fn sample(&mut self, timestamp: i64, value: &[u8]);
 }
 
 impl<'a> RedisModuleApi<'a> {
@@ -241,11 +250,12 @@ impl RedisModuleState {
 #[derive(Debug, Default)]
 struct ModuleShard {
     records: FastHashMap<Bytes, ModuleRecord>,
+    search_indexes: FastHashSet<Bytes>,
     sets: FastHashMap<Bytes, FastHashSet<Bytes>>,
     multisets: FastHashMap<Bytes, FastHashMap<Bytes, i64>>,
     json: FastHashMap<Bytes, serde_json::Value>,
     floats: FastHashMap<Bytes, Vec<f64>>,
-    series: FastHashMap<Bytes, BTreeMap<i64, f64>>,
+    series: FastHashMap<Bytes, BTreeMap<i64, TimeSeriesSample>>,
     bits: FastHashMap<Bytes, BTreeSet<u64>>,
     counters: FastHashMap<Bytes, u64>,
     cell_buckets: FastHashMap<Bytes, CellBucket>,
@@ -288,6 +298,13 @@ impl ModuleRecord {
 struct CellBucket {
     remaining: i64,
     reset_after: i64,
+}
+
+#[cfg(feature = "redis-modules")]
+#[derive(Debug, Clone)]
+struct TimeSeriesSample {
+    value: f64,
+    raw: Bytes,
 }
 
 #[cfg(feature = "redis-modules")]
@@ -420,6 +437,15 @@ fn command_mutates(command: &str) -> bool {
 }
 
 #[cfg(feature = "redis-modules")]
+fn normalize_module_command(command: &str) -> Cow<'_, str> {
+    if command.as_bytes().iter().any(u8::is_ascii_lowercase) {
+        Cow::Owned(command.to_ascii_uppercase())
+    } else {
+        Cow::Borrowed(command)
+    }
+}
+
+#[cfg(feature = "redis-modules")]
 fn result_bulk_string(value: impl Into<String>) -> RedisModuleApiResult {
     RedisModuleApiResult::Bulk(Some(value.into().into_bytes()))
 }
@@ -470,6 +496,15 @@ impl EmbeddedStore {
         let mut keys = Vec::new();
         for shard in &self.module_state.shards {
             keys.extend(shard.read().records.keys().cloned());
+        }
+        keys.sort();
+        keys
+    }
+
+    fn module_search_index_keys(&self) -> Vec<Bytes> {
+        let mut keys = Vec::new();
+        for shard in &self.module_state.shards {
+            keys.extend(shard.read().search_indexes.iter().cloned());
         }
         keys.sort();
         keys

@@ -9,7 +9,8 @@ impl EmbeddedStore {
         command: &str,
         args: &[&[u8]],
     ) -> RedisModuleApiResult {
-        match command.to_ascii_uppercase().as_str() {
+        let command = normalize_module_command(command);
+        match command.as_ref() {
             "TS.CREATE" if !args.is_empty() => {
                 let route = self.route_key(args[0]);
                 let mut shard = self.module_state.write(route);
@@ -42,7 +43,7 @@ impl EmbeddedStore {
                 {
                     Some((timestamp, value)) => RedisModuleApiResult::Array(vec![
                         RedisModuleApiResult::Integer(*timestamp),
-                        result_bulk_string(value.to_string()),
+                        result_bulk_bytes(value.raw.clone()),
                     ]),
                     None => result_null(),
                 }
@@ -50,26 +51,14 @@ impl EmbeddedStore {
             "TS.RANGE" | "TS.REVRANGE" if args.len() >= 3 => {
                 let start = parse_ts_bound(args[1], i64::MIN);
                 let end = parse_ts_bound(args[2], i64::MAX);
+                let reverse = command.as_ref() == "TS.REVRANGE";
                 let route = self.route_key(args[0]);
                 let shard = self.module_state.read(route);
-                let mut rows = shard
+                let rows = shard
                     .series
                     .get(args[0])
-                    .map(|series| {
-                        series
-                            .range(start..=end)
-                            .map(|(timestamp, value)| {
-                                RedisModuleApiResult::Array(vec![
-                                    RedisModuleApiResult::Integer(*timestamp),
-                                    result_bulk_string(value.to_string()),
-                                ])
-                            })
-                            .collect::<Vec<_>>()
-                    })
+                    .map(|series| ts_range_rows(series, start, end, reverse))
                     .unwrap_or_default();
-                if command.eq_ignore_ascii_case("TS.REVRANGE") {
-                    rows.reverse();
-                }
                 RedisModuleApiResult::Array(rows)
             }
             "TS.DEL" if args.len() >= 3 => {
@@ -94,7 +83,7 @@ impl EmbeddedStore {
                 let Some(delta) = parse_f64_lossy(args[1]) else {
                     return invalid_arg("invalid TS delta");
                 };
-                let signed = if command.eq_ignore_ascii_case("TS.DECRBY") {
+                let signed = if command.as_ref() == "TS.DECRBY" {
                     -delta
                 } else {
                     delta
@@ -107,8 +96,11 @@ impl EmbeddedStore {
                 let route = self.route_key(args[0]);
                 let mut shard = self.module_state.write(route);
                 let series = shard.series.entry(args[0].to_vec()).or_default();
-                let previous = series.last_key_value().map_or(0.0, |(_, value)| *value);
-                series.insert(timestamp, previous + signed);
+                let value = series
+                    .last_key_value()
+                    .map_or(0.0, |(_, sample)| sample.value)
+                    + signed;
+                series.insert(timestamp, ts_sample(value));
                 RedisModuleApiResult::Integer(timestamp)
             }
             "TS.INFO" if !args.is_empty() => {
@@ -144,37 +136,18 @@ impl EmbeddedStore {
                             RedisModuleApiResult::Array(Vec::new()),
                             RedisModuleApiResult::Array(vec![
                                 RedisModuleApiResult::Integer(*timestamp),
-                                result_bulk_string(value.to_string()),
+                                result_bulk_bytes(value.raw.clone()),
                             ]),
                         ]))
                     })
                     .collect(),
             ),
-            "TS.MRANGE" | "TS.MREVRANGE" if args.len() >= 2 => {
-                let start = parse_ts_bound(args[0], i64::MIN);
-                let end = parse_ts_bound(args[1], i64::MAX);
-                RedisModuleApiResult::Array(
-                    self.module_series_keys()
-                        .into_iter()
-                        .map(|key| {
-                            let range = self.timeseries_api_execute(
-                                if command.eq_ignore_ascii_case("TS.MREVRANGE") {
-                                    "TS.REVRANGE"
-                                } else {
-                                    "TS.RANGE"
-                                },
-                                &[&key, args[0], args[1]],
-                            );
-                            let _ = (start, end);
-                            RedisModuleApiResult::Array(vec![
-                                result_bulk_bytes(key),
-                                RedisModuleApiResult::Array(Vec::new()),
-                                range,
-                            ])
-                        })
-                        .collect(),
-                )
-            }
+            "TS.MRANGE" | "TS.MREVRANGE" if args.len() >= 2 => RedisModuleApiResult::Array(
+                self.timeseries_multi_range_rows(command.as_ref(), args)
+                    .into_iter()
+                    .map(timeseries_multi_range_row_result)
+                    .collect(),
+            ),
             "TS.ALTER" | "TS.CREATERULE" | "TS.DELETERULE" => {
                 if let Some(key) = args.first() {
                     let route = self.route_key(key);
@@ -185,7 +158,11 @@ impl EmbeddedStore {
                 }
                 RedisModuleApiResult::Simple("OK")
             }
-            _ => self.module_record_command(RedisModuleFamily::RedisTimeSeries, command, args),
+            _ => self.module_record_command(
+                RedisModuleFamily::RedisTimeSeries,
+                command.as_ref(),
+                args,
+            ),
         }
     }
 
@@ -204,7 +181,13 @@ impl EmbeddedStore {
             .series
             .entry(key.to_vec())
             .or_default()
-            .insert(timestamp, value);
+            .insert(
+                timestamp,
+                TimeSeriesSample {
+                    value,
+                    raw: raw_value.to_vec(),
+                },
+            );
         RedisModuleApiResult::Integer(timestamp)
     }
 
@@ -216,6 +199,74 @@ impl EmbeddedStore {
         keys.sort();
         keys
     }
+
+    pub(crate) fn timeseries_multi_range_rows(
+        &self,
+        command: &str,
+        args: &[&[u8]],
+    ) -> Vec<(Bytes, Vec<(i64, Bytes)>)> {
+        if args.len() < 2 {
+            return Vec::new();
+        }
+        let start = parse_ts_bound(args[0], i64::MIN);
+        let end = parse_ts_bound(args[1], i64::MAX);
+        let reverse = command.eq_ignore_ascii_case("TS.MREVRANGE");
+        let mut ranges: Vec<(Bytes, Vec<(i64, Bytes)>)> = Vec::new();
+        for shard in &self.module_state.shards {
+            let shard = shard.read();
+            ranges.reserve(shard.series.len());
+            for (key, series) in &shard.series {
+                ranges.push((
+                    key.clone(),
+                    ts_range_row_values(series, start, end, reverse),
+                ));
+            }
+        }
+        ranges.sort_by(|left, right| left.0.cmp(&right.0));
+        ranges
+    }
+
+    pub(crate) fn write_timeseries_multi_range<W: TimeSeriesMultiRangeWriter>(
+        &self,
+        command: &str,
+        args: &[&[u8]],
+        writer: &mut W,
+    ) {
+        if args.len() < 2 {
+            writer.begin_rows(0);
+            return;
+        }
+        let start = parse_ts_bound(args[0], i64::MIN);
+        let end = parse_ts_bound(args[1], i64::MAX);
+        let reverse = command.eq_ignore_ascii_case("TS.MREVRANGE");
+        let mut keys = Vec::new();
+        for shard in &self.module_state.shards {
+            let shard = shard.read();
+            keys.reserve(shard.series.len());
+            keys.extend(shard.series.keys().cloned());
+        }
+        keys.sort();
+        writer.begin_rows(keys.len());
+        for key in keys {
+            let route = self.route_key(&key);
+            let shard = self.module_state.read(route);
+            let Some(series) = shard.series.get(&key) else {
+                writer.begin_series(&key, 0);
+                continue;
+            };
+            let samples = ts_range_len(series, start, end);
+            writer.begin_series(&key, samples);
+            if reverse {
+                for (timestamp, sample) in series.range(start..=end).rev() {
+                    writer.sample(*timestamp, &sample.raw);
+                }
+            } else {
+                for (timestamp, sample) in series.range(start..=end) {
+                    writer.sample(*timestamp, &sample.raw);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(feature = "redis-module-timeseries")]
@@ -226,5 +277,83 @@ fn parse_ts_bound(raw: &[u8], fallback: i64) -> i64 {
         i64::MAX
     } else {
         parse_i64_lossy(raw).unwrap_or(fallback)
+    }
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn ts_range_rows(
+    series: &BTreeMap<i64, TimeSeriesSample>,
+    start: i64,
+    end: i64,
+    reverse: bool,
+) -> Vec<RedisModuleApiResult> {
+    if reverse {
+        series.range(start..=end).rev().map(ts_sample_row).collect()
+    } else {
+        series.range(start..=end).map(ts_sample_row).collect()
+    }
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn ts_range_row_values(
+    series: &BTreeMap<i64, TimeSeriesSample>,
+    start: i64,
+    end: i64,
+    reverse: bool,
+) -> Vec<(i64, Bytes)> {
+    let mut rows = Vec::with_capacity(ts_range_len(series, start, end));
+    let iter = series
+        .range(start..=end)
+        .map(|(timestamp, sample)| (*timestamp, sample.raw.clone()));
+    if reverse {
+        rows.extend(iter.rev());
+    } else {
+        rows.extend(iter);
+    }
+    rows
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn ts_sample_row((timestamp, sample): (&i64, &TimeSeriesSample)) -> RedisModuleApiResult {
+    RedisModuleApiResult::Array(vec![
+        RedisModuleApiResult::Integer(*timestamp),
+        result_bulk_bytes(sample.raw.clone()),
+    ])
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn timeseries_multi_range_row_result(
+    (key, samples): (Bytes, Vec<(i64, Bytes)>),
+) -> RedisModuleApiResult {
+    RedisModuleApiResult::Array(vec![
+        result_bulk_bytes(key),
+        RedisModuleApiResult::Array(Vec::new()),
+        RedisModuleApiResult::Array(
+            samples
+                .into_iter()
+                .map(|(timestamp, value)| {
+                    RedisModuleApiResult::Array(vec![
+                        RedisModuleApiResult::Integer(timestamp),
+                        result_bulk_bytes(value),
+                    ])
+                })
+                .collect(),
+        ),
+    ])
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn ts_sample(value: f64) -> TimeSeriesSample {
+    TimeSeriesSample {
+        value,
+        raw: value.to_string().into_bytes(),
+    }
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn ts_range_len(series: &BTreeMap<i64, TimeSeriesSample>, start: i64, end: i64) -> usize {
+    match (series.first_key_value(), series.last_key_value()) {
+        (Some((first, _)), Some((last, _))) if start <= *first && *last <= end => series.len(),
+        _ => series.range(start..=end).count(),
     }
 }

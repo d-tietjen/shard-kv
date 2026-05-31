@@ -50,6 +50,8 @@ mod write;
 
 #[cfg(feature = "redis")]
 pub(crate) use key_scan::{DEFAULT_SCAN_COUNT, RedisKeyScanType};
+#[cfg(feature = "redis-module-timeseries")]
+pub(crate) use modules::TimeSeriesMultiRangeWriter;
 #[cfg(feature = "redis-module-topk")]
 pub(crate) use modules::TopKError;
 #[cfg(feature = "redis-modules")]

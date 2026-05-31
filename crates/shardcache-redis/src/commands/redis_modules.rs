@@ -1,7 +1,12 @@
 use crate::commands::redis::{bulk, error, int, simple};
 #[cfg(feature = "server")]
-use crate::commands::redis::{with_resp_protocol, write_frame};
+use crate::commands::redis::{
+    with_resp_protocol, write_frame, write_resp_array_header, write_resp_null,
+    write_resp_simple_string,
+};
 use crate::protocol::Frame;
+#[cfg(all(feature = "server", feature = "redis-module-timeseries"))]
+use crate::storage::TimeSeriesMultiRangeWriter;
 use crate::storage::{
     Command, EmbeddedStore, EngineCommandContext, EngineFrameFuture, RedisModuleApiResult,
     RedisModuleFamily,
@@ -120,6 +125,26 @@ impl RedisModuleCommand {
         }
         let _ = (store, args);
         module_command_error(self.family)
+    }
+
+    #[cfg(feature = "server")]
+    fn execute_resp(self, store: &EmbeddedStore, args: &[&[u8]], out: &mut bytes::BytesMut) {
+        #[cfg(feature = "redis-module-timeseries")]
+        if self.family == "RedisTimeSeries" && matches!(self.name, "TS.MRANGE" | "TS.MREVRANGE") {
+            let mut writer = RespTimeSeriesMultiRangeWriter { out };
+            store.write_timeseries_multi_range(self.name, args, &mut writer);
+            return;
+        }
+        #[cfg(feature = "redis-module-topk")]
+        if self.family == "topk" {
+            write_frame(out, &topk::execute(self.name, store, args));
+            return;
+        }
+        if let Some(family) = self.family_enum() {
+            write_module_api_result_resp(out, store.redis_module_execute(family, self.name, args));
+            return;
+        }
+        write_frame(out, &module_command_error(self.family));
     }
 
     fn family_enum(self) -> Option<RedisModuleFamily> {
@@ -265,7 +290,7 @@ impl<'a> crate::commands::BorrowedCommandObject<'a> for BorrowedRedisModuleComma
     #[cfg(feature = "server")]
     fn execute_borrowed(&self, ctx: BorrowedCommandContext<'_, '_, '_>) {
         with_resp_protocol(ctx.resp_protocol, || {
-            write_frame(ctx.out, &self.command.execute_frame(ctx.store, &self.args));
+            self.command.execute_resp(ctx.store, &self.args, ctx.out);
         });
     }
 
@@ -279,14 +304,14 @@ impl<'a> crate::commands::BorrowedCommandObject<'a> for BorrowedRedisModuleComma
 impl crate::server::commands::RawDirectCommand for RedisModuleCommand {
     fn execute(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         with_resp_protocol(ctx.resp_protocol, || {
-            write_frame(ctx.out, &self.execute_frame(ctx.store, &ctx.args));
+            self.execute_resp(ctx.store, &ctx.args, ctx.out);
         });
     }
 
     fn execute_fast(&self, ctx: RawCommandContext<'_, '_, '_, '_>) {
         let start = ServerWire::begin_fast_value(ctx.out);
         with_resp_protocol(crate::server::wire::RespProtocolVersion::Resp2, || {
-            write_frame(ctx.out, &self.execute_frame(ctx.store, &ctx.args));
+            self.execute_resp(ctx.store, &ctx.args, ctx.out);
         });
         ServerWire::finish_fast_value(ctx.out, start);
     }
@@ -328,6 +353,70 @@ fn module_api_result_frame(result: RedisModuleApiResult) -> Frame {
         } => error(&format!(
             "ERR {family:?} module command is not supported: {command}"
         )),
+    }
+}
+
+#[cfg(feature = "server")]
+fn write_module_api_result_resp(out: &mut bytes::BytesMut, result: RedisModuleApiResult) {
+    match result {
+        RedisModuleApiResult::Simple(value) => write_resp_simple_string(out, value),
+        RedisModuleApiResult::Integer(value) => ServerWire::write_resp_integer(out, value),
+        RedisModuleApiResult::Bulk(Some(value)) => ServerWire::write_resp_blob_string(out, &value),
+        RedisModuleApiResult::Bulk(None) => write_resp_null(out),
+        RedisModuleApiResult::Array(items) => {
+            write_resp_array_header(out, items.len());
+            for item in items {
+                write_module_api_result_resp(out, item);
+            }
+        }
+        RedisModuleApiResult::Error(message) => ServerWire::write_resp_error(out, &message),
+        RedisModuleApiResult::TopKInfo {
+            k,
+            width,
+            depth,
+            decay,
+        } => {
+            write_resp_array_header(out, 8);
+            write_resp_simple_string(out, "k");
+            ServerWire::write_resp_integer(out, k as i64);
+            write_resp_simple_string(out, "width");
+            ServerWire::write_resp_integer(out, width as i64);
+            write_resp_simple_string(out, "depth");
+            ServerWire::write_resp_integer(out, depth as i64);
+            write_resp_simple_string(out, "decay");
+            write_resp_simple_string(out, &format!("{decay:.17}"));
+        }
+        RedisModuleApiResult::Unsupported {
+            family, command, ..
+        } => ServerWire::write_resp_error(
+            out,
+            &format!("ERR {family:?} module command is not supported: {command}"),
+        ),
+    }
+}
+
+#[cfg(all(feature = "server", feature = "redis-module-timeseries"))]
+struct RespTimeSeriesMultiRangeWriter<'a> {
+    out: &'a mut bytes::BytesMut,
+}
+
+#[cfg(all(feature = "server", feature = "redis-module-timeseries"))]
+impl TimeSeriesMultiRangeWriter for RespTimeSeriesMultiRangeWriter<'_> {
+    fn begin_rows(&mut self, rows: usize) {
+        write_resp_array_header(self.out, rows);
+    }
+
+    fn begin_series(&mut self, key: &[u8], samples: usize) {
+        write_resp_array_header(self.out, 3);
+        ServerWire::write_resp_blob_string(self.out, key);
+        write_resp_array_header(self.out, 0);
+        write_resp_array_header(self.out, samples);
+    }
+
+    fn sample(&mut self, timestamp: i64, value: &[u8]) {
+        write_resp_array_header(self.out, 2);
+        ServerWire::write_resp_integer(self.out, timestamp);
+        ServerWire::write_resp_blob_string(self.out, value);
     }
 }
 

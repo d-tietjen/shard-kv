@@ -2,7 +2,7 @@
 
 Head-to-head command-matrix run for the feature-gated Redis module command surface. The run exercises every module command case registered in the shardcache benchmark harness against shardcache and a Redis Stack baseline.
 
-## Scope
+## Initial Audit Scope
 
 - Date: 2026-05-31.
 - Host: `adam`, Ubuntu 24.04.4 LTS.
@@ -14,7 +14,7 @@ Head-to-head command-matrix run for the feature-gated Redis module command surfa
 
 This is a command-coverage and strict request/response comparison. Redis Stack does not ship every third-party or retired module represented by the feature-gated shardcache module surface, so rows where Redis Stack reports command errors are recorded as baseline-error coverage rows rather than performance claims.
 
-## Summary
+## Initial Summary
 
 | Target | Cases | Sum ops/sec | Mean avg us | Unexpected errors | Expected-error replies |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -26,9 +26,27 @@ This is a command-coverage and strict request/response comparison. Redis Stack d
 | Clean non-error common subset | 96 | 10623.0 | 6165.5 | 1.72x | 44.7 | 77.9 | 0 |
 | Zero-unexpected-error common subset | 109 | 12061.5 | 6999.5 | 1.72x | 42.8 | 78.1 | 0 |
 
-Status counts: `ok` 96, `expected-error` 13, `redis-stack error` 118, `shardcache error` 0. Redis Stack was faster on 0 commands in both the clean non-error subset and the zero-unexpected-error subset.
+Initial status counts: `ok` 96, `expected-error` 13, `redis-stack error` 118, `shardcache error` 0. Redis Stack was faster on 0 commands in both the clean non-error subset and the zero-unexpected-error subset.
 
-## Module Prefix Rollup
+## Slower-Row Optimization Follow-Up
+
+The initial full matrix showed no Redis Stack throughput wins, but three clean rows had higher shardcache average latency: `FT._LIST`, `TS.MRANGE`, and `TS.MREVRANGE`. After optimizing those paths, the same 227-command module matrix was rerun on Adam with the same 1 vCPU, 1 client, 1 key shard, pipeline-depth-1, 1s warmup, and 2s measurement shape. The optimized clean subset has 0 Redis Stack throughput wins and 0 Redis Stack lower-latency rows.
+
+- Artifact: `benchmarks/results/adam-module-command-matrix-optimized5-modules-1vcpu-p1-20260531T221741Z/report.md`.
+
+| Optimized scope | Cases | shardcache ops/sec | Redis Stack ops/sec | sc/redis | shardcache mean avg us | Redis Stack mean avg us | Redis faster cases |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| All module cases | 227 | 27953.5 | 14615.5 | 1.91x | 35.7 | 68.4 | n/a |
+| Clean non-error common subset | 96 | 11817.5 | 6171.5 | 1.91x | 35.7 | 77.2 | 0 |
+| Zero-unexpected-error common subset | 109 | 13418.5 | 7007.5 | 1.91x | 34.8 | 77.0 | 0 |
+
+| Command | shardcache ops/sec before | shardcache ops/sec after | Redis Stack ops/sec after | shardcache avg us before | shardcache avg us after | Redis Stack avg us after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `FT._LIST` | 110.5 | 123.0 | 64.5 | 144.7 | 30.2 | 59.4 |
+| `TS.MRANGE` | 110.5 | 123.0 | 64.0 | 677.8 | 328.6 | 343.1 |
+| `TS.MREVRANGE` | 110.5 | 123.0 | 64.0 | 692.0 | 330.0 | 332.9 |
+
+## Initial Module Prefix Rollup
 
 The `sc/redis` prefix ratio is only shown for prefixes where Redis Stack had no unexpected errors; mixed unsupported/error prefixes are shown as `n/a` to avoid treating error-reply throughput as a performance result.
 
@@ -54,7 +72,7 @@ The `sc/redis` prefix ratio is only shown for prefixes where Redis Stack had no 
 | `TOPK` | 7 | 7 | 773.5 | 448.0 | 1.73x | 31.0 | 72.8 | 0 | 0 |
 | `TS` | 17 | 17 | 1878.5 | 1088.0 | 1.73x | 108.9 | 125.0 | 0 | 0 |
 
-## Full Command Results
+## Initial Full Command Results
 
 `ok` means both targets returned non-error replies. `expected-error` means the benchmark intentionally exercises an error-reply path, such as reserve-on-existing, and the error was classified as expected. `redis-stack error` means Redis Stack returned unexpected errors for that command in this baseline image. Ratios are omitted for Redis Stack error rows because error-reply throughput is not a useful performance comparison.
 

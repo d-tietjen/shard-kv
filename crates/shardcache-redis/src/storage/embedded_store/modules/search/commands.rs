@@ -5,14 +5,23 @@ use super::super::*;
 #[cfg(feature = "redis-module-search")]
 impl EmbeddedStore {
     pub(crate) fn search_api_execute(&self, command: &str, args: &[&[u8]]) -> RedisModuleApiResult {
-        match command.to_ascii_uppercase().as_str() {
+        match normalize_module_command(command).as_ref() {
             "FT._LIST" => RedisModuleApiResult::Array(
-                self.module_record_keys()
+                self.module_search_index_keys()
                     .into_iter()
                     .map(result_bulk_bytes)
                     .collect(),
             ),
-            "FT.CREATE" | "FT.ALIASADD" | "FT.ALIASUPDATE" | "FT.ALTER" if !args.is_empty() => {
+            "FT.CREATE" if !args.is_empty() => {
+                let route = self.route_key(args[0]);
+                let mut shard = self.module_state.write(route);
+                shard.search_indexes.insert(args[0].to_vec());
+                shard
+                    .records
+                    .insert(args[0].to_vec(), ModuleRecord::new(args));
+                RedisModuleApiResult::Simple("OK")
+            }
+            "FT.ALIASADD" | "FT.ALIASUPDATE" | "FT.ALTER" if !args.is_empty() => {
                 let route = self.route_key(args[0]);
                 self.module_state
                     .write(route)
@@ -22,12 +31,9 @@ impl EmbeddedStore {
             }
             "FT.ALIASDEL" | "FT.DROPINDEX" if !args.is_empty() => {
                 let route = self.route_key(args[0]);
-                let removed = self
-                    .module_state
-                    .write(route)
-                    .records
-                    .remove(args[0])
-                    .is_some();
+                let mut shard = self.module_state.write(route);
+                shard.search_indexes.remove(args[0]);
+                let removed = shard.records.remove(args[0]).is_some();
                 RedisModuleApiResult::Integer(if removed { 1 } else { 0 })
             }
             "FT.INFO" if !args.is_empty() => {

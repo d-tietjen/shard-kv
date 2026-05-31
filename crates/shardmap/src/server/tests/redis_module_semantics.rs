@@ -198,3 +198,99 @@ fn registry_style_module_commands_preserve_metadata() {
     assert_eq!(run(&store, &[b"SNOWFLAKE.NEXT"]), Frame::Integer(1));
     assert_eq!(run(&store, &[b"SNOWFLAKE.NEXT"]), Frame::Integer(2));
 }
+
+#[test]
+fn search_list_only_returns_search_indexes() {
+    let store = EmbeddedStore::new(8);
+
+    assert_eq!(
+        run(
+            &store,
+            &[b"AI.TENSORSET", b"tensor", b"FLOAT", b"1", b"VALUES", b"1"]
+        ),
+        Frame::SimpleString("OK".into())
+    );
+    assert_eq!(
+        run(&store, &[b"GRAPH.QUERY", b"graph", b"RETURN 1"]),
+        Frame::Array(vec![
+            Frame::Array(Vec::new()),
+            Frame::Array(Vec::new()),
+            Frame::Array(vec![bulk_string(b"Query internal execution time: 0 ms")]),
+        ])
+    );
+    assert_eq!(
+        run(
+            &store,
+            &[b"FT.CREATE", b"idx", b"SCHEMA", b"title", b"TEXT"]
+        ),
+        Frame::SimpleString("OK".into())
+    );
+
+    assert_eq!(
+        run(&store, &[b"FT._LIST"]),
+        Frame::Array(vec![bulk_string(b"idx")])
+    );
+}
+
+#[test]
+fn timeseries_multi_range_builds_ranges_without_nested_dispatch() {
+    let store = EmbeddedStore::new(8);
+
+    assert_eq!(
+        run(&store, &[b"TS.CREATE", b"ts:a", b"LABELS", b"sensor", b"1"]),
+        Frame::SimpleString("OK".into())
+    );
+    assert_eq!(
+        run(&store, &[b"TS.ADD", b"ts:a", b"1", b"1.5"]),
+        Frame::Integer(1)
+    );
+    assert_eq!(
+        run(&store, &[b"TS.ADD", b"ts:a", b"2", b"2.5"]),
+        Frame::Integer(2)
+    );
+    assert_eq!(
+        run(&store, &[b"TS.CREATE", b"ts:b", b"LABELS", b"sensor", b"1"]),
+        Frame::SimpleString("OK".into())
+    );
+    assert_eq!(
+        run(&store, &[b"TS.ADD", b"ts:b", b"1", b"3.5"]),
+        Frame::Integer(1)
+    );
+
+    assert!(matches!(
+        run(&store, &[b"TS.MRANGE", b"0", b"+", b"FILTER", b"sensor=1"]),
+        Frame::Array(items)
+            if items.len() == 2
+                && matches!(
+                    &items[0],
+                    Frame::Array(series)
+                        if series[0] == bulk_string(b"ts:a")
+                            && matches!(&series[2], Frame::Array(samples) if samples.len() == 2)
+                )
+                && matches!(
+                    &items[1],
+                    Frame::Array(series)
+                        if series[0] == bulk_string(b"ts:b")
+                            && matches!(&series[2], Frame::Array(samples) if samples.len() == 1)
+                )
+    ));
+
+    assert!(matches!(
+        run(
+            &store,
+            &[b"TS.MREVRANGE", b"0", b"+", b"FILTER", b"sensor=1"]
+        ),
+        Frame::Array(items)
+            if matches!(
+                &items[0],
+                Frame::Array(series)
+                    if series[0] == bulk_string(b"ts:a")
+                        && matches!(
+                            &series[2],
+                            Frame::Array(samples)
+                                if matches!(&samples[0], Frame::Array(row) if row[0] == Frame::Integer(2))
+                                    && matches!(&samples[1], Frame::Array(row) if row[0] == Frame::Integer(1))
+                        )
+            )
+    ));
+}

@@ -42,6 +42,8 @@ mod telemetry;
 pub use command::{BorrowedCommand, Command};
 #[cfg(feature = "sharded")]
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
+#[cfg(feature = "redis-module-timeseries")]
+pub(crate) use embedded_store::TimeSeriesMultiRangeWriter;
 #[cfg(feature = "redis-module-topk")]
 pub(crate) use embedded_store::TopKError;
 #[cfg(feature = "redis")]

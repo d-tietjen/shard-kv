@@ -250,28 +250,34 @@ these profiles: 0/297 no-keyspace, 0/6 keyspace-wide, and 0/2 destructive.
 
 ### Current Adam Module Command Snapshot
 
-The Redis Stack module-command matrix was run on `adam` on 2026-05-31 at git
-`9db56cb9fe575daa363478074d582708a6d10948`. shardcache was built with
-`redis-server,redis-modules-all`; both servers were pinned to one server CPU
-with 1 client, 1 key shard, pipeline depth 1, 1s warmup, and 2s measurement.
-The baseline was `redis/redis-stack-server:latest` on `127.0.0.1:6391`.
+The optimized Redis Stack module-command matrix was run on `adam` on
+2026-05-31. shardcache was built with `redis-server,redis-modules-all`; both
+servers were pinned to one server CPU with 1 client, 1 key shard, pipeline depth
+1, 1s warmup, and 2s measurement. The baseline was
+`redis/redis-stack-server:latest`.
 
 Artifacts:
 
 - `benchmarks/results/adam-module-command-matrix-1vcpu-p1-20260531T214753Z/report.md`
+- `benchmarks/results/adam-module-command-matrix-optimized5-modules-1vcpu-p1-20260531T221741Z/report.md`
 - [`REDIS_MODULE_COMMAND_BENCHMARKS.md`](REDIS_MODULE_COMMAND_BENCHMARKS.md)
 
 | Scope | Cases | shardcache ops/sec | Redis Stack ops/sec | sc/redis | shardcache mean avg us | Redis Stack mean avg us | Redis faster cases |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| all module cases | 227 | 25,127.5 | 14,580.0 | 1.72x | 39.7 | 68.5 | n/a |
-| clean non-error common subset | 96 | 10,623.0 | 6,165.5 | 1.72x | 44.7 | 77.9 | 0 |
-| zero-unexpected-error common subset | 109 | 12,061.5 | 6,999.5 | 1.72x | 42.8 | 78.1 | 0 |
+| all module cases | 227 | 27,953.5 | 14,615.5 | 1.91x | 35.7 | 68.4 | n/a |
+| clean non-error common subset | 96 | 11,817.5 | 6,171.5 | 1.91x | 35.7 | 77.2 | 0 |
+| zero-unexpected-error common subset | 109 | 13,418.5 | 7,007.5 | 1.91x | 34.8 | 77.0 | 0 |
 
 shardcache completed all 227 module command cases with zero unexpected errors.
 Redis Stack returned unexpected errors on 118 command cases from modules or
 command shapes not supported by that image, so those rows prove coverage and
 baseline behavior rather than performance. For command-level rows, see the
 module benchmark document.
+
+A follow-up on the three rows where Redis Stack had lower average latency in the
+initial full matrix (`FT._LIST`, `TS.MRANGE`, and `TS.MREVRANGE`) now has
+shardcache ahead on both throughput and average latency after optimizing module
+index listing and multi-series range serialization.
 
 The earlier scaling-oriented no-keyspace Redis-command matrix was run on `adam`
 on 2026-05-24 with 16 clients, 16 key shards, `SHARD_COUNT=16`, shared keyspace
