@@ -14,6 +14,7 @@ pub enum RedisCommandFamily {
     List,
     Set,
     ZSet,
+    Module,
 }
 
 impl RedisCommandFamily {
@@ -33,6 +34,7 @@ impl RedisCommandFamily {
             Self::List => "list",
             Self::Set => "set",
             Self::ZSet => "zset",
+            Self::Module => "module",
         }
     }
 }
@@ -45,6 +47,7 @@ pub enum RedisCommandProfile {
     Small,
     Large,
     Destructive,
+    Module,
 }
 
 impl RedisCommandProfile {
@@ -53,6 +56,7 @@ impl RedisCommandProfile {
             Self::Small => "small",
             Self::Large => "large",
             Self::Destructive => "destructive",
+            Self::Module => "module",
         }
     }
 }
@@ -67,6 +71,7 @@ pub struct RedisCommandCase {
     pub script: RedisCommandSetup,
     pub setup: RedisCommandSetup,
     pub expect_error: bool,
+    pub ignore_setup_error: bool,
 }
 
 impl RedisCommandCase {
@@ -101,6 +106,7 @@ macro_rules! case {
             script: &[],
             setup: &[],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
@@ -116,6 +122,7 @@ macro_rules! error_case {
             script: &[],
             setup: &[],
             expect_error: true,
+            ignore_setup_error: false,
         }
     };
 }
@@ -137,6 +144,7 @@ macro_rules! case_with_setup {
             script: &[],
             setup: &[$(&[$($setup_part),+] as RedisCommandParts),*],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
@@ -158,6 +166,7 @@ macro_rules! case_script {
             script: &[$(&[$($script_part),+] as RedisCommandParts),+],
             setup: &[],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
@@ -179,6 +188,7 @@ macro_rules! destructive_case_script {
             script: &[$(&[$($script_part),+] as RedisCommandParts),+],
             setup: &[],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
@@ -200,9 +210,15 @@ macro_rules! large_case {
             script: &[],
             setup: &[$(&[$($setup_part),+] as RedisCommandParts),*],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
+
+#[path = "redis_module_command_cases.rs"]
+mod redis_module_command_cases;
+
+pub use redis_module_command_cases::REDIS_MODULE_COMMAND_CASES;
 
 pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Connection, "AUTH", "AUTH", ["AUTH", "unused"]),
@@ -2423,7 +2439,8 @@ mod tests {
 
     use super::{
         BENCHMARKED_COMMANDS, REDIS_5_0_14_COMMANDS, REDIS_5_0_14_EXCLUSIONS, REDIS_COMMAND_CASES,
-        REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES, RedisCommandFamily,
+        REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES, REDIS_MODULE_COMMAND_CASES,
+        RedisCommandFamily, RedisCommandProfile,
     };
 
     fn has_cases<T>(items: &[T]) -> bool {
@@ -2453,6 +2470,22 @@ mod tests {
             extra.is_empty(),
             "benchmark cases include undeclared commands: {extra:?}"
         );
+    }
+
+    #[test]
+    fn module_benchmark_cases_cover_registered_module_commands() {
+        let commands = REDIS_MODULE_COMMAND_CASES
+            .iter()
+            .map(|case| case.command_name)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(commands.len(), 227);
+        assert_eq!(commands.len(), REDIS_MODULE_COMMAND_CASES.len());
+        assert!(REDIS_MODULE_COMMAND_CASES.iter().all(|case| {
+            case.family == RedisCommandFamily::Module
+                && case.profile == RedisCommandProfile::Module
+                && case.ignore_setup_error
+        }));
     }
 
     #[test]

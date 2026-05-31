@@ -49,7 +49,7 @@ if [[ "${SERVER_DIRECT_SHARD_PORTS:-0}" != "0" ]]; then
 fi
 
 if [[ "$start_shardcache" == "1" ]]; then
-  cargo build --release -p shardcache --features redis-server --bin shardcache
+  cargo build --release -p shardcache --features "${SHARDCACHE_FEATURES:-redis-server}" --bin shardcache
 fi
 cargo build --release -p shardcache-benchmarks --bin redis_command_matrix
 report_pinning

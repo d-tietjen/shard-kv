@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use shardcache_benchmarks::redis_command_cases::{
     REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES,
-    RedisCommandCase,
+    REDIS_MODULE_COMMAND_CASES, RedisCommandCase,
 };
 use shardmap::protocol::{
     FAST_FLAG_REDIS_COMMAND_ARGS, FAST_PROTOCOL_VERSION, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC,
@@ -476,6 +476,26 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
     if filter.eq_ignore_ascii_case("extended-with-destructive") {
         return all_cases().collect();
     }
+    if filter.eq_ignore_ascii_case("modules")
+        || filter.eq_ignore_ascii_case("module")
+        || filter.eq_ignore_ascii_case("profile:module")
+        || filter.eq_ignore_ascii_case("profile:modules")
+    {
+        return REDIS_MODULE_COMMAND_CASES.to_vec();
+    }
+    if let Some(module) = filter.strip_prefix("module:") {
+        return REDIS_MODULE_COMMAND_CASES
+            .iter()
+            .copied()
+            .filter(|case| {
+                let prefix_len = case
+                    .command_name
+                    .find('.')
+                    .unwrap_or(case.command_name.len());
+                module.eq_ignore_ascii_case(&case.command_name[..prefix_len])
+            })
+            .collect();
+    }
     if filter.eq_ignore_ascii_case("extended-no-keyspace")
         || filter.eq_ignore_ascii_case("no-keyspace")
         || filter.eq_ignore_ascii_case("profile:no-keyspace")
@@ -501,6 +521,7 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
     }
 
     let command_matches = all_cases()
+        .chain(REDIS_MODULE_COMMAND_CASES.iter().copied())
         .filter(|case| filter.eq_ignore_ascii_case(case.command_name))
         .collect::<Vec<_>>();
     if !command_matches.is_empty() {
@@ -508,6 +529,7 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
     }
 
     let family_matches = all_cases()
+        .chain(REDIS_MODULE_COMMAND_CASES.iter().copied())
         .filter(|case| filter.eq_ignore_ascii_case(case.family.label()))
         .collect::<Vec<_>>();
     if !family_matches.is_empty() {
@@ -515,6 +537,7 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
     }
 
     all_cases()
+        .chain(REDIS_MODULE_COMMAND_CASES.iter().copied())
         .filter(|case| filter.eq_ignore_ascii_case(case.case_name))
         .collect()
 }
@@ -660,7 +683,7 @@ fn run_setup(
     for case in cases {
         let namespace = suffixes.for_case(case, fixture_scope);
         for parts in case.setup {
-            if conn.execute(parts, namespace)? {
+            if conn.execute(parts, namespace)? && !case.ignore_setup_error {
                 return Err(format!("setup for `{}` produced a RESP error", case.case_name).into());
             }
         }
@@ -1444,9 +1467,9 @@ fn is_probable_key(part: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FixtureScope, REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES, WorkerSuffixes,
-        all_non_destructive_cases, parse_target_addr, rewrite_key, select_cases, shift_for,
-        stripe_index,
+        FixtureScope, REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES,
+        REDIS_MODULE_COMMAND_CASES, WorkerSuffixes, all_non_destructive_cases, parse_target_addr,
+        rewrite_key, select_cases, shift_for, stripe_index,
     };
 
     #[test]
@@ -1516,6 +1539,40 @@ mod tests {
             destructive_cases
                 .iter()
                 .all(|case| case.profile.label() == "destructive")
+        );
+    }
+
+    #[test]
+    fn module_filter_is_opt_in() {
+        let default_cases = select_cases("all", "").unwrap();
+        assert!(
+            !default_cases
+                .iter()
+                .any(|case| case.profile.label() == "module")
+        );
+
+        let module_cases = select_cases("modules", "").unwrap();
+        assert_eq!(module_cases.len(), REDIS_MODULE_COMMAND_CASES.len());
+        assert!(
+            module_cases
+                .iter()
+                .all(|case| case.profile.label() == "module")
+        );
+        assert!(
+            module_cases
+                .iter()
+                .all(|case| case.family.label() == "module")
+        );
+    }
+
+    #[test]
+    fn module_prefix_filter_selects_namespace() {
+        let json_cases = select_cases("module:json", "").unwrap();
+        assert!(!json_cases.is_empty());
+        assert!(
+            json_cases
+                .iter()
+                .all(|case| case.command_name.starts_with("JSON."))
         );
     }
 
