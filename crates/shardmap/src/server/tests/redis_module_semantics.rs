@@ -256,6 +256,30 @@ fn timeseries_multi_range_builds_ranges_without_nested_dispatch() {
         run(&store, &[b"TS.ADD", b"ts:b", b"1", b"3.5"]),
         Frame::Integer(1)
     );
+    assert_eq!(
+        run(&store, &[b"TS.CREATE", b"ts:c", b"LABELS", b"sensor", b"2"]),
+        Frame::SimpleString("OK".into())
+    );
+    assert_eq!(
+        run(&store, &[b"TS.ADD", b"ts:c", b"1", b"4.5"]),
+        Frame::Integer(1)
+    );
+    assert_eq!(
+        run(&store, &[b"TS.ADD", b"ts:unlabeled", b"1", b"5.5"]),
+        Frame::Integer(1)
+    );
+
+    assert_eq!(
+        run(&store, &[b"TS.QUERYINDEX", b"sensor=1"]),
+        Frame::Array(vec![bulk_string(b"ts:a"), bulk_string(b"ts:b")])
+    );
+    assert!(matches!(
+        run(&store, &[b"TS.MGET", b"FILTER", b"sensor=1"]),
+        Frame::Array(items)
+            if items.len() == 2
+                && matches!(&items[0], Frame::Array(series) if series[0] == bulk_string(b"ts:a"))
+                && matches!(&items[1], Frame::Array(series) if series[0] == bulk_string(b"ts:b"))
+    ));
 
     assert!(matches!(
         run(&store, &[b"TS.MRANGE", b"0", b"+", b"FILTER", b"sensor=1"]),

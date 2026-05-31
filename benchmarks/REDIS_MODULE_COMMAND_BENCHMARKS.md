@@ -46,6 +46,23 @@ The initial full matrix showed no Redis Stack throughput wins, but three clean r
 | `TS.MRANGE` | 110.5 | 123.0 | 64.0 | 677.8 | 328.6 | 343.1 |
 | `TS.MREVRANGE` | 110.5 | 123.0 | 64.0 | 692.0 | 330.0 | 332.9 |
 
+## P99 Tail-Latency Follow-Up
+
+The command matrix now records per-command p50/p95/p99/p999 latency in the raw CSV and reports mean p99 in Markdown/JSON. A final 1-vCPU, pipeline-depth-1 Adam run used that harness after adding filter-aware RedisTimeSeries multi-range matching, a single-shard multi-range response path, and pre-encoded time-series sample rows. In the clean Redis Stack-comparable subset, Redis Stack has 0 throughput wins, 0 average-latency wins, and 0 p99-latency wins.
+
+- Artifact: `benchmarks/results/adam-module-command-matrix-p99-opt3-modules-1vcpu-p1-20260531T231229Z/report.md`.
+
+| Final optimized scope | Cases | shardcache ops/sec | Redis Stack ops/sec | sc/redis | shardcache mean avg us | Redis Stack mean avg us | shardcache mean p99 us | Redis Stack mean p99 us | Redis faster cases | Redis lower p99 cases |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| All module cases | 227 | 29791.5 | 15147.0 | 1.97x | 33.1 | 65.2 | 41.3 | 89.4 | n/a | n/a |
+| Clean non-error common subset | 96 | 12597.5 | 6405.5 | 1.97x | 32.8 | 74.2 | 40.8 | 103.8 | 0 | 0 |
+| Zero-unexpected-error common subset | 109 | 14302.5 | 7272.0 | 1.97x | 32.1 | 74.3 | 39.7 | 105.4 | 0 | 0 |
+
+| Command | shardcache ops/sec | Redis Stack ops/sec | shardcache avg us | Redis Stack avg us | shardcache p99 us | Redis Stack p99 us |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `TS.MRANGE` | 131.0 | 66.5 | 295.6 | 344.4 | 415.0 | 443.4 |
+| `TS.MREVRANGE` | 131.0 | 66.5 | 296.5 | 332.5 | 421.4 | 423.2 |
+
 ## Initial Module Prefix Rollup
 
 The `sc/redis` prefix ratio is only shown for prefixes where Redis Stack had no unexpected errors; mixed unsupported/error prefixes are shown as `n/a` to avoid treating error-reply throughput as a performance result.

@@ -56,6 +56,8 @@ struct CsvRow {
     ops: u64,
     ops_per_sec: f64,
     avg_us: f64,
+    p99_us: f64,
+    has_percentiles: bool,
     errors: u64,
     profile: String,
 }
@@ -69,6 +71,8 @@ struct TargetSummary {
     total_ops: u64,
     sum_ops_per_sec: f64,
     mean_avg_us: f64,
+    latency_percentile_cases: usize,
+    mean_p99_us: f64,
     errors: u64,
     small_cases: usize,
     large_cases: usize,
@@ -121,6 +125,8 @@ fn read_rows(path: &Path) -> Result<Vec<CsvRow>, BoxError> {
         return Ok(Vec::new());
     };
     let columns = header.split(',').collect::<Vec<_>>();
+    let optional_index =
+        |name: &str| -> Option<usize> { columns.iter().position(|column| *column == name) };
     let index = |name: &str| -> Result<usize, BoxError> {
         columns
             .iter()
@@ -137,6 +143,7 @@ fn read_rows(path: &Path) -> Result<Vec<CsvRow>, BoxError> {
     let ops_i = index("ops")?;
     let ops_sec_i = index("ops_per_sec")?;
     let avg_us_i = index("avg_us")?;
+    let p99_us_i = optional_index("p99_us");
     let errors_i = index("errors")?;
     let profile_i = index("profile")?;
 
@@ -155,6 +162,12 @@ fn read_rows(path: &Path) -> Result<Vec<CsvRow>, BoxError> {
             )
             .into());
         }
+        let avg_us = fields[avg_us_i].parse()?;
+        let p99_us = match p99_us_i {
+            Some(index) => fields[index].parse()?,
+            None => avg_us,
+        };
+        let has_percentiles = p99_us_i.is_some();
         rows.push(CsvRow {
             target: fields[target_i].to_string(),
             family: fields[family_i].to_string(),
@@ -164,7 +177,9 @@ fn read_rows(path: &Path) -> Result<Vec<CsvRow>, BoxError> {
             duration_s: fields[duration_i].parse()?,
             ops: fields[ops_i].parse()?,
             ops_per_sec: fields[ops_sec_i].parse()?,
-            avg_us: fields[avg_us_i].parse()?,
+            avg_us,
+            p99_us,
+            has_percentiles,
             errors: fields[errors_i].parse()?,
             profile: fields[profile_i].to_string(),
         });
@@ -240,6 +255,10 @@ fn summarize(rows: &[CsvRow]) -> Vec<TargetSummary> {
         summary.total_ops = summary.total_ops.saturating_add(row.ops);
         summary.sum_ops_per_sec += row.ops_per_sec;
         summary.mean_avg_us += row.avg_us;
+        if row.has_percentiles {
+            summary.latency_percentile_cases += 1;
+            summary.mean_p99_us += row.p99_us;
+        }
         summary.errors = summary.errors.saturating_add(row.errors);
         if row.profile == "large" {
             summary.large_cases += 1;
@@ -255,15 +274,25 @@ fn summarize(rows: &[CsvRow]) -> Vec<TargetSummary> {
             if summary.cases > 0 {
                 summary.mean_avg_us /= summary.cases as f64;
             }
+            if summary.latency_percentile_cases > 0 {
+                summary.mean_p99_us /= summary.latency_percentile_cases as f64;
+            }
             summary.rows.sort_by(|left, right| {
-                right
-                    .avg_us
-                    .partial_cmp(&left.avg_us)
+                latency_sort_value(right)
+                    .partial_cmp(&latency_sort_value(left))
                     .unwrap_or(Ordering::Equal)
             });
             summary
         })
         .collect()
+}
+
+fn latency_sort_value(row: &CsvRow) -> f64 {
+    if row.has_percentiles {
+        row.p99_us
+    } else {
+        row.avg_us
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -274,6 +303,9 @@ struct TargetComparison {
     baseline_sum_ops_per_sec: f64,
     target_mean_avg_us: f64,
     baseline_mean_avg_us: f64,
+    p99_common_cases: usize,
+    target_mean_p99_us: f64,
+    baseline_mean_p99_us: f64,
     target_errors: u64,
     baseline_errors: u64,
 }
@@ -309,6 +341,11 @@ fn compare_to_baseline(rows: &[CsvRow], baseline: &str) -> Vec<TargetComparison>
                 comparison.baseline_sum_ops_per_sec += baseline_row.ops_per_sec;
                 comparison.target_mean_avg_us += target_row.avg_us;
                 comparison.baseline_mean_avg_us += baseline_row.avg_us;
+                if target_row.has_percentiles && baseline_row.has_percentiles {
+                    comparison.p99_common_cases += 1;
+                    comparison.target_mean_p99_us += target_row.p99_us;
+                    comparison.baseline_mean_p99_us += baseline_row.p99_us;
+                }
                 comparison.target_errors =
                     comparison.target_errors.saturating_add(target_row.errors);
                 comparison.baseline_errors = comparison
@@ -321,6 +358,10 @@ fn compare_to_baseline(rows: &[CsvRow], baseline: &str) -> Vec<TargetComparison>
             }
             comparison.target_mean_avg_us /= comparison.common_cases as f64;
             comparison.baseline_mean_avg_us /= comparison.common_cases as f64;
+            if comparison.p99_common_cases > 0 {
+                comparison.target_mean_p99_us /= comparison.p99_common_cases as f64;
+                comparison.baseline_mean_p99_us /= comparison.p99_common_cases as f64;
+            }
             Some(comparison)
         })
         .collect()
@@ -355,26 +396,27 @@ fn render_markdown(
     writeln!(out).unwrap();
     writeln!(
         out,
-        "| Target | Cases | Clients | Duration | Sum Ops/sec | Mean Avg us | Errors | vs `{}` |",
+        "| Target | Cases | Clients | Duration | Sum Ops/sec | Mean Avg us | Mean P99 us | Errors | vs `{}` |",
         baseline
     )
     .unwrap();
     writeln!(
         out,
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     )
     .unwrap();
     for summary in summaries {
         let ratio = ratio(summary.sum_ops_per_sec, baseline_ops);
         writeln!(
             out,
-            "| {} | {} | {} | {} | {:.1} | {:.1} | {} | {} |",
+            "| {} | {} | {} | {} | {:.1} | {:.1} | {} | {} | {} |",
             summary.target,
             summary.cases,
             summary.clients,
             summary.duration_s,
             summary.sum_ops_per_sec,
             summary.mean_avg_us,
+            optional_us(summary.latency_percentile_cases, summary.mean_p99_us),
             summary.errors,
             ratio,
         )
@@ -394,19 +436,19 @@ fn render_markdown(
     } else {
         writeln!(
             out,
-            "| Target | Common Cases | Target Sum Ops/sec | `{}` Sum Ops/sec | Ratio | Target Mean Avg us | `{}` Mean Avg us | Target Errors | `{}` Errors |",
-            baseline, baseline, baseline
+            "| Target | Common Cases | Target Sum Ops/sec | `{}` Sum Ops/sec | Ratio | Target Mean Avg us | `{}` Mean Avg us | P99 Cases | Target Mean P99 us | `{}` Mean P99 us | Target Errors | `{}` Errors |",
+            baseline, baseline, baseline, baseline
         )
         .unwrap();
         writeln!(
             out,
-            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
         )
         .unwrap();
         for comparison in comparisons {
             writeln!(
                 out,
-                "| {} | {} | {:.1} | {:.1} | {} | {:.1} | {:.1} | {} | {} |",
+                "| {} | {} | {:.1} | {:.1} | {} | {:.1} | {:.1} | {} | {} | {} | {} | {} |",
                 comparison.target,
                 comparison.common_cases,
                 comparison.target_sum_ops_per_sec,
@@ -417,6 +459,9 @@ fn render_markdown(
                 ),
                 comparison.target_mean_avg_us,
                 comparison.baseline_mean_avg_us,
+                comparison.p99_common_cases,
+                optional_us(comparison.p99_common_cases, comparison.target_mean_p99_us),
+                optional_us(comparison.p99_common_cases, comparison.baseline_mean_p99_us),
                 comparison.target_errors,
                 comparison.baseline_errors,
             )
@@ -430,20 +475,21 @@ fn render_markdown(
         writeln!(out).unwrap();
         writeln!(
             out,
-            "| Family | Command | Case | Profile | Ops/sec | Avg us | Errors |"
+            "| Family | Command | Case | Profile | Ops/sec | Avg us | P99 us | Errors |"
         )
         .unwrap();
-        writeln!(out, "| --- | --- | --- | --- | ---: | ---: | ---: |").unwrap();
+        writeln!(out, "| --- | --- | --- | --- | ---: | ---: | ---: | ---: |").unwrap();
         for row in summary.rows.iter().take(args.slowest) {
             writeln!(
                 out,
-                "| {} | `{}` | {} | {} | {:.1} | {:.1} | {} |",
+                "| {} | `{}` | {} | {} | {:.1} | {:.1} | {} | {} |",
                 row.family,
                 row.command,
                 markdown_cell(&row.case_name),
                 row.profile,
                 row.ops_per_sec,
                 row.avg_us,
+                row_percentile_us(row),
                 row.errors,
             )
             .unwrap();
@@ -466,7 +512,7 @@ fn render_json(
 
     let mut out = String::new();
     writeln!(out, "{{").unwrap();
-    writeln!(out, "  \"schema_version\": 2,").unwrap();
+    writeln!(out, "  \"schema_version\": 3,").unwrap();
     writeln!(out, "  \"label\": \"{}\",", json_escape(&args.label)).unwrap();
     writeln!(
         out,
@@ -528,6 +574,18 @@ fn render_json(
         )
         .unwrap();
         writeln!(out, "      \"mean_avg_us\": {:.3},", summary.mean_avg_us).unwrap();
+        writeln!(
+            out,
+            "      \"latency_percentile_cases\": {},",
+            summary.latency_percentile_cases
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "      \"mean_p99_us\": {},",
+            optional_json_number(summary.latency_percentile_cases, summary.mean_p99_us)
+        )
+        .unwrap();
         writeln!(out, "      \"errors\": {},", summary.errors).unwrap();
         writeln!(out, "      \"baseline_ratio\": {:.6}", ratio).unwrap();
         writeln!(out, "    }}{comma}").unwrap();
@@ -579,6 +637,24 @@ fn render_json(
         .unwrap();
         writeln!(
             out,
+            "      \"p99_common_cases\": {},",
+            comparison.p99_common_cases
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "      \"target_mean_p99_us\": {},",
+            optional_json_number(comparison.p99_common_cases, comparison.target_mean_p99_us)
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "      \"baseline_mean_p99_us\": {},",
+            optional_json_number(comparison.p99_common_cases, comparison.baseline_mean_p99_us)
+        )
+        .unwrap();
+        writeln!(
+            out,
             "      \"target_errors\": {},",
             comparison.target_errors
         )
@@ -602,6 +678,30 @@ fn ratio(value: f64, baseline: f64) -> String {
         return "n/a".to_string();
     }
     format!("{:.2}x", value / baseline)
+}
+
+fn optional_us(count: usize, value: f64) -> String {
+    if count == 0 {
+        "n/a".to_string()
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+fn row_percentile_us(row: &CsvRow) -> String {
+    if row.has_percentiles {
+        format!("{:.1}", row.p99_us)
+    } else {
+        "n/a".to_string()
+    }
+}
+
+fn optional_json_number(count: usize, value: f64) -> String {
+    if count == 0 {
+        "null".to_string()
+    } else {
+        format!("{value:.3}")
+    }
 }
 
 fn markdown_cell(value: &str) -> String {
@@ -644,6 +744,8 @@ mod tests {
         assert_eq!(shardcache.errors, 1);
         assert_eq!(shardcache.sum_ops_per_sec, 300.0);
         assert_eq!(shardcache.mean_avg_us, 15.0);
+        assert_eq!(shardcache.latency_percentile_cases, 2);
+        assert_eq!(shardcache.mean_p99_us, 150.0);
     }
 
     #[test]
@@ -673,6 +775,9 @@ mod tests {
         assert_eq!(comparisons[0].common_cases, 1);
         assert_eq!(comparisons[0].baseline_sum_ops_per_sec, 100.0);
         assert_eq!(comparisons[0].target_sum_ops_per_sec, 50.0);
+        assert_eq!(comparisons[0].p99_common_cases, 1);
+        assert_eq!(comparisons[0].baseline_mean_p99_us, 100.0);
+        assert_eq!(comparisons[0].target_mean_p99_us, 400.0);
         assert_eq!(comparisons[0].target_errors, 1);
     }
 
@@ -687,6 +792,8 @@ mod tests {
             ops: ops_per_sec as u64,
             ops_per_sec,
             avg_us,
+            p99_us: avg_us * 10.0,
+            has_percentiles: true,
             errors,
             profile: "small".to_string(),
         }

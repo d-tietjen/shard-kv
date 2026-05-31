@@ -64,7 +64,7 @@ pub struct RedisModuleApi<'a> {
 pub(crate) trait TimeSeriesMultiRangeWriter {
     fn begin_rows(&mut self, rows: usize);
     fn begin_series(&mut self, key: &[u8], samples: usize);
-    fn sample(&mut self, timestamp: i64, value: &[u8]);
+    fn sample_encoded(&mut self, encoded_resp: &[u8]);
 }
 
 impl<'a> RedisModuleApi<'a> {
@@ -305,6 +305,7 @@ struct CellBucket {
 struct TimeSeriesSample {
     value: f64,
     raw: Bytes,
+    encoded_resp: Bytes,
 }
 
 #[cfg(feature = "redis-modules")]

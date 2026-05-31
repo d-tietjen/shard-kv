@@ -100,7 +100,7 @@ impl EmbeddedStore {
                     .last_key_value()
                     .map_or(0.0, |(_, sample)| sample.value)
                     + signed;
-                series.insert(timestamp, ts_sample(value));
+                series.insert(timestamp, ts_sample(timestamp, value));
                 RedisModuleApiResult::Integer(timestamp)
             }
             "TS.INFO" if !args.is_empty() => {
@@ -121,27 +121,31 @@ impl EmbeddedStore {
                 ])
             }
             "TS.QUERYINDEX" => {
-                let keys = self.module_series_keys();
+                let filters = parse_ts_label_filters(args);
+                let keys = self.timeseries_matching_keys(&filters);
                 RedisModuleApiResult::Array(keys.into_iter().map(result_bulk_bytes).collect())
             }
-            "TS.MGET" => RedisModuleApiResult::Array(
-                self.module_series_keys()
-                    .into_iter()
-                    .filter_map(|key| {
-                        let route = self.route_key(&key);
-                        let shard = self.module_state.read(route);
-                        let (timestamp, value) = shard.series.get(&key)?.last_key_value()?;
-                        Some(RedisModuleApiResult::Array(vec![
-                            result_bulk_bytes(key),
-                            RedisModuleApiResult::Array(Vec::new()),
-                            RedisModuleApiResult::Array(vec![
-                                RedisModuleApiResult::Integer(*timestamp),
-                                result_bulk_bytes(value.raw.clone()),
-                            ]),
-                        ]))
-                    })
-                    .collect(),
-            ),
+            "TS.MGET" => {
+                let filters = parse_ts_filters_after_keyword(args, 0);
+                RedisModuleApiResult::Array(
+                    self.timeseries_matching_keys(&filters)
+                        .into_iter()
+                        .filter_map(|key| {
+                            let route = self.route_key(&key);
+                            let shard = self.module_state.read(route);
+                            let (timestamp, value) = shard.series.get(&key)?.last_key_value()?;
+                            Some(RedisModuleApiResult::Array(vec![
+                                result_bulk_bytes(key),
+                                RedisModuleApiResult::Array(Vec::new()),
+                                RedisModuleApiResult::Array(vec![
+                                    RedisModuleApiResult::Integer(*timestamp),
+                                    result_bulk_bytes(value.raw.clone()),
+                                ]),
+                            ]))
+                        })
+                        .collect(),
+                )
+            }
             "TS.MRANGE" | "TS.MREVRANGE" if args.len() >= 2 => RedisModuleApiResult::Array(
                 self.timeseries_multi_range_rows(command.as_ref(), args)
                     .into_iter()
@@ -181,20 +185,24 @@ impl EmbeddedStore {
             .series
             .entry(key.to_vec())
             .or_default()
-            .insert(
-                timestamp,
-                TimeSeriesSample {
-                    value,
-                    raw: raw_value.to_vec(),
-                },
-            );
+            .insert(timestamp, ts_sample_from_raw(timestamp, value, raw_value));
         RedisModuleApiResult::Integer(timestamp)
     }
 
-    fn module_series_keys(&self) -> Vec<Bytes> {
+    fn timeseries_matching_keys(&self, filters: &[TsLabelFilter<'_>]) -> Vec<Bytes> {
         let mut keys = Vec::new();
         for shard in &self.module_state.shards {
-            keys.extend(shard.read().series.keys().cloned());
+            let shard = shard.read();
+            keys.reserve(shard.series.len());
+            keys.extend(
+                shard
+                    .series
+                    .keys()
+                    .filter(|key| {
+                        ts_record_matches_filters(shard.records.get(key.as_slice()), filters)
+                    })
+                    .cloned(),
+            );
         }
         keys.sort();
         keys
@@ -211,15 +219,18 @@ impl EmbeddedStore {
         let start = parse_ts_bound(args[0], i64::MIN);
         let end = parse_ts_bound(args[1], i64::MAX);
         let reverse = command.eq_ignore_ascii_case("TS.MREVRANGE");
+        let filters = parse_ts_filters_after_keyword(args, 2);
         let mut ranges: Vec<(Bytes, Vec<(i64, Bytes)>)> = Vec::new();
         for shard in &self.module_state.shards {
             let shard = shard.read();
             ranges.reserve(shard.series.len());
             for (key, series) in &shard.series {
-                ranges.push((
-                    key.clone(),
-                    ts_range_row_values(series, start, end, reverse),
-                ));
+                if ts_record_matches_filters(shard.records.get(key.as_slice()), &filters) {
+                    ranges.push((
+                        key.clone(),
+                        ts_range_row_values(series, start, end, reverse),
+                    ));
+                }
             }
         }
         ranges.sort_by(|left, right| left.0.cmp(&right.0));
@@ -239,11 +250,36 @@ impl EmbeddedStore {
         let start = parse_ts_bound(args[0], i64::MIN);
         let end = parse_ts_bound(args[1], i64::MAX);
         let reverse = command.eq_ignore_ascii_case("TS.MREVRANGE");
+        let filters = parse_ts_filters_after_keyword(args, 2);
+        if self.module_state.shards.len() == 1 {
+            let shard = self.module_state.shards[0].read();
+            let mut rows = shard
+                .series
+                .iter()
+                .filter(|(key, _)| {
+                    ts_record_matches_filters(shard.records.get(key.as_slice()), &filters)
+                })
+                .collect::<Vec<_>>();
+            rows.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            writer.begin_rows(rows.len());
+            for (key, series) in rows {
+                write_timeseries_range_series(writer, key, series, start, end, reverse);
+            }
+            return;
+        }
         let mut keys = Vec::new();
         for shard in &self.module_state.shards {
             let shard = shard.read();
             keys.reserve(shard.series.len());
-            keys.extend(shard.series.keys().cloned());
+            keys.extend(
+                shard
+                    .series
+                    .keys()
+                    .filter(|key| {
+                        ts_record_matches_filters(shard.records.get(key.as_slice()), &filters)
+                    })
+                    .cloned(),
+            );
         }
         keys.sort();
         writer.begin_rows(keys.len());
@@ -254,17 +290,93 @@ impl EmbeddedStore {
                 writer.begin_series(&key, 0);
                 continue;
             };
-            let samples = ts_range_len(series, start, end);
-            writer.begin_series(&key, samples);
-            if reverse {
-                for (timestamp, sample) in series.range(start..=end).rev() {
-                    writer.sample(*timestamp, &sample.raw);
-                }
-            } else {
-                for (timestamp, sample) in series.range(start..=end) {
-                    writer.sample(*timestamp, &sample.raw);
-                }
-            }
+            write_timeseries_range_series(writer, &key, series, start, end, reverse);
+        }
+    }
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+#[derive(Clone, Copy)]
+struct TsLabelFilter<'a> {
+    label: &'a [u8],
+    value: &'a [u8],
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn parse_ts_filters_after_keyword<'a>(args: &[&'a [u8]], start: usize) -> Vec<TsLabelFilter<'a>> {
+    let Some(tail) = args.get(start..) else {
+        return Vec::new();
+    };
+    let Some(filter_at) = tail.iter().position(|arg| bytes_eq(arg, b"FILTER")) else {
+        return Vec::new();
+    };
+    parse_ts_label_filters(&args[start + filter_at + 1..])
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn parse_ts_label_filters<'a>(args: &[&'a [u8]]) -> Vec<TsLabelFilter<'a>> {
+    args.iter()
+        .filter_map(|raw| parse_ts_label_filter(raw))
+        .collect()
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn parse_ts_label_filter(raw: &[u8]) -> Option<TsLabelFilter<'_>> {
+    let eq_at = raw.iter().position(|byte| *byte == b'=')?;
+    if eq_at == 0 {
+        return None;
+    }
+    Some(TsLabelFilter {
+        label: &raw[..eq_at],
+        value: &raw[eq_at + 1..],
+    })
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn ts_record_matches_filters(record: Option<&ModuleRecord>, filters: &[TsLabelFilter<'_>]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    let Some(record) = record else {
+        return false;
+    };
+    filters.iter().all(|filter| {
+        ts_record_label_value(record, filter.label).is_some_and(|value| value == filter.value)
+    })
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn ts_record_label_value<'a>(record: &'a ModuleRecord, label: &[u8]) -> Option<&'a [u8]> {
+    let labels_at = record
+        .args
+        .iter()
+        .position(|arg| bytes_eq(arg, b"LABELS"))?;
+    for pair in record.args[labels_at + 1..].chunks_exact(2) {
+        if pair[0].as_slice() == label {
+            return Some(pair[1].as_slice());
+        }
+    }
+    None
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn write_timeseries_range_series<W: TimeSeriesMultiRangeWriter>(
+    writer: &mut W,
+    key: &[u8],
+    series: &BTreeMap<i64, TimeSeriesSample>,
+    start: i64,
+    end: i64,
+    reverse: bool,
+) {
+    let samples = ts_range_len(series, start, end);
+    writer.begin_series(key, samples);
+    if reverse {
+        for (_timestamp, sample) in series.range(start..=end).rev() {
+            writer.sample_encoded(&sample.encoded_resp);
+        }
+    } else {
+        for (_timestamp, sample) in series.range(start..=end) {
+            writer.sample_encoded(&sample.encoded_resp);
         }
     }
 }
@@ -343,11 +455,33 @@ fn timeseries_multi_range_row_result(
 }
 
 #[cfg(feature = "redis-module-timeseries")]
-fn ts_sample(value: f64) -> TimeSeriesSample {
+fn ts_sample(timestamp: i64, value: f64) -> TimeSeriesSample {
+    let raw = value.to_string().into_bytes();
+    ts_sample_from_raw(timestamp, value, &raw)
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn ts_sample_from_raw(timestamp: i64, value: f64, raw: &[u8]) -> TimeSeriesSample {
     TimeSeriesSample {
         value,
-        raw: value.to_string().into_bytes(),
+        raw: raw.to_vec(),
+        encoded_resp: encode_ts_resp_sample(timestamp, raw),
     }
+}
+
+#[cfg(feature = "redis-module-timeseries")]
+fn encode_ts_resp_sample(timestamp: i64, value: &[u8]) -> Bytes {
+    let timestamp = timestamp.to_string();
+    let value_len = value.len().to_string();
+    let mut out = Vec::with_capacity(12 + timestamp.len() + value_len.len() + value.len());
+    out.extend_from_slice(b"*2\r\n:");
+    out.extend_from_slice(timestamp.as_bytes());
+    out.extend_from_slice(b"\r\n$");
+    out.extend_from_slice(value_len.as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(value);
+    out.extend_from_slice(b"\r\n");
+    out
 }
 
 #[cfg(feature = "redis-module-timeseries")]

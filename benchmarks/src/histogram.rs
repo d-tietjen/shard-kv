@@ -1,5 +1,6 @@
 use hdrhistogram::Histogram;
 
+#[derive(Debug, Clone)]
 pub struct LatencyHistogram {
     h: Histogram<u64>,
 }

@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
+use shardcache_benchmarks::histogram::LatencyHistogram;
 use shardcache_benchmarks::redis_command_cases::{
     REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES,
     REDIS_MODULE_COMMAND_CASES, RedisCommandCase,
@@ -197,6 +198,7 @@ struct CaseStats {
     errors: u64,
     expected_errors: u64,
     elapsed_ns: u128,
+    latency: LatencyHistogram,
 }
 
 impl CaseStats {
@@ -205,6 +207,7 @@ impl CaseStats {
         self.errors = self.errors.saturating_add(other.errors);
         self.expected_errors = self.expected_errors.saturating_add(other.expected_errors);
         self.elapsed_ns = self.elapsed_ns.saturating_add(other.elapsed_ns);
+        self.latency.merge(&other.latency);
     }
 
     fn ops_per_sec(&self, duration: Duration) -> f64 {
@@ -216,6 +219,22 @@ impl CaseStats {
             0 => 0.0,
             ops => self.elapsed_ns as f64 / ops as f64 / 1_000.0,
         }
+    }
+
+    fn p50_us(&self) -> f64 {
+        self.latency.p50_ns() as f64 / 1_000.0
+    }
+
+    fn p95_us(&self) -> f64 {
+        self.latency.p95_ns() as f64 / 1_000.0
+    }
+
+    fn p99_us(&self) -> f64 {
+        self.latency.p99_ns() as f64 / 1_000.0
+    }
+
+    fn p999_us(&self) -> f64 {
+        self.latency.p999_ns() as f64 / 1_000.0
     }
 }
 
@@ -260,8 +279,10 @@ fn main() -> Result<(), BoxError> {
         args.duration,
     );
     println!();
-    println!("| target | family | command | case | ops/sec | avg us | errors | expected errors |");
-    println!("| --- | --- | --- | --- | ---: | ---: | ---: | ---: |");
+    println!(
+        "| target | family | command | case | ops/sec | avg us | p99 us | errors | expected errors |"
+    );
+    println!("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |");
 
     let mut csv = match args.csv.as_deref() {
         Some(path) => Some(std::fs::File::create(path)?),
@@ -270,7 +291,7 @@ fn main() -> Result<(), BoxError> {
     if let Some(csv) = csv.as_mut() {
         writeln!(
             csv,
-            "target,family,command,case,clients,key_shards,pipeline_depth,duration_s,ops,ops_per_sec,avg_us,errors,expected_errors,profile"
+            "target,family,command,case,clients,key_shards,pipeline_depth,duration_s,ops,ops_per_sec,avg_us,p50_us,p95_us,p99_us,p999_us,errors,expected_errors,profile"
         )?;
     }
 
@@ -297,20 +318,21 @@ fn main() -> Result<(), BoxError> {
             }
 
             println!(
-                "| {} | {} | {} | {} | {:.0} | {:.2} | {} | {} |",
+                "| {} | {} | {} | {} | {:.0} | {:.2} | {:.2} | {} | {} |",
                 target.name,
                 case.family.label(),
                 case.command_name,
                 case.case_name,
                 stats.ops_per_sec(duration),
                 stats.avg_us(),
+                stats.p99_us(),
                 stats.errors,
                 stats.expected_errors
             );
             if let Some(csv) = csv.as_mut() {
                 writeln!(
                     csv,
-                    "{},{},{},{},{},{},{},{},{},{:.3},{:.3},{},{},{}",
+                    "{},{},{},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{}",
                     target.name,
                     case.family.label(),
                     case.command_name,
@@ -322,6 +344,10 @@ fn main() -> Result<(), BoxError> {
                     stats.ops,
                     stats.ops_per_sec(duration),
                     stats.avg_us(),
+                    stats.p50_us(),
+                    stats.p95_us(),
+                    stats.p99_us(),
+                    stats.p999_us(),
                     stats.errors,
                     stats.expected_errors,
                     case.profile.label()
@@ -731,11 +757,13 @@ fn drain_pipeline(
     for (index, started) in pending.drain(..) {
         let error = conn.read_case(&cases[index])?;
         if let Some(stats) = stats.as_deref_mut() {
+            let elapsed_ns = started.elapsed().as_nanos();
             let case_stats = &mut stats[index];
             case_stats.ops = case_stats.ops.saturating_add(1);
-            case_stats.elapsed_ns = case_stats
-                .elapsed_ns
-                .saturating_add(started.elapsed().as_nanos());
+            case_stats.elapsed_ns = case_stats.elapsed_ns.saturating_add(elapsed_ns);
+            case_stats
+                .latency
+                .record(elapsed_ns.min(u128::from(u64::MAX)) as u64);
             if error {
                 if cases[index].expect_error {
                     case_stats.expected_errors = case_stats.expected_errors.saturating_add(1);

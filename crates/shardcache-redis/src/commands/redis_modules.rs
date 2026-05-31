@@ -407,16 +407,14 @@ impl TimeSeriesMultiRangeWriter for RespTimeSeriesMultiRangeWriter<'_> {
     }
 
     fn begin_series(&mut self, key: &[u8], samples: usize) {
-        write_resp_array_header(self.out, 3);
+        self.out.extend_from_slice(b"*3\r\n");
         ServerWire::write_resp_blob_string(self.out, key);
-        write_resp_array_header(self.out, 0);
+        self.out.extend_from_slice(b"*0\r\n");
         write_resp_array_header(self.out, samples);
     }
 
-    fn sample(&mut self, timestamp: i64, value: &[u8]) {
-        write_resp_array_header(self.out, 2);
-        ServerWire::write_resp_integer(self.out, timestamp);
-        ServerWire::write_resp_blob_string(self.out, value);
+    fn sample_encoded(&mut self, encoded_resp: &[u8]) {
+        self.out.extend_from_slice(encoded_resp);
     }
 }
 

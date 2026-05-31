@@ -260,13 +260,14 @@ Artifacts:
 
 - `benchmarks/results/adam-module-command-matrix-1vcpu-p1-20260531T214753Z/report.md`
 - `benchmarks/results/adam-module-command-matrix-optimized5-modules-1vcpu-p1-20260531T221741Z/report.md`
+- `benchmarks/results/adam-module-command-matrix-p99-opt3-modules-1vcpu-p1-20260531T231229Z/report.md`
 - [`REDIS_MODULE_COMMAND_BENCHMARKS.md`](REDIS_MODULE_COMMAND_BENCHMARKS.md)
 
-| Scope | Cases | shardcache ops/sec | Redis Stack ops/sec | sc/redis | shardcache mean avg us | Redis Stack mean avg us | Redis faster cases |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| all module cases | 227 | 27,953.5 | 14,615.5 | 1.91x | 35.7 | 68.4 | n/a |
-| clean non-error common subset | 96 | 11,817.5 | 6,171.5 | 1.91x | 35.7 | 77.2 | 0 |
-| zero-unexpected-error common subset | 109 | 13,418.5 | 7,007.5 | 1.91x | 34.8 | 77.0 | 0 |
+| Scope | Cases | shardcache ops/sec | Redis Stack ops/sec | sc/redis | shardcache mean avg us | Redis Stack mean avg us | shardcache mean p99 us | Redis Stack mean p99 us | Redis faster cases | Redis lower p99 cases |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all module cases | 227 | 29,791.5 | 15,147.0 | 1.97x | 33.1 | 65.2 | 41.3 | 89.4 | n/a | n/a |
+| clean non-error common subset | 96 | 12,597.5 | 6,405.5 | 1.97x | 32.8 | 74.2 | 40.8 | 103.8 | 0 | 0 |
+| zero-unexpected-error common subset | 109 | 14,302.5 | 7,272.0 | 1.97x | 32.1 | 74.3 | 39.7 | 105.4 | 0 | 0 |
 
 shardcache completed all 227 module command cases with zero unexpected errors.
 Redis Stack returned unexpected errors on 118 command cases from modules or
@@ -276,8 +277,9 @@ module benchmark document.
 
 A follow-up on the three rows where Redis Stack had lower average latency in the
 initial full matrix (`FT._LIST`, `TS.MRANGE`, and `TS.MREVRANGE`) now has
-shardcache ahead on both throughput and average latency after optimizing module
-index listing and multi-series range serialization.
+shardcache ahead on throughput, average latency, and p99 latency after
+optimizing module index listing, RedisTimeSeries filter matching, and
+multi-series range serialization.
 
 The earlier scaling-oriented no-keyspace Redis-command matrix was run on `adam`
 on 2026-05-24 with 16 clients, 16 key shards, `SHARD_COUNT=16`, shared keyspace

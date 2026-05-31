@@ -62,9 +62,9 @@ The bundle contains:
 | File | Purpose |
 | --- | --- |
 | `metadata.txt` | Git SHA, dirty status, host/runtime versions, benchmark knobs, pinning knobs. |
-| `redis-command-matrix.csv` | Raw per-target, per-command output from the live RESP harness. |
-| `report.md` | Target summary, throughput ratios, and slowest-case tables. |
-| `summary.json` | Machine-readable target totals and ratios. |
+| `redis-command-matrix.csv` | Raw per-target, per-command throughput plus p50/p95/p99/p999 latency from the live RESP harness. |
+| `report.md` | Target summary, throughput ratios, mean p99, and slowest-case tables. |
+| `summary.json` | Machine-readable target totals, p99 summaries, and ratios. |
 | `redis-compatibility.json` | JSON command compatibility manifest captured with the run. |
 
 When Redis, Valkey, or Dragonfly references are already captured for the same
