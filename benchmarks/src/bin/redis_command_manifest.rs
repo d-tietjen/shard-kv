@@ -178,7 +178,7 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in shardcache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, missing function invocation, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.2.0 compatibility surface."
+        "`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in shardcache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, missing function invocation, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.2.1 compatibility surface."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -206,7 +206,7 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     .unwrap();
     writeln!(
         out,
-        "| Redis 5.0.14 commands explicitly excluded from 0.2.0 | {} |",
+        "| Redis 5.0.14 commands explicitly excluded from 0.2.1 | {} |",
         redis5_excluded.len()
     )
     .unwrap();
@@ -324,7 +324,7 @@ fn render_semantic_notes(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "- Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.2.0 compatibility semantics."
+        "- Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.2.1 compatibility semantics."
     )
     .unwrap();
     writeln!(

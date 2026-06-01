@@ -30,14 +30,14 @@ mod batch;
 mod batch_results;
 mod core;
 #[cfg(feature = "redis")]
-#[path = "../../../shardcache-redis/src/storage/embedded_store/key_scan.rs"]
+#[path = "../redis_compat/storage/embedded_store/key_scan.rs"]
 mod key_scan;
 mod lifecycle;
 #[cfg(feature = "redis-modules")]
-#[path = "../../../shardcache-redis/src/storage/embedded_store/modules.rs"]
+#[path = "../redis_compat/storage/embedded_store/modules.rs"]
 mod modules;
 #[cfg(feature = "redis")]
-#[path = "../../../shardcache-redis/src/storage/embedded_store/objects.rs"]
+#[path = "../redis_compat/storage/embedded_store/objects.rs"]
 mod objects;
 mod owned;
 mod point;

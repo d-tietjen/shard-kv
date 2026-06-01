@@ -32,7 +32,7 @@ mod engine;
 mod flat_map;
 mod records;
 #[cfg(feature = "redis")]
-#[path = "../../shardcache-redis/src/storage/redis_objects.rs"]
+#[path = "redis_compat/storage/redis_objects.rs"]
 mod redis_objects;
 mod semantic;
 mod stats;

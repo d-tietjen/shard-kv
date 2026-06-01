@@ -11,7 +11,7 @@ Use the published crate from crates.io:
 
 ```toml
 [dependencies]
-shardcache-redis = "0.2.0"
+shardcache-redis = "0.2.1"
 ```
 
 From a workspace checkout, use a path dependency:
@@ -25,7 +25,7 @@ The crate defaults to `redis`, so `cargo check -p shardcache-redis` exercises
 the Redis compatibility implementation.
 
 Compatibility status is generated from the live command benchmark registry in
-[`docs/REDIS_COMPATIBILITY.md`](../../docs/REDIS_COMPATIBILITY.md). The 0.2.0
+[`docs/REDIS_COMPATIBILITY.md`](../../docs/REDIS_COMPATIBILITY.md). The 0.2.1
 target covers the Redis 5.0.14 command table plus Redis 6, 7, 8, and
 feature-gated module command families tracked in the manifest, with standalone
 expected-error behavior and semantic caveats documented there.

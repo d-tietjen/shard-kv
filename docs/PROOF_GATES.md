@@ -28,7 +28,7 @@ before tagging or publishing.
 ./scripts/check-redis-compatibility-doc.sh
 ```
 
-`check-feature-matrix.sh` compiles the public 0.2.0 feature contract for
+`check-feature-matrix.sh` compiles the public 0.2.1 feature contract for
 `shardcache`, `shardmap`, and `shardcache-redis`, and verifies that
 embedded-only builds do not depend on `shardcache-redis`.
 
