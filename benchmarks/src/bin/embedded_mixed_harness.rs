@@ -18,7 +18,7 @@ use shardcache_benchmarks::histogram::{LatencyHistogram, format_ns};
 use shardcache_benchmarks::workload::{
     KeyDistribution, KeyPattern, Mix, OpStream, Workload, WorkloadSpec,
 };
-use shardmap::config::{EvictionPolicy, ShardCacheConfig};
+use shardmap::config::{EvictionPolicy, PersistenceConfig, ShardCacheConfig};
 use shardmap::server::{ServerRuntime, ShardCacheServer};
 use shardmap::storage::{
     EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedStore, ShardArcEmbeddedStore,
@@ -129,6 +129,17 @@ struct InternalWorkerResult {
     writes_hist: LatencyHistogram,
 }
 
+struct OwnerLocalWorkerArgs {
+    keys: Arc<Vec<PreparedKey>>,
+    value: Arc<Vec<u8>>,
+    mix: Mix,
+    key_distribution: KeyDistribution,
+    stop: Arc<AtomicBool>,
+    measure: Arc<AtomicBool>,
+    latency_sample_rate: u64,
+    yield_ops: u64,
+}
+
 struct InternalRunResult {
     ops: u64,
     reads: u64,
@@ -140,6 +151,25 @@ struct InternalRunResult {
     all: LatencyHistogram,
     reads_hist: LatencyHistogram,
     writes_hist: LatencyHistogram,
+}
+
+fn server_config_from_args(args: &Args) -> ShardCacheConfig {
+    ShardCacheConfig {
+        bind_addr: args.bind_addr.clone(),
+        shard_count: args.shard_count,
+        max_connections: args.max_connections,
+        max_memory_bytes: args.max_memory_bytes,
+        eviction_policy: if args.max_memory_bytes > 0 {
+            EvictionPolicy::Lru
+        } else {
+            EvictionPolicy::None
+        },
+        persistence: PersistenceConfig {
+            enabled: false,
+            ..PersistenceConfig::default()
+        },
+        ..ShardCacheConfig::default()
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -199,17 +229,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.internal_latency_sample_rate,
     );
 
-    let mut config = ShardCacheConfig::default();
-    config.bind_addr = args.bind_addr.clone();
-    config.shard_count = args.shard_count;
-    config.max_connections = args.max_connections;
-    config.max_memory_bytes = args.max_memory_bytes;
-    config.eviction_policy = if args.max_memory_bytes > 0 {
-        EvictionPolicy::Lru
-    } else {
-        EvictionPolicy::None
-    };
-    config.persistence.enabled = false;
+    let config = server_config_from_args(&args);
     config.validate()?;
 
     let runtime_threads = if args.owner_local {
@@ -326,17 +346,7 @@ fn run_shard_arc(
         args.internal_latency_sample_rate,
     );
 
-    let mut config = ShardCacheConfig::default();
-    config.bind_addr = args.bind_addr.clone();
-    config.shard_count = args.shard_count;
-    config.max_connections = args.max_connections;
-    config.max_memory_bytes = args.max_memory_bytes;
-    config.eviction_policy = if args.max_memory_bytes > 0 {
-        EvictionPolicy::Lru
-    } else {
-        EvictionPolicy::None
-    };
-    config.persistence.enabled = false;
+    let config = server_config_from_args(&args);
     config.validate()?;
 
     let runtime_threads = args.runtime_threads.unwrap_or_else(|| {
@@ -451,17 +461,7 @@ fn run_owner_local(
         .next()
         .expect("single-shard owner-local harness must create one local store");
 
-    let mut config = ShardCacheConfig::default();
-    config.bind_addr = args.bind_addr.clone();
-    config.shard_count = args.shard_count;
-    config.max_connections = args.max_connections;
-    config.max_memory_bytes = args.max_memory_bytes;
-    config.eviction_policy = if args.max_memory_bytes > 0 {
-        EvictionPolicy::Lru
-    } else {
-        EvictionPolicy::None
-    };
-    config.persistence.enabled = false;
+    let config = server_config_from_args(&args);
     config.validate()?;
 
     println!(
@@ -500,16 +500,17 @@ fn run_owner_local(
                 ))
             })?;
 
-            let local_task = tokio::task::spawn_local(run_owner_local_internal_worker(
-                Arc::clone(&keys),
-                Arc::clone(&value),
-                mix,
-                key_distribution,
-                Arc::clone(&stop_for_runtime),
-                Arc::clone(&measure_for_runtime),
-                internal_latency_sample_rate,
-                owner_yield_ops,
-            ));
+            let local_task =
+                tokio::task::spawn_local(run_owner_local_internal_worker(OwnerLocalWorkerArgs {
+                    keys: Arc::clone(&keys),
+                    value: Arc::clone(&value),
+                    mix,
+                    key_distribution,
+                    stop: Arc::clone(&stop_for_runtime),
+                    measure: Arc::clone(&measure_for_runtime),
+                    latency_sample_rate: internal_latency_sample_rate,
+                    yield_ops: owner_yield_ops,
+                }));
 
             let server = ShardCacheServer::from_thread_local_embedded_store(config);
             let server_task = tokio::task::spawn_local(async move {
@@ -566,17 +567,18 @@ fn run_owner_local(
     Ok(())
 }
 
-async fn run_owner_local_internal_worker(
-    keys: Arc<Vec<PreparedKey>>,
-    value: Arc<Vec<u8>>,
-    mix: Mix,
-    key_distribution: KeyDistribution,
-    stop: Arc<AtomicBool>,
-    measure: Arc<AtomicBool>,
-    latency_sample_rate: u64,
-    yield_ops: u64,
-) -> InternalWorkerResult {
-    let mut stream = OpStream::new(0xA11C_010C_A1_u64, keys.len(), mix, key_distribution);
+async fn run_owner_local_internal_worker(args: OwnerLocalWorkerArgs) -> InternalWorkerResult {
+    let OwnerLocalWorkerArgs {
+        keys,
+        value,
+        mix,
+        key_distribution,
+        stop,
+        measure,
+        latency_sample_rate,
+        yield_ops,
+    } = args;
+    let mut stream = OpStream::new(0x00A1_1C01_0CA1_u64, keys.len(), mix, key_distribution);
     let latency_clock = FastClock::new();
     let mut all = LatencyHistogram::new();
     let mut reads_hist = LatencyHistogram::new();

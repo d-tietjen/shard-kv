@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use shardmap::config::{EvictionPolicy, ServerEndpointMode, ShardCacheConfig};
+use shardmap::config::{EvictionPolicy, PersistenceConfig, ServerEndpointMode, ShardCacheConfig};
 use shardmap::server::{ServerRuntime, ShardCacheServer};
 use shardmap::storage::{EmbeddedRouteMode, EmbeddedStore};
 
@@ -43,20 +43,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ServerRuntime::initialize_tracing();
     let args = Args::parse();
 
-    let mut config = ShardCacheConfig::default();
-    config.bind_addr = args.bind_addr;
-    config.shard_count = args.shard_count;
-    config.max_connections = args.max_connections;
-    config.max_memory_bytes = args.max_memory_bytes;
-    config.eviction_policy = if args.max_memory_bytes > 0 {
-        EvictionPolicy::Lru
-    } else {
-        EvictionPolicy::None
+    let server_endpoint_mode = match args.direct_shard_ports {
+        true => ServerEndpointMode::DirectShard,
+        false => ServerEndpointMode::Fanout,
     };
-    config.persistence.enabled = false;
-    if args.direct_shard_ports {
-        config.server_endpoint_mode = ServerEndpointMode::DirectShard;
-    }
+    let config = ShardCacheConfig {
+        bind_addr: args.bind_addr,
+        shard_count: args.shard_count,
+        max_connections: args.max_connections,
+        max_memory_bytes: args.max_memory_bytes,
+        eviction_policy: if args.max_memory_bytes > 0 {
+            EvictionPolicy::Lru
+        } else {
+            EvictionPolicy::None
+        },
+        persistence: PersistenceConfig {
+            enabled: false,
+            ..PersistenceConfig::default()
+        },
+        server_endpoint_mode,
+        ..ShardCacheConfig::default()
+    };
     config.validate()?;
 
     let route_mode = match args.session_prefix_routing {

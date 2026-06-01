@@ -280,17 +280,12 @@ enum VectorWriteResult {
     Unchanged(Frame),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum Quantization {
     NoQuant,
+    #[default]
     Q8,
     Bin,
-}
-
-impl Default for Quantization {
-    fn default() -> Self {
-        Self::Q8
-    }
 }
 
 impl VectorDecodeCache {
