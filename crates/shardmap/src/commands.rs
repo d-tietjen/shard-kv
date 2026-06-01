@@ -1404,7 +1404,7 @@ impl CommandCatalog {
             .iter()
             .copied()
             .find(|command| command.matches(name))
-            .or_else(|| {
+            .or({
                 #[cfg(feature = "redis-modules")]
                 {
                     redis_modules::find_command_definition(name)
