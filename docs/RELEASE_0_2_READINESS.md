@@ -1,18 +1,18 @@
-# 0.1.0 Release Readiness
+# 0.2.0 Release Readiness
 
-This note tracks what must be true before tagging `v0.1.0`.
+This note tracks what must be true before tagging `v0.2.0`.
 
 ## Release Shape
 
-- `shardmap` is a crates.io crate for 0.1.0. It owns the embedded cache
+- `shardmap` is a crates.io crate for 0.2.0. It owns the embedded cache
   engine, storage, protocol, persistence, replication, and opt-in server
   internals.
 - `shardcache-client-rs` is a crates.io crate for Rust clients of the native
   SCNP protocol.
-- `shardcache` is a source-only workspace package for the server binary. It is
-  `publish = false` for 0.1.0.
-- `shardcache-redis` owns Redis/Valkey compatibility source. It is
-  `publish = false` for 0.1.0 and depends on `shardmap`.
+- `shardcache` is a crates.io crate for the RESP/SCNP server binary and
+  server-facing feature flags.
+- `shardcache-redis` is a crates.io crate for Redis/Valkey compatibility
+  command source and depends on `shardmap`.
 - `shardcache-formal`, `shardcache-py`, `shardcache-runtime`, benchmarks, and
   integrations are workspace support packages and are not part of the crates.io
   publish set for this release.
@@ -23,7 +23,8 @@ This note tracks what must be true before tagging `v0.1.0`.
   `redis`. A later release should replace that bridge with a normal
   extension dependency boundary.
 - Redis tier-1 compatibility now has explicit coverage for every command in the
-  0.1.0 surface, including `DUMP` and `RESTORE`.
+  0.2.0 surface, including Redis 6, 7, and 8 additions tracked in the generated
+  manifest.
 - `WATCH` and `UNWATCH` have snapshot-based runtime behavior; version-accurate
   invalidation for values changed away and back remains a compatibility gap.
 - Benchmark writeups are curated summaries; raw outputs belong under ignored
@@ -39,12 +40,12 @@ Run these before tagging:
 ./scripts/proof-gate.sh release
 ```
 
-Run the gate from a clean tree. `cargo package -p shardmap` intentionally
-rejects dirty publishable crate files unless `--allow-dirty` is passed, and
-the release gate does not pass that override. Use `--allow-dirty` only as a
-local diagnostic to check package contents before the final commit.
+Run the gate from a clean tree. `cargo package` intentionally rejects dirty
+publishable crate files unless `--allow-dirty` is passed, and the release gate
+does not pass that override. Use `--allow-dirty` only as a local diagnostic to
+check package contents before the final commit.
 
-The pure `--no-default-features` build is intentionally unsupported for 0.1.0
+The pure `--no-default-features` build is intentionally unsupported for 0.2.0
 and should fail with a single compile error telling users to enable `embedded`
 or `sharded`.
 
@@ -87,7 +88,7 @@ The latest Adam proof artifacts from 2026-05-24 are:
 
 For publishable claims, rerun the full Linux benchmark matrices from
 `benchmarks/README.md` on a pinned host and update only curated writeups.
-The curated command and transport summary for 0.1.0 is
+The curated command and transport summary for 0.2.0 is
 `benchmarks/REDIS_HEAD_TO_HEAD_BENCHMARKS.md`; raw result bundles stay ignored
 under `benchmarks/results/`.
 
@@ -102,7 +103,7 @@ CLIENTS=1 \
 WARMUP=1 \
 DURATION=1 \
 FAIL_ON_ERROR=1 \
-CSV=/private/tmp/shardcache-0.1-redis-command-matrix-all-proof.csv \
+CSV=/private/tmp/shardcache-0.2-redis-command-matrix-all-proof.csv \
 ./benchmarks/scripts/run-redis-command-matrix.sh
 ```
 
@@ -117,7 +118,7 @@ CLIENTS=1 \
 WARMUP=1 \
 DURATION=1 \
 FAIL_ON_ERROR=1 \
-CSV=/private/tmp/shardcache-0.1-redis-command-matrix-shardcache-vs-redis.csv \
+CSV=/private/tmp/shardcache-0.2-redis-command-matrix-shardcache-vs-redis.csv \
 ./benchmarks/scripts/run-redis-command-matrix.sh
 ```
 
@@ -135,15 +136,26 @@ not durable Redis-compatible storage.
 
 ## Publish Set
 
-The publishable crates are `shardmap` and `shardcache-client-rs`.
+The publishable crates are `shardmap`, `shardcache-client-rs`,
+`shardcache-redis`, and `shardcache`. Because `shardcache-redis` and
+`shardcache` depend on `shardmap = 0.2.0`, their crates.io dry-runs cannot
+resolve until `shardmap 0.2.0` is visible in the crates.io index.
 
 ```bash
 cargo publish -p shardmap --dry-run
 cargo publish -p shardcache-client-rs --dry-run
 cargo publish -p shardmap
 cargo publish -p shardcache-client-rs
+
+# After crates.io indexes shardmap 0.2.0:
+cargo publish -p shardcache-redis --dry-run
+cargo publish -p shardcache --dry-run
+cargo publish -p shardcache-redis
+cargo publish -p shardcache
 ```
 
-All other workspace packages have `publish = false` for 0.1.0 so the embedded
-cache and Rust client ship without exposing the server/runtime internals as
-separate crates.
+Publish `shardmap` before `shardcache-redis` and `shardcache`, because both
+depend on the new `shardmap` version. After `shardmap 0.2.0` is indexed,
+`shardcache-redis` and `shardcache` can be published in either order.
+`shardcache-client-rs` can be published independently. All other workspace
+packages have `publish = false` for 0.2.0.

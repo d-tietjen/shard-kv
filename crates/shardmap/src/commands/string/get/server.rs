@@ -8,6 +8,7 @@ use crate::server::wire::ServerWire;
 use crate::storage::hash_key;
 #[cfg(feature = "redis")]
 use crate::storage::{RedisStringLookup, VECTOR_SET_PREFIX, WRONGTYPE_MESSAGE};
+#[cfg(feature = "redis")]
 use bytes::BytesMut;
 
 use super::Get;

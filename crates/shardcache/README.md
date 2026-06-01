@@ -1,16 +1,19 @@
 # shardcache
 
-`shardcache` is the source-only Redis/Valkey-style server for `shard-kv`. It is
-built on `shardmap` and exposes RESP plus the native SCNP protocol used by
+`shardcache` is the Redis/Valkey-style server for `shard-kv`. It is built on
+`shardmap` and exposes RESP plus the native SCNP protocol used by
 `shardcache-client-rs`.
-
-`shardcache` is not published to crates.io in the 0.1.x release line. Build it
-from this repository for local or private deployments.
 
 ## Run From Source
 
 ```sh
 cargo run -p shardcache -- --bind-addr 127.0.0.1:6380 --disable-persistence
+```
+
+Install the binary from crates.io:
+
+```sh
+cargo install shardcache --version 0.2.0 --locked
 ```
 
 Install the binary from a checkout:
@@ -116,4 +119,5 @@ cargo run -p shardcache --no-default-features --features server -- \
 - `--server-mode direct` requires `--disable-persistence`.
 - The default Docker command uses direct, in-memory mode.
 - Use a stable `--data-dir` or `--config` path for persistent source-built deployments.
-- Publishable Rust clients should depend on `shardcache-client-rs`, not this source-only package.
+- Rust clients should depend on `shardcache-client-rs`; server deployments use
+  this crate's `shardcache` binary.

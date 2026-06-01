@@ -1,6 +1,6 @@
 # shardcache Docker
 
-This is the container runbook for the source-only `shardcache` server. The
+This is the container runbook for the `shardcache` server. The
 repository builds a local image named `shardcache:local`; it does not publish a
 Docker Hub image or remote registry image by default.
 

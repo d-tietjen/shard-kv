@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.1.0"
+shardmap = "0.2.0"
 ```
 
 ## Quick Start
@@ -172,9 +172,15 @@ use shardmap::ShardMap;
 
 let cache = ShardMap::new();
 
-assert!(cache.try_acquire_lock(b"lock:job:1", b"worker-a", 5_000)?);
-assert!(!cache.try_acquire_lock(b"lock:job:1", b"worker-b", 5_000)?);
-assert!(cache.renew_lock(b"lock:job:1", b"worker-a", 5_000)?);
+assert!(cache
+    .try_acquire_lock(b"lock:job:1", b"worker-a", 5_000)
+    .expect("lock acquisition should be valid"));
+assert!(!cache
+    .try_acquire_lock(b"lock:job:1", b"worker-b", 5_000)
+    .expect("second lock acquisition should be valid"));
+assert!(cache
+    .renew_lock(b"lock:job:1", b"worker-a", 5_000)
+    .expect("lock renewal should be valid"));
 assert!(cache.release_lock(b"lock:job:1", b"worker-a"));
 ```
 
@@ -449,7 +455,7 @@ storage into a specialized runtime.
 | `redis-functions` | Via `redis-server` | Redis 7 `FUNCTION`/`FCALL` compatibility stubs with an empty function registry. |
 | `redis-modules` | Via `redis-server` | Redis `MODULE` compatibility stubs with an empty module registry and disabled loading. |
 | `redis-modules-all` | No | Aggregate Redis Modules compatibility facades, concrete command discovery metadata, and embedded APIs; individual `redis-module-*` flags can enable one module family at a time. |
-| `server` | No | TCP server internals used by the source-only `shardcache` package. |
+| `server` | No | TCP server internals used by the `shardcache` package. |
 | `redis-server` | No | Server internals plus Redis/Valkey compatibility. |
 | `telemetry` | No | Embedded operational metrics. |
 | `monoio` | No | Linux-only server transport internals. |

@@ -99,7 +99,7 @@ impl ShardCacheServer {
         Self::from_benchmark_shard_arc_embedded_store(config, store)
     }
 
-    /// Serves the [`LocalEmbeddedStore`](crate::storage::LocalEmbeddedStore)
+    /// Serves the [`LocalEmbeddedStore`]
     /// already installed on this thread.
     ///
     /// This mode is for owner-local embedded deployments where the embedding

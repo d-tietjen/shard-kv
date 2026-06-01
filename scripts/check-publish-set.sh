@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Guard the 0.1.x crates.io release shape.
+# Guard the 0.2.x crates.io release shape.
 
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-publishable=" shardmap shardcache-client-rs "
+publishable=" shardmap shardcache shardcache-redis shardcache-client-rs "
 failed=0
 
 for manifest in crates/*/Cargo.toml; do

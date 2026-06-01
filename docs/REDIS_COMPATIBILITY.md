@@ -18,7 +18,7 @@ cargo run -p shardcache-benchmarks --bin redis_command_manifest -- --output docs
 | Destructive-profile cases | 2 |
 | Keyspace-wide benchmark cases | 8 |
 
-`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in shardcache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, missing function invocation, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.1.0 compatibility surface.
+`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in shardcache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, missing function invocation, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.2.0 compatibility surface.
 
 ## Redis 5.0.14 Baseline
 
@@ -28,7 +28,7 @@ Official baseline: Redis 5.0.14 `redisCommandTable` from <https://github.com/red
 | --- | ---: |
 | Redis 5.0.14 command table entries | 200 |
 | Redis 5.0.14 commands supported and live-benchmarked | 200 |
-| Redis 5.0.14 commands explicitly excluded from 0.1.0 | 0 |
+| Redis 5.0.14 commands explicitly excluded from 0.2.0 | 0 |
 | Redis 5.0.14 commands missing | 0 |
 | Supported extensions beyond Redis 5.0.14 | 68 |
 
@@ -45,7 +45,7 @@ Explicit Redis 5.0.14 exclusions: none.
 - The manifest tracks live RESP command acceptance and benchmark coverage, not a promise that every edge case, exact error string, or background subsystem is byte-for-byte identical to Redis.
 - Expected-error commands are part of the compatibility surface in standalone mode. They intentionally return Redis-style errors for disabled cluster, replication, monitor, shutdown, module loading, migration, cross-DB movement, missing function invocation, and security-warning paths.
 - Redis Functions and Redis module-loading compatibility live behind the `redis-functions` and `redis-modules` Cargo features. The default `redis-server` feature set enables both so Redis 7 clients can discover those surfaces without loading executable code.
-- Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.1.0 compatibility semantics.
+- Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.2.0 compatibility semantics.
 - Stream coverage includes basic append, length, range, reverse range, delete, trim, set-id, read, and minimal group/readgroup paths. Pending-entry-list, claim, ack, and detailed group/consumer introspection behavior is intentionally lightweight.
 - Scripting uses a constrained evaluator for return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. It is not a general Lua VM.
 - HyperLogLog commands return compatible cardinalities for the covered operations, but shardcache stores exact sets in its own representation rather than Redis' binary HLL encoding.

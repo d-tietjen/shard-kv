@@ -1,7 +1,7 @@
 # Operations
 
 This page is the short operational contract for running `shardcache` in
-0.1.0-style deployments.
+0.2.0-style deployments.
 
 For the container-specific runbook, see
 [`SHARDCACHE_DOCKER.md`](SHARDCACHE_DOCKER.md).
@@ -10,13 +10,16 @@ For the container-specific runbook, see
 
 | Build | Command | Use When |
 | --- | --- | --- |
-| Embedded crate | `shardmap = "0.1.0"` | In-process Rust cache use. |
+| Embedded crate | `shardmap = "0.2.0"` | In-process Rust cache use. |
+| Server crate | `shardcache = "0.2.0"` | Install or depend on the RESP/SCNP server package. |
+| Redis compatibility crate | `shardcache-redis = "0.2.0"` | Depend on Redis/Valkey command source and embedded compatibility APIs. |
+| Native client crate | `shardcache-client-rs = "0.2.0"` | SCNP client access from Rust applications. |
 | Server | `cargo run -p shardcache --features server --bin shardcache -- ...` | RESP/SCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo run -p shardcache --features redis-server --bin shardcache -- ...` | Redis/Valkey-compatible command and object behavior. |
 
-`shardmap` and `shardcache-client-rs` are the crates.io crates for 0.1.x. The
-`shardcache` server is a source-only workspace package for local/private
-deployments.
+`shardmap`, `shardcache`, `shardcache-redis`, and `shardcache-client-rs` are
+the crates.io crates for 0.2.x. Python, C ABI, runtime, benchmark, and
+integration packages remain source-workspace packages.
 
 `redis-server` implies `server`, `redis`, `redis-functions`, and
 `redis-modules`. Embedded-only builds are expected not to compile the Redis
@@ -26,9 +29,9 @@ individual `redis-module-*` features so production builds only compile module
 facades they deliberately expose.
 
 The Dockerfile builds the same `shardcache` binary into a local image.
-Compose names that image `shardcache:local`; there is no Docker Hub or remote
-registry publishing path in this repository yet. The default Docker build uses
-the Redis/Valkey-compatible `redis-server` feature set and starts the direct
+Compose names that image `shardcache:local`; the repository does not push a
+remote image by default. The default Docker build uses the
+Redis/Valkey-compatible `redis-server` feature set and starts the direct
 in-memory server path. Use `SHARDCACHE_FEATURES=server` for the lean server
 build without the Redis compatibility catalog.
 

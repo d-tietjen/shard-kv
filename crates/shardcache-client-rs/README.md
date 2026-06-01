@@ -8,9 +8,8 @@ server ports. This crate is intentionally small and synchronous: one client owns
 one or more TCP connections and is meant to be used directly from worker
 threads.
 
-This is one of the two publishable crates in the 0.1.x release line. The
-`shardcache` server itself is source-only and is built from the `shard-kv`
-repository.
+This is one of the four publishable crates in the 0.2.x release line alongside
+`shardmap`, `shardcache`, and `shardcache-redis`.
 
 ## Install
 
@@ -18,7 +17,7 @@ Use the published crate from crates.io:
 
 ```toml
 [dependencies]
-shardcache-client-rs = "0.1.0"
+shardcache-client-rs = "0.2.0"
 ```
 
 From a workspace checkout, use a path dependency:
@@ -204,7 +203,7 @@ building RESP request frames in user code.
 
 ```toml
 [dependencies]
-shardcache-client-rs = { version = "0.1.0", features = ["redis"] }
+shardcache-client-rs = { version = "0.2.0", features = ["redis"] }
 ```
 
 The primary API is the first-party Redis namespace on the client. Common
