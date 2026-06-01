@@ -66,6 +66,8 @@ jobs:
         run: ./scripts/check-feature-matrix.sh
       - name: crates.io publish set
         run: ./scripts/check-publish-set.sh
+      - name: crates.io package artifacts
+        run: ./scripts/check-publish-artifacts.sh
       - name: test redis differential compatibility
         env:
           SHARDCACHE_COMPAT_SERVER_BIN: redis-server
@@ -84,10 +86,6 @@ jobs:
         run: cargo doc -p shardcache-redis --no-deps --all-features
       - name: rustdoc shardcache client
         run: cargo doc -p shardcache-client-rs --no-deps
-      - name: package shardmap crate
-        run: cargo package -p shardmap --locked
-      - name: package shardcache client crate
-        run: cargo package -p shardcache-client-rs --locked
 
   docker:
     runs-on: ubuntu-latest

@@ -22,6 +22,7 @@ quick() {
   ./scripts/check-redis-compatibility-doc.sh
   ./scripts/check-feature-matrix.sh
   ./scripts/check-publish-set.sh
+  ./scripts/check-publish-artifacts.sh
   git diff --check
 }
 
@@ -43,8 +44,6 @@ release() {
   cargo doc -p shardcache --no-deps --all-features
   cargo doc -p shardcache-redis --no-deps --all-features
   cargo doc -p shardcache-client-rs --no-deps
-  cargo package -p shardmap --locked
-  cargo package -p shardcache-client-rs --locked
 }
 
 case "$tier" in
