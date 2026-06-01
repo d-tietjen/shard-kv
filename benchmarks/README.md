@@ -11,12 +11,153 @@ Two modes, parallel and independent:
 | --- | --- | --- |
 | `saturation` | Closed-loop, push as hard as possible | Peak ops/sec, logical payload GB/s, CPU and p99 at peak |
 | `curve` | Open-loop, target rate sweep | How CPU and p99 scale with load up to saturation |
-| `redis_command_matrix` | RESP command script, per command | Head-to-head command throughput for shardcache vs Redis/Valkey |
+| `redis_command_matrix` | RESP command script, per command | Head-to-head command throughput for shardcache vs Redis, Valkey, and Dragonfly |
+| `redis_embedded_command_matrix` | Prepared embedded Redis commands, per command | In-process command throughput for the full shardcache Redis command surface |
+| `run-memcache-comparison.sh` | Docker-isolated cache workload | Head-to-head GET/SET/mixed throughput for shardcache server modes vs Memcached |
 | `semantic_cache_matrix` | Pairwise embedding sweep plus lookup latency | Semantic cache F1/FPR across thresholds and unique/cycling lookup latency |
 
 The throughput drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `shardcache-lmcache`
 emit rows in the same schema.
+
+## Docker Server Suite
+
+For reproducible Redis-compatible server comparisons, use the standardized
+Docker runner:
+
+```bash
+./benchmarks/scripts/run-benchmark-suite.sh \
+  --targets redis,valkey,dragonfly,shardcache-resp,shardcache-scnp \
+  --suite redis-core \
+  --vcpus 1,2,4,8,16
+```
+
+This runner treats Redis, Redis Stack, Valkey, Dragonfly, shardcache RESP, and
+shardcache SCNP as first-class server targets. It starts one target at a time,
+applies the same vCPU and optional memory limits, reuses the same resolved
+command plan, and writes one portable CSV per target. The standard server
+matrix is `1,2,4,8,16` vCPU. The shared defaults live in
+`benchmarks/bench.toml`; suite manifests live in `benchmarks/suites/`. See
+[`DOCKER_BENCHMARKS.md`](DOCKER_BENCHMARKS.md) for the full workflow, including
+multi-vCPU runs, module suites, command precomposition budgets, and saved-CSV
+comparison.
+
+For Redis module command benchmarks, use the `redis-stack` target. It runs the
+Redis Stack server image with the common module set loaded so module rows can
+be measured instead of only recorded as unsupported-command compatibility rows.
+
+## Memcached Comparison
+
+For key/value cache comparisons against Memcached, use the Docker-isolated
+cache workload runner:
+
+```bash
+./benchmarks/scripts/run-memcache-comparison.sh \
+  --targets all \
+  --vcpus 1,2,4,8,16 \
+  --clients 1,16 \
+  --pipeline-depth 1,16
+```
+
+This runs Memcached, shardcache RESP, shardcache SCNP, and shardcache direct
+SCNP one at a time with the same CPU allocation and workload settings, then
+writes `cache-comparison.csv`. See
+[`MEMCACHE_BENCHMARKS.md`](MEMCACHE_BENCHMARKS.md) for the full workflow.
+
+## Embedded Cache Suite
+
+For in-process cache comparisons without Docker or TCP overhead, use the
+standardized embedded runner:
+
+```bash
+./benchmarks/scripts/run-embedded-benchmark-suite.sh \
+  --suite embedded-core \
+  --vcpus 1,2,4,8,16
+```
+
+This compares shardcache embedded paths against DashMap, Moka, LRU, and
+`RwLock<HashMap>` baselines with the same generated workload and hardware
+budget. The shared defaults live in `benchmarks/embedded.toml`; suite manifests
+live in `benchmarks/embedded-suites/`. See
+[`EMBEDDED_BENCHMARKS.md`](EMBEDDED_BENCHMARKS.md) for the full workflow,
+including TTL, LRU/capacity, copy-out, and custom backend runs.
+
+## Embedded Redis Command Suite
+
+To benchmark every Redis-compatible command shardcache supports without TCP or
+protocol framing, use the embedded command runner:
+
+```bash
+./benchmarks/scripts/run-redis-embedded-command-suite.sh \
+  --suite all \
+  --vcpus 1,2,4,8,16
+```
+
+This runner uses the same command suite manifests as the Docker server suite,
+prepares embedded command objects before timing, and writes a CSV compatible
+with `redis_command_report`. See
+[`REDIS_EMBEDDED_COMMAND_BENCHMARKS.md`](REDIS_EMBEDDED_COMMAND_BENCHMARKS.md)
+for the full workflow, module feature flags, and server-vs-embedded comparison
+instructions.
+
+## Embedded Store As Server
+
+`embedded_server_harness` is a small benchmark-only binary for the API where an
+application owns a shardmap `EmbeddedStore` and exposes that live store through
+`ShardCacheServer::from_embedded_store`. Pair it with `resp_blast` for a direct
+RESP workload:
+
+```bash
+cargo build --release -p shardcache-benchmarks \
+  --features embedded-server \
+  --bin embedded_server_harness --bin resp_blast
+
+SHARDCACHE_WORKER_COUNT=8 \
+  target/release/embedded_server_harness \
+  --bind-addr 127.0.0.1:6383 \
+  --shard-count 16
+
+target/release/resp_blast \
+  --target 127.0.0.1:6383 \
+  --populate "SET bench-key bench-value" \
+  --command "GET bench-key" \
+  --clients 16 \
+  --pipeline 64 \
+  --duration 10
+```
+
+This row exercises the embedded database-as-server path specifically. Use the
+source-only `shardcache` CLI for ordinary standalone server comparisons. The
+embedded server harness uses owner-routed fanout by default: single-shard
+requests are routed to their owning worker/core, while cross-shard public
+commands return an error. Add `--direct-shard-ports` when the benchmark target
+should expose shard-owned direct ports for shard-aware SCNP clients.
+
+Use `embedded_mixed_harness --owner-local` for the owner-local topology where
+the embedded workload and the TCP server share one installed `LocalEmbeddedStore`
+on the owner thread. This is the benchmark to use when validating that exposing
+an embedded database as a server does not move the embedded hot path onto the
+shared `Arc<EmbeddedStore>` lock path:
+
+```bash
+cargo build --release -p shardcache-benchmarks \
+  --features embedded-server \
+  --bin embedded_mixed_harness --bin resp_blast
+
+target/release/embedded_mixed_harness \
+  --owner-local \
+  --bind-addr 127.0.0.1:6383 \
+  --shard-count 1 \
+  --internal-workers 1 \
+  --value-size 1024 \
+  --internal-mix get \
+  --key-distribution hot:1:100
+```
+
+Run `resp_blast` against the same bind address while the harness is active. The
+default mixed harness without `--owner-local` is still useful as a shared-store
+baseline. The `--shard-arc` flag is a benchmark-only topology probe for
+measuring per-shard `Arc` contention; it is not a public deployment mode.
 
 ## Published Coverage
 
@@ -27,8 +168,10 @@ artifact or still needs a fresh run.
 | --- | --- | --- | --- |
 | shardcache vs Redis / Valkey / Dragonfly TCP | [`SHARDCACHE_VS_REDIS_TCP.md`](SHARDCACHE_VS_REDIS_TCP.md) | Saturation matrix across value sizes, mixes, clients, and pipeline depths | Publishable for TCP throughput claims. |
 | shardcache vs Redis command-by-command | [`REDIS_HEAD_TO_HEAD_BENCHMARKS.md`](REDIS_HEAD_TO_HEAD_BENCHMARKS.md) | Redis 5.0 compatibility surface and saved per-command rows | Compatibility coverage is complete; some saved head-to-head cells are marked `n/a` where that exact shape has not been rerun. |
-| RESP v6/v7 command surface (LPOS, LCS/STRALGO, XAUTOCLAIM, RESET, ACL, FAILOVER, function commands, Redis 7 hash-field TTL, and other Redis 6/7 extensions) | [`RESP_V6_COMMAND_BENCHMARKS.md`](RESP_V6_COMMAND_BENCHMARKS.md), [`RESP_V7_HASH_TTL_BENCHMARKS.md`](RESP_V7_HASH_TTL_BENCHMARKS.md) | In-process/server throughput snapshots plus 2026-05-31 Adam command-matrix coverage for the full v6/v7 extension set and full Hash family | Publishable for the focused rows; use the full matrix as coverage/broad mixed-loop comparison and isolate blocking commands for single-command claims. |
-| Redis module command surface | [`REDIS_MODULE_COMMAND_BENCHMARKS.md`](REDIS_MODULE_COMMAND_BENCHMARKS.md) | 2026-05-31 Adam command-matrix coverage for 227 feature-gated module command cases against Redis Stack | Full shardcache module coverage recorded; Redis Stack unsupported-module rows are baseline-error coverage, not performance claims. |
+| RESP v6/v7 command surface (LPOS, LCS/STRALGO, XAUTOCLAIM, RESET, ACL, FAILOVER, function commands, Redis 7 hash-field TTL, and other Redis 6/7 extensions) | [`RESP_V6_COMMAND_BENCHMARKS.md`](RESP_V6_COMMAND_BENCHMARKS.md), [`RESP_V7_HASH_TTL_BENCHMARKS.md`](RESP_V7_HASH_TTL_BENCHMARKS.md) | In-process/server throughput snapshots plus Adam command-matrix coverage for the full v6/v7 extension set and full Hash family, including the 2026-06-01 standardized Docker sweep across Redis, Valkey, Dragonfly, shardcache RESP, and shardcache SCNP | Publishable for the focused rows; use the full matrix as coverage/broad mixed-loop comparison and isolate blocking commands for single-command claims. |
+| Redis module command surface | [`REDIS_MODULE_COMMAND_BENCHMARKS.md`](REDIS_MODULE_COMMAND_BENCHMARKS.md) | 2026-05-31 Redis Stack command-matrix coverage plus the 2026-06-01 standardized Docker sweep for 227 feature-gated module command cases across Redis Stack, Valkey, Dragonfly, shardcache RESP, and shardcache SCNP | Full shardcache module coverage recorded; Redis Stack and plain-server unsupported-module rows are compatibility/error coverage, not performance claims. |
+| shardcache server vs Memcached | [`MEMCACHE_BENCHMARKS.md`](MEMCACHE_BENCHMARKS.md) | Docker-isolated GET/SET/mixed cache workload across value sizes, clients, pipeline depths, and vCPU counts | Harness is now available; run on Linux/Adam before publishing specific numbers. |
+| Embedded store exposed as public server | [`results/adam-embedded-current-20260601T201056Z/report.md`](results/adam-embedded-current-20260601T201056Z/report.md) | Current-code Adam rerun of shared-arc fanout, benchmark-only shard-arc, and owner-local topologies with a simultaneous embedded GET worker and third-party RESP clients against the same 1KiB hot key | Publishable for this focused single-shard hot-key topology; expand with write/mixed and distributed-key runs before broad claims. |
 | shardmap embedded vs Moka | [`SHARDMAP_VS_MOKA_EMBEDDED.md`](SHARDMAP_VS_MOKA_EMBEDDED.md) | Embedded owner-local shardmap against `moka::sync::Cache` | Publishable for this embedded comparison. |
 | Embedded release matrix | [`SHARDMAP_EMBEDDED_RELEASE.md`](SHARDMAP_EMBEDDED_RELEASE.md) | Direct, shared, TTL, LRU, and selected Rust-cache baselines | Publishable as a release proof, not a single competitor-only report. |
 | LMCache plugin vs Redis TCP | [`LMCACHE_VS_REDIS.md`](LMCACHE_VS_REDIS.md) | shardcache LMCache embedded and SCNP/TCP against Redis TCP | Publishable for the recorded Linux run; rerun before making new M5 or 5MiB LMCache claims. |
@@ -179,8 +322,9 @@ throughput. Set `FAIL_ON_ERROR=1` when the matrix should fail on any RESP error
 reply instead of recording the error count in the output.
 For shardcache direct shard ports, use `host:base_port+shards` in `TARGETS`
 and set `KEY_SHARDS` to the same shard count. When the script starts
-shardcache, also set `SERVER_DIRECT_SHARD_PORTS=1` and optionally
-`SHARDCACHE_DIRECT_SHARD_BASE_PORT`; for example
+shardcache, also set `SERVER_DIRECT_SHARD_PORTS=1`; the script maps that to the
+server's direct-shard endpoint topology and optionally passes
+`SHARDCACHE_DIRECT_SHARD_BASE_PORT`. For example,
 `SERVER_DIRECT_SHARD_PORTS=1 SHARDCACHE_DIRECT_SHARD_BASE_PORT=6384
 TARGETS=shardcache-sharded=scnp:127.0.0.1:6384+4 KEY_SHARDS=4` routes each
 worker to the shard-owned SCNP port for its generated key lane.
@@ -195,7 +339,9 @@ CASES=profile:destructive ./benchmarks/scripts/run-redis-command-matrix.sh
 
 Set `DOCKER_SERVICES="redis valkey dragonfly"` and include
 `dragonfly=127.0.0.1:6382` in `TARGETS` when running Dragonfly in the same
-matrix.
+matrix. For Redis module rows in this legacy runner, use
+`DOCKER_SERVICES="redis-stack"` with
+`TARGETS=redis-stack=127.0.0.1:6379`.
 
 For proof and release work, prefer the bundle wrapper:
 
@@ -776,17 +922,16 @@ The default server build is tokio/non-monoio and works on every supported
 platform. On Linux, add `--features server,monoio` and run with
 `SHARDCACHE_USE_MONOIO=1` to switch the TCP workers to monoio. Monoio always
 uses `bytes-handoff` for connection read buffering through the monoio read
-adapter. With `SERVER_DIRECT_SHARD_PORTS=1`, monoio also uses shard-owned
-listener ports so each worker owns direct accept, parsing, command execution,
-and storage on its pinned thread; the fanout port remains available for
-non-routed clients. Direct shard ports start at `SCNP_DIRECT_BASE_PORT` or the
-fanout port + 1. The helper
+adapter. With `SERVER_DIRECT_SHARD_PORTS=1`, the helper also enables
+shard-owned listener ports so each worker owns direct accept, parsing, command
+execution, and storage on its pinned thread; the fanout port remains available
+for non-routed clients. Direct shard ports start at `SCNP_DIRECT_BASE_PORT` in
+this helper, or at the fanout port + 1 otherwise. The helper
 `scripts/run-tcp-client-sweep-local.sh` follows the same split:
 `SERVER_RUNTIME=tokio` is the default, while `SERVER_RUNTIME=monoio` builds the
 monoio feature and sets the runtime environment variables. Set
 `SERVER_DIRECT_SHARD_PORTS=1` with either runtime to benchmark client-routed
-shard ports in safe mode. Add `SERVER_UNSAFE=1` to the same run to enable the
-owned-shard lock-bypass hot path where supported.
+shard ports in safe mode.
 
 Monoio runtime experiments can be passed through the same helper. Use
 `SHARDCACHE_MONOIO_DRIVER=auto|legacy|io_uring` to compare monoio drivers,

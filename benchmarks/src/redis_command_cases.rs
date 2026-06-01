@@ -14,6 +14,7 @@ pub enum RedisCommandFamily {
     List,
     Set,
     ZSet,
+    Vector,
     Module,
 }
 
@@ -34,6 +35,7 @@ impl RedisCommandFamily {
             Self::List => "list",
             Self::Set => "set",
             Self::ZSet => "zset",
+            Self::Vector => "vector",
             Self::Module => "module",
         }
     }
@@ -386,6 +388,170 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "WAITAOF no aof",
         ["WAITAOF", "0", "0", "0"]
     ),
+    case_with_setup!(
+        Vector,
+        "VADD",
+        "VADD update 16d",
+        [
+            "VADD",
+            "$key:vset-vadd",
+            "$vector-values:16:7",
+            "elem:000007",
+            "SETATTR",
+            "{\"group\":3,\"keep\":true}"
+        ],
+        [["$vector-fixture:vset-vadd:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VCARD",
+        "VCARD 256 vectors",
+        ["VCARD", "$key:vset-card"],
+        [["$vector-fixture:vset-card:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VDIM",
+        "VDIM 16d",
+        ["VDIM", "$key:vset-dim"],
+        [["$vector-fixture:vset-dim:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VEMB",
+        "VEMB raw 16d",
+        ["VEMB", "$key:vset-emb", "elem:000001", "RAW"],
+        [["$vector-fixture:vset-emb:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VGETATTR",
+        "VGETATTR json",
+        ["VGETATTR", "$key:vset-attr", "elem:000001"],
+        [["$vector-fixture:vset-attr:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VINFO",
+        "VINFO 256 vectors",
+        ["VINFO", "$key:vset-info"],
+        [["$vector-fixture:vset-info:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VISMEMBER",
+        "VISMEMBER hit",
+        ["VISMEMBER", "$key:vset-member", "elem:000001"],
+        [["$vector-fixture:vset-member:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VLINKS",
+        "VLINKS with scores",
+        ["VLINKS", "$key:vset-links", "elem:000001", "WITHSCORES"],
+        [["$vector-fixture:vset-links:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VRANDMEMBER",
+        "VRANDMEMBER count",
+        ["VRANDMEMBER", "$key:vset-rand", "8"],
+        [["$vector-fixture:vset-rand:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VRANGE",
+        "VRANGE lex count",
+        [
+            "VRANGE",
+            "$key:vset-range",
+            "[elem:000000",
+            "[elem:999999",
+            "32"
+        ],
+        [["$vector-fixture:vset-range:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VREM",
+        "VREM miss",
+        ["VREM", "$key:vset-rem", "elem:999999"],
+        [["$vector-fixture:vset-rem:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSETATTR",
+        "VSETATTR update json",
+        [
+            "VSETATTR",
+            "$key:vset-setattr",
+            "elem:000001",
+            "{\"group\":1,\"keep\":true,\"updated\":true}"
+        ],
+        [["$vector-fixture:vset-setattr:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSIM",
+        "VSIM ele hnsw",
+        [
+            "VSIM",
+            "$key:vset-sim",
+            "ELE",
+            "elem:000001",
+            "COUNT",
+            "10",
+            "EF",
+            "64"
+        ],
+        [["$vector-fixture:vset-sim:1024:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSIM",
+        "VSIM values hnsw",
+        [
+            "VSIM",
+            "$key:vset-sim-values",
+            "$vector-values:16:1",
+            "COUNT",
+            "10",
+            "EF",
+            "64"
+        ],
+        [["$vector-fixture:vset-sim-values:1024:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSIM",
+        "VSIM filter exact",
+        [
+            "VSIM",
+            "$key:vset-sim-filter",
+            "ELE",
+            "elem:000001",
+            "COUNT",
+            "10",
+            "FILTER",
+            ".group == 1"
+        ],
+        [["$vector-fixture:vset-sim-filter:1024:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSIM",
+        "VSIM truth exact",
+        [
+            "VSIM",
+            "$key:vset-sim-truth",
+            "ELE",
+            "elem:000001",
+            "COUNT",
+            "10",
+            "TRUTH"
+        ],
+        [["$vector-fixture:vset-sim-truth:1024:16"]]
+    ),
     case!(Server, "ACL", "ACL WHOAMI", ["ACL", "WHOAMI"]),
     error_case!(Server, "FAILOVER", "FAILOVER unsupported", ["FAILOVER"]),
     case!(
@@ -654,7 +820,7 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "RENAME",
         "RENAME b to a",
         ["RENAME", "rename-b", "rename-a"],
-        [["SET", "rename-a", "v"]]
+        [["SET", "rename-b", "v"]]
     ),
     case_with_setup!(
         Key,
@@ -1270,7 +1436,13 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(List, "LLEN", "LLEN", ["LLEN", "l"]),
     case!(List, "LINDEX", "LINDEX", ["LINDEX", "l", "1"]),
-    case!(List, "LSET", "LSET", ["LSET", "l", "1", "B"]),
+    case_with_setup!(
+        List,
+        "LSET",
+        "LSET",
+        ["LSET", "l", "1", "B"],
+        [["RPUSH", "l", "a", "b", "c"]]
+    ),
     case!(List, "LREM", "LREM", ["LREM", "l", "0", "B"]),
     case_with_setup!(
         List,
@@ -2166,6 +2338,19 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "UNLINK",
     "UNSUBSCRIBE",
     "UNWATCH",
+    "VADD",
+    "VCARD",
+    "VDIM",
+    "VEMB",
+    "VGETATTR",
+    "VINFO",
+    "VISMEMBER",
+    "VLINKS",
+    "VRANDMEMBER",
+    "VRANGE",
+    "VREM",
+    "VSETATTR",
+    "VSIM",
     "WAIT",
     "WAITAOF",
     "WATCH",

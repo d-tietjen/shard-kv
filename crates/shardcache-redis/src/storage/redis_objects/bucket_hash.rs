@@ -204,13 +204,15 @@ impl RedisObjectBucket {
                 .expect("hash slab slot missing");
             let removed = hash.remove(field).is_some();
             let empty = hash.is_empty();
-            if empty {
-                self.hashes.remove(key);
-                self.hash_slab.remove(slot);
-                self.expire_at_ms.remove(key);
-                self.hash_field_expire_at_ms.remove(key);
-            } else if removed {
-                self.clear_hash_field_ttl(key, field);
+            match (empty, removed) {
+                (true, _) => {
+                    self.hashes.remove(key);
+                    self.hash_slab.remove(slot);
+                    self.expire_at_ms.remove(key);
+                    self.hash_field_expire_at_ms.remove(key);
+                }
+                (false, true) => self.clear_hash_field_ttl(key, field),
+                (false, false) => {}
             }
             return (RedisObjectResult::Integer(removed as i64), empty);
         }
@@ -806,7 +808,7 @@ impl RedisObjectBucket {
     }
 
     #[inline]
-    fn remove_hash_slot(&mut self, key: &[u8], slot: SlotId) {
+    pub(crate) fn remove_hash_slot(&mut self, key: &[u8], slot: SlotId) {
         self.hashes.remove(key);
         self.hash_slab.remove(slot);
         self.expire_at_ms.remove(key);

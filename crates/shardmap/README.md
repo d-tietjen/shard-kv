@@ -42,6 +42,7 @@ sharded store and can be moved into worker threads.
 | Route inspection | See which shard owns a key before sending work to a worker. | [`route_inspection.rs`](examples/route_inspection.rs) |
 | Lock helpers | Process-local token locks built on `SET key token NX PX ttl` semantics. | [`ttl_and_locks.rs`](examples/ttl_and_locks.rs) |
 | Configuration | Capacity hints, memory budgets, eviction policy, routing, and lock policy. | [`configured_cache.rs`](examples/configured_cache.rs) |
+| Redis-compatible embedded API | Execute supported Redis commands directly in-process, including prepared commands and session state. | Enable the `redis` feature |
 | Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
 | Semantic TTL | Combine semantic reuse with freshness windows. | [`semantic_ttl.rs`](examples/semantic_ttl.rs) |
 | Governance metadata | Attach application-owned authorization context to semantic hits. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
@@ -179,6 +180,171 @@ assert!(cache.release_lock(b"lock:job:1", b"worker-a"));
 
 Use the server surface when multiple processes or machines need to coordinate
 through one lock table.
+
+## Redis-Compatible Embedded API
+
+Enable the `redis` feature when you want to call shardcache's supported Redis
+command surface without opening a socket. The embedded Redis API uses the same
+command implementations as the server path and supports prepared commands for
+hot loops.
+
+```rust,ignore
+use shardmap::redis_embedded::EmbeddedRedis;
+use shardmap::protocol::Frame;
+
+let redis = EmbeddedRedis::new(4);
+
+assert_eq!(
+    redis.execute(&[b"SET".as_slice(), b"user:42", b"ready"]),
+    Frame::SimpleString("OK".into())
+);
+
+let get = redis.prepare(&[b"GET".as_slice(), b"user:42"]).unwrap();
+assert_eq!(
+    redis.execute_prepared(&get),
+    Frame::BlobString(b"ready".to_vec())
+);
+```
+
+Use a session when a caller needs per-client Redis state such as transaction
+queuing.
+
+```rust,ignore
+use shardmap::redis_embedded::EmbeddedRedis;
+use shardmap::protocol::Frame;
+
+let redis = EmbeddedRedis::new(4);
+let mut session = redis.session();
+
+assert_eq!(
+    session.execute(&[b"MULTI".as_slice()]),
+    Frame::SimpleString("OK".into())
+);
+assert_eq!(
+    session.execute(&[b"SET".as_slice(), b"user:42", b"queued"]),
+    Frame::SimpleString("QUEUED".into())
+);
+assert!(matches!(session.execute(&[b"EXEC".as_slice()]), Frame::Array(_)));
+```
+
+## Exposing Embedded Storage
+
+Enable `redis-server` when an embedded process also needs to expose its live
+store to third-party services over RESP/SCNP. `ShardCacheServer` can serve a
+caller-owned `ShardedEngine`, so in-process code and remote clients observe the
+same data.
+
+```rust,ignore
+use std::sync::Arc;
+
+use shardmap::config::ShardCacheConfig;
+use shardmap::embedded::{ShardCacheServer, ShardedEngine};
+
+let store = Arc::new(ShardedEngine::new(4));
+store.set(b"local-key".to_vec(), b"local-value".to_vec(), None);
+
+let mut config = ShardCacheConfig::default();
+config.bind_addr = "127.0.0.1:6380".into();
+config.persistence.enabled = false;
+
+ShardCacheServer::from_embedded_store(config, store.clone())
+    .run()
+    .await?;
+# Ok::<(), shardmap::ShardCacheError>(())
+```
+
+When serving a caller-owned store, the store's shard count and routing mode are
+authoritative. The server config still controls the bind address, connection
+limit, transaction mode, and worker count, but it does not create replacement
+storage or apply persistence to the embedded handle. Apply memory limits with
+`ShardedEngine::configure_memory_policy` before handing the store to the
+server. Multi-direct embedded serving is TCP-only today; Unix sockets still use
+the engine-backed path.
+
+Embedded server deployments expose two endpoint shapes:
+
+- `ServerEndpointMode::Fanout` (default) binds one public listener. The listener
+  parses each complete RESP/SCNP request, routes single-shard commands to the
+  worker that owns the shard, and rejects cross-shard public commands instead of
+  letting an arbitrary server thread lock across shards.
+- `ServerEndpointMode::DirectShard` exposes shard-owned direct ports in
+  addition to the fanout listener. Use this for shard-aware SCNP clients that
+  can route directly to the owning shard.
+
+```rust,ignore
+use shardmap::config::ServerEndpointMode;
+
+config.server_endpoint_mode = ServerEndpointMode::DirectShard;
+```
+
+If your embedded application is already using the owner-local hot path, serve
+the `LocalEmbeddedStore` installed on that owner thread instead of wrapping a
+shared `Arc<ShardedEngine>`. This keeps embedded calls and third-party protocol
+requests on the same shard-owned memory and avoids introducing shared
+`EmbeddedStore` locks into the hot path.
+
+```rust,ignore
+use shardmap::config::ShardCacheConfig;
+use shardmap::embedded::{ShardCacheServer, ShardedEngine};
+
+let store = ShardedEngine::new(1);
+store.set(b"local-key".to_vec(), b"local-value".to_vec(), None);
+let local_store = store.into_local_stores(1).into_iter().next().unwrap();
+local_store.install_local()?;
+
+let mut config = ShardCacheConfig::default();
+config.bind_addr = "127.0.0.1:6380".into();
+config.persistence.enabled = false;
+
+ShardCacheServer::from_thread_local_embedded_store(config)
+    .run_thread_local_with_shutdown(async {
+        // Signal shutdown from your owner-thread runtime.
+    })
+    .await?;
+# Ok::<(), shardmap::ShardCacheError>(())
+```
+
+The thread-local server future is intentionally `!Send`: run it on the same
+current-thread runtime or `LocalSet` that owns the local embedded store. The
+server leaves the local store installed when it stops so the embedding process
+can continue using or reclaim it.
+
+The thread-local server is still a fanout endpoint shape; the difference is
+storage ownership. It serves the local store already installed on the owner
+thread instead of introducing a shared `Arc<ShardedEngine>` handle.
+
+For read replicas or service subscribers, wrap the embedded source in
+`ReplicatedEmbeddedStore` and start its native replication listener.
+
+```rust,ignore
+use std::sync::Arc;
+
+use shardmap::config::{ReplicationConfig, ReplicationRole};
+use shardmap::embedded::{ReplicatedEmbeddedStore, ReplicationReplicaClient};
+
+let mut primary_config = ReplicationConfig {
+    enabled: true,
+    role: ReplicationRole::Primary,
+    bind_addr: "127.0.0.1:7631".into(),
+    ..ReplicationConfig::default()
+};
+
+let primary = Arc::new(ReplicatedEmbeddedStore::new(4, primary_config.clone())?);
+let _listener = primary.serve_replicas(primary_config)?;
+
+let replica = ReplicationReplicaClient::start(ReplicationConfig {
+    enabled: true,
+    role: ReplicationRole::Replica,
+    replica_of: Some("127.0.0.1:7631".into()),
+    ..ReplicationConfig::default()
+})?;
+# Ok::<(), shardmap::ShardCacheError>(())
+```
+
+Native replication v1 streams byte-string cache mutations and consistent
+snapshots. It is intended for read replicas, sidecar cache mirrors, and service
+subscribers that consume shardcache's FCRP frames; Redis object-family
+replication is outside this embedded replication surface.
 
 ## Semantic Cache
 

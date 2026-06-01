@@ -8,8 +8,14 @@ use super::fast_write::{FastWriteBatchIoVec, FastWriteItem};
 #[cfg(feature = "embedded")]
 use super::transactions::{TransactionCoordinator, TransactionState};
 #[cfg(feature = "embedded")]
-use super::wire::RespProtocolVersion;
+use super::wire::{RespProtocolVersion, ServerWire};
 use super::*;
+#[cfg(feature = "embedded")]
+use crate::protocol::BorrowedCommandParts;
+#[cfg(feature = "embedded")]
+use bytes::Bytes as BytesFrame;
+#[cfg(feature = "embedded")]
+use tokio::sync::oneshot;
 
 pub(super) struct MultiDirectAddress;
 
@@ -65,6 +71,26 @@ impl MultiDirectAddress {
 pub(super) struct MultiDirectWorker;
 
 #[cfg(feature = "embedded")]
+pub(super) enum MultiDirectWorkerMessage {
+    Stream(std::net::TcpStream),
+    Routed(RoutedWorkerRequest),
+}
+
+#[cfg(feature = "embedded")]
+pub(super) struct RoutedWorkerRequest {
+    pub(super) frame: BytesFrame,
+    pub(super) owned_shard_id: usize,
+    pub(super) resp_protocol: RespProtocolVersion,
+    pub(super) response_tx: oneshot::Sender<Result<RoutedWorkerResponse>>,
+}
+
+#[cfg(feature = "embedded")]
+pub(super) struct RoutedWorkerResponse {
+    pub(super) payload: BytesFrame,
+    pub(super) resp_protocol: RespProtocolVersion,
+}
+
+#[cfg(feature = "embedded")]
 pub(super) struct TokioHybridWorkerConfig {
     pub(super) worker_id: usize,
     pub(super) direct_bind_addr: SocketAddr,
@@ -90,7 +116,7 @@ impl MultiDirectWorker {
         config: TokioWorkerConfig,
         store: Arc<EmbeddedStore>,
         limiter: Arc<Semaphore>,
-        rx: flume::Receiver<std::net::TcpStream>,
+        rx: flume::Receiver<MultiDirectWorkerMessage>,
     ) {
         let TokioWorkerConfig {
             worker_id,
@@ -119,41 +145,32 @@ impl MultiDirectWorker {
 
         let local = LocalSet::new();
         runtime.block_on(local.run_until(async move {
-            while let Ok(std_stream) = rx.recv_async().await {
-                if std_stream.set_nonblocking(true).is_err() {
-                    continue;
+            while let Ok(message) = rx.recv_async().await {
+                match message {
+                    MultiDirectWorkerMessage::Stream(std_stream) => {
+                        Self::spawn_stream_connection(
+                            worker_id,
+                            std_stream,
+                            store.clone(),
+                            limiter.clone(),
+                            single_threaded,
+                            None,
+                            started_at,
+                            transaction_coordinator.clone(),
+                        )
+                        .await;
+                    }
+                    MultiDirectWorkerMessage::Routed(request) => {
+                        Self::handle_routed_request(
+                            worker_id,
+                            request,
+                            &store,
+                            single_threaded,
+                            started_at,
+                            transaction_coordinator.as_deref(),
+                        );
+                    }
                 }
-                let stream = match TcpStream::from_std(std_stream) {
-                    Ok(s) => s,
-                    Err(error) => {
-                        tracing::warn!("worker {worker_id} from_std failed: {error}");
-                        continue;
-                    }
-                };
-                let permit = match limiter.clone().try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        let _ = ConnectionRejector::reject(stream).await;
-                        continue;
-                    }
-                };
-                let store = store.clone();
-                let transaction_coordinator = transaction_coordinator.clone();
-                spawn_local(async move {
-                    if let Err(error) = MultiDirectConnection::handle(
-                        stream,
-                        store,
-                        permit,
-                        single_threaded,
-                        None,
-                        started_at,
-                        transaction_coordinator,
-                    )
-                    .await
-                    {
-                        tracing::warn!("multi-direct connection closed with error: {error}");
-                    }
-                });
             }
         }));
     }
@@ -162,7 +179,7 @@ impl MultiDirectWorker {
         config: TokioHybridWorkerConfig,
         store: Arc<EmbeddedStore>,
         limiter: Arc<Semaphore>,
-        rx: flume::Receiver<std::net::TcpStream>,
+        rx: flume::Receiver<MultiDirectWorkerMessage>,
     ) {
         let TokioHybridWorkerConfig {
             worker_id,
@@ -245,43 +262,130 @@ impl MultiDirectWorker {
                 }
             });
 
-            while let Ok(std_stream) = rx.recv_async().await {
-                if std_stream.set_nonblocking(true).is_err() {
-                    continue;
+            while let Ok(message) = rx.recv_async().await {
+                match message {
+                    MultiDirectWorkerMessage::Stream(std_stream) => {
+                        Self::spawn_stream_connection(
+                            worker_id,
+                            std_stream,
+                            store.clone(),
+                            limiter.clone(),
+                            single_threaded,
+                            None,
+                            started_at,
+                            transaction_coordinator.clone(),
+                        )
+                        .await;
+                    }
+                    MultiDirectWorkerMessage::Routed(request) => {
+                        Self::handle_routed_request(
+                            worker_id,
+                            request,
+                            &store,
+                            single_threaded,
+                            started_at,
+                            transaction_coordinator.as_deref(),
+                        );
+                    }
                 }
-                let stream = match TcpStream::from_std(std_stream) {
-                    Ok(s) => s,
-                    Err(error) => {
-                        tracing::warn!("worker {worker_id} from_std failed: {error}");
-                        continue;
-                    }
-                };
-                let permit = match limiter.clone().try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        let _ = ConnectionRejector::reject(stream).await;
-                        continue;
-                    }
-                };
-                let store = store.clone();
-                let transaction_coordinator = transaction_coordinator.clone();
-                spawn_local(async move {
-                    if let Err(error) = MultiDirectConnection::handle(
-                        stream,
-                        store,
-                        permit,
-                        single_threaded,
-                        None,
-                        started_at,
-                        transaction_coordinator,
-                    )
-                    .await
-                    {
-                        tracing::warn!("multi-direct connection closed with error: {error}");
-                    }
-                });
             }
         }));
+    }
+
+    async fn spawn_stream_connection(
+        worker_id: usize,
+        std_stream: std::net::TcpStream,
+        store: Arc<EmbeddedStore>,
+        limiter: Arc<Semaphore>,
+        single_threaded: bool,
+        owned_shard_id: Option<usize>,
+        started_at: Instant,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
+    ) {
+        if std_stream.set_nonblocking(true).is_err() {
+            return;
+        }
+        let stream = match TcpStream::from_std(std_stream) {
+            Ok(s) => s,
+            Err(error) => {
+                tracing::warn!("worker {worker_id} from_std failed: {error}");
+                return;
+            }
+        };
+        let permit = match limiter.try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let _ = ConnectionRejector::reject(stream).await;
+                return;
+            }
+        };
+        spawn_local(async move {
+            if let Err(error) = MultiDirectConnection::handle(
+                stream,
+                store,
+                permit,
+                single_threaded,
+                owned_shard_id,
+                started_at,
+                transaction_coordinator,
+            )
+            .await
+            {
+                tracing::warn!("multi-direct connection closed with error: {error}");
+            }
+        });
+    }
+
+    fn handle_routed_request(
+        worker_id: usize,
+        request: RoutedWorkerRequest,
+        store: &EmbeddedStore,
+        single_threaded: bool,
+        started_at: Instant,
+        transaction_coordinator: Option<&TransactionCoordinator>,
+    ) {
+        let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
+        let mut fast_write_queue = FastWriteQueue::default();
+        let mut transaction_state = TransactionState::default();
+        let mut resp_protocol = request.resp_protocol;
+        let result = DirectProtocol::process_shared_request_buffer_with_context(
+            &request.frame,
+            store,
+            &mut write_buffer,
+            Some(&mut fast_write_queue),
+            SharedRequestBufferContext {
+                single_threaded,
+                owned_shard_id: Some(request.owned_shard_id),
+                started_at,
+                transaction_coordinator,
+                transaction_state: &mut transaction_state,
+                resp_protocol: &mut resp_protocol,
+            },
+        )
+        .and_then(|consumed| {
+            if consumed == request.frame.len() {
+                Ok(())
+            } else {
+                Err(crate::ShardCacheError::Protocol(format!(
+                    "routed worker {worker_id} left {} bytes unconsumed",
+                    request.frame.len().saturating_sub(consumed)
+                )))
+            }
+        })
+        .map(|_| {
+            if !fast_write_queue.is_empty() {
+                fast_write_queue.flush_bytes(&mut write_buffer);
+                FastWriteQueue::materialize_optional(
+                    Some(&mut fast_write_queue),
+                    &mut write_buffer,
+                );
+            }
+            RoutedWorkerResponse {
+                payload: write_buffer.freeze(),
+                resp_protocol,
+            }
+        });
+        let _ = request.response_tx.send(result);
     }
 }
 
@@ -505,18 +609,25 @@ impl MultiDirectConnection {
                 },
             )?;
 
-            if use_fast_write_queue && !fast_write_queue.is_empty() {
-                fast_write_queue.flush_bytes(&mut write_buffer);
-                fast_write_queue.write_pending_tokio(&mut stream).await?;
-                if write_buffer.capacity() < READ_RESERVE_THRESHOLD {
-                    write_buffer.reserve(CONNECTION_BUFFER_CAPACITY);
+            match (
+                use_fast_write_queue && !fast_write_queue.is_empty(),
+                !write_buffer.is_empty(),
+            ) {
+                (true, _) => {
+                    fast_write_queue.flush_bytes(&mut write_buffer);
+                    fast_write_queue.write_pending_tokio(&mut stream).await?;
+                    if write_buffer.capacity() < READ_RESERVE_THRESHOLD {
+                        write_buffer.reserve(CONNECTION_BUFFER_CAPACITY);
+                    }
                 }
-            } else if !write_buffer.is_empty() {
-                Self::write_inline_response(&mut stream, &write_buffer).await?;
-                write_buffer.clear();
-                if write_buffer.capacity() < READ_RESERVE_THRESHOLD {
-                    write_buffer.reserve(CONNECTION_BUFFER_CAPACITY);
+                (false, true) => {
+                    Self::write_inline_response(&mut stream, &write_buffer).await?;
+                    write_buffer.clear();
+                    if write_buffer.capacity() < READ_RESERVE_THRESHOLD {
+                        write_buffer.reserve(CONNECTION_BUFFER_CAPACITY);
+                    }
                 }
+                (false, false) => {}
             }
             if consumed_total > 0 {
                 frame_buffer.advance(consumed_total).map_err(|error| {
@@ -526,6 +637,172 @@ impl MultiDirectConnection {
         }
 
         transaction_state.close(transaction_coordinator.as_deref());
+        Ok(())
+    }
+
+    pub(super) async fn handle_public_routed(
+        mut stream: TcpStream,
+        store: Arc<EmbeddedStore>,
+        _permit: OwnedSemaphorePermit,
+        worker_txs: Arc<Vec<flume::Sender<MultiDirectWorkerMessage>>>,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
+    ) -> Result<()> {
+        if worker_txs.is_empty() {
+            return Err(crate::ShardCacheError::Config(
+                "public routed fanout requires at least one worker".into(),
+            ));
+        }
+
+        let mut frame_buffer = HandoffBuffer::with_config(HandoffConfig::buffer());
+        let mut resp_protocol = RespProtocolVersion::default();
+        let mut transaction_state = TransactionState::default();
+
+        let result: Result<()> = async {
+            loop {
+                let read = frame_buffer
+                    .read_available(&mut stream)
+                    .await
+                    .map_err(|error| {
+                        crate::ShardCacheError::Protocol(format!("handoff read error: {error}"))
+                    })?;
+                if read == 0 {
+                    break;
+                }
+
+                loop {
+                    let mut batch: Option<PublicWorkerBatch> = None;
+                    let mut consumed_total = 0usize;
+                    let mut pending = Vec::new();
+                    let available = frame_buffer.peek();
+
+                    while consumed_total < available.len() {
+                        let Some(frame) = PublicRoutedFrame::parse(
+                            &available[consumed_total..],
+                            &store,
+                            transaction_coordinator.as_deref(),
+                            &mut transaction_state,
+                            resp_protocol,
+                        )?
+                        else {
+                            break;
+                        };
+
+                        if frame.barrier && (!pending.is_empty() || batch.is_some()) {
+                            break;
+                        }
+
+                        match frame.destination {
+                            PublicRoutedDestination::Worker { shard_id } => match &mut batch {
+                                Some(batch) if batch.shard_id == shard_id => {
+                                    batch.len += frame.consumed;
+                                }
+                                Some(_) => {
+                                    let ready_batch = batch.take().expect("batch exists");
+                                    Self::enqueue_public_batch(
+                                        &worker_txs,
+                                        available,
+                                        ready_batch,
+                                        resp_protocol,
+                                        &mut pending,
+                                    )
+                                    .await?;
+                                    batch = Some(PublicWorkerBatch {
+                                        shard_id,
+                                        start: consumed_total,
+                                        len: frame.consumed,
+                                    });
+                                }
+                                None => {
+                                    batch = Some(PublicWorkerBatch {
+                                        shard_id,
+                                        start: consumed_total,
+                                        len: frame.consumed,
+                                    });
+                                }
+                            },
+                            PublicRoutedDestination::Error { payload } => {
+                                if let Some(ready_batch) = batch.take() {
+                                    Self::enqueue_public_batch(
+                                        &worker_txs,
+                                        available,
+                                        ready_batch,
+                                        resp_protocol,
+                                        &mut pending,
+                                    )
+                                    .await?;
+                                }
+                                pending.push(PublicPendingResponse::Ready(RoutedWorkerResponse {
+                                    payload,
+                                    resp_protocol,
+                                }));
+                            }
+                        }
+
+                        consumed_total += frame.consumed;
+                        if frame.barrier || pending.len() >= WRITE_HANDOFF_MAX_ITEMS {
+                            break;
+                        }
+                    }
+
+                    if let Some(ready_batch) = batch.take() {
+                        Self::enqueue_public_batch(
+                            &worker_txs,
+                            available,
+                            ready_batch,
+                            resp_protocol,
+                            &mut pending,
+                        )
+                        .await?;
+                    }
+
+                    if pending.is_empty() {
+                        break;
+                    }
+
+                    frame_buffer.advance(consumed_total).map_err(|error| {
+                        crate::ShardCacheError::Protocol(format!("handoff advance error: {error}"))
+                    })?;
+
+                    for pending_response in pending {
+                        let response = pending_response.receive().await?;
+                        resp_protocol = response.resp_protocol;
+                        if !response.payload.is_empty() {
+                            Self::write_inline_response(&mut stream, &response.payload).await?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+
+        transaction_state.close(transaction_coordinator.as_deref());
+        result
+    }
+
+    async fn enqueue_public_batch(
+        worker_txs: &[flume::Sender<MultiDirectWorkerMessage>],
+        available: &[u8],
+        batch: PublicWorkerBatch,
+        resp_protocol: RespProtocolVersion,
+        pending: &mut Vec<PublicPendingResponse>,
+    ) -> Result<()> {
+        let target = batch.shard_id % worker_txs.len();
+        let (response_tx, response_rx) = oneshot::channel();
+        let frame_bytes =
+            BytesFrame::copy_from_slice(&available[batch.start..batch.start + batch.len]);
+        worker_txs[target]
+            .send_async(MultiDirectWorkerMessage::Routed(RoutedWorkerRequest {
+                frame: frame_bytes,
+                owned_shard_id: batch.shard_id,
+                resp_protocol,
+                response_tx,
+            }))
+            .await
+            .map_err(|_| {
+                crate::ShardCacheError::Protocol(format!("worker {target} channel closed"))
+            })?;
+        pending.push(PublicPendingResponse::Routed(response_rx));
         Ok(())
     }
 
@@ -543,6 +820,172 @@ impl MultiDirectConnection {
             }
             Err(error) => Err(error.into()),
         }
+    }
+}
+
+#[cfg(feature = "embedded")]
+struct PublicWorkerBatch {
+    shard_id: usize,
+    start: usize,
+    len: usize,
+}
+
+#[cfg(feature = "embedded")]
+enum PublicPendingResponse {
+    Ready(RoutedWorkerResponse),
+    Routed(oneshot::Receiver<Result<RoutedWorkerResponse>>),
+}
+
+#[cfg(feature = "embedded")]
+impl PublicPendingResponse {
+    async fn receive(self) -> Result<RoutedWorkerResponse> {
+        match self {
+            Self::Ready(response) => Ok(response),
+            Self::Routed(response_rx) => response_rx.await.map_err(|_| {
+                crate::ShardCacheError::Protocol("routed worker response dropped".into())
+            })?,
+        }
+    }
+}
+
+#[cfg(feature = "embedded")]
+pub(super) struct PublicRoutedFrame {
+    pub(super) consumed: usize,
+    pub(super) destination: PublicRoutedDestination,
+    pub(super) barrier: bool,
+}
+
+#[cfg(feature = "embedded")]
+pub(super) enum PublicRoutedDestination {
+    Worker { shard_id: usize },
+    Error { payload: BytesFrame },
+}
+
+#[cfg(feature = "embedded")]
+impl PublicRoutedFrame {
+    pub(super) fn parse(
+        buf: &[u8],
+        store: &EmbeddedStore,
+        transaction_coordinator: Option<&TransactionCoordinator>,
+        transaction_state: &mut TransactionState,
+        resp_protocol: RespProtocolVersion,
+    ) -> Result<Option<Self>> {
+        match buf.first().copied() {
+            Some(first_byte) if FastCodec::is_fast_request_prefix(first_byte) => {
+                Self::parse_fast(buf, store)
+            }
+            Some(_) => Self::parse_resp(
+                buf,
+                store,
+                transaction_coordinator,
+                transaction_state,
+                resp_protocol,
+            ),
+            None => Ok(None),
+        }
+    }
+
+    fn parse_fast(buf: &[u8], store: &EmbeddedStore) -> Result<Option<Self>> {
+        let Some((request, consumed)) = FastCodec::decode_request(buf)? else {
+            return Ok(None);
+        };
+        let shards = super::transactions::fast_request_shards(store, &request);
+        Ok(Some(Self::from_shards(consumed, shards, false, true)))
+    }
+
+    fn parse_resp(
+        buf: &[u8],
+        store: &EmbeddedStore,
+        transaction_coordinator: Option<&TransactionCoordinator>,
+        transaction_state: &mut TransactionState,
+        resp_protocol: RespProtocolVersion,
+    ) -> Result<Option<Self>> {
+        if let Some((consumed, command, args)) = DirectProtocol::try_resp_command_parts(buf) {
+            let mut parts = BorrowedCommandParts::new();
+            parts.push(command);
+            parts.extend(args.iter().copied());
+            return Ok(Some(Self::from_resp_parts(
+                consumed,
+                store,
+                &parts,
+                transaction_coordinator,
+                transaction_state,
+                resp_protocol,
+            )));
+        }
+
+        let Some((frame, consumed)) = RespCodec::decode_command(buf)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self::from_resp_parts(
+            consumed,
+            store,
+            &frame.parts,
+            transaction_coordinator,
+            transaction_state,
+            resp_protocol,
+        )))
+    }
+
+    fn from_resp_parts(
+        consumed: usize,
+        store: &EmbeddedStore,
+        parts: &[&[u8]],
+        transaction_coordinator: Option<&TransactionCoordinator>,
+        transaction_state: &mut TransactionState,
+        resp_protocol: RespProtocolVersion,
+    ) -> Self {
+        let barrier = parts
+            .first()
+            .is_some_and(|command| command.eq_ignore_ascii_case(b"HELLO"));
+        let mut payload = BytesMut::new();
+        if transaction_state.handle_resp_command(
+            transaction_coordinator,
+            store,
+            parts,
+            &mut payload,
+            resp_protocol,
+        ) {
+            return Self {
+                consumed,
+                destination: PublicRoutedDestination::Error {
+                    payload: payload.freeze(),
+                },
+                barrier: true,
+            };
+        }
+        let shards = super::transactions::command_shards(store, parts);
+        Self::from_shards(consumed, shards, barrier, false)
+    }
+
+    fn from_shards(consumed: usize, shards: Vec<usize>, barrier: bool, fast: bool) -> Self {
+        let destination = match shards.as_slice() {
+            [] => PublicRoutedDestination::Worker { shard_id: 0 },
+            [shard_id] => PublicRoutedDestination::Worker {
+                shard_id: *shard_id,
+            },
+            _ => PublicRoutedDestination::Error {
+                payload: Self::route_error(
+                    fast,
+                    "ERR routed public embedded server only accepts single-shard commands",
+                ),
+            },
+        };
+        Self {
+            consumed,
+            destination,
+            barrier,
+        }
+    }
+
+    fn route_error(fast: bool, message: &str) -> BytesFrame {
+        let mut out = BytesMut::with_capacity(message.len() + 16);
+        if fast {
+            ServerWire::write_fast_error(&mut out, message);
+        } else {
+            ServerWire::write_resp_error(&mut out, message);
+        }
+        out.freeze()
     }
 }
 

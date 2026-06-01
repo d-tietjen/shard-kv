@@ -47,7 +47,23 @@ cargo run -p shardcache --features server --bin shardcache -- \
   --shard-count 4
 ```
 
-For direct shard routing, enable shard-owned SCNP listeners on the server:
+For direct shard routing, enable shard-owned listeners on the server config:
+
+```toml
+bind_addr = "127.0.0.1:6380"
+shard_count = 4
+server_endpoint_mode = "direct_shard"
+```
+
+Then start the server with that config:
+
+```bash
+cargo run -p shardcache --features server --bin shardcache -- \
+  --config shardcache.toml
+```
+
+For scripts and container runs that do not write a config file, the compatibility
+environment switch exposes the same direct port shape:
 
 ```bash
 SHARDCACHE_DIRECT_SHARD_PORTS=1 \

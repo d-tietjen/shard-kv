@@ -1,0 +1,7 @@
+id = "redis-keyspace"
+title = "Redis Keyspace Commands"
+driver = "redis_command_matrix"
+cases = "profile:keyspace"
+fixture_scope = "shared-keyspace"
+destructive = false
+requires_modules = false

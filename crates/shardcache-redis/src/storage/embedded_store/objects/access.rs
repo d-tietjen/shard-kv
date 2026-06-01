@@ -1,5 +1,29 @@
 use super::super::*;
 
+impl EmbeddedStore {
+    pub(crate) fn redis_object_shard_wait_generation(&self, shard_id: usize) -> u64 {
+        self.objects.shard_wait_generation(shard_id)
+    }
+
+    pub(crate) fn wait_for_redis_object_shard_change(
+        &self,
+        shard_id: usize,
+        observed_generation: u64,
+        timeout: Option<std::time::Duration>,
+    ) -> bool {
+        self.objects
+            .wait_for_shard_change(shard_id, observed_generation, timeout)
+    }
+
+    pub(crate) fn notify_redis_object_shard(&self, shard_id: usize) {
+        self.objects.notify_shard_waiters(shard_id);
+    }
+
+    pub(crate) fn notify_redis_object_key(&self, key: &[u8]) {
+        self.notify_redis_object_shard(self.route_key(key).shard_id);
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) trait RedisObjectStoreAccess {
     /// Returns true when Redis object containers are present.

@@ -166,14 +166,18 @@ impl RedisListStore for EmbeddedStore {
         values: &[&[u8]],
         front: bool,
     ) -> RedisObjectResult {
-        self.object_create_hashed(
+        let result = self.object_create_hashed(
             key_hash,
             key,
             |bucket, key_hash| {
                 bucket.push_list_existing_or_wrongtype_hashed(key_hash, key, values, front)
             },
             |bucket, key_hash| bucket.push_list_new_unchecked_hashed(key_hash, key, values, front),
-        )
+        );
+        if values_available_after_push(&result) {
+            self.notify_redis_object_key(key);
+        }
+        result
     }
 
     fn push_list_existing_hashed(
@@ -223,10 +227,18 @@ impl RedisListStore for EmbeddedStore {
             RedisObjectReadOutcome::WrongType => RedisObjectResult::WrongType,
             RedisObjectReadOutcome::Written => {
                 drop(bucket);
-                self.object_write_hashed(key_hash, key, |bucket| {
+                let result = self.object_write_hashed(key_hash, key, |bucket| {
                     bucket.push_list_existing_hashed(key_hash, key, values, front)
-                })
+                });
+                if values_available_after_push(&result) {
+                    self.notify_redis_object_key(key);
+                }
+                result
             }
         }
     }
+}
+
+fn values_available_after_push(result: &RedisObjectResult) -> bool {
+    matches!(result, RedisObjectResult::Integer(len) if *len > 0)
 }

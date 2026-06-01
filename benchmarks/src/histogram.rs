@@ -47,13 +47,10 @@ impl LatencyHistogram {
 }
 
 pub fn format_ns(ns: u64) -> String {
-    if ns < 1_000 {
-        format!("{ns}ns")
-    } else if ns < 1_000_000 {
-        format!("{:.1}us", ns as f64 / 1_000.0)
-    } else if ns < 1_000_000_000 {
-        format!("{:.1}ms", ns as f64 / 1_000_000.0)
-    } else {
-        format!("{:.2}s", ns as f64 / 1_000_000_000.0)
+    match ns {
+        ns if ns < 1_000 => format!("{ns}ns"),
+        ns if ns < 1_000_000 => format!("{:.1}us", ns as f64 / 1_000.0),
+        ns if ns < 1_000_000_000 => format!("{:.1}ms", ns as f64 / 1_000_000.0),
+        ns => format!("{:.2}s", ns as f64 / 1_000_000_000.0),
     }
 }

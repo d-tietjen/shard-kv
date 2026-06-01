@@ -287,6 +287,41 @@ request/response, while an earlier mixed matrix made it look artificially slow.
 The 2026-05-31 matrix is still useful because it covers the full v6/v7 surface
 at one git SHA and records errors/expected errors for every selected case.
 
+## 5. Standardized Docker server sweep — Adam, 2026-06-01
+
+The PR prime sweep reran the full `redis-v6-v7` suite through the standardized
+Docker runner against Redis, Valkey, Dragonfly, shardcache RESP, and shardcache
+SCNP. Shape: Adam Ubuntu 24.04.4, 1 client, pipeline depth 1, 2s warmup, 10s
+measurement, `1,2,4,8,16` vCPU, 512 MiB command-precomposition budget, and the
+same resolved command plan for every target.
+
+- Artifact: `benchmarks/results/adam-prime-new-commands-20260601T012301Z/report.md`.
+- Suite rows: 53 Redis v6/v7 extension cases per target per vCPU.
+- Runner validation: 50 total target/suite/vCPU legs across `redis-v6-v7` and
+  `redis-modules`, no runner-level `Error:` lines, and no lingering benchmark
+  containers or ports on Adam after cleanup.
+
+This standardized run is a coverage and broad mixed-loop comparison. Because
+`BLMOVE`, `BLMPOP`, and `BZMPOP` are co-selected, the Redis and Valkey mixed
+loop is dominated by blocking waits; keep section 4's nonblocking table and the
+focused single-command runs for publishable throughput claims.
+
+| Target | Rows | Clean rows | Sum ops/sec | Mean avg us | Mean p99 us | Unexpected errors | Expected-error replies |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Redis | 265 | 260 | 902.5 | 5,496.9 | 5,757.5 | 170 | 510 |
+| Valkey | 265 | 215 | 902.9 | 5,491.9 | 5,750.5 | 1,700 | 510 |
+| Dragonfly | 265 | 155 | 59,417.5 | 84.8 | 98.0 | 246,632 | 33,638 |
+| shardcache RESP | 265 | 265 | 93,843.4 | 53.2 | 63.6 | 0 | 53,125 |
+| shardcache SCNP | 265 | 265 | 92,936.2 | 53.7 | 65.2 | 0 | 52,611 |
+
+| vCPU | shardcache RESP ops/sec | RESP p99 us | shardcache SCNP ops/sec | SCNP p99 us | Unexpected errors |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 19,241.6 | 62.4 | 19,373.0 | 62.1 | 0 |
+| 2 | 18,032.3 | 64.8 | 17,978.5 | 65.0 | 0 |
+| 4 | 18,305.0 | 63.8 | 18,074.8 | 72.0 | 0 |
+| 8 | 18,763.0 | 64.9 | 19,256.6 | 63.2 | 0 |
+| 16 | 19,501.5 | 62.0 | 18,253.3 | 63.5 | 0 |
+
 ## Reproduce
 
 In-network, both servers on the Docker `bridge`:

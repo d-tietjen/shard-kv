@@ -254,8 +254,11 @@ impl EmbeddedStore {
                     .or_insert(serde_json::Value::Null);
                 if json_path_is_root(args[1]) {
                     json_merge_value(doc, value);
-                } else if let Some(target) = json_path_mut(doc, args[1]) {
-                    json_merge_value(target, value);
+                } else {
+                    let target = json_path_mut(doc, args[1]);
+                    if let Some(target) = target {
+                        json_merge_value(target, value);
+                    }
                 }
                 RedisModuleApiResult::Simple("OK")
             }

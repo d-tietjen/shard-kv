@@ -14,6 +14,51 @@ Head-to-head command-matrix run for the feature-gated Redis module command surfa
 
 This is a command-coverage and strict request/response comparison. Redis Stack does not ship every third-party or retired module represented by the feature-gated shardcache module surface, so rows where Redis Stack reports command errors are recorded as baseline-error coverage rows rather than performance claims.
 
+## Standardized Docker Server Sweep
+
+The 2026-06-01 Adam prime sweep exercised the same 227 module command cases
+through the standardized Docker runner against Redis, Valkey, Dragonfly,
+shardcache RESP, and shardcache SCNP. This was the PR validation shape for the
+feature-gated module command surface: 1 client, pipeline depth 1, 2s warmup,
+10s measurement, `1,2,4,8,16` vCPU, 512 MiB command-precomposition budget, and
+`SHARDCACHE_FEATURES=redis-server,redis-modules-all`.
+
+- Artifact: `benchmarks/results/adam-prime-new-commands-20260601T012301Z/report.md`.
+- Command bundle: `redis-modules` plus the Redis v6/v7 extension suite in the
+  same isolated run.
+- Runner validation: 50 target/suite/vCPU legs started, no runner-level
+  `Error:` lines, all target CSVs shared the resolved plan IDs, and Adam had no
+  lingering `bench-*` containers or benchmark ports after cleanup.
+
+Plain `redis:7.4-alpine`, `valkey/valkey:8.0-alpine`, and Dragonfly do not load
+the module implementations in this server matrix. Their module rows are
+therefore compatibility/error coverage, not throughput claims. Redis Stack
+remains the Redis-family module reference for comparable implemented-module
+rows; the standardized sweep proves that shardcache's feature-gated module
+surface runs end to end through both RESP and SCNP across the vCPU matrix.
+
+| vCPU | shardcache RESP ops/sec | RESP avg us | RESP p99 us | shardcache SCNP ops/sec | SCNP avg us | SCNP p99 us | Unexpected errors |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 15,392.4 | 64.7 | 83.5 | 15,377.2 | 64.8 | 82.4 | 0 |
+| 2 | 14,937.0 | 66.7 | 86.7 | 17,235.7 | 57.8 | 68.1 | 0 |
+| 4 | 14,235.6 | 70.0 | 87.4 | 15,867.5 | 62.8 | 77.3 | 0 |
+| 8 | 12,579.3 | 79.2 | 100.8 | 16,939.2 | 58.8 | 73.4 | 0 |
+| 16 | 15,010.6 | 66.4 | 84.0 | 16,188.7 | 61.5 | 75.9 | 0 |
+
+Across all five vCPU tiers, shardcache RESP completed 1,135 module rows with
+72,154.9 summed ops/sec, 69.4 us mean average latency, 88.5 us mean p99, and 0
+unexpected errors. shardcache SCNP completed the same 1,135 rows with 81,608.3
+summed ops/sec, 61.1 us mean average latency, 75.4 us mean p99, and 0
+unexpected errors. The expected-error replies come from intentional error-path
+cases such as reserve-on-existing, and are tracked separately from unexpected
+errors in the CSV.
+
+| Target | Module rows | Rows with unexpected errors | Unexpected error replies | Notes |
+| --- | ---: | ---: | ---: | --- |
+| Redis | 1,135 | 1,055 | 896,886 | Module families absent in the plain Redis image. |
+| Valkey | 1,135 | 1,055 | 888,831 | Module families absent in the plain Valkey image. |
+| Dragonfly | 1,135 | 890 | 612,279 | Some Redis-compatible module names are accepted as stubs, but most module families are absent. |
+
 ## Initial Summary
 
 | Target | Cases | Sum ops/sec | Mean avg us | Unexpected errors | Expected-error replies |

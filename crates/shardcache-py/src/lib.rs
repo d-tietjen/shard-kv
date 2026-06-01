@@ -725,12 +725,17 @@ fn discover_numa_nodes() -> Option<Vec<DiscoveredNumaNode>> {
 fn parse_cpu_list(raw: &str) -> Vec<usize> {
     let mut cpus = Vec::new();
     for part in raw.trim().split(',').filter(|part| !part.is_empty()) {
-        if let Some((start, end)) = part.split_once('-') {
-            if let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) {
-                cpus.extend(start..=end);
+        match part.split_once('-') {
+            Some((start, end)) => {
+                if let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) {
+                    cpus.extend(start..=end);
+                }
             }
-        } else if let Ok(cpu) = part.parse::<usize>() {
-            cpus.push(cpu);
+            None => {
+                if let Ok(cpu) = part.parse::<usize>() {
+                    cpus.push(cpu);
+                }
+            }
         }
     }
     cpus
@@ -1731,17 +1736,21 @@ impl StoreCore {
                 let (worker_id, route) = store.routed_key(&key);
                 let now_ms = now_millis();
                 let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
-                if store.wal_enabled_for_shard(worker_id) {
-                    let wal_key = key.clone();
-                    let wal_value = value.clone();
-                    if store.uses_caller_local_routes() {
+                let wal_record = store
+                    .wal_enabled_for_shard(worker_id)
+                    .then(|| (key.clone(), value.clone()));
+                match store.uses_caller_local_routes().then_some(route) {
+                    Some(route) => {
                         store.workers[worker_id].run_store(move |inner| {
                             inner.set_slice_routed_local(route, &key, &value, ttl_ms)
                         });
-                    } else {
+                    }
+                    None => {
                         store.workers[worker_id]
                             .run_store(move |inner| inner.set(key, value, ttl_ms));
                     }
+                }
+                if let Some((wal_key, wal_value)) = wal_record {
                     store.append_wal(
                         worker_id,
                         MutationOp::Set,
@@ -1750,12 +1759,6 @@ impl StoreCore {
                         expire_at_ms,
                         now_ms,
                     );
-                } else if store.uses_caller_local_routes() {
-                    store.workers[worker_id].run_store(move |inner| {
-                        inner.set_slice_routed_local(route, &key, &value, ttl_ms)
-                    });
-                } else {
-                    store.workers[worker_id].run_store(move |inner| inner.set(key, value, ttl_ms));
                 }
             }
         }
@@ -1907,12 +1910,14 @@ impl StoreCore {
             Self::Threaded(store) => {
                 let (worker_id, route) = store.routed_session(&session_prefix);
                 let now_ms = now_millis();
-                if store.wal_enabled_for_shard(worker_id) {
-                    let records = items
+                let wal_records = store.wal_enabled_for_shard(worker_id).then(|| {
+                    items
                         .iter()
                         .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect::<Vec<_>>();
-                    if store.uses_caller_local_routes() {
+                        .collect::<Vec<_>>()
+                });
+                match store.uses_caller_local_routes().then_some(route) {
+                    Some(route) => {
                         store.workers[worker_id].run_store(move |inner| {
                             inner.batch_set_session_owned_no_ttl_routed_local(
                                 route,
@@ -1920,26 +1925,17 @@ impl StoreCore {
                                 items,
                             )
                         });
-                    } else {
+                    }
+                    None => {
                         store.workers[worker_id].run_store(move |inner| {
                             inner.batch_set_session_owned_no_ttl(session_prefix, items)
                         });
                     }
+                }
+                if let Some(records) = wal_records {
                     for (key, value) in records {
                         store.append_wal(worker_id, MutationOp::Set, key, value, None, now_ms);
                     }
-                } else if store.uses_caller_local_routes() {
-                    store.workers[worker_id].run_store(move |inner| {
-                        inner.batch_set_session_owned_no_ttl_routed_local(
-                            route,
-                            session_prefix,
-                            items,
-                        )
-                    });
-                } else {
-                    store.workers[worker_id].run_store(move |inner| {
-                        inner.batch_set_session_owned_no_ttl(session_prefix, items)
-                    });
                 }
             }
         }

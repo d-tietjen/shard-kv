@@ -52,6 +52,25 @@ fn main() -> shardcache_client_rs::Result<()> {
 }
 ```
 
+## Endpoint Topology
+
+`server_endpoint_mode = "fanout"` is the default. It binds one public RESP/SCNP
+listener on `bind_addr` and routes each request internally.
+
+Use `server_endpoint_mode = "direct_shard"` when shard-aware clients should
+also connect to one shard-owned port per shard. Direct ports start at
+`bind_addr + 1` unless `SHARDCACHE_DIRECT_SHARD_BASE_PORT` sets the first direct
+port:
+
+```toml
+bind_addr = "127.0.0.1:6380"
+shard_count = 4
+server_endpoint_mode = "direct_shard"
+```
+
+With that config, the fanout listener is `127.0.0.1:6380` and the default
+direct shard listeners are `127.0.0.1:6381` through `127.0.0.1:6384`.
+
 Semantic cache commands are available through RESP when the server is used as a
 networked semantic cache:
 

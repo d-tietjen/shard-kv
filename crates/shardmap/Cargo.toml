@@ -161,6 +161,11 @@ name = "protocol_test"
 path = "tests/protocol_test.rs"
 
 [[test]]
+name = "embedded_server_test"
+path = "tests/embedded_server_test.rs"
+required-features = ["redis-server"]
+
+[[test]]
 name = "fuzz_harness_test"
 path = "tests/fuzz_harness_test.rs"
 required-features = ["redis"]

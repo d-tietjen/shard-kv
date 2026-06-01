@@ -20,7 +20,6 @@ pub(crate) use crate::commands::zset_shared::{
 };
 pub(crate) use adapter::RedisCommand;
 pub(crate) use define_redis_command;
-#[cfg(not(feature = "server"))]
 pub(crate) use dispatch::dispatch as dispatch_redis_command;
 #[cfg(feature = "server")]
 #[allow(unused_imports)]

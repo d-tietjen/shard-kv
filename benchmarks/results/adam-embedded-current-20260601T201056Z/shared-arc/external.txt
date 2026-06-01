@@ -1,0 +1,1 @@
+shared-arc	clients=16	pipeline=64	ops/sec=1775155	p50us=9.1	p99us=9.8	p999us=10.0	window_s=10.00	thread_ops[min..max]=1331328..1331520

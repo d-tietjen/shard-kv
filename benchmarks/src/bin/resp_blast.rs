@@ -135,7 +135,6 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut handles = Vec::with_capacity(args.clients);
     for tid in 0..args.clients {
-        let addr = addr;
         let send_buf = Arc::clone(&send_buf);
         let stop = Arc::clone(&stop);
         let counter = Arc::clone(&counters[tid]);
@@ -170,7 +169,7 @@ fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 // Hot loop. Runs across warmup + window; the coordinator isolates
                 // the window via counter snapshots.
                 while !stop.load(Ordering::Relaxed) {
-                    let sample = batch % sample_every == 0;
+                    let sample = batch.is_multiple_of(sample_every);
                     let t0 = if sample { Some(Instant::now()) } else { None };
 
                     conn.get_mut().write_all(&send_buf)?;

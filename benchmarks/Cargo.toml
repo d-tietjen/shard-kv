@@ -29,6 +29,16 @@ embedded-read-biased-lock = ["shardmap/embedded-read-biased-lock"]
 monoio = ["shardmap/monoio"]
 # Build benchmark binaries with prefix-aware memory-limit eviction available.
 prefix-eviction = ["shardmap/prefix-eviction"]
+# Build the benchmark-only server that exposes a caller-owned shardmap store
+# through the shardcache RESP/SCNP server path.
+embedded-server = ["shardmap/redis-server"]
+# Build the embedded Redis command benchmark with every Redis function/module
+# command family enabled so command coverage matches the server matrix.
+redis-embedded-commands = [
+    "shardmap/redis",
+    "shardmap/redis-functions",
+    "shardmap/redis-modules-all",
+]
 
 [dependencies]
 shardmap = { workspace = true, features = ["sharded"] }
@@ -44,6 +54,9 @@ lru = "0.12"
 moka = { version = "0.12", default-features = false, features = ["sync"] }
 parking_lot = { workspace = true }
 rand = { version = "0.8", features = ["small_rng"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [[bin]]
@@ -75,6 +88,11 @@ name = "redis_command_matrix"
 path = "src/bin/redis_command_matrix.rs"
 
 [[bin]]
+name = "redis_embedded_command_matrix"
+path = "src/bin/redis_embedded_command_matrix.rs"
+required-features = ["redis-embedded-commands"]
+
+[[bin]]
 name = "redis_command_manifest"
 path = "src/bin/redis_command_manifest.rs"
 
@@ -93,3 +111,13 @@ path = "src/bin/semantic_cache_matrix.rs"
 [[bin]]
 name = "semantic_server_load"
 path = "src/bin/semantic_server_load.rs"
+
+[[bin]]
+name = "embedded_server_harness"
+path = "src/bin/embedded_server_harness.rs"
+required-features = ["embedded-server"]
+
+[[bin]]
+name = "embedded_mixed_harness"
+path = "src/bin/embedded_mixed_harness.rs"
+required-features = ["embedded-server"]

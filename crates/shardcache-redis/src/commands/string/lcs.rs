@@ -213,35 +213,39 @@ fn longest_common_subsequence(a: &[u8], b: &[u8]) -> (Vec<u8>, Vec<LcsMatch>, us
     let mut i = alen;
     let mut j = blen;
     while i > 0 && j > 0 {
-        if a[i - 1] == b[j - 1] {
-            sequence.push(a[i - 1]);
-            let ai = i - 1;
-            let bi = j - 1;
-            match range.as_mut() {
-                Some(current) if current.a_start == ai + 1 && current.b_start == bi + 1 => {
-                    current.a_start = ai;
-                    current.b_start = bi;
-                    current.len += 1;
-                }
-                _ => {
-                    if let Some(finished) = range.take() {
-                        matches.push(finished);
+        match () {
+            _ if a[i - 1] == b[j - 1] => {
+                sequence.push(a[i - 1]);
+                let ai = i - 1;
+                let bi = j - 1;
+                match range.as_mut() {
+                    Some(current) if current.a_start == ai + 1 && current.b_start == bi + 1 => {
+                        current.a_start = ai;
+                        current.b_start = bi;
+                        current.len += 1;
                     }
-                    range = Some(LcsMatch {
-                        a_start: ai,
-                        a_end: ai,
-                        b_start: bi,
-                        b_end: bi,
-                        len: 1,
-                    });
+                    _ => {
+                        if let Some(finished) = range.take() {
+                            matches.push(finished);
+                        }
+                        range = Some(LcsMatch {
+                            a_start: ai,
+                            a_end: ai,
+                            b_start: bi,
+                            b_end: bi,
+                            len: 1,
+                        });
+                    }
                 }
+                i -= 1;
+                j -= 1;
             }
-            i -= 1;
-            j -= 1;
-        } else if dp[at(i - 1, j)] >= dp[at(i, j - 1)] {
-            i -= 1;
-        } else {
-            j -= 1;
+            _ if dp[at(i - 1, j)] >= dp[at(i, j - 1)] => {
+                i -= 1;
+            }
+            _ => {
+                j -= 1;
+            }
         }
     }
     if let Some(finished) = range.take() {

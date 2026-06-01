@@ -48,6 +48,13 @@ pub struct ShardCacheConfig {
     pub replication: ReplicationConfig,
     /// Redis transaction execution mode.
     pub transaction_mode: TransactionMode,
+    /// Public server endpoint topology.
+    ///
+    /// `Fanout` exposes one listener. Caller-owned embedded stores route
+    /// fanout requests to shard owners; standalone direct servers keep their
+    /// compatibility fanout behavior. `DirectShard` also exposes shard-owned
+    /// ports for clients that can route directly.
+    pub server_endpoint_mode: ServerEndpointMode,
 }
 
 /// Memory-limit eviction policy.
@@ -77,6 +84,17 @@ pub enum TransactionMode {
     ShardLocal,
     /// Coordinate transactions across all affected shards using router-level gates.
     CoordinatedCrossShard,
+}
+
+/// Public server endpoint topology.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerEndpointMode {
+    /// One public listener.
+    #[default]
+    Fanout,
+    /// Expose shard-owned direct ports in addition to the fanout listener.
+    DirectShard,
 }
 
 /// Capacity settings for the hot, warm, and cold in-memory tiers.
@@ -284,6 +302,7 @@ impl Default for ShardCacheConfig {
             persistence: PersistenceConfig::default(),
             replication: ReplicationConfig::default(),
             transaction_mode: TransactionMode::default(),
+            server_endpoint_mode: ServerEndpointMode::default(),
         }
     }
 }
@@ -426,6 +445,14 @@ impl ShardCacheConfig {
         }
     }
 
+    /// Returns the total memory limit when one is configured.
+    pub fn total_memory_limit_bytes(&self) -> Option<usize> {
+        match self.max_memory_bytes {
+            0 => None,
+            bytes => Some(bytes as usize),
+        }
+    }
+
     /// Returns the snapshot interval, clamped to at least 1 second.
     pub fn snapshot_interval(&self) -> Duration {
         Duration::from_secs(self.persistence.snapshot_every_seconds.max(1))
@@ -490,7 +517,7 @@ impl PersistenceConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShardCacheConfig, geometry::CacheSizeParser};
+    use super::{ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser};
 
     #[test]
     fn parses_cache_sizes() {
@@ -523,5 +550,21 @@ mod tests {
         let shard_count = ShardCacheConfig::default_shard_count();
         assert!(shard_count > 0);
         assert!(shard_count.is_power_of_two());
+    }
+
+    #[test]
+    fn default_server_endpoint_mode_is_fanout() {
+        assert_eq!(
+            ShardCacheConfig::default().server_endpoint_mode,
+            ServerEndpointMode::Fanout
+        );
+    }
+
+    #[test]
+    fn parses_server_endpoint_mode_from_toml() {
+        let config: ShardCacheConfig =
+            toml::from_str(r#"server_endpoint_mode = "direct_shard""#).unwrap();
+
+        assert_eq!(config.server_endpoint_mode, ServerEndpointMode::DirectShard);
     }
 }

@@ -1,21 +1,113 @@
 services:
   redis:
-    image: redis:7.4-alpine
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
     container_name: bench-redis
+    profiles: ["redis", "servers"]
     ports:
       - "127.0.0.1:6379:6379"
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--port", "6379"]
+    command:
+      [
+        "redis-server",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+        "--protected-mode",
+        "no",
+        "--port",
+        "6379",
+      ]
+
+  redis-stack:
+    image: ${REDIS_STACK_IMAGE:-redis/redis-stack-server:latest}
+    container_name: bench-redis-stack
+    profiles: ["redis-stack", "servers"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    environment:
+      # Redis Stack loads RedisBloom, RediSearch, RedisJSON, and RedisTimeSeries
+      # at startup. The suite runner disables snapshots after startup so the
+      # empty save policy is passed through redis-cli instead of REDIS_ARGS.
+      REDIS_ARGS: "--appendonly no --protected-mode no --port 6379"
 
   valkey:
-    image: valkey/valkey:8.0-alpine
+    image: ${VALKEY_IMAGE:-valkey/valkey:8.0-alpine}
     container_name: bench-valkey
+    profiles: ["valkey", "servers"]
     ports:
       - "127.0.0.1:6381:6381"
-    command: ["valkey-server", "--save", "", "--appendonly", "no", "--port", "6381"]
+    command:
+      [
+        "valkey-server",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+        "--protected-mode",
+        "no",
+        "--port",
+        "6381",
+      ]
 
   dragonfly:
-    image: docker.dragonflydb.io/dragonflydb/dragonfly:v1.27.0
+    image: ${DRAGONFLY_IMAGE:-docker.dragonflydb.io/dragonflydb/dragonfly:v1.27.0}
     container_name: bench-dragonfly
+    profiles: ["dragonfly", "servers"]
     ports:
       - "127.0.0.1:6382:6382"
-    command: ["--port=6382", "--proactor_threads=4", "--snapshot_cron="]
+    command:
+      [
+        "--port=6382",
+        "--proactor_threads=${DRAGONFLY_THREADS:-1}",
+        "--snapshot_cron=",
+        "--dbfilename=",
+      ]
+
+  memcached:
+    image: ${MEMCACHED_IMAGE:-memcached:1.6-alpine}
+    container_name: bench-memcached
+    profiles: ["memcached", "servers"]
+    ports:
+      - "127.0.0.1:${MEMCACHED_PORT:-11211}:11211"
+    command:
+      [
+        "memcached",
+        "-m",
+        "${MEMCACHED_MEMORY_MB:-1024}",
+        "-p",
+        "11211",
+        "-u",
+        "memcache",
+        "-t",
+        "${MEMCACHED_THREADS:-1}",
+        "-c",
+        "${MEMCACHED_MAX_CONNECTIONS:-4096}",
+        "-I",
+        "${MEMCACHED_MAX_ITEM_SIZE:-64m}",
+      ]
+
+  shardcache:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        SHARDCACHE_FEATURES: ${SHARDCACHE_FEATURES:-redis-server}
+    image: shardcache-bench:local
+    container_name: bench-shardcache
+    profiles: ["shardcache", "servers"]
+    ports:
+      - "127.0.0.1:${SHARDCACHE_PORT:-6383}:6383"
+      - "127.0.0.1:6501-6516:6501-6516"
+    environment:
+      SHARDCACHE_DIRECT_SHARD_PORTS: "1"
+      SHARDCACHE_DIRECT_SHARD_BASE_PORT: "6501"
+    command:
+      [
+        "--bind-addr",
+        "0.0.0.0:6383",
+        "--shard-count",
+        "${SHARD_COUNT:-1}",
+        "--disable-persistence",
+        "--server-mode",
+        "direct",
+      ]

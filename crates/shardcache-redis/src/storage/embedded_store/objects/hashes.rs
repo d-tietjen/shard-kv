@@ -1,6 +1,8 @@
 use super::super::*;
 use super::access::RedisObjectStoreAccess;
-use crate::storage::HashFieldExpireCond;
+use crate::storage::{
+    HashFieldExpireCond, HashFieldGetExpireAction, HashFieldSetCondition, HashFieldSetExpireAction,
+};
 
 #[allow(dead_code)]
 pub(crate) trait RedisHashStore {
@@ -10,6 +12,20 @@ pub(crate) trait RedisHashStore {
     fn hexists(&self, key: &[u8], field: &[u8]) -> RedisObjectResult;
     fn hdel(&self, key: &[u8], field: &[u8]) -> RedisObjectResult;
     fn hdel_many(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
+    fn hgetdel(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
+    fn hgetex(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        action: HashFieldGetExpireAction,
+    ) -> RedisObjectResult;
+    fn hsetex(
+        &self,
+        key: &[u8],
+        fields: &[(&[u8], &[u8])],
+        condition: HashFieldSetCondition,
+        action: HashFieldSetExpireAction,
+    ) -> RedisObjectResult;
     fn hlen(&self, key: &[u8]) -> RedisObjectResult;
     fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
     fn hmget_visit(
@@ -87,6 +103,36 @@ impl RedisHashStore for EmbeddedStore {
 
     fn hdel_many(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult {
         self.object_write(key, |bucket| bucket.hdel_many(key, fields))
+    }
+
+    fn hgetdel(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| bucket.hash_field_getdel(key, fields, now_ms))
+    }
+
+    fn hgetex(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        action: HashFieldGetExpireAction,
+    ) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| {
+            bucket.hash_field_getex(key, fields, action, now_ms)
+        })
+    }
+
+    fn hsetex(
+        &self,
+        key: &[u8],
+        fields: &[(&[u8], &[u8])],
+        condition: HashFieldSetCondition,
+        action: HashFieldSetExpireAction,
+    ) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| {
+            bucket.hash_field_setex(key, fields, condition, action, now_ms)
+        })
     }
 
     fn hlen(&self, key: &[u8]) -> RedisObjectResult {

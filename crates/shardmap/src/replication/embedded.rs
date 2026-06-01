@@ -27,6 +27,7 @@ use super::protocol::{
     decode_frame_payload_bytes, mutation_batch_record_count, visit_mutation_batch_payload,
     visit_mutation_batch_payload_bytes,
 };
+use super::transport::{ReplicationPrimaryServer, SnapshotProvider};
 
 const DIRECT_ENCODED_SET_MAX_VALUE_LEN: usize = 128;
 
@@ -283,6 +284,18 @@ impl ReplicatedEmbeddedStore {
 
     pub fn primary(&self) -> Arc<ReplicationPrimary> {
         Arc::clone(&self.primary)
+    }
+
+    /// Starts a TCP replication listener for this embedded primary.
+    ///
+    /// This is a convenience wrapper around [`ReplicationPrimaryServer::start`]
+    /// that uses the embedded store as the consistent snapshot provider.
+    pub fn serve_replicas(
+        self: &Arc<Self>,
+        config: ReplicationConfig,
+    ) -> Result<ReplicationPrimaryServer> {
+        let snapshots: Arc<dyn SnapshotProvider> = self.clone();
+        ReplicationPrimaryServer::start(config, self.primary(), snapshots)
     }
 
     pub fn metrics_snapshot(&self) -> ReplicationMetricsSnapshot {

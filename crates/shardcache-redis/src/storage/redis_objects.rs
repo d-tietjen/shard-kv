@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicIsize};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize};
+use std::sync::{Condvar, Mutex};
 
 use hashbrown::HashTable;
 use indextreemap::IndexTreeSet;
@@ -92,6 +93,9 @@ pub(crate) struct RedisObjectStore {
 pub(crate) struct RedisObjectShard {
     buckets: Vec<RwLock<RedisObjectBucket>>,
     object_count: AtomicIsize,
+    wait_generation: Mutex<u64>,
+    waiter_count: AtomicUsize,
+    wait_condvar: Condvar,
 }
 
 #[derive(Debug, Default)]
@@ -232,7 +236,9 @@ mod bucket_core;
 mod bucket_hash;
 #[path = "redis_objects/bucket_hash_ttl.rs"]
 mod bucket_hash_ttl;
-pub(crate) use bucket_hash_ttl::HashFieldExpireCond;
+pub(crate) use bucket_hash_ttl::{
+    HashFieldExpireCond, HashFieldGetExpireAction, HashFieldSetCondition, HashFieldSetExpireAction,
+};
 #[path = "redis_objects/bucket_list.rs"]
 mod bucket_list;
 #[path = "redis_objects/bucket_set.rs"]

@@ -344,7 +344,7 @@ fn render_semantic_notes(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "- Blocking list and sorted-set commands are live-tested on ready or short-timeout paths. Long-lived blocking wakeups across clients need separate proofing before being described as full Redis parity."
+        "- Blocking list and sorted-set commands wait on the owning shard for shard-local key sets. Ready, timeout, and cross-client wakeup paths are covered; empty multi-key waits that span shards report CROSSSLOT instead of using a global waiter."
     )
     .unwrap();
     writeln!(
@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn manifest_counts_are_intentional() {
         let entries = build_manifest();
-        assert_eq!(count_status(&entries, CompatStatus::Supported), 247);
+        assert_eq!(count_status(&entries, CompatStatus::Supported), 252);
         assert_eq!(count_status(&entries, CompatStatus::Missing), 0);
     }
 
@@ -652,7 +652,7 @@ mod tests {
         let entries = build_manifest();
         assert_eq!(redis_5_supported_commands(&entries).len(), 200);
         assert_eq!(redis_5_missing_commands(&entries).len(), 0);
-        assert_eq!(redis_5_extension_commands(&entries).len(), 47);
+        assert_eq!(redis_5_extension_commands(&entries).len(), 52);
     }
 
     #[test]

@@ -1,0 +1,8 @@
+id = "embedded-copy"
+title = "Embedded Copy-Out Cache Backends"
+driver = "saturation"
+backends = "fc-shared-copy-locked,fc-shared-copy-unlocked,dashmap,moka,rwlock-hashmap,lru"
+ttl_ms = ""
+eviction_policy = "none"
+capacity_resident_pct = ""
+read_mode = "copy"

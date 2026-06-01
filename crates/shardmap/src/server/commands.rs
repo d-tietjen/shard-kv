@@ -1250,6 +1250,58 @@ fn find_hot_raw_command(command: &[u8]) -> Option<&'static dyn RawDirectCommand>
         4 if command.eq_ignore_ascii_case(b"LPOS") => Some(&crate::commands::lpos::COMMAND),
         #[cfg(feature = "redis")]
         5 if command.eq_ignore_ascii_case(b"RESET") => Some(&crate::commands::reset::COMMAND),
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VADD") => {
+            Some(&crate::commands::vector_set::VADD_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        5 if command.eq_ignore_ascii_case(b"VCARD") => {
+            Some(&crate::commands::vector_set::VCARD_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VDIM") => {
+            Some(&crate::commands::vector_set::VDIM_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VEMB") => {
+            Some(&crate::commands::vector_set::VEMB_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        8 if command.eq_ignore_ascii_case(b"VGETATTR") => {
+            Some(&crate::commands::vector_set::VGETATTR_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        5 if command.eq_ignore_ascii_case(b"VINFO") => {
+            Some(&crate::commands::vector_set::VINFO_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        9 if command.eq_ignore_ascii_case(b"VISMEMBER") => {
+            Some(&crate::commands::vector_set::VISMEMBER_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        6 if command.eq_ignore_ascii_case(b"VLINKS") => {
+            Some(&crate::commands::vector_set::VLINKS_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        11 if command.eq_ignore_ascii_case(b"VRANDMEMBER") => {
+            Some(&crate::commands::vector_set::VRANDMEMBER_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        6 if command.eq_ignore_ascii_case(b"VRANGE") => {
+            Some(&crate::commands::vector_set::VRANGE_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VREM") => {
+            Some(&crate::commands::vector_set::VREM_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        8 if command.eq_ignore_ascii_case(b"VSETATTR") => {
+            Some(&crate::commands::vector_set::VSETATTR_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VSIM") => {
+            Some(&crate::commands::vector_set::VSIM_COMMAND)
+        }
         #[cfg(feature = "redis-functions")]
         5 if command.eq_ignore_ascii_case(b"FCALL") => {
             Some(&crate::commands::function_cmd::FCALL_COMMAND)
@@ -1589,6 +1641,58 @@ impl RawCommandDispatcher {
             crate::protocol::FastCommandKind::ZMPop => Some(&crate::commands::zmpop::COMMAND),
             #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BZMPop => Some(&crate::commands::bzmpop::COMMAND),
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VAdd => {
+                Some(&crate::commands::vector_set::VADD_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VCard => {
+                Some(&crate::commands::vector_set::VCARD_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VDim => {
+                Some(&crate::commands::vector_set::VDIM_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VEmb => {
+                Some(&crate::commands::vector_set::VEMB_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VGetAttr => {
+                Some(&crate::commands::vector_set::VGETATTR_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VInfo => {
+                Some(&crate::commands::vector_set::VINFO_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VIsMember => {
+                Some(&crate::commands::vector_set::VISMEMBER_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VLinks => {
+                Some(&crate::commands::vector_set::VLINKS_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VRandMember => {
+                Some(&crate::commands::vector_set::VRANDMEMBER_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VRange => {
+                Some(&crate::commands::vector_set::VRANGE_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VRem => {
+                Some(&crate::commands::vector_set::VREM_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VSetAttr => {
+                Some(&crate::commands::vector_set::VSETATTR_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VSim => {
+                Some(&crate::commands::vector_set::VSIM_COMMAND)
+            }
             _ => None,
         }
     }

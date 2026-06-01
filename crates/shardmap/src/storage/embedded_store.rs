@@ -45,6 +45,7 @@ mod routing;
 mod semantic;
 mod session_slots;
 mod shard;
+mod shard_arc;
 mod views;
 mod write;
 
@@ -79,6 +80,8 @@ use routing::{
 pub use session_slots::PackedSessionWrite;
 pub(crate) use session_slots::SessionSlotMap;
 pub(crate) use shard::EmbeddedShard;
+#[doc(hidden)]
+pub use shard_arc::ShardArcEmbeddedStore;
 pub use views::{
     EmbeddedBatchReadView, EmbeddedReadSlice, EmbeddedReadView, EmbeddedRef, EmbeddedRefMut,
     EmbeddedSessionBatchView, OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView,

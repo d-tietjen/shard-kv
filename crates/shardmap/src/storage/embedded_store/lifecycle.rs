@@ -5,7 +5,49 @@ impl EmbeddedStore {
     pub fn delete(&self, key: &[u8]) -> bool {
         let now_ms = now_millis();
         let route = self.route_key(key);
-        self.delete_routed_then(route, key, now_ms, || {})
+        let deleted = self.delete_routed_then(route, key, now_ms, || {});
+        #[cfg(feature = "redis")]
+        if !deleted {
+            return self.delete_pinned_vector_value_if_distinct(route, key, now_ms);
+        }
+        deleted
+    }
+
+    #[cfg(feature = "redis")]
+    pub(super) fn delete_pinned_vector_value_if_distinct(
+        &self,
+        primary_route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        let vector_route = self.route_vector_key(key);
+        if primary_route.shard_id == vector_route.shard_id
+            || !self.pinned_vector_value_exists_routed(vector_route, key)
+        {
+            return false;
+        }
+        self.delete_routed_then(vector_route, key, now_ms, || {})
+    }
+
+    #[cfg(feature = "redis")]
+    pub(super) fn pinned_vector_value_exists(&self, key: &[u8]) -> bool {
+        let primary_route = self.route_key(key);
+        let vector_route = self.route_vector_key(key);
+        primary_route.shard_id != vector_route.shard_id
+            && self.pinned_vector_value_exists_routed(vector_route, key)
+    }
+
+    #[cfg(feature = "redis")]
+    fn pinned_vector_value_exists_routed(
+        &self,
+        vector_route: EmbeddedKeyRoute,
+        key: &[u8],
+    ) -> bool {
+        let mut is_vector = false;
+        self.with_shared_value_bytes_routed(vector_route, key, &mut |bytes| {
+            is_vector = bytes.starts_with(crate::storage::VECTOR_SET_PREFIX);
+        });
+        is_vector
     }
 
     /// Deletes a routed key and runs `after_delete` before releasing the shard
@@ -83,7 +125,15 @@ impl EmbeddedStore {
                 }
             }
         }
-        self.get_ref_routed(route, key).is_some()
+        if self.get_ref_routed(route, key).is_some() {
+            return true;
+        }
+        #[cfg(feature = "redis")]
+        {
+            self.pinned_vector_value_exists(key)
+        }
+        #[cfg(not(feature = "redis"))]
+        false
     }
 
     /// Returns Redis-style TTL in seconds: `-2` for missing, `-1` for no TTL.
@@ -116,7 +166,16 @@ impl EmbeddedStore {
         {
             return -1;
         }
-        shard.map.ttl_seconds(key, now_ms)
+        let ttl = shard.map.ttl_seconds(key, now_ms);
+        if ttl != -2 {
+            return ttl;
+        }
+        #[cfg(feature = "redis")]
+        {
+            self.pinned_vector_ttl_seconds(route, key, now_ms)
+        }
+        #[cfg(not(feature = "redis"))]
+        ttl
     }
 
     /// Returns Redis-style TTL in milliseconds: `-2` for missing, `-1` for no TTL.
@@ -149,7 +208,17 @@ impl EmbeddedStore {
         {
             return -1;
         }
-        shard.map.ttl_millis(key, now_ms)
+        let ttl = shard.map.ttl_millis(key, now_ms);
+        if ttl != -2 {
+            return ttl;
+        }
+        #[cfg(feature = "redis")]
+        {
+            self.pinned_vector_ttl_millis(route, key, now_ms)
+                .unwrap_or(-2)
+        }
+        #[cfg(not(feature = "redis"))]
+        ttl
     }
 
     /// Removes the TTL from a key and returns true when a TTL was cleared.
@@ -185,14 +254,91 @@ impl EmbeddedStore {
         {
             return false;
         }
-        shard.map.persist(key, now_ms)
+        let persisted = shard.map.persist(key, now_ms);
+        #[cfg(feature = "redis")]
+        if !persisted {
+            return self.persist_pinned_vector_value_if_distinct(route, key, now_ms);
+        }
+        persisted
     }
 
     /// Sets an absolute expiration timestamp in Unix milliseconds.
     pub fn expire(&self, key: &[u8], expire_at_ms: u64) -> bool {
         let route = self.route_key(key);
         let now_ms = now_millis();
-        self.expire_routed_then(route, key, expire_at_ms, now_ms, || {})
+        let changed = self.expire_routed_then(route, key, expire_at_ms, now_ms, || {});
+        #[cfg(feature = "redis")]
+        if !changed {
+            return self.expire_pinned_vector_value_if_distinct(route, key, expire_at_ms, now_ms);
+        }
+        changed
+    }
+
+    #[cfg(feature = "redis")]
+    fn pinned_vector_ttl_millis(
+        &self,
+        primary_route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<i64> {
+        let vector_route = self.route_vector_key(key);
+        if primary_route.shard_id == vector_route.shard_id
+            || !self.pinned_vector_value_exists_routed(vector_route, key)
+        {
+            return None;
+        }
+        let mut shard = self.shards[vector_route.shard_id].write();
+        let ttl = shard.map.ttl_millis(key, now_ms);
+        (ttl != -2).then_some(ttl)
+    }
+
+    #[cfg(feature = "redis")]
+    fn pinned_vector_ttl_seconds(
+        &self,
+        primary_route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> i64 {
+        match self.pinned_vector_ttl_millis(primary_route, key, now_ms) {
+            Some(ttl) if ttl > 0 => (ttl + 999) / 1_000,
+            Some(ttl) => ttl,
+            None => -2,
+        }
+    }
+
+    #[cfg(feature = "redis")]
+    fn persist_pinned_vector_value_if_distinct(
+        &self,
+        primary_route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        let vector_route = self.route_vector_key(key);
+        if primary_route.shard_id == vector_route.shard_id
+            || !self.pinned_vector_value_exists_routed(vector_route, key)
+        {
+            return false;
+        }
+        let mut shard = self.shards[vector_route.shard_id].write();
+        shard.map.persist(key, now_ms)
+    }
+
+    #[cfg(feature = "redis")]
+    fn expire_pinned_vector_value_if_distinct(
+        &self,
+        primary_route: EmbeddedKeyRoute,
+        key: &[u8],
+        expire_at_ms: u64,
+        now_ms: u64,
+    ) -> bool {
+        let vector_route = self.route_vector_key(key);
+        if primary_route.shard_id == vector_route.shard_id
+            || !self.pinned_vector_value_exists_routed(vector_route, key)
+        {
+            return false;
+        }
+        let mut shard = self.shards[vector_route.shard_id].write();
+        shard.map.expire(key, expire_at_ms, now_ms)
     }
 
     /// Updates an absolute expiration timestamp and runs `after_expire` before
@@ -290,9 +436,13 @@ impl EmbeddedStore {
 
         match object_type {
             Some(kind) => kind,
-            None => match self.get_ref(key).is_some() {
-                true => "string",
-                false => "none",
+            None => match self.get_ref(key) {
+                #[cfg(feature = "redis")]
+                Some(value) if value.starts_with(crate::storage::VECTOR_SET_PREFIX) => "vectorset",
+                Some(_) => "string",
+                #[cfg(feature = "redis")]
+                None if self.pinned_vector_value_exists(key) => "vectorset",
+                None => "none",
             },
         }
     }
@@ -308,7 +458,13 @@ impl EmbeddedStore {
             Some(encoding) => Some(encoding),
             None => match self.get_ref(key).is_some() {
                 true => Some("raw"),
-                false => None,
+                false => {
+                    #[cfg(feature = "redis")]
+                    if self.pinned_vector_value_exists(key) {
+                        return Some("raw");
+                    }
+                    None
+                }
             },
         }
     }

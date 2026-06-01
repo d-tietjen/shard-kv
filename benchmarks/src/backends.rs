@@ -10,6 +10,7 @@ mod dashmap_ref;
 mod fc_embed;
 mod fc_shared;
 mod lru_bk;
+mod memcached;
 mod moka_bk;
 mod resp;
 mod rwlock_hashmap;
@@ -42,6 +43,7 @@ pub const BACKEND_IDS: &[&str] = &[
     "fc-server-resp",
     "fc-server-scnp",
     "fc-server-scnp-direct",
+    "memcached",
     "redis",
     "valkey",
     "dragonfly",
@@ -289,6 +291,12 @@ pub fn make(
                 format!("backend `{id}` requires --addr host:port (Docker compose recommended)")
             })?;
             Arc::new(resp::RespBackend::new(id, addr)?)
+        }
+        "memcached" => {
+            let addr = addr.ok_or_else(|| {
+                format!("backend `{id}` requires --addr host:port (Docker compose recommended)")
+            })?;
+            Arc::new(memcached::MemcachedBackend::new(addr)?)
         }
         "fc-server-scnp" => {
             let addr = addr.ok_or_else(|| {

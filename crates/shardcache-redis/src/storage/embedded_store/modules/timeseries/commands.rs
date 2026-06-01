@@ -383,12 +383,10 @@ fn write_timeseries_range_series<W: TimeSeriesMultiRangeWriter>(
 
 #[cfg(feature = "redis-module-timeseries")]
 fn parse_ts_bound(raw: &[u8], fallback: i64) -> i64 {
-    if raw == b"-" {
-        i64::MIN
-    } else if raw == b"+" {
-        i64::MAX
-    } else {
-        parse_i64_lossy(raw).unwrap_or(fallback)
+    match raw {
+        b"-" => i64::MIN,
+        b"+" => i64::MAX,
+        raw => parse_i64_lossy(raw).unwrap_or(fallback),
     }
 }
 

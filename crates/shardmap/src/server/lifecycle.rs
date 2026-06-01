@@ -1,12 +1,13 @@
 use super::connection::{ConnectionRejector, EngineConnection, HandoffConfig, SnapshotTask};
-use super::direct::{DirectConnection, DirectServer};
+use super::direct::{DirectConnection, DirectServer, ShardArcConnection};
 #[cfg(feature = "embedded")]
 use super::transactions::TransactionCoordinator;
 #[cfg(all(target_os = "linux", feature = "embedded", feature = "monoio"))]
 use super::transport::{MonoioMultiDirectWorker, MonoioWorkerConfig};
 #[cfg(feature = "embedded")]
 use super::transport::{
-    MultiDirectAddress, MultiDirectWorker, TokioHybridWorkerConfig, TokioWorkerConfig,
+    MultiDirectAddress, MultiDirectConnection, MultiDirectWorker, MultiDirectWorkerMessage,
+    TokioHybridWorkerConfig, TokioWorkerConfig,
 };
 use super::*;
 
@@ -17,6 +18,9 @@ impl ShardCacheServer {
             engine: Some(engine),
             mode: ServerMode::Auto,
             unix_socket_path: None,
+            embedded_store: None,
+            shard_arc_store: None,
+            thread_local_embedded_store: false,
         }
     }
 
@@ -26,6 +30,9 @@ impl ShardCacheServer {
             engine: Some(engine),
             mode,
             unix_socket_path: None,
+            embedded_store: None,
+            shard_arc_store: None,
+            thread_local_embedded_store: false,
         }
     }
 
@@ -35,6 +42,81 @@ impl ShardCacheServer {
             engine: None,
             mode: ServerMode::Direct,
             unix_socket_path: None,
+            embedded_store: None,
+            shard_arc_store: None,
+            thread_local_embedded_store: false,
+        }
+    }
+
+    /// Exposes an existing embedded store over the shardcache RESP/SCNP server.
+    ///
+    /// The supplied store remains owned by the embedding process. Local
+    /// in-process reads and writes and remote protocol requests all observe the
+    /// same data. Server configuration controls the listener and connection
+    /// behavior; configure memory limits directly on the store before serving
+    /// it if the embedding process owns that policy.
+    pub fn from_embedded_store(config: ShardCacheConfig, store: Arc<EmbeddedStore>) -> Self {
+        Self {
+            config,
+            engine: None,
+            mode: ServerMode::Direct,
+            unix_socket_path: None,
+            embedded_store: Some(store),
+            shard_arc_store: None,
+            thread_local_embedded_store: false,
+        }
+    }
+
+    /// Exposes a shard-shared embedded store over the benchmark GET/SET server.
+    ///
+    /// This mode is intentionally narrower than `from_embedded_store`: it is a
+    /// measurement surface for architectures where the sharing boundary is an
+    /// `Arc` per storage shard rather than one `Arc` around the full store.
+    #[doc(hidden)]
+    pub fn from_benchmark_shard_arc_embedded_store(
+        config: ShardCacheConfig,
+        store: Arc<ShardArcEmbeddedStore>,
+    ) -> Self {
+        Self {
+            config,
+            engine: None,
+            mode: ServerMode::Direct,
+            unix_socket_path: None,
+            embedded_store: None,
+            shard_arc_store: Some(store),
+            thread_local_embedded_store: false,
+        }
+    }
+
+    #[doc(hidden)]
+    #[deprecated(
+        note = "benchmark topology probe; use from_embedded_store for public fanout or server_endpoint_mode=direct_shard for direct shard ports"
+    )]
+    pub fn from_shard_arc_embedded_store(
+        config: ShardCacheConfig,
+        store: Arc<ShardArcEmbeddedStore>,
+    ) -> Self {
+        Self::from_benchmark_shard_arc_embedded_store(config, store)
+    }
+
+    /// Serves the [`LocalEmbeddedStore`](crate::storage::LocalEmbeddedStore)
+    /// already installed on this thread.
+    ///
+    /// This mode is for owner-local embedded deployments where the embedding
+    /// process and the TCP server must use the exact same shard-owned memory
+    /// without falling back to shared `EmbeddedStore` locks. Install a local
+    /// store with `LocalEmbeddedStore::install_local()` before calling `run` or
+    /// `run_with_shutdown`; the server leaves that store installed when it
+    /// stops.
+    pub fn from_thread_local_embedded_store(config: ShardCacheConfig) -> Self {
+        Self {
+            config,
+            engine: None,
+            mode: ServerMode::Direct,
+            unix_socket_path: None,
+            embedded_store: None,
+            shard_arc_store: None,
+            thread_local_embedded_store: true,
         }
     }
 
@@ -44,8 +126,19 @@ impl ShardCacheServer {
     }
 
     pub async fn run(self) -> Result<()> {
+        if self.shard_arc_store.is_some() {
+            return self
+                .run_shard_arc_with_shutdown(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await;
+        }
         if self.should_run_multi_direct() {
-            return self.run_multi_direct().await;
+            return self
+                .run_multi_direct_with_shutdown(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await;
         }
         if self.should_run_direct() {
             return self
@@ -65,14 +158,86 @@ impl ShardCacheServer {
     where
         F: std::future::Future<Output = ()> + Send,
     {
+        if self.shard_arc_store.is_some() {
+            return self.run_shard_arc_with_shutdown(shutdown).await;
+        }
+        if self.should_run_multi_direct() {
+            return self.run_multi_direct_with_shutdown(shutdown).await;
+        }
         if self.should_run_direct() {
             return Err(crate::ShardCacheError::Config(
-                "run_with_shutdown is only available for engine-backed mode; use run() for direct mode"
+                "thread-local embedded servers must use run_thread_local_with_shutdown because the owner-local runtime is !Send"
                     .into(),
             ));
         }
 
         self.run_engine_with_shutdown(shutdown).await
+    }
+
+    pub async fn run_thread_local_with_shutdown<F>(self, shutdown: F) -> Result<()>
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        if !self.should_run_direct() {
+            return Err(crate::ShardCacheError::Config(
+                "run_thread_local_with_shutdown requires from_thread_local_embedded_store".into(),
+            ));
+        }
+        self.run_direct_with_shutdown(shutdown).await
+    }
+
+    async fn run_shard_arc_with_shutdown<F>(self, shutdown: F) -> Result<()>
+    where
+        F: std::future::Future<Output = ()> + Send,
+    {
+        if self.unix_socket_path.is_some() {
+            return Err(crate::ShardCacheError::Config(
+                "shard-arc embedded server mode does not support unix sockets".into(),
+            ));
+        }
+        let store = self
+            .shard_arc_store
+            .as_ref()
+            .expect("shard-arc server requires store")
+            .clone();
+        let listener = TcpListener::bind(&self.config.bind_addr).await?;
+        tracing::info!(
+            "shardcache listening on {} (shard-arc embedded GET/SET mode, {} shards)",
+            self.config.bind_addr,
+            store.shard_count()
+        );
+
+        let limiter = Arc::new(Semaphore::new(self.config.max_connections));
+        tokio::pin!(shutdown);
+
+        loop {
+            tokio::select! {
+                _ = &mut shutdown => {
+                    tracing::info!("shutdown requested");
+                    break;
+                }
+                accept_result = listener.accept() => {
+                    let (stream, peer_addr) = accept_result?;
+                    stream.set_nodelay(true)?;
+                    tracing::debug!("accepted connection from {peer_addr}");
+                    let permit = match limiter.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            ConnectionRejector::reject(stream).await?;
+                            continue;
+                        }
+                    };
+                    let store = store.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = ShardArcConnection::handle(stream, store, permit).await {
+                            tracing::warn!("shard-arc connection closed with error: {error}");
+                        }
+                    });
+                }
+            }
+        }
+
+        Ok(())
     }
 
     async fn run_engine_with_shutdown<F>(self, shutdown: F) -> Result<()>
@@ -175,19 +340,16 @@ trait ServerModeRouting {
 
 impl ServerModeRouting for ShardCacheServer {
     fn should_run_direct(&self) -> bool {
-        // The legacy single-thread DIRECT_STATE path is now superseded by
-        // multi-direct with worker_count=1 — same hot-path optimizations
-        // (RwLock reads, fused encode, mpsc write decoupling). Keep this
-        // returning false so all Direct-mode requests go through multi-direct.
-        false
+        self.thread_local_embedded_store
     }
 
     fn should_run_multi_direct(&self) -> bool {
         // Direct mode now always uses multi-direct (with at least 1 worker).
-        matches!(self.mode, ServerMode::Direct)
-            || (matches!(self.mode, ServerMode::Auto)
-                && !self.config.persistence.enabled
-                && self.config.shard_count >= 1)
+        !self.thread_local_embedded_store
+            && (matches!(self.mode, ServerMode::Direct)
+                || (matches!(self.mode, ServerMode::Auto)
+                    && !self.config.persistence.enabled
+                    && self.config.shard_count >= 1))
     }
 
     fn engine(&self) -> &EngineHandle {
@@ -202,7 +364,11 @@ impl ShardCacheServer {
     where
         F: std::future::Future<Output = ()>,
     {
-        DirectServer::initialize(&self.config);
+        if self.thread_local_embedded_store {
+            DirectServer::initialize_thread_local(&self.config)?;
+        } else {
+            DirectServer::initialize(&self.config)?;
+        }
 
         let result = if let Some(path) = self.unix_socket_path.clone() {
             UnixSocketPath::prepare(&path)?;
@@ -305,7 +471,10 @@ impl ShardCacheServer {
         result
     }
 
-    async fn run_multi_direct(self) -> Result<()> {
+    async fn run_multi_direct_with_shutdown<F>(self, shutdown: F) -> Result<()>
+    where
+        F: std::future::Future<Output = ()>,
+    {
         if self.unix_socket_path.is_some() {
             return Err(crate::ShardCacheError::Config(
                 "multi-direct mode does not support unix sockets yet; use --shard-count 1".into(),
@@ -319,16 +488,11 @@ impl ShardCacheServer {
             ))
         })?;
 
-        let shard_count = self.config.shard_count;
         let max_connections = self.config.max_connections;
-
-        let route_mode = MultiDirectRouteMode::configured()?;
-        let store = EmbeddedStore::with_route_mode(shard_count, route_mode);
-        store.configure_memory_policy(
-            self.config.per_shard_memory_limit_bytes(),
-            self.config.eviction_policy,
-        );
-        let shared_store = Arc::new(store);
+        let caller_owned_embedded_store = self.embedded_store.is_some();
+        let shared_store = self.multi_direct_store()?;
+        let shard_count = shared_store.shard_count();
+        let fanout_routes_to_owner = caller_owned_embedded_store;
         let limiter = Arc::new(Semaphore::new(max_connections));
         let transaction_coordinator =
             TransactionCoordinator::new(shard_count, self.config.transaction_mode).map(Arc::new);
@@ -337,11 +501,15 @@ impl ShardCacheServer {
         let use_monoio = std::env::var("SHARDCACHE_USE_MONOIO").is_ok_and(|v| v != "0");
         #[cfg(any(not(target_os = "linux"), not(feature = "monoio")))]
         let use_monoio = false;
-        let requested_direct_shard_ports =
-            std::env::var("SHARDCACHE_DIRECT_SHARD_PORTS").is_ok_and(|v| v != "0");
-        let direct_shard_ports = requested_direct_shard_ports;
-        if use_monoio {
-            tracing::info!("multi-direct: using monoio workers");
+        let direct_shard_ports = matches!(
+            self.config.server_endpoint_mode,
+            ServerEndpointMode::DirectShard
+        ) || std::env::var("SHARDCACHE_DIRECT_SHARD_PORTS")
+            .is_ok_and(|v| v != "0");
+        if use_monoio && fanout_routes_to_owner {
+            return Err(crate::ShardCacheError::Config(
+                "owner-routed fanout is not supported with SHARDCACHE_USE_MONOIO=1 yet".into(),
+            ));
         }
         let available_workers = std::thread::available_parallelism()
             .map(|available| available.get())
@@ -369,7 +537,17 @@ impl ShardCacheServer {
             );
         }
 
-        let mut worker_txs: Vec<flume::Sender<std::net::TcpStream>> =
+        if fanout_routes_to_owner {
+            tracing::info!(
+                "multi-direct: public fanout routes each request to the owning shard worker"
+            );
+        } else {
+            tracing::info!(
+                "multi-direct: public fanout assigns whole connections to worker threads"
+            );
+        }
+
+        let mut worker_txs: Vec<flume::Sender<MultiDirectWorkerMessage>> =
             Vec::with_capacity(worker_count);
         let mut handles = Vec::with_capacity(worker_count);
 
@@ -381,24 +559,27 @@ impl ShardCacheServer {
         } else {
             core_affinity::get_core_ids().unwrap_or_default()
         };
-        if worker_count == 1 {
-            tracing::info!("multi-direct: leaving single worker affinity unchanged");
-        } else if core_ids.is_empty() {
-            tracing::warn!("multi-direct: no core ids available, workers will not be pinned");
-        } else {
-            tracing::info!(
-                "multi-direct: pinning {} workers across {} available cores",
-                worker_count,
-                core_ids.len()
-            );
+        match (worker_count, core_ids.is_empty()) {
+            (1, _) => tracing::info!("multi-direct: leaving single worker affinity unchanged"),
+            (_, true) => {
+                tracing::warn!("multi-direct: no core ids available, workers will not be pinned");
+            }
+            (_, false) => {
+                tracing::info!(
+                    "multi-direct: pinning {} workers across {} available cores",
+                    worker_count,
+                    core_ids.len()
+                );
+            }
         }
 
         let single_threaded = worker_count == 1 && cfg!(feature = "unsafe");
         let started_at = Instant::now();
         for worker_id in 0..worker_count {
-            // The channel is only used by the legacy fanout acceptor. Shard-port
+            // Public fanout uses this channel either for legacy whole-socket
+            // handoff or for strict per-request shard routing. Shard-port
             // workers bind and accept inside their own pinned worker thread.
-            let (tx, rx) = flume::bounded::<std::net::TcpStream>(256);
+            let (tx, rx) = flume::bounded::<MultiDirectWorkerMessage>(256);
             worker_txs.push(tx);
             let store = shared_store.clone();
             let limiter = limiter.clone();
@@ -494,7 +675,7 @@ impl ShardCacheServer {
                 },
                 worker_count
             );
-            let _ = tokio::signal::ctrl_c().await;
+            shutdown.await;
             tracing::info!("shutdown requested");
             drop(worker_txs);
             for handle in handles {
@@ -510,11 +691,10 @@ impl ShardCacheServer {
             worker_count
         );
 
-        let shutdown = async {
-            let _ = tokio::signal::ctrl_c().await;
-        };
         tokio::pin!(shutdown);
 
+        let worker_txs = Arc::new(worker_txs);
+        let mut public_tasks = tokio::task::JoinSet::new();
         let mut next_worker = 0usize;
         loop {
             tokio::select! {
@@ -522,11 +702,40 @@ impl ShardCacheServer {
                     tracing::info!("shutdown requested");
                     break;
                 }
+                finished = public_tasks.join_next(), if !public_tasks.is_empty() => {
+                    if let Some(Err(error)) = finished {
+                        tracing::warn!("public routed connection task failed: {error}");
+                    }
+                }
                 accept = listener.accept() => {
                     let (stream, _addr) = accept?;
                     let _ = stream.set_nodelay(true);
-                    // Hand off to a worker as a std::net::TcpStream so it can
-                    // be re-registered on the worker's reactor.
+                    if fanout_routes_to_owner {
+                        let permit = match limiter.clone().try_acquire_owned() {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                let _ = ConnectionRejector::reject(stream).await;
+                                continue;
+                            }
+                        };
+                        let store = shared_store.clone();
+                        let worker_txs = Arc::clone(&worker_txs);
+                        let transaction_coordinator = transaction_coordinator.clone();
+                        public_tasks.spawn(async move {
+                            if let Err(error) = MultiDirectConnection::handle_public_routed(
+                                stream,
+                                store,
+                                permit,
+                                worker_txs,
+                                transaction_coordinator,
+                            )
+                            .await
+                            {
+                                tracing::warn!("public routed connection closed with error: {error}");
+                            }
+                        });
+                        continue;
+                    }
                     let std_stream = match stream.into_std() {
                         Ok(s) => s,
                         Err(error) => {
@@ -536,7 +745,11 @@ impl ShardCacheServer {
                     };
                     let target = next_worker % worker_txs.len();
                     next_worker = next_worker.wrapping_add(1);
-                    if worker_txs[target].send_async(std_stream).await.is_err() {
+                    if worker_txs[target]
+                        .send_async(MultiDirectWorkerMessage::Stream(std_stream))
+                        .await
+                        .is_err()
+                    {
                         tracing::warn!("worker {target} channel closed");
                         break;
                     }
@@ -544,12 +757,39 @@ impl ShardCacheServer {
             }
         }
 
+        public_tasks.abort_all();
+        while public_tasks.join_next().await.is_some() {}
+
         // Drop senders to signal workers to exit, then join.
         drop(worker_txs);
         for handle in handles {
             let _ = handle.join();
         }
         Ok(())
+    }
+
+    fn multi_direct_store(&self) -> Result<Arc<EmbeddedStore>> {
+        if let Some(store) = &self.embedded_store {
+            tracing::info!(
+                "multi-direct: serving caller-owned embedded store with {} shards ({:?} routing)",
+                store.shard_count(),
+                store.route_mode()
+            );
+            return Ok(Arc::clone(store));
+        }
+
+        let route_mode = MultiDirectRouteMode::configured()?;
+        let store = EmbeddedStore::with_route_mode(self.config.shard_count, route_mode);
+        store.configure_memory_policy(
+            self.config.per_shard_memory_limit_bytes(),
+            self.config.eviction_policy,
+        );
+        #[cfg(feature = "redis")]
+        store.configure_vector_memory_policy(
+            self.config.total_memory_limit_bytes(),
+            self.config.eviction_policy,
+        );
+        Ok(Arc::new(store))
     }
 }
 

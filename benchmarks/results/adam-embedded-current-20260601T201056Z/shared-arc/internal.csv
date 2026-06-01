@@ -1,0 +1,2 @@
+mode,bind_addr,shard_count,runtime_threads,internal_workers,value_size,mix,key_count,duration_s,ops_total,ops_per_sec,logical_payload_gb_per_sec,process_vcpu,p50_ns,p99_ns,p999_ns,read_ops,read_p99_ns,read_p999_ns,write_ops,write_p99_ns,write_p999_ns,errors,latency_sample_count
+mixed-local-embedded,127.0.0.1:6411,1,8,1,1024,100-0,1,12.047,242792731,20153141,20.637,3.506,50,180,430,242792731,180,430,0,0,0,0,3793637

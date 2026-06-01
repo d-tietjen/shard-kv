@@ -388,6 +388,118 @@ fn key_for_shard(store: &EmbeddedStore, shard_id: usize) -> Vec<u8> {
     panic!("unable to find key for shard {shard_id}");
 }
 
+fn parse_public_routed_frame(
+    input: &[u8],
+    store: &EmbeddedStore,
+) -> super::transport::PublicRoutedFrame {
+    let mut transaction_state = super::transactions::TransactionState::default();
+    super::transport::PublicRoutedFrame::parse(
+        input,
+        store,
+        None,
+        &mut transaction_state,
+        super::wire::RespProtocolVersion::default(),
+    )
+    .expect("route parse should succeed")
+    .expect("frame should be complete")
+}
+
+#[test]
+fn public_routed_frame_routes_resp_to_owning_shard() {
+    let store = EmbeddedStore::new(4);
+    let key = key_for_shard(&store, 2);
+    let mut input = Vec::new();
+    encode_resp_command(&[b"GET", key.as_slice()], &mut input);
+
+    let frame = parse_public_routed_frame(&input, &store);
+
+    assert_eq!(frame.consumed, input.len());
+    assert!(!frame.barrier);
+    match frame.destination {
+        super::transport::PublicRoutedDestination::Worker { shard_id } => {
+            assert_eq!(shard_id, 2);
+        }
+        super::transport::PublicRoutedDestination::Error { .. } => {
+            panic!("single-shard GET should route to a worker")
+        }
+    }
+}
+
+#[test]
+fn public_routed_frame_rejects_cross_shard_resp() {
+    let store = EmbeddedStore::new(4);
+    let key_a = key_for_shard(&store, 0);
+    let key_b = key_for_shard(&store, 1);
+    let mut input = Vec::new();
+    encode_resp_command(&[b"MGET", key_a.as_slice(), key_b.as_slice()], &mut input);
+
+    let frame = parse_public_routed_frame(&input, &store);
+
+    assert_eq!(frame.consumed, input.len());
+    match frame.destination {
+        super::transport::PublicRoutedDestination::Error { payload } => {
+            assert_eq!(
+                decode_resp_stream(&payload),
+                vec![Frame::Error(
+                    "ERR routed public embedded server only accepts single-shard commands".into()
+                )]
+            );
+        }
+        super::transport::PublicRoutedDestination::Worker { shard_id } => {
+            panic!("cross-shard MGET should not route to worker {shard_id}")
+        }
+    }
+}
+
+#[test]
+fn public_routed_frame_marks_resp_hello_as_barrier() {
+    let store = EmbeddedStore::new(4);
+    let mut input = Vec::new();
+    encode_resp_command(&[b"HELLO", b"3"], &mut input);
+
+    let frame = parse_public_routed_frame(&input, &store);
+
+    assert!(frame.barrier);
+    match frame.destination {
+        super::transport::PublicRoutedDestination::Worker { shard_id } => {
+            assert_eq!(shard_id, 0);
+        }
+        super::transport::PublicRoutedDestination::Error { .. } => {
+            panic!("HELLO should route as a control command")
+        }
+    }
+}
+
+#[test]
+fn public_routed_frame_routes_scnp_to_owning_shard() {
+    let store = EmbeddedStore::new(4);
+    let key = key_for_shard(&store, 3);
+    let mut input = Vec::new();
+    FastCodec::encode_request(
+        &FastRequest {
+            key_hash: Some(hash_key(&key)),
+            route_shard: None,
+            key_tag: None,
+            command: FastCommand::Get {
+                key: key.as_slice(),
+            },
+        },
+        &mut input,
+    );
+
+    let frame = parse_public_routed_frame(&input, &store);
+
+    assert_eq!(frame.consumed, input.len());
+    match frame.destination {
+        super::transport::PublicRoutedDestination::Worker { shard_id } => {
+            assert_eq!(shard_id, 3);
+        }
+        super::transport::PublicRoutedDestination::Error { .. } => {
+            panic!("single-shard SCNP GET should route to a worker")
+        }
+    }
+}
+
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     values
         .iter()
@@ -497,6 +609,7 @@ fn transaction_command_shards_use_shared_redis_key_specs() {
         ]),
         BTreeSet::from([1, 3])
     );
+    assert_eq!(shards(&[b"EVAL", b"return 1", b"0"]), BTreeSet::new());
     assert_eq!(
         shards(&[
             b"SORT",
@@ -540,6 +653,45 @@ fn resp2_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
         "APPEND" => commands!([b"APPEND", b"string", b"value"]),
         "ASKING" => commands!([b"ASKING"]),
         "AUTH" => commands!([b"AUTH", b"password"]),
+        "ARCOUNT" => commands!([b"ARINSERT", b"ar", b"a", b"b"], [b"ARCOUNT", b"ar"]),
+        "ARDEL" => commands!([b"ARINSERT", b"ar", b"a"], [b"ARDEL", b"ar", b"0"]),
+        "ARDELRANGE" => commands!(
+            [b"ARINSERT", b"ar", b"a", b"b"],
+            [b"ARDELRANGE", b"ar", b"0", b"1"]
+        ),
+        "ARGET" => commands!([b"ARINSERT", b"ar", b"a"], [b"ARGET", b"ar", b"0"]),
+        "ARGETRANGE" => commands!(
+            [b"ARINSERT", b"ar", b"a", b"b"],
+            [b"ARGETRANGE", b"ar", b"0", b"1"]
+        ),
+        "ARGREP" => commands!(
+            [b"ARINSERT", b"ar", b"alpha", b"beta"],
+            [b"ARGREP", b"ar", b"0", b"1", b"MATCH", b"alpha"]
+        ),
+        "ARINFO" => commands!([b"ARINSERT", b"ar", b"a"], [b"ARINFO", b"ar"]),
+        "ARINSERT" => commands!([b"ARINSERT", b"ar", b"a"]),
+        "ARLASTITEMS" => commands!(
+            [b"ARINSERT", b"ar", b"a", b"b"],
+            [b"ARLASTITEMS", b"ar", b"1"]
+        ),
+        "ARLEN" => commands!([b"ARINSERT", b"ar", b"a"], [b"ARLEN", b"ar"]),
+        "ARMGET" => commands!(
+            [b"ARINSERT", b"ar", b"a", b"b"],
+            [b"ARMGET", b"ar", b"0", b"1"]
+        ),
+        "ARMSET" => commands!([b"ARMSET", b"ar", b"0", b"a", b"1", b"b"]),
+        "ARNEXT" => commands!([b"ARINSERT", b"ar", b"a"], [b"ARNEXT", b"ar"]),
+        "AROP" => commands!(
+            [b"ARINSERT", b"ar", b"1", b"2"],
+            [b"AROP", b"ar", b"0", b"1", b"SUM"]
+        ),
+        "ARRING" => commands!([b"ARRING", b"ar", b"2", b"a", b"b"]),
+        "ARSCAN" => commands!(
+            [b"ARINSERT", b"ar", b"a", b"b"],
+            [b"ARSCAN", b"ar", b"0", b"1"]
+        ),
+        "ARSEEK" => commands!([b"ARSEEK", b"ar", b"3"]),
+        "ARSET" => commands!([b"ARSET", b"ar", b"0", b"a", b"b"]),
         "BGREWRITEAOF" => commands!([b"BGREWRITEAOF"]),
         "BGSAVE" => commands!([b"BGSAVE"]),
         "BITCOUNT" => commands!([b"SETBIT", b"bits", b"7", b"1"], [b"BITCOUNT", b"bits"]),
@@ -635,7 +787,12 @@ fn resp2_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
         "DEBUG" => commands!([b"DEBUG", b"HELP"]),
         "DECR" => commands!([b"DECR", b"counter"]),
         "DECRBY" => commands!([b"DECRBY", b"counter", b"2"]),
+        "DELEX" => commands!([b"SET", b"delex-key", b"value"], [b"DELEX", b"delex-key"]),
         "DEL" => commands!([b"SET", b"delete-me", b"value"], [b"DEL", b"delete-me"]),
+        "DIGEST" => commands!(
+            [b"SET", b"digest-key", b"value"],
+            [b"DIGEST", b"digest-key"]
+        ),
         "DISCARD" => commands!([b"MULTI"], [b"DISCARD"]),
         "DUMP" => commands!([b"SET", b"dump-key", b"value"], [b"DUMP", b"dump-key"]),
         "ECHO" => commands!([b"ECHO", b"hello"]),
@@ -843,6 +1000,14 @@ fn resp2_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
             [b"HSET", b"hash", b"field", b"value"],
             [b"HGETALL", b"hash"]
         ),
+        "HGETDEL" => commands!(
+            [b"HSET", b"hash", b"field", b"value"],
+            [b"HGETDEL", b"hash", b"FIELDS", b"1", b"field"]
+        ),
+        "HGETEX" => commands!(
+            [b"HSET", b"hash", b"field", b"value"],
+            [b"HGETEX", b"hash", b"EX", b"60", b"FIELDS", b"1", b"field"]
+        ),
         "HINCRBY" => commands!([b"HINCRBY", b"hash", b"field", b"2"]),
         "HINCRBYFLOAT" => commands!([b"HINCRBYFLOAT", b"hash", b"field", b"1.5"]),
         "HKEYS" => commands!([b"HSET", b"hash", b"field", b"value"], [b"HKEYS", b"hash"]),
@@ -862,6 +1027,9 @@ fn resp2_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
             [b"HSCAN", b"hash", b"0"]
         ),
         "HSET" => commands!([b"HSET", b"hash", b"field", b"value"]),
+        "HSETEX" => commands!([
+            b"HSETEX", b"hash", b"EX", b"60", b"FIELDS", b"1", b"field", b"value"
+        ]),
         "HSETNX" => commands!([b"HSETNX", b"hash", b"field", b"value"]),
         "HSTRLEN" => commands!(
             [b"HSET", b"hash", b"field", b"value"],
@@ -869,8 +1037,10 @@ fn resp2_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
         ),
         "HVALS" => commands!([b"HSET", b"hash", b"field", b"value"], [b"HVALS", b"hash"]),
         "HELLO" => commands!([b"HELLO", b"2"]),
+        "HOTKEYS" => commands!([b"HOTKEYS", b"GET"]),
         "INFO" => commands!([b"INFO"]),
         "INCR" => commands!([b"INCR", b"counter"]),
+        "INCREX" => commands!([b"INCREX", b"counter", b"BYINT", b"2"]),
         "INCRBY" => commands!([b"INCRBY", b"counter", b"2"]),
         "INCRBYFLOAT" => commands!([b"INCRBYFLOAT", b"counter", b"1.5"]),
         "KEYS" => commands!([b"SET", b"keys-one", b"value"], [b"KEYS", b"*"]),
@@ -929,6 +1099,16 @@ fn resp2_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
         "MONITOR" => commands!([b"MONITOR"]),
         "MOVE" => commands!([b"MOVE", b"move-key", b"1"]),
         "MSET" => commands!([b"MSET", b"mset-a", b"1", b"mset-b", b"2"]),
+        "MSETEX" => commands!([
+            b"MSETEX",
+            b"2",
+            b"msetex-a",
+            b"1",
+            b"msetex-b",
+            b"2",
+            b"EX",
+            b"60"
+        ]),
         "MSETNX" => commands!([b"MSETNX", b"msetnx-a", b"1", b"msetnx-b", b"2"]),
         "MULTI" => commands!([b"MULTI"], [b"DISCARD"]),
         "OBJECT" => commands!(
@@ -1105,6 +1285,74 @@ fn resp2_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
         ),
         "UNSUBSCRIBE" => commands!([b"UNSUBSCRIBE", b"channel"]),
         "UNWATCH" => commands!([b"WATCH", b"watched"], [b"UNWATCH"]),
+        "VADD" => commands!([b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"]),
+        "VCARD" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VCARD", b"vset"]
+        ),
+        "VDIM" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VDIM", b"vset"]
+        ),
+        "VEMB" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VEMB", b"vset", b"a"]
+        ),
+        "VGETATTR" => commands!(
+            [
+                b"VADD",
+                b"vset",
+                b"VALUES",
+                b"2",
+                b"1",
+                b"0",
+                b"a",
+                b"SETATTR",
+                b"{\"kind\":\"seed\"}"
+            ],
+            [b"VGETATTR", b"vset", b"a"]
+        ),
+        "VINFO" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VINFO", b"vset"]
+        ),
+        "VISMEMBER" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VISMEMBER", b"vset", b"a"]
+        ),
+        "VLINKS" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VADD", b"vset", b"VALUES", b"2", b"0", b"1", b"b"],
+            [b"VLINKS", b"vset", b"a", b"WITHSCORES"]
+        ),
+        "VRANDMEMBER" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VRANDMEMBER", b"vset", b"1"]
+        ),
+        "VRANGE" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VRANGE", b"vset", b"-", b"+", b"10"]
+        ),
+        "VREM" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VREM", b"vset", b"a"]
+        ),
+        "VSETATTR" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [b"VSETATTR", b"vset", b"a", b"{\"kind\":\"seed\"}"]
+        ),
+        "VSIM" => commands!(
+            [b"VADD", b"vset", b"VALUES", b"2", b"1", b"0", b"a"],
+            [
+                b"VSIM",
+                b"vset",
+                b"ELE",
+                b"a",
+                b"WITHSCORES",
+                b"COUNT",
+                b"1"
+            ]
+        ),
         "WAIT" => commands!([b"WAIT", b"1", b"1"]),
         "WAITAOF" => commands!([b"WAITAOF", b"0", b"0", b"0"]),
         "WATCH" => commands!([b"WATCH", b"watched"]),
@@ -2080,6 +2328,174 @@ fn assert_resp_error_contains(store: &EmbeddedStore, parts: &[&[u8]], expected: 
     assert!(
         message.contains(expected),
         "expected error containing {expected:?}, got {message:?}"
+    );
+}
+
+#[cfg(feature = "redis")]
+fn redis_frame(store: &EmbeddedStore, name: &str, args: &[&[u8]]) -> Frame {
+    crate::commands::redis::dispatch_redis_command(name, store, args)
+}
+
+#[cfg(feature = "redis")]
+fn assert_redis_error_contains(store: &EmbeddedStore, name: &str, args: &[&[u8]], expected: &str) {
+    let Frame::Error(message) = redis_frame(store, name, args) else {
+        panic!("expected Redis error for {name} {args:?}");
+    };
+    assert!(
+        message.contains(expected),
+        "expected error containing {expected:?}, got {message:?}"
+    );
+}
+
+#[cfg(feature = "redis")]
+fn key_on_different_shard(store: &EmbeddedStore, key: &[u8]) -> Vec<u8> {
+    let shard_id = store.route_key(key).shard_id;
+    for index in 0..10_000 {
+        let candidate = format!("cross-shard-blocking-{index}").into_bytes();
+        if store.route_key(&candidate).shard_id != shard_id {
+            return candidate;
+        }
+    }
+    panic!("expected to find a key on a different shard");
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn raw_resp_blocking_list_commands_wait_on_source_shard() {
+    let store = std::sync::Arc::new(EmbeddedStore::new(4));
+
+    let blocking = store.clone();
+    let started = std::time::Instant::now();
+    let handle = std::thread::spawn(move || {
+        redis_frame(blocking.as_ref(), "BLPOP", &[b"blocking-list", b"1"])
+    });
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    assert_eq!(
+        store.rpush(b"blocking-list", &[b"value".as_slice()]),
+        RedisObjectResult::Integer(1)
+    );
+    let frame = handle.join().expect("blocking BLPOP should complete");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(20));
+    assert_eq!(
+        frame,
+        Frame::Array(vec![bulk(b"blocking-list"), bulk(b"value")])
+    );
+
+    let blocking = store.clone();
+    let handle = std::thread::spawn(move || {
+        redis_frame(
+            blocking.as_ref(),
+            "BLMPOP",
+            &[b"1", b"1", b"blocking-mpop", b"RIGHT", b"COUNT", b"2"],
+        )
+    });
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    assert_eq!(
+        store.rpush(
+            b"blocking-mpop",
+            &[b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]
+        ),
+        RedisObjectResult::Integer(3)
+    );
+    let frame = handle.join().expect("blocking BLMPOP should complete");
+    assert_eq!(
+        frame,
+        Frame::Array(vec![
+            bulk(b"blocking-mpop"),
+            Frame::Array(vec![bulk(b"c"), bulk(b"b")])
+        ])
+    );
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn raw_resp_blocking_move_waits_on_source_shard() {
+    let store = std::sync::Arc::new(EmbeddedStore::new(4));
+    let blocking = store.clone();
+    let handle = std::thread::spawn(move || {
+        redis_frame(
+            blocking.as_ref(),
+            "BLMOVE",
+            &[
+                b"blocking-move-src",
+                b"blocking-move-dst",
+                b"RIGHT",
+                b"LEFT",
+                b"1",
+            ],
+        )
+    });
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    assert_eq!(
+        store.rpush(b"blocking-move-src", &[b"moved".as_slice()]),
+        RedisObjectResult::Integer(1)
+    );
+    let frame = handle.join().expect("blocking BLMOVE should complete");
+    assert_eq!(frame, bulk(b"moved"));
+    assert_eq!(
+        store.lpop(b"blocking-move-dst"),
+        RedisObjectResult::Bulk(Some(b"moved".to_vec()))
+    );
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn raw_resp_blocking_zset_commands_wait_on_source_shard() {
+    let store = std::sync::Arc::new(EmbeddedStore::new(4));
+
+    let blocking = store.clone();
+    let handle = std::thread::spawn(move || {
+        redis_frame(
+            blocking.as_ref(),
+            "BZMPOP",
+            &[b"1", b"1", b"blocking-zmpop", b"MAX", b"COUNT", b"2"],
+        )
+    });
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    assert_eq!(
+        store.zadd(b"blocking-zmpop", 2.0, b"member"),
+        RedisObjectResult::Integer(1)
+    );
+    let frame = handle.join().expect("blocking BZMPOP should complete");
+    assert_eq!(
+        frame,
+        Frame::Array(vec![
+            bulk(b"blocking-zmpop"),
+            Frame::Array(vec![Frame::Array(vec![bulk(b"member"), bulk(b"2")])])
+        ])
+    );
+
+    let blocking = store.clone();
+    let handle = std::thread::spawn(move || {
+        redis_frame(blocking.as_ref(), "BZPOPMIN", &[b"blocking-bzpop", b"1"])
+    });
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    assert_eq!(
+        store.zadd(b"blocking-bzpop", 1.0, b"first"),
+        RedisObjectResult::Integer(1)
+    );
+    let frame = handle.join().expect("blocking BZPOPMIN should complete");
+    assert_eq!(
+        frame,
+        Frame::Array(vec![bulk(b"blocking-bzpop"), bulk(b"first"), bulk(b"1")])
+    );
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn raw_resp_blocking_commands_timeout_and_reject_cross_shard_waits() {
+    let store = EmbeddedStore::new(4);
+    let started = std::time::Instant::now();
+    let frame = redis_frame(&store, "BLPOP", &[b"blocking-timeout", b"0.05"]);
+    assert_eq!(frame, Frame::Null);
+    assert!(started.elapsed() >= std::time::Duration::from_millis(20));
+
+    let other = key_on_different_shard(&store, b"blocking-cross-a");
+    assert_redis_error_contains(
+        &store,
+        "BLMPOP",
+        &[b"0.05", b"2", b"blocking-cross-a", &other, b"LEFT"],
+        "CROSSSLOT",
     );
 }
 
@@ -3443,7 +3859,10 @@ fn raw_resp_redis_backfill_error_paths_round_trip() {
         b"$-1\r\n".to_vec()
     );
     assert_eq!(
-        RespTestHarness::exec_resp(&store, &[b"BRPOPLPUSH", b"missing-list", b"wrong", b"0"]),
+        RespTestHarness::exec_resp(
+            &store,
+            &[b"BRPOPLPUSH", b"missing-list", b"wrong", b"0.001"]
+        ),
         b"$-1\r\n".to_vec()
     );
     assert_eq!(
@@ -5607,6 +6026,230 @@ fn hash_field_ttl_family_basic_semantics() {
     assert_eq!(
         run(&[b"HTTL", b"h2", b"FIELDS", b"1", b"x"]),
         Frame::Array(vec![Frame::Integer(-1)])
+    );
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
+    let store = EmbeddedStore::new(8);
+    let run = |parts: &[&[u8]]| -> Frame {
+        let raw =
+            RespTestHarness::exec_resp_sequence_raw(&store, &[parts], TransactionMode::Disabled);
+        decode_resp_stream(&raw)
+            .into_iter()
+            .next()
+            .expect("one frame")
+    };
+
+    assert_eq!(
+        run(&[
+            b"VADD",
+            b"points",
+            b"REDUCE",
+            b"2",
+            b"VALUES",
+            b"4",
+            b"1",
+            b"2",
+            b"3",
+            b"4",
+            b"a",
+            b"NOQUANT",
+            b"SETATTR",
+            b"{\"kind\":\"seed\",\"score\":3}"
+        ]),
+        Frame::Integer(1)
+    );
+    assert_eq!(
+        run(&[
+            b"VADD",
+            b"points",
+            b"VALUES",
+            b"4",
+            b"4",
+            b"3",
+            b"2",
+            b"1",
+            b"b",
+            b"SETATTR",
+            b"{\"kind\":\"other\",\"score\":1}"
+        ]),
+        Frame::Integer(1)
+    );
+
+    assert_eq!(
+        run(&[b"TYPE", b"points"]),
+        Frame::SimpleString("vectorset".to_string())
+    );
+    assert!(
+        matches!(run(&[b"GET", b"points"]), Frame::Error(message) if message.contains("WRONGTYPE"))
+    );
+    assert_eq!(run(&[b"VCARD", b"points"]), Frame::Integer(2));
+    assert_eq!(run(&[b"VDIM", b"points"]), Frame::Integer(2));
+    assert_eq!(run(&[b"VISMEMBER", b"points", b"a"]), Frame::Integer(1));
+    assert_eq!(
+        run(&[b"VGETATTR", b"points", b"a"]),
+        Frame::BlobString(b"{\"kind\":\"seed\",\"score\":3}".to_vec())
+    );
+
+    match run(&[b"VEMB", b"points", b"a", b"RAW"]) {
+        Frame::Array(items) => {
+            assert_eq!(items[0], Frame::SimpleString("fp32".to_string()));
+            assert!(matches!(&items[1], Frame::BlobString(bytes) if bytes.len() == 8));
+            assert!(matches!(&items[2], Frame::SimpleString(_)));
+        }
+        other => panic!("unexpected VEMB RAW reply: {other:?}"),
+    }
+
+    match run(&[b"VINFO", b"points"]) {
+        Frame::Array(items) => {
+            assert!(items.windows(2).any(|pair| pair
+                == [
+                    Frame::BlobString(b"quant-type".to_vec()),
+                    Frame::BlobString(b"fp32".to_vec())
+                ]));
+            assert!(
+                items
+                    .windows(2)
+                    .any(|pair| pair
+                        == [Frame::BlobString(b"vector-dim".to_vec()), Frame::Integer(2)])
+            );
+        }
+        other => panic!("unexpected VINFO reply: {other:?}"),
+    }
+
+    assert_eq!(
+        run(&[b"VRANGE", b"points", b"[a", b"[z", b"1"]),
+        Frame::Array(vec![Frame::BlobString(b"a".to_vec())])
+    );
+    assert_eq!(
+        run(&[b"VRANGE", b"points", b"(a", b"+", b"-1"]),
+        Frame::Array(vec![Frame::BlobString(b"b".to_vec())])
+    );
+
+    match run(&[b"VRANDMEMBER", b"points", b"-3"]) {
+        Frame::Array(items) => assert_eq!(items.len(), 3),
+        other => panic!("unexpected VRANDMEMBER reply: {other:?}"),
+    }
+
+    match run(&[
+        b"VSIM",
+        b"points",
+        b"VALUES",
+        b"4",
+        b"1",
+        b"2",
+        b"3",
+        b"4",
+        b"WITHSCORES",
+        b"WITHATTRIBS",
+        b"COUNT",
+        b"2",
+        b"FILTER",
+        b".kind == \"seed\" && .score >= 3",
+    ]) {
+        Frame::Array(items) => {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], Frame::BlobString(b"a".to_vec()));
+            match &items[1] {
+                Frame::BlobString(score) => {
+                    let score = std::str::from_utf8(score).unwrap().parse::<f64>().unwrap();
+                    assert!(score > 0.99);
+                }
+                other => panic!("unexpected VSIM score frame: {other:?}"),
+            }
+            assert_eq!(
+                items[2],
+                Frame::BlobString(b"{\"kind\":\"seed\",\"score\":3}".to_vec())
+            );
+        }
+        other => panic!("unexpected VSIM reply: {other:?}"),
+    }
+
+    assert_eq!(run(&[b"VSETATTR", b"points", b"a", b""]), Frame::Integer(1));
+    assert_eq!(run(&[b"VGETATTR", b"points", b"a"]), Frame::Null);
+    assert!(matches!(
+        run(&[b"VSETATTR", b"points", b"a", b"not-json"]),
+        Frame::Error(_)
+    ));
+    assert_eq!(run(&[b"VREM", b"points", b"b"]), Frame::Integer(1));
+    assert_eq!(run(&[b"VCARD", b"points"]), Frame::Integer(1));
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn redis8_vector_sets_are_pinned_to_vector_shard() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let vector_shard = store.vector_shard_id();
+    let normal_shard = (0..store.shard_count())
+        .find(|shard_id| *shard_id != vector_shard)
+        .expect("non-vector shard");
+    let key = key_for_shard(&store, normal_shard);
+    assert_eq!(store.route_key(&key).shard_id, normal_shard);
+
+    let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[
+            &[
+                b"VADD",
+                key.as_slice(),
+                b"VALUES",
+                b"2",
+                b"1",
+                b"0",
+                b"alpha",
+            ],
+            &[b"VCARD", key.as_slice()],
+        ],
+        TransactionMode::Disabled,
+        Some(vector_shard),
+    );
+    assert_eq!(responses, vec![Frame::Integer(1), Frame::Integer(1)]);
+
+    let rejected = RespTestHarness::exec_resp_sequence_on_owned_shard(
+        &store,
+        &[&[b"VCARD", key.as_slice()]],
+        TransactionMode::Disabled,
+        Some(normal_shard),
+    );
+    assert_eq!(
+        rejected,
+        vec![Frame::Error("ERR direct shard route mismatch".to_string())]
+    );
+
+    let generic = RespTestHarness::exec_resp_sequence(
+        &store,
+        &[
+            &[b"TYPE", key.as_slice()],
+            &[b"EXISTS", key.as_slice()],
+            &[b"GET", key.as_slice()],
+            &[b"COPY", key.as_slice(), b"vector-copy"],
+            &[b"TYPE", b"vector-copy"],
+            &[b"RENAME", b"vector-copy", b"vector-moved"],
+            &[b"VCARD", b"vector-moved"],
+            &[b"EXISTS", b"vector-copy"],
+            &[b"DEL", key.as_slice()],
+            &[b"DEL", b"vector-moved"],
+            &[b"EXISTS", key.as_slice()],
+        ],
+        TransactionMode::Disabled,
+    );
+    assert_eq!(
+        generic,
+        vec![
+            Frame::SimpleString("vectorset".to_string()),
+            Frame::Integer(1),
+            Frame::Error(crate::storage::WRONGTYPE_MESSAGE.to_string()),
+            Frame::Integer(1),
+            Frame::SimpleString("vectorset".to_string()),
+            Frame::SimpleString("OK".to_string()),
+            Frame::Integer(1),
+            Frame::Integer(0),
+            Frame::Integer(1),
+            Frame::Integer(1),
+            Frame::Integer(0),
+        ]
     );
 }
 

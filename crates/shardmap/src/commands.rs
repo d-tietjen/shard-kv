@@ -14,8 +14,17 @@ pub(crate) mod formal_rank;
 pub(crate) mod formal_transactions;
 
 #[cfg(feature = "redis")]
+#[path = "../../shardcache-redis/src/commands/array.rs"]
+pub mod array;
+#[cfg(feature = "redis")]
+#[path = "../../shardcache-redis/src/commands/blocking.rs"]
+pub(crate) mod blocking;
+#[cfg(feature = "redis")]
 #[path = "../../shardcache-redis/src/commands/redis.rs"]
 pub(crate) mod redis;
+#[cfg(feature = "redis")]
+#[path = "../../shardcache-redis/src/commands/vector_set.rs"]
+pub mod vector_set;
 
 // Key commands.
 #[cfg(feature = "redis")]
@@ -177,6 +186,9 @@ pub(crate) mod string_bits;
 #[path = "../../shardcache-redis/src/commands/string/shared.rs"]
 pub(crate) mod string_shared;
 #[cfg(feature = "redis")]
+#[path = "../../shardcache-redis/src/commands/string/v8.rs"]
+pub mod string_v8;
+#[cfg(feature = "redis")]
 #[path = "../../shardcache-redis/src/commands/string/strlen.rs"]
 pub mod strlen;
 
@@ -228,6 +240,9 @@ pub mod flush;
 #[cfg(feature = "redis-functions")]
 #[path = "../../shardcache-redis/src/commands/server/function_cmd.rs"]
 pub mod function_cmd;
+#[cfg(feature = "redis")]
+#[path = "../../shardcache-redis/src/commands/server/hotkeys.rs"]
+pub mod hotkeys;
 #[cfg(feature = "redis")]
 #[path = "../../shardcache-redis/src/commands/server/info.rs"]
 pub mod info;
@@ -289,6 +304,12 @@ pub mod hget;
 #[path = "../../shardcache-redis/src/commands/hash/hgetall.rs"]
 pub mod hgetall;
 #[cfg(feature = "redis")]
+#[path = "../../shardcache-redis/src/commands/hash/hgetdel.rs"]
+pub mod hgetdel;
+#[cfg(feature = "redis")]
+#[path = "../../shardcache-redis/src/commands/hash/hgetex.rs"]
+pub mod hgetex;
+#[cfg(feature = "redis")]
 #[path = "../../shardcache-redis/src/commands/hash/hincrby.rs"]
 pub mod hincrby;
 #[cfg(feature = "redis")]
@@ -330,6 +351,9 @@ pub mod hscan;
 #[cfg(feature = "redis")]
 #[path = "../../shardcache-redis/src/commands/hash/hset.rs"]
 pub mod hset;
+#[cfg(feature = "redis")]
+#[path = "../../shardcache-redis/src/commands/hash/hsetex.rs"]
+pub mod hsetex;
 #[cfg(feature = "redis")]
 #[path = "../../shardcache-redis/src/commands/hash/hsetnx.rs"]
 pub mod hsetnx;
@@ -814,6 +838,68 @@ pub(crate) trait EngineRespSpanCommandDispatch: CommandMetadata {
 }
 
 pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
+    #[cfg(feature = "redis")]
+    &array::ARCOUNT_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARDEL_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARDELRANGE_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARGET_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARGETRANGE_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARGREP_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARINFO_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARINSERT_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARLASTITEMS_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARLEN_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARMGET_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARMSET_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARNEXT_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::AROP_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARRING_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARSCAN_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARSEEK_COMMAND,
+    #[cfg(feature = "redis")]
+    &array::ARSET_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VADD_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VCARD_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VDIM_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VEMB_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VGETATTR_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VINFO_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VISMEMBER_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VLINKS_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VRANDMEMBER_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VRANGE_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VREM_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VSETATTR_COMMAND,
+    #[cfg(feature = "redis")]
+    &vector_set::VSIM_COMMAND,
     &get::COMMAND,
     &set::COMMAND,
     &del::COMMAND,
@@ -951,6 +1037,8 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     #[cfg(feature = "redis")]
     &info::COMMAND,
     #[cfg(feature = "redis")]
+    &hotkeys::COMMAND,
+    #[cfg(feature = "redis")]
     &memory::COMMAND,
     #[cfg(feature = "redis")]
     &pubsub::PUBLISH_COMMAND,
@@ -1079,7 +1167,13 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     #[cfg(feature = "redis")]
     &getdel::COMMAND,
     #[cfg(feature = "redis")]
+    &string_v8::DELEX_COMMAND,
+    #[cfg(feature = "redis")]
+    &string_v8::DIGEST_COMMAND,
+    #[cfg(feature = "redis")]
     &incr::COMMAND,
+    #[cfg(feature = "redis")]
+    &string_v8::INCREX_COMMAND,
     #[cfg(feature = "redis")]
     &incrby::COMMAND,
     #[cfg(feature = "redis")]
@@ -1091,6 +1185,8 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     #[cfg(feature = "redis")]
     &mset::COMMAND,
     #[cfg(feature = "redis")]
+    &string_v8::MSETEX_COMMAND,
+    #[cfg(feature = "redis")]
     &mget::COMMAND,
     #[cfg(feature = "redis")]
     &msetnx::COMMAND,
@@ -1100,6 +1196,10 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     &hset::COMMAND,
     #[cfg(feature = "redis")]
     &hget::COMMAND,
+    #[cfg(feature = "redis")]
+    &hgetdel::COMMAND,
+    #[cfg(feature = "redis")]
+    &hgetex::COMMAND,
     #[cfg(feature = "redis")]
     &hmset::COMMAND,
     #[cfg(feature = "redis")]
@@ -1126,6 +1226,8 @@ pub(crate) static CATALOG: &[&dyn CommandDefinition] = &[
     &hpexpiretime::COMMAND,
     #[cfg(feature = "redis")]
     &hpersist::COMMAND,
+    #[cfg(feature = "redis")]
+    &hsetex::COMMAND,
     #[cfg(feature = "redis")]
     &hsetnx::COMMAND,
     #[cfg(feature = "redis")]

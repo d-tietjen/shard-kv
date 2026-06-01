@@ -1,0 +1,4 @@
+mode,external_ops_per_sec,external_p50_us,external_p99_us,external_p999_us,internal_ops_per_sec,internal_p50_ns,internal_p99_ns,internal_p999_ns,process_vcpu,errors,notes
+shared-arc,1775155,9.1,9.8,10.0,20153141,50,180,430,3.506,0,Arc<EmbeddedStore> exposed through owner-routed fanout
+shard-arc,7633814,2.1,2.9,3.3,5366200,260,820,1470,8.930,0,Benchmark-only shard-level Arc server probe
+owner-local,1341879,11.6,12.8,17.8,1454302,40,250,370,1.000,0,LocalEmbeddedStore served and used on one owner-local runtime thread

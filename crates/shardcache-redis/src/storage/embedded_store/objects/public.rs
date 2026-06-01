@@ -42,6 +42,29 @@ impl EmbeddedStore {
         <Self as RedisHashStore>::hdel_many(self, key, fields)
     }
 
+    pub fn hgetdel(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult {
+        <Self as RedisHashStore>::hgetdel(self, key, fields)
+    }
+
+    pub fn hgetex(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        action: crate::storage::HashFieldGetExpireAction,
+    ) -> RedisObjectResult {
+        <Self as RedisHashStore>::hgetex(self, key, fields, action)
+    }
+
+    pub fn hsetex(
+        &self,
+        key: &[u8],
+        fields: &[(&[u8], &[u8])],
+        condition: crate::storage::HashFieldSetCondition,
+        action: crate::storage::HashFieldSetExpireAction,
+    ) -> RedisObjectResult {
+        <Self as RedisHashStore>::hsetex(self, key, fields, condition, action)
+    }
+
     pub fn hlen(&self, key: &[u8]) -> RedisObjectResult {
         <Self as RedisHashStore>::hlen(self, key)
     }

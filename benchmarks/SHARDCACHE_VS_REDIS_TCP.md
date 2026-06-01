@@ -356,7 +356,10 @@ SHARDCACHE_USE_MONOIO=1 SHARDCACHE_DIRECT_SHARD_PORTS=1 \
 ```
 
 The fanout port remains `6500`; the default first direct shard port is `6501`
-unless `SHARDCACHE_DIRECT_SHARD_BASE_PORT` is set.
+unless `SHARDCACHE_DIRECT_SHARD_BASE_PORT` is set. In config-file based runs,
+the equivalent endpoint choice is `server_endpoint_mode = "direct_shard"`; this
+historical command uses the environment switch because the benchmark script
+publishes the direct shard port range separately.
 
 Pipeline run:
 

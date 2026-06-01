@@ -78,9 +78,13 @@ impl RedisZSetStore for EmbeddedStore {
         ch: bool,
         incr: bool,
     ) -> RedisObjectResult {
-        self.object_write(key, |bucket| {
+        let result = self.object_write(key, |bucket| {
             bucket.zadd_cond(key, score, member, nx, xx, gt, lt, ch, incr)
-        })
+        });
+        if values_available_after_zadd(&result) {
+            self.notify_redis_object_key(key);
+        }
+        result
     }
 
     fn zrem(&self, key: &[u8], member: &[u8]) -> RedisObjectResult {
@@ -111,7 +115,11 @@ impl RedisZSetStore for EmbeddedStore {
     }
 
     fn zincrby(&self, key: &[u8], delta: f64, member: &[u8]) -> RedisObjectResult {
-        self.object_write(key, |bucket| bucket.zincrby(key, delta, member))
+        let result = self.object_write(key, |bucket| bucket.zincrby(key, delta, member));
+        if values_available_after_zadd(&result) {
+            self.notify_redis_object_key(key);
+        }
+        result
     }
 
     fn zcard(&self, key: &[u8]) -> RedisObjectResult {
@@ -207,13 +215,24 @@ impl RedisZSetStore for EmbeddedStore {
         score: f64,
         member: &[u8],
     ) -> RedisObjectResult {
-        self.object_create_hashed(
+        let result = self.object_create_hashed(
             key_hash,
             key,
             |bucket, key_hash| {
                 bucket.zadd_existing_or_wrongtype_hashed(key_hash, key, score, member)
             },
             |bucket, key_hash| bucket.zadd_new_unchecked_hashed(key_hash, key, score, member),
-        )
+        );
+        if values_available_after_zadd(&result) {
+            self.notify_redis_object_key(key);
+        }
+        result
     }
+}
+
+fn values_available_after_zadd(result: &RedisObjectResult) -> bool {
+    matches!(
+        result,
+        RedisObjectResult::Integer(value) if *value > 0
+    ) || matches!(result, RedisObjectResult::Bulk(Some(_)))
 }

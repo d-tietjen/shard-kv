@@ -77,9 +77,10 @@ coverage. Important 0.1.0 caveats:
 - HyperLogLog commands return compatible cardinalities for covered operations,
   but use an exact internal representation rather than Redis' binary HLL
   encoding.
-- Blocking list and sorted-set commands are live-tested on ready and
-  short-timeout paths. Long-lived blocking wakeups across clients require
-  separate proofing before being described as full Redis parity.
+- Blocking list and sorted-set commands wait on the owning shard for shard-local
+  key sets, with ready, timeout, and cross-client wakeup paths covered by tests.
+  Empty multi-key waits that span shards return `CROSSSLOT` instead of using a
+  global waiter.
 - RESP2/RESP3 support is covered by protocol tests and command smoke tests, but
   exact error wording and obscure inline-frame edge cases should still be
   checked against the target upstream version before expanding public claims.

@@ -47,11 +47,16 @@ struct Args {
 
 #[derive(Debug, Clone)]
 struct CsvRow {
+    resolved_plan_id: String,
+    suite: String,
+    category: String,
     target: String,
     family: String,
     command: String,
     case_name: String,
     clients: usize,
+    pipeline_depth: usize,
+    vcpus: usize,
     duration_s: u64,
     ops: u64,
     ops_per_sec: f64,
@@ -139,6 +144,11 @@ fn read_rows(path: &Path) -> Result<Vec<CsvRow>, BoxError> {
     let command_i = index("command")?;
     let case_i = index("case")?;
     let clients_i = index("clients")?;
+    let resolved_plan_i = optional_index("resolved_plan_id");
+    let suite_i = optional_index("suite");
+    let category_i = optional_index("category");
+    let pipeline_depth_i = optional_index("pipeline_depth");
+    let vcpus_i = optional_index("vcpus");
     let duration_i = index("duration_s")?;
     let ops_i = index("ops")?;
     let ops_sec_i = index("ops_per_sec")?;
@@ -169,11 +179,28 @@ fn read_rows(path: &Path) -> Result<Vec<CsvRow>, BoxError> {
         };
         let has_percentiles = p99_us_i.is_some();
         rows.push(CsvRow {
+            resolved_plan_id: resolved_plan_i
+                .map(|index| fields[index].to_string())
+                .unwrap_or_else(|| "legacy".to_string()),
+            suite: suite_i
+                .map(|index| fields[index].to_string())
+                .unwrap_or_else(|| "legacy".to_string()),
+            category: category_i
+                .map(|index| fields[index].to_string())
+                .unwrap_or_else(|| fields[family_i].to_string()),
             target: fields[target_i].to_string(),
             family: fields[family_i].to_string(),
             command: fields[command_i].to_string(),
             case_name: fields[case_i].to_string(),
             clients: fields[clients_i].parse()?,
+            pipeline_depth: match pipeline_depth_i {
+                Some(index) => fields[index].parse()?,
+                None => 1,
+            },
+            vcpus: match vcpus_i {
+                Some(index) => fields[index].parse()?,
+                None => 0,
+            },
             duration_s: fields[duration_i].parse()?,
             ops: fields[ops_i].parse()?,
             ops_per_sec: fields[ops_sec_i].parse()?,
@@ -189,41 +216,61 @@ fn read_rows(path: &Path) -> Result<Vec<CsvRow>, BoxError> {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RowKey {
+    resolved_plan_id: String,
+    suite: String,
+    category: String,
     target: String,
     family: String,
     command: String,
     case_name: String,
     clients: usize,
+    pipeline_depth: usize,
+    vcpus: usize,
     profile: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CaseKey {
+    resolved_plan_id: String,
+    suite: String,
+    category: String,
     family: String,
     command: String,
     case_name: String,
     clients: usize,
+    pipeline_depth: usize,
+    vcpus: usize,
     profile: String,
 }
 
 impl CsvRow {
     fn row_key(&self) -> RowKey {
         RowKey {
+            resolved_plan_id: self.resolved_plan_id.clone(),
+            suite: self.suite.clone(),
+            category: self.category.clone(),
             target: self.target.clone(),
             family: self.family.clone(),
             command: self.command.clone(),
             case_name: self.case_name.clone(),
             clients: self.clients,
+            pipeline_depth: self.pipeline_depth,
+            vcpus: self.vcpus,
             profile: self.profile.clone(),
         }
     }
 
     fn case_key(&self) -> CaseKey {
         CaseKey {
+            resolved_plan_id: self.resolved_plan_id.clone(),
+            suite: self.suite.clone(),
+            category: self.category.clone(),
             family: self.family.clone(),
             command: self.command.clone(),
             case_name: self.case_name.clone(),
             clients: self.clients,
+            pipeline_depth: self.pipeline_depth,
+            vcpus: self.vcpus,
             profile: self.profile.clone(),
         }
     }
@@ -783,11 +830,16 @@ mod tests {
 
     fn row(target: &str, command: &str, ops_per_sec: f64, avg_us: f64, errors: u64) -> CsvRow {
         CsvRow {
+            resolved_plan_id: "plan-test".to_string(),
+            suite: "redis-core".to_string(),
+            category: "string".to_string(),
             target: target.to_string(),
             family: "string".to_string(),
             command: command.to_string(),
             case_name: command.to_string(),
             clients: 1,
+            pipeline_depth: 1,
+            vcpus: 1,
             duration_s: 1,
             ops: ops_per_sec as u64,
             ops_per_sec,

@@ -14,7 +14,7 @@ The default Compose service:
 
 - builds `cargo build --locked --release -p shardcache --features redis-server --bin shardcache`;
 - publishes the fanout listener on `127.0.0.1:6380`;
-- publishes direct shard ports `127.0.0.1:6501-6504`;
+- publishes direct shard ports `127.0.0.1:6501-6504` for shard-aware clients;
 - starts `shardcache` with `--disable-persistence --server-mode direct`;
 - names the local image `shardcache:local`.
 
@@ -65,7 +65,7 @@ Compose exposes the main server knobs as environment variables:
 | `SHARDCACHE_HOST` | `127.0.0.1` | Host interface used for published ports. |
 | `SHARDCACHE_PORT` | `6380` | Fanout RESP/SCNP listener port. |
 | `SHARDCACHE_SHARD_COUNT` | `4` | Storage shard count. Must be a non-zero power of two. |
-| `SHARDCACHE_DIRECT_SHARD_PORTS` | `1` | Enables one direct listener per shard. |
+| `SHARDCACHE_DIRECT_SHARD_PORTS` | `1` | Compose compatibility switch that enables one direct listener per shard. Source/config deployments should prefer `server_endpoint_mode = "direct_shard"`. |
 | `SHARDCACHE_DIRECT_SHARD_BASE_PORT` | `6501` | First direct shard listener port inside the container. |
 | `SHARDCACHE_DIRECT_SHARD_PORT_RANGE` | `6501-6504` | Host/container direct port range published by Compose. |
 | `SHARDCACHE_MAX_CONNECTIONS` | `4096` | Accepted connection limit. |
@@ -84,6 +84,9 @@ Direct shard ports are for clients that already route keys to their owning
 shard. They accept RESP and SCNP, but they reject keyspace-wide operations,
 transactions, or multi-key requests that do not belong entirely to that shard.
 Use the fanout listener for ordinary Redis clients and cross-shard commands.
+In file-based deployments, select this topology with
+`server_endpoint_mode = "direct_shard"`; the Compose environment variable exists
+so the container can publish the matching host port range.
 
 Rust clients can use direct routing with `shardcache-client-rs`:
 

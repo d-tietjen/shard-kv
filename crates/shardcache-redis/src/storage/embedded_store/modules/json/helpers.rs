@@ -45,12 +45,12 @@ pub(crate) fn json_path_or_root_mut<'a>(
     path: &[u8],
 ) -> &'a mut serde_json::Value {
     if json_path_is_root(path) {
-        value
-    } else if json_path(value, path).is_some() {
-        json_path_mut(value, path).expect("path existence was checked")
-    } else {
-        value
+        return value;
     }
+    if json_path(value, path).is_some() {
+        return json_path_mut(value, path).expect("path existence was checked");
+    }
+    value
 }
 
 #[cfg(feature = "redis-module-json")]

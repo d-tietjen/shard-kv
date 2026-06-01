@@ -192,6 +192,19 @@ pub enum FastCommandKind {
     ZScan = 228,
     ZUnion = 229,
     ZUnionStore = 230,
+    VAdd = 231,
+    VCard = 232,
+    VDim = 233,
+    VEmb = 234,
+    VGetAttr = 235,
+    VInfo = 236,
+    VIsMember = 237,
+    VLinks = 238,
+    VRandMember = 239,
+    VRange = 240,
+    VRem = 241,
+    VSetAttr = 242,
+    VSim = 243,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -857,6 +870,58 @@ pub const FAST_REDIS_COMMAND_OPCODES: &[FastRedisCommandOpcode] = &[
         name: "ZUNIONSTORE",
         kind: FastCommandKind::ZUnionStore,
     },
+    FastRedisCommandOpcode {
+        name: "VADD",
+        kind: FastCommandKind::VAdd,
+    },
+    FastRedisCommandOpcode {
+        name: "VCARD",
+        kind: FastCommandKind::VCard,
+    },
+    FastRedisCommandOpcode {
+        name: "VDIM",
+        kind: FastCommandKind::VDim,
+    },
+    FastRedisCommandOpcode {
+        name: "VEMB",
+        kind: FastCommandKind::VEmb,
+    },
+    FastRedisCommandOpcode {
+        name: "VGETATTR",
+        kind: FastCommandKind::VGetAttr,
+    },
+    FastRedisCommandOpcode {
+        name: "VINFO",
+        kind: FastCommandKind::VInfo,
+    },
+    FastRedisCommandOpcode {
+        name: "VISMEMBER",
+        kind: FastCommandKind::VIsMember,
+    },
+    FastRedisCommandOpcode {
+        name: "VLINKS",
+        kind: FastCommandKind::VLinks,
+    },
+    FastRedisCommandOpcode {
+        name: "VRANDMEMBER",
+        kind: FastCommandKind::VRandMember,
+    },
+    FastRedisCommandOpcode {
+        name: "VRANGE",
+        kind: FastCommandKind::VRange,
+    },
+    FastRedisCommandOpcode {
+        name: "VREM",
+        kind: FastCommandKind::VRem,
+    },
+    FastRedisCommandOpcode {
+        name: "VSETATTR",
+        kind: FastCommandKind::VSetAttr,
+    },
+    FastRedisCommandOpcode {
+        name: "VSIM",
+        kind: FastCommandKind::VSim,
+    },
 ];
 
 impl FastCommandKind {
@@ -1035,6 +1100,19 @@ impl FastCommandKind {
             228 => Some(Self::ZScan),
             229 => Some(Self::ZUnion),
             230 => Some(Self::ZUnionStore),
+            231 => Some(Self::VAdd),
+            232 => Some(Self::VCard),
+            233 => Some(Self::VDim),
+            234 => Some(Self::VEmb),
+            235 => Some(Self::VGetAttr),
+            236 => Some(Self::VInfo),
+            237 => Some(Self::VIsMember),
+            238 => Some(Self::VLinks),
+            239 => Some(Self::VRandMember),
+            240 => Some(Self::VRange),
+            241 => Some(Self::VRem),
+            242 => Some(Self::VSetAttr),
+            243 => Some(Self::VSim),
             _ => None,
         }
     }
@@ -1207,6 +1285,19 @@ impl FastCommandKind {
             Self::ZScore => Some("ZSCORE"),
             Self::ZUnion => Some("ZUNION"),
             Self::ZUnionStore => Some("ZUNIONSTORE"),
+            Self::VAdd => Some("VADD"),
+            Self::VCard => Some("VCARD"),
+            Self::VDim => Some("VDIM"),
+            Self::VEmb => Some("VEMB"),
+            Self::VGetAttr => Some("VGETATTR"),
+            Self::VInfo => Some("VINFO"),
+            Self::VIsMember => Some("VISMEMBER"),
+            Self::VLinks => Some("VLINKS"),
+            Self::VRandMember => Some("VRANDMEMBER"),
+            Self::VRange => Some("VRANGE"),
+            Self::VRem => Some("VREM"),
+            Self::VSetAttr => Some("VSETATTR"),
+            Self::VSim => Some("VSIM"),
             Self::RespCommand
             | Self::CommandDocs
             | Self::ConfigGet

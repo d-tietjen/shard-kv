@@ -71,13 +71,21 @@ it is treated as a durable Redis-compatible deployment.
 
 | Surface | Default Shape | Notes |
 | --- | --- | --- |
-| Fanout listener | `--bind-addr`, often `127.0.0.1:6380` | RESP and SCNP accepted on one socket. |
-| Direct shard ports | `SHARDCACHE_DIRECT_SHARD_PORTS=1` plus base port | One route-checked RESP/SCNP listener per shard for direct routing clients. |
+| Fanout listener | `--bind-addr`, often `127.0.0.1:6380` | RESP and SCNP accepted on one socket. This is the default `server_endpoint_mode = "fanout"`. |
+| Direct shard ports | `server_endpoint_mode = "direct_shard"` | Adds one route-checked RESP/SCNP listener per shard for direct routing clients. |
 
-When direct shard ports are enabled, keep the published port range length equal
-to `SHARDCACHE_SHARD_COUNT`. RESP requests on shard ports must route all keys
-to that shard; keyspace-wide commands and RESP transactions are rejected there
-and should use the fanout listener.
+Direct shard ports start at `bind_addr + 1` unless
+`SHARDCACHE_DIRECT_SHARD_BASE_PORT` sets the first direct port. When direct
+shard ports are enabled, keep the published port range length equal to
+`SHARDCACHE_SHARD_COUNT`. RESP requests on shard ports must route all keys to
+that shard; keyspace-wide commands and RESP transactions are rejected there and
+should use the fanout listener.
+
+When a caller-owned embedded store is exposed as a server, fanout routes each
+complete single-shard request to the shard owner. It should not lock across all
+shards or force the embedded hot path through a separate memory copy. Use
+`server_endpoint_mode = "direct_shard"` only when third-party clients can route
+directly to shard-owned ports.
 
 Direct server connections default to RESP2. `HELLO 3` switches that connection
 to RESP3, `HELLO 2` switches it back, and `HELLO` without a protocol argument
@@ -93,7 +101,7 @@ Compose exposes the main knobs as environment variables:
 | `SHARDCACHE_HOST` | Host interface used by Compose port publishing. Defaults to `127.0.0.1`. |
 | `SHARDCACHE_PORT` | Host/container fanout port. |
 | `SHARDCACHE_SHARD_COUNT` | Server shard count. |
-| `SHARDCACHE_DIRECT_SHARD_PORTS` | Enables shard-owned direct SCNP listeners. |
+| `SHARDCACHE_DIRECT_SHARD_PORTS` | Container/script compatibility switch that enables shard-owned direct listeners. Prefer `server_endpoint_mode = "direct_shard"` in config files. |
 | `SHARDCACHE_DIRECT_SHARD_BASE_PORT` | First direct shard listener port. |
 | `SHARDCACHE_DIRECT_SHARD_PORT_RANGE` | Host/container direct shard port range published by Compose. |
 | `SHARDCACHE_MAX_CONNECTIONS` | Connection limit. |

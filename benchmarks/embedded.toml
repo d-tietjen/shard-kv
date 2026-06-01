@@ -1,0 +1,16 @@
+# Shared embedded benchmark defaults. CLI flags with the same names override
+# these values for one run.
+
+suites = "embedded-core"
+vcpus = "1,2,4,8,16"
+clients = "match-vcpus"
+value_sizes = "64,512,4096,65536,1048576"
+mixes = "100-0,0-100,80-20"
+warmup = 2
+duration = 10
+key_memory_cap_bytes = 4000000000
+large_value_key_floor = 64
+latency_sample_rate = 1
+key_pattern = "point"
+key_distribution = "uniform"
+out_dir = "benchmarks/results"

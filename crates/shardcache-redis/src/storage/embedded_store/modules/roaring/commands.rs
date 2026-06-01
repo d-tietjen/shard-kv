@@ -199,14 +199,19 @@ impl EmbeddedStore {
                 let mut result = self.roaring_bits(args[2]);
                 for key in &args[3..] {
                     let other = self.roaring_bits(key);
-                    if bytes_eq(op, b"AND") {
-                        result = result.intersection(&other).copied().collect();
-                    } else if bytes_eq(op, b"XOR") {
-                        result = result.symmetric_difference(&other).copied().collect();
-                    } else if bytes_eq(op, b"DIFF") {
-                        result = result.difference(&other).copied().collect();
-                    } else {
-                        result.extend(other);
+                    match op {
+                        op if bytes_eq(op, b"AND") => {
+                            result = result.intersection(&other).copied().collect();
+                        }
+                        op if bytes_eq(op, b"XOR") => {
+                            result = result.symmetric_difference(&other).copied().collect();
+                        }
+                        op if bytes_eq(op, b"DIFF") => {
+                            result = result.difference(&other).copied().collect();
+                        }
+                        _ => {
+                            result.extend(other);
+                        }
                     }
                 }
                 let route = self.route_key(dest);

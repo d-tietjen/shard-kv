@@ -495,10 +495,14 @@ pub(super) fn command_shards(store: &EmbeddedStore, parts: &[&[u8]]) -> Vec<usiz
     if ScnpScanCommand::from_name(command) == Some(ScnpScanCommand::ScanShard) {
         return scnp_scan_shard(store, args);
     }
+    #[cfg(feature = "redis")]
+    if crate::commands::vector_set::is_vector_command_name(command) {
+        return vec![store.vector_shard_id()];
+    }
     route_keys_to_shards(store, command_route_keys(command, args))
 }
 
-fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'_>) -> Vec<usize> {
+pub(super) fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'_>) -> Vec<usize> {
     match &request.command {
         FastCommand::RespCommand { parts } => command_shards(store, parts),
         command => route_keys_to_shards(store, command.route_keys()),
@@ -692,10 +696,7 @@ fn counted_key_span<'a>(args: &'a [&'a [u8]], numkeys_index: usize) -> Option<&'
         .and_then(|raw| parse_ascii_usize(raw))?;
     let key_start = numkeys_index.checked_add(1)?;
     let key_end = key_start.checked_add(numkeys)?;
-    match numkeys {
-        0 => None,
-        _ => args.get(key_start..key_end),
-    }
+    args.get(key_start..key_end)
 }
 
 fn parse_ascii_usize(raw: &[u8]) -> Option<usize> {

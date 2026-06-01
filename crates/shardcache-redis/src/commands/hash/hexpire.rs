@@ -92,7 +92,7 @@ pub(crate) fn fields_clause_error() -> Frame {
 }
 
 /// Convert (ttl, unit, base) into an absolute unix-ms deadline.
-fn resolve_deadline_ms(ttl: i64, unit: TimeUnit, base: TimeBase) -> Option<u64> {
+pub(crate) fn resolve_deadline_ms(ttl: i64, unit: TimeUnit, base: TimeBase) -> Option<u64> {
     match base {
         TimeBase::Absolute => {
             // Absolute timestamps may be in the past (that deletes the field);

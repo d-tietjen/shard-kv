@@ -1299,8 +1299,11 @@ dependencies = [
  "moka",
  "parking_lot",
  "rand",
+ "serde",
+ "serde_json",
  "shardcache-client-rs",
  "shardmap",
+ "tokio",
  "xxhash-rust",
 ]
 

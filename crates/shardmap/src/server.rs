@@ -13,7 +13,7 @@ use tokio::task::{JoinHandle, LocalSet, spawn_local};
 use tokio::time::{MissedTickBehavior, interval};
 
 use crate::Result;
-use crate::config::ShardCacheConfig;
+use crate::config::{ServerEndpointMode, ShardCacheConfig};
 use crate::protocol::{
     FAST_FLAG_KEY_HASH, FAST_FLAG_KEY_TAG, FAST_FLAG_ROUTE_SHARD, FAST_PROTOCOL_VERSION,
     FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC, FastCodec, FastCommand, FastRequest, FastResponse,
@@ -21,6 +21,8 @@ use crate::protocol::{
 };
 #[cfg(not(feature = "embedded"))]
 use crate::storage::FlatMap;
+#[cfg(feature = "embedded")]
+use crate::storage::ShardArcEmbeddedStore;
 use crate::storage::{BorrowedCommand, Bytes, EngineHandle, now_millis};
 #[cfg(feature = "embedded")]
 use crate::storage::{EmbeddedRouteMode, EmbeddedStore, LocalEmbeddedStore};
@@ -55,6 +57,9 @@ pub struct ShardCacheServer {
     engine: Option<EngineHandle>,
     mode: ServerMode,
     unix_socket_path: Option<PathBuf>,
+    embedded_store: Option<Arc<EmbeddedStore>>,
+    shard_arc_store: Option<Arc<ShardArcEmbeddedStore>>,
+    thread_local_embedded_store: bool,
 }
 
 const READ_CHUNK_SIZE: usize = 64 * 1024;

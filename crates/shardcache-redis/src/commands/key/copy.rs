@@ -88,6 +88,10 @@ fn copy_existing_key(store: &EmbeddedStore, source: &[u8], dest: &[u8], replace:
         store.set_value_bytes(dest, value, ttl_ms);
         return true;
     }
+    if let Some(value) = store.clone_pinned_vector_value(source) {
+        store.set_pinned_vector_value(dest, value, ttl_ms);
+        return true;
+    }
     if let Some(value) = store.clone_object_value(source) {
         store.set_object_value(dest, value, ttl_ms);
         return true;
