@@ -1,5 +1,0 @@
-embedded_mixed_harness: pid=1457241 bind=127.0.0.1:6413 shards=1 runtime_threads=1 internal_workers=1 value_size=1024 mix=100-0 keys=1 warmup=3s owner_local=true owner_yield_ops=1024
-[2m2026-06-01T20:17:50.569550Z[0m [32m INFO[0m [2mshardmap::server::lifecycle[0m[2m:[0m shardcache listening on 127.0.0.1:6413 (direct local mode)
-embedded_mixed_harness: owner-local embedded measurement active
-[2m2026-06-01T20:18:05.619707Z[0m [32m INFO[0m [2mshardmap::server::lifecycle[0m[2m:[0m shutdown requested
-embedded_mixed_harness: internal ops/sec=1454302 logical_gb/s=1.489 process_vcpu=1.000 p50=40ns p99=250ns p999=370ns reads=17523712 writes=0 errors=0

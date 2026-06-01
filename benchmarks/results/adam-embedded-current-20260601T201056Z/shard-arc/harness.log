@@ -1,5 +1,0 @@
-embedded_mixed_harness: pid=1457143 bind=127.0.0.1:6412 shards=1 runtime_threads=8 internal_workers=1 value_size=1024 mix=100-0 keys=1 warmup=3s shard_arc=true
-[2m2026-06-01T20:17:35.519240Z[0m [32m INFO[0m [2mshardmap::server::lifecycle[0m[2m:[0m shardcache listening on 127.0.0.1:6412 (shard-arc embedded GET/SET mode, 1 shards)
-embedded_mixed_harness: shard-arc embedded measurement active
-[2m2026-06-01T20:17:50.562472Z[0m [32m INFO[0m [2mshardmap::server::lifecycle[0m[2m:[0m shutdown requested
-embedded_mixed_harness: internal ops/sec=5366200 logical_gb/s=5.495 process_vcpu=8.930 p50=260ns p99=820ns p999=1.5us reads=64621103 writes=0 errors=0

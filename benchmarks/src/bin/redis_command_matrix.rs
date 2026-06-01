@@ -1129,7 +1129,7 @@ fn vector_add_command(key: &str, index: usize, dim: usize) -> Vec<String> {
     parts.push(format!(
         "{{\"group\":{},\"keep\":{}}}",
         index % 4,
-        index % 2 == 0
+        index.is_multiple_of(2)
     ));
     parts
 }

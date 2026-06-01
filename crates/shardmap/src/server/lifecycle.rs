@@ -527,9 +527,7 @@ impl ShardCacheServer {
         let direct_base_port = direct_shard_ports
             .then(|| MultiDirectAddress::direct_base_port(bind_addr, shard_count))
             .transpose()?;
-        if direct_shard_ports {
-            let direct_base_port =
-                direct_base_port.expect("direct shard base port exists when enabled");
+        if let Some(direct_base_port) = direct_base_port {
             tracing::info!(
                 "multi-direct: exposing shard-owned native ports {}-{}",
                 direct_base_port,

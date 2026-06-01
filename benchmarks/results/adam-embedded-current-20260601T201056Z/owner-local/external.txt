@@ -1,1 +1,0 @@
-owner-local	clients=16	pipeline=64	ops/sec=1341879	p50us=11.6	p99us=12.8	p999us=17.8	window_s=10.00	thread_ops[min..max]=1001728..1010944

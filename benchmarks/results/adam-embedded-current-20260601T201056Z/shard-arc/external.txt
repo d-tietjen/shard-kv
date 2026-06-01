@@ -1,1 +1,0 @@
-shard-arc	clients=16	pipeline=64	ops/sec=7633814	p50us=2.1	p99us=2.9	p999us=3.3	window_s=10.00	thread_ops[min..max]=5642752..5721600

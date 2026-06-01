@@ -172,9 +172,9 @@ use shardmap::ShardMap;
 
 let cache = ShardMap::new();
 
-assert!(cache.try_acquire_lock(b"lock:job:1", b"worker-a", 5_000));
-assert!(!cache.try_acquire_lock(b"lock:job:1", b"worker-b", 5_000));
-assert!(cache.renew_lock(b"lock:job:1", b"worker-a", 5_000));
+assert!(cache.try_acquire_lock(b"lock:job:1", b"worker-a", 5_000)?);
+assert!(!cache.try_acquire_lock(b"lock:job:1", b"worker-b", 5_000)?);
+assert!(cache.renew_lock(b"lock:job:1", b"worker-a", 5_000)?);
 assert!(cache.release_lock(b"lock:job:1", b"worker-a"));
 ```
 

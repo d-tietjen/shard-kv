@@ -1,4 +1,5 @@
 use super::*;
+use crate::Result;
 
 impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     /// Returns a borrowed value guard for `key`.
@@ -468,11 +469,13 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
 
     /// Updates a point-key TTL only when the stored bytes match `expected`.
     #[inline(always)]
-    pub fn update_ttl_if_value_eq(&self, key: &[u8], expected: &[u8], ttl_ms: u64) -> bool {
+    pub fn update_ttl_if_value_eq(&self, key: &[u8], expected: &[u8], ttl_ms: u64) -> Result<bool> {
         #[cfg(feature = "no-ttl")]
         {
             let _ = (key, expected, ttl_ms);
-            panic!("shardcache/no-ttl builds do not support shared-store TTL writes");
+            Err(crate::ShardCacheError::Config(
+                "shardcache/no-ttl builds do not support shared-store TTL writes".into(),
+            ))
         }
         #[cfg(not(feature = "no-ttl"))]
         {
@@ -486,7 +489,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                     .get_ref_hashed_shared(route.key_hash, key, now_ms)
                     .is_some_and(|value| value == expected);
             if !matches {
-                return false;
+                return Ok(false);
             }
             self.disable_semantic_query_cache();
             guard.set_slice_hashed(
@@ -500,7 +503,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             drop(guard);
             self.invalidate_semantic_shadow(route, key, now_ms);
             self.bump_semantic_generation();
-            true
+            Ok(true)
         }
     }
 

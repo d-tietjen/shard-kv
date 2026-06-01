@@ -18,21 +18,23 @@ fn is_enabled(cache: &ShardMap, name: &str) -> bool {
         .is_some_and(|value| value.as_ref() == b"on")
 }
 
-fn refresh_flags(cache: &ShardMap) {
-    if !cache.try_acquire_lock(b"lock:refresh-flags", b"worker-1", 5_000) {
-        return;
+fn refresh_flags(cache: &ShardMap) -> shardmap::Result<()> {
+    if !cache.try_acquire_lock(b"lock:refresh-flags", b"worker-1", 5_000)? {
+        return Ok(());
     }
 
     set_flag(cache, "semantic-cache", true);
     set_flag(cache, "tcp-server", false);
     assert!(cache.release_lock(b"lock:refresh-flags", b"worker-1"));
+    Ok(())
 }
 
-fn main() {
+fn main() -> shardmap::Result<()> {
     let cache = ShardMap::new();
 
-    refresh_flags(&cache);
+    refresh_flags(&cache)?;
 
     assert!(is_enabled(&cache, "semantic-cache"));
     assert!(!is_enabled(&cache, "tcp-server"));
+    Ok(())
 }

@@ -1,2 +1,0 @@
-mode,bind_addr,shard_count,runtime_threads,internal_workers,value_size,mix,key_count,duration_s,ops_total,ops_per_sec,logical_payload_gb_per_sec,process_vcpu,p50_ns,p99_ns,p999_ns,read_ops,read_p99_ns,read_p999_ns,write_ops,write_p99_ns,write_p999_ns,errors,latency_sample_count
-owner-local-embedded,127.0.0.1:6413,1,1,1,1024,100-0,1,12.050,17523712,1454302,1.489,1.000,40,250,370,17523712,250,370,0,0,0,0,273808

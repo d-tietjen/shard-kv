@@ -164,13 +164,7 @@ impl MultiDirectWorker {
                             started_at,
                             transaction_coordinator: &transaction_coordinator,
                         };
-                        Self::spawn_stream_connection(
-                            worker_id,
-                            std_stream,
-                            &context,
-                            None,
-                        )
-                        .await;
+                        Self::spawn_stream_connection(worker_id, std_stream, &context, None).await;
                     }
                     MultiDirectWorkerMessage::Routed(request) => {
                         Self::handle_routed_request(
@@ -284,13 +278,7 @@ impl MultiDirectWorker {
                             started_at,
                             transaction_coordinator: &transaction_coordinator,
                         };
-                        Self::spawn_stream_connection(
-                            worker_id,
-                            std_stream,
-                            &context,
-                            None,
-                        )
-                        .await;
+                        Self::spawn_stream_connection(worker_id, std_stream, &context, None).await;
                     }
                     MultiDirectWorkerMessage::Routed(request) => {
                         Self::handle_routed_request(
@@ -411,8 +399,10 @@ impl MultiDirectWorker {
         _store: Arc<()>,
         _limiter: Arc<Semaphore>,
         _rx: flume::Receiver<std::net::TcpStream>,
-    ) {
-        panic!("multi-direct requires the `embedded` feature");
+    ) -> Result<()> {
+        Err(crate::ShardCacheError::Config(
+            "multi-direct requires the `embedded` feature".into(),
+        ))
     }
 
     pub(super) fn run_hybrid(
@@ -420,8 +410,10 @@ impl MultiDirectWorker {
         _store: Arc<()>,
         _limiter: Arc<Semaphore>,
         _rx: flume::Receiver<std::net::TcpStream>,
-    ) {
-        panic!("multi-direct requires the `embedded` feature");
+    ) -> Result<()> {
+        Err(crate::ShardCacheError::Config(
+            "multi-direct requires the `embedded` feature".into(),
+        ))
     }
 }
 
