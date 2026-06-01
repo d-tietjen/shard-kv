@@ -111,6 +111,15 @@ pub(super) struct TokioWorkerConfig {
 }
 
 #[cfg(feature = "embedded")]
+struct StreamConnectionContext<'a> {
+    store: &'a Arc<EmbeddedStore>,
+    limiter: &'a Arc<Semaphore>,
+    single_threaded: bool,
+    started_at: Instant,
+    transaction_coordinator: &'a Option<Arc<TransactionCoordinator>>,
+}
+
+#[cfg(feature = "embedded")]
 impl MultiDirectWorker {
     pub(super) fn run(
         config: TokioWorkerConfig,
@@ -148,15 +157,18 @@ impl MultiDirectWorker {
             while let Ok(message) = rx.recv_async().await {
                 match message {
                     MultiDirectWorkerMessage::Stream(std_stream) => {
+                        let context = StreamConnectionContext {
+                            store: &store,
+                            limiter: &limiter,
+                            single_threaded,
+                            started_at,
+                            transaction_coordinator: &transaction_coordinator,
+                        };
                         Self::spawn_stream_connection(
                             worker_id,
                             std_stream,
-                            store.clone(),
-                            limiter.clone(),
-                            single_threaded,
+                            &context,
                             None,
-                            started_at,
-                            transaction_coordinator.clone(),
                         )
                         .await;
                     }
@@ -265,15 +277,18 @@ impl MultiDirectWorker {
             while let Ok(message) = rx.recv_async().await {
                 match message {
                     MultiDirectWorkerMessage::Stream(std_stream) => {
+                        let context = StreamConnectionContext {
+                            store: &store,
+                            limiter: &limiter,
+                            single_threaded,
+                            started_at,
+                            transaction_coordinator: &transaction_coordinator,
+                        };
                         Self::spawn_stream_connection(
                             worker_id,
                             std_stream,
-                            store.clone(),
-                            limiter.clone(),
-                            single_threaded,
+                            &context,
                             None,
-                            started_at,
-                            transaction_coordinator.clone(),
                         )
                         .await;
                     }
@@ -295,12 +310,8 @@ impl MultiDirectWorker {
     async fn spawn_stream_connection(
         worker_id: usize,
         std_stream: std::net::TcpStream,
-        store: Arc<EmbeddedStore>,
-        limiter: Arc<Semaphore>,
-        single_threaded: bool,
+        context: &StreamConnectionContext<'_>,
         owned_shard_id: Option<usize>,
-        started_at: Instant,
-        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     ) {
         if std_stream.set_nonblocking(true).is_err() {
             return;
@@ -312,13 +323,17 @@ impl MultiDirectWorker {
                 return;
             }
         };
-        let permit = match limiter.try_acquire_owned() {
+        let permit = match context.limiter.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
                 let _ = ConnectionRejector::reject(stream).await;
                 return;
             }
         };
+        let store = context.store.clone();
+        let single_threaded = context.single_threaded;
+        let started_at = context.started_at;
+        let transaction_coordinator = context.transaction_coordinator.clone();
         spawn_local(async move {
             if let Err(error) = MultiDirectConnection::handle(
                 stream,
