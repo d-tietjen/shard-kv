@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile the public feature surfaces that define the 0.2.0 crate contract.
+# Compile the public feature surfaces that define the 0.2.1 crate contract.
 
 set -euo pipefail
 

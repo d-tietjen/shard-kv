@@ -13,9 +13,9 @@ compatibility surface, and benchmark claims evolve.
 
 | Gate | Purpose |
 | --- | --- |
-| `quick` | Formatting, benchmark harness unit tests, compatibility manifest freshness, feature-flag compile matrix, and whitespace diff checks. |
+| `quick` | Formatting, benchmark harness unit tests, compatibility manifest freshness, feature-flag compile matrix, crates.io package artifact checks, and whitespace diff checks. |
 | `redis` | Everything in `quick`, plus Redis compatibility tests, raw RESP server tests, and the live differential test against `SHARDCACHE_COMPAT_SERVER_BIN` or `redis-server`. |
-| `release` | Everything in `redis`, plus the workspace test suite, formal support tests, rustdoc, and package dry runs for crates that do not depend on an unpublished workspace version. |
+| `release` | Everything in `redis`, plus the workspace test suite, formal support tests, and rustdoc for all publishable crates. |
 
 Use `quick` while iterating on source layout, feature flags, command registry,
 or docs. Use `redis` before merging compatibility changes. Use `release`
@@ -26,6 +26,7 @@ before tagging or publishing.
 ```bash
 ./scripts/check-feature-matrix.sh
 ./scripts/check-redis-compatibility-doc.sh
+./scripts/check-publish-artifacts.sh
 ```
 
 `check-feature-matrix.sh` compiles the public 0.2.1 feature contract for
@@ -41,6 +42,13 @@ doc intentionally:
 cargo run -p shardcache-benchmarks --bin redis_command_manifest -- \
   --output docs/REDIS_COMPATIBILITY.md
 ```
+
+`check-publish-artifacts.sh` packages every publishable crate, unpacks the
+generated `.crate` archives, and compiles temporary consumer crates with
+`[patch.crates-io]` pointing at those unpacked archives. This catches issues
+that only appear after Cargo rewrites workspace `path` dependencies and
+verifies optional Redis/server features from the same artifact layout users get
+from crates.io.
 
 ## Benchmark Artifacts
 

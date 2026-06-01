@@ -46,6 +46,12 @@ publishable crate files unless `--allow-dirty` is passed, and the release gate
 does not pass that override. Use `--allow-dirty` only as a local diagnostic to
 check package contents before the final commit.
 
+The release gate includes `./scripts/check-publish-artifacts.sh`, which
+packages every publishable crate and compiles temporary consumers against the
+unpacked `.crate` archives. This is the pre-merge guard for missing packaged
+files, optional-feature source layout mistakes, and path dependencies that only
+fail after Cargo rewrites them for crates.io.
+
 The pure `--no-default-features` build is intentionally unsupported for 0.2.1
 and should fail with a single compile error telling users to enable `embedded`
 or `sharded`.
@@ -143,6 +149,8 @@ The publishable crates are `shardmap`, `shardcache-client-rs`,
 resolve until `shardmap 0.2.1` is visible in the crates.io index.
 
 ```bash
+./scripts/check-publish-artifacts.sh
+
 cargo publish -p shardmap --dry-run
 cargo publish -p shardcache-client-rs --dry-run
 cargo publish -p shardmap
