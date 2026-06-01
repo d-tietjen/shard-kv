@@ -36,6 +36,10 @@ impl EmbeddedStore {
                 shift,
                 #[cfg(feature = "redis")]
                 objects: RedisObjectStore::new(shard_count),
+                #[cfg(feature = "redis-modules")]
+                module_state: modules::RedisModuleState::new(shard_count),
+                #[cfg(feature = "redis-module-topk")]
+                topk: modules::TopKStore::new(shard_count),
                 route_mode,
             }
         }
@@ -82,6 +86,10 @@ impl EmbeddedStore {
             shift,
             #[cfg(feature = "redis")]
             objects: RedisObjectStore::new(shard_count),
+            #[cfg(feature = "redis-modules")]
+            module_state: modules::RedisModuleState::new(shard_count),
+            #[cfg(feature = "redis-module-topk")]
+            topk: modules::TopKStore::new(shard_count),
             route_mode,
             metrics,
         }
@@ -125,7 +133,7 @@ impl EmbeddedStore {
             .sum::<usize>();
         #[cfg(feature = "redis")]
         {
-            len + self.objects.object_count()
+            len + self.objects.live_object_count(now_millis())
         }
         #[cfg(not(feature = "redis"))]
         {
@@ -247,6 +255,23 @@ impl EmbeddedStore {
         }
     }
 
+    /// Gives the pinned vector shard the full configured memory budget.
+    #[cfg(feature = "redis")]
+    pub fn configure_vector_memory_policy(
+        &self,
+        total_memory_limit_bytes: Option<usize>,
+        eviction_policy: EvictionPolicy,
+    ) {
+        let now_ms = now_millis();
+        if let Some(shard) = self.shards.get(self.vector_shard_id()) {
+            shard.write().configure_memory_policy(
+                total_memory_limit_bytes,
+                eviction_policy,
+                now_ms,
+            );
+        }
+    }
+
     /// Returns true when the store has no live keys.
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
@@ -308,6 +333,23 @@ impl EmbeddedStore {
     #[inline(always)]
     pub fn route_key(&self, key: &[u8]) -> EmbeddedKeyRoute {
         compute_key_route(self.route_mode, self.shift, key)
+    }
+
+    /// Returns the shard that owns pinned vector-set data.
+    #[cfg(feature = "redis")]
+    #[inline(always)]
+    pub const fn vector_shard_id(&self) -> usize {
+        0
+    }
+
+    /// Computes the pinned storage route for Redis vector-set data.
+    #[cfg(feature = "redis")]
+    #[inline(always)]
+    pub fn route_vector_key(&self, key: &[u8]) -> EmbeddedKeyRoute {
+        EmbeddedKeyRoute {
+            shard_id: self.vector_shard_id(),
+            key_hash: hash_key(key),
+        }
     }
 
     /// Returns the session-routing prefix for a key.

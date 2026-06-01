@@ -495,10 +495,14 @@ pub(super) fn command_shards(store: &EmbeddedStore, parts: &[&[u8]]) -> Vec<usiz
     if ScnpScanCommand::from_name(command) == Some(ScnpScanCommand::ScanShard) {
         return scnp_scan_shard(store, args);
     }
+    #[cfg(feature = "redis")]
+    if crate::commands::vector_set::is_vector_command_name(command) {
+        return vec![store.vector_shard_id()];
+    }
     route_keys_to_shards(store, command_route_keys(command, args))
 }
 
-fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'_>) -> Vec<usize> {
+pub(super) fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'_>) -> Vec<usize> {
     match &request.command {
         FastCommand::RespCommand { parts } => command_shards(store, parts),
         command => route_keys_to_shards(store, command.route_keys()),
@@ -548,6 +552,7 @@ enum SupplementalCommandKeySpec {
     AllShards,
     AllArgs,
     At(usize),
+    FirstN(usize),
     Counted { numkeys_index: usize },
     StreamRead,
     Sort,
@@ -564,6 +569,7 @@ impl SupplementalCommandKeySpec {
                 .copied()
                 .map(|key| FastRedisRouteKeys::Keys(vec![key]))
                 .unwrap_or(FastRedisRouteKeys::None),
+            Self::FirstN(count) => first_n_route_keys(args, count),
             Self::Counted { numkeys_index } => counted_route_keys(args, numkeys_index),
             Self::StreamRead => stream_read_route_keys(args),
             Self::Sort => sort_route_keys(args),
@@ -584,6 +590,7 @@ const SUPPLEMENTAL_COMMAND_KEY_SPECS: &[SupplementalCommandKeyEntry] = &[
             b"BGSAVE",
             b"CLUSTER",
             b"DEBUG",
+            b"FUNCTION",
             b"HOST:",
             b"LASTSAVE",
             b"LATENCY",
@@ -605,7 +612,10 @@ const SUPPLEMENTAL_COMMAND_KEY_SPECS: &[SupplementalCommandKeyEntry] = &[
             b"SHUTDOWN",
             b"SLAVEOF",
             b"SLOWLOG",
+            b"SPUBLISH",
             b"SUBSCRIBE",
+            b"SSUBSCRIBE",
+            b"SUNSUBSCRIBE",
             b"SYNC",
             b"UNSUBSCRIBE",
             b"WAIT",
@@ -613,8 +623,19 @@ const SUPPLEMENTAL_COMMAND_KEY_SPECS: &[SupplementalCommandKeyEntry] = &[
         spec: SupplementalCommandKeySpec::None,
     },
     SupplementalCommandKeyEntry {
-        names: &[b"EVAL", b"EVALSHA"],
+        names: &[
+            b"EVAL",
+            b"EVALSHA",
+            b"EVAL_RO",
+            b"EVALSHA_RO",
+            b"FCALL",
+            b"FCALL_RO",
+        ],
         spec: SupplementalCommandKeySpec::Counted { numkeys_index: 1 },
+    },
+    SupplementalCommandKeyEntry {
+        names: &[b"GEOSEARCHSTORE"],
+        spec: SupplementalCommandKeySpec::FirstN(2),
     },
     SupplementalCommandKeyEntry {
         names: &[b"MIGRATE", b"SWAPDB"],
@@ -637,7 +658,7 @@ const SUPPLEMENTAL_COMMAND_KEY_SPECS: &[SupplementalCommandKeyEntry] = &[
         spec: SupplementalCommandKeySpec::StreamRead,
     },
     SupplementalCommandKeyEntry {
-        names: &[b"SORT"],
+        names: &[b"SORT", b"SORT_RO"],
         spec: SupplementalCommandKeySpec::Sort,
     },
 ];
@@ -675,10 +696,7 @@ fn counted_key_span<'a>(args: &'a [&'a [u8]], numkeys_index: usize) -> Option<&'
         .and_then(|raw| parse_ascii_usize(raw))?;
     let key_start = numkeys_index.checked_add(1)?;
     let key_end = key_start.checked_add(numkeys)?;
-    match numkeys {
-        0 => None,
-        _ => args.get(key_start..key_end),
-    }
+    args.get(key_start..key_end)
 }
 
 fn parse_ascii_usize(raw: &[u8]) -> Option<usize> {

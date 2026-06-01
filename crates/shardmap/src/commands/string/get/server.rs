@@ -7,7 +7,9 @@ use crate::server::commands::{
 use crate::server::wire::ServerWire;
 use crate::storage::hash_key;
 #[cfg(feature = "redis")]
-use crate::storage::{RedisStringLookup, WRONGTYPE_MESSAGE};
+use crate::storage::{RedisStringLookup, VECTOR_SET_PREFIX, WRONGTYPE_MESSAGE};
+#[cfg(feature = "redis")]
+use bytes::BytesMut;
 
 use super::Get;
 
@@ -63,6 +65,12 @@ impl RawDirectCommand for Get {
                                     key_hash,
                                     key,
                                     |value| {
+                                        #[cfg(feature = "redis")]
+                                        if Self::write_fast_wrongtype_for_typed_point_value(
+                                            value, out,
+                                        ) {
+                                            return;
+                                        }
                                         if let Some(queue) = ctx.fast_write_queue.as_mut() {
                                             queue.push_fast_value(out, value);
                                         } else {
@@ -75,6 +83,10 @@ impl RawDirectCommand for Get {
                     false => {
                         ctx.store
                             .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+                                #[cfg(feature = "redis")]
+                                if Self::write_fast_wrongtype_for_typed_point_value(value, out) {
+                                    return;
+                                }
                                 if let Some(queue) = ctx.fast_write_queue.as_mut() {
                                     queue.push_fast_value(out, value);
                                 } else {
@@ -88,6 +100,10 @@ impl RawDirectCommand for Get {
                     let _ = ctx.single_threaded;
                     ctx.store
                         .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+                            #[cfg(feature = "redis")]
+                            if Self::write_fast_wrongtype_for_typed_point_value(value, out) {
+                                return;
+                            }
                             if let Some(queue) = ctx.fast_write_queue.as_mut() {
                                 queue.push_fast_value(out, value);
                             } else {
@@ -135,7 +151,7 @@ impl Get {
         key: &[u8],
     ) {
         #[cfg(feature = "redis")]
-        if ctx.store.has_redis_objects() {
+        if ctx.store.has_redis_objects() || ctx.fast_write_queue.is_none() {
             Self::write_resp_string_lookup(ctx, key);
             return;
         }
@@ -146,6 +162,10 @@ impl Get {
             unsafe {
                 ctx.store
                     .with_shared_value_bytes_route_hashed_single_threaded(key_hash, key, |value| {
+                        #[cfg(feature = "redis")]
+                        if Self::write_resp_wrongtype_for_typed_point_value(value, out) {
+                            return;
+                        }
                         queue.push_resp_value(out, value)
                     })
             }
@@ -165,7 +185,7 @@ impl Get {
         key: &[u8],
     ) {
         #[cfg(feature = "redis")]
-        if ctx.store.has_redis_objects() {
+        if ctx.store.has_redis_objects() || ctx.fast_write_queue.is_none() {
             Self::write_resp_string_lookup(ctx, key);
             return;
         }
@@ -174,6 +194,10 @@ impl Get {
             let out = &mut *ctx.out;
             ctx.store
                 .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+                    #[cfg(feature = "redis")]
+                    if Self::write_resp_wrongtype_for_typed_point_value(value, out) {
+                        return;
+                    }
                     queue.push_resp_value(out, value)
                 })
         } else {
@@ -206,6 +230,28 @@ impl Get {
             }
         }
     }
+
+    #[cfg(feature = "redis")]
+    #[inline(always)]
+    fn write_resp_wrongtype_for_typed_point_value(value: &[u8], out: &mut BytesMut) -> bool {
+        if value.starts_with(VECTOR_SET_PREFIX) {
+            ServerWire::write_resp_error(out, WRONGTYPE_MESSAGE);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "redis")]
+    #[inline(always)]
+    fn write_fast_wrongtype_for_typed_point_value(value: &[u8], out: &mut BytesMut) -> bool {
+        if value.starts_with(VECTOR_SET_PREFIX) {
+            ServerWire::write_fast_error(out, WRONGTYPE_MESSAGE);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(feature = "server")]
@@ -216,9 +262,14 @@ impl DirectFastCommand for Get {
         request: FastRequest<'_>,
     ) -> FastResponse {
         match request.command {
-            FastCommand::Get { key } => {
-                ctx.get(key).map_or(FastResponse::Null, FastResponse::Value)
-            }
+            FastCommand::Get { key } => match ctx.get(key) {
+                #[cfg(feature = "redis")]
+                Some(value) if value.starts_with(VECTOR_SET_PREFIX) => {
+                    FastResponse::Error(WRONGTYPE_MESSAGE.as_bytes().to_vec())
+                }
+                Some(value) => FastResponse::Value(value),
+                None => FastResponse::Null,
+            },
             _ => FastResponse::Error(b"ERR unsupported command".to_vec()),
         }
     }
@@ -269,6 +320,10 @@ impl Get {
                             key_hash,
                             key,
                             |value| {
+                                #[cfg(feature = "redis")]
+                                if Self::write_fast_wrongtype_for_typed_point_value(value, out) {
+                                    return;
+                                }
                                 ServerWire::write_fast_value(out, value);
                             },
                         )
@@ -277,17 +332,29 @@ impl Get {
                 #[cfg(not(feature = "unsafe"))]
                 {
                     store.with_value_bytes_route_hashed(key_hash, key, |value| {
+                        #[cfg(feature = "redis")]
+                        if Self::write_fast_wrongtype_for_typed_point_value(value, out) {
+                            return;
+                        }
                         ServerWire::write_fast_value(out, value);
                     })
                 }
             }
             (Some(key_hash), false) => {
                 store.with_value_bytes_route_hashed(key_hash, key, |value| {
+                    #[cfg(feature = "redis")]
+                    if Self::write_fast_wrongtype_for_typed_point_value(value, out) {
+                        return;
+                    }
                     ServerWire::write_fast_value(out, value);
                 })
             }
             (None, _) => match store.get_value_bytes(key) {
                 Some(value) => {
+                    #[cfg(feature = "redis")]
+                    if Self::write_fast_wrongtype_for_typed_point_value(value.as_ref(), out) {
+                        return true;
+                    }
                     ServerWire::write_fast_value(out, value.as_ref());
                     true
                 }

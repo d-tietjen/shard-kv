@@ -1,5 +1,8 @@
 use super::super::*;
 use super::access::RedisObjectStoreAccess;
+use crate::storage::{
+    HashFieldExpireCond, HashFieldGetExpireAction, HashFieldSetCondition, HashFieldSetExpireAction,
+};
 
 #[allow(dead_code)]
 pub(crate) trait RedisHashStore {
@@ -9,6 +12,20 @@ pub(crate) trait RedisHashStore {
     fn hexists(&self, key: &[u8], field: &[u8]) -> RedisObjectResult;
     fn hdel(&self, key: &[u8], field: &[u8]) -> RedisObjectResult;
     fn hdel_many(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
+    fn hgetdel(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
+    fn hgetex(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        action: HashFieldGetExpireAction,
+    ) -> RedisObjectResult;
+    fn hsetex(
+        &self,
+        key: &[u8],
+        fields: &[(&[u8], &[u8])],
+        condition: HashFieldSetCondition,
+        action: HashFieldSetExpireAction,
+    ) -> RedisObjectResult;
     fn hlen(&self, key: &[u8]) -> RedisObjectResult;
     fn hmget(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
     fn hmget_visit(
@@ -46,6 +63,21 @@ pub(crate) trait RedisHashStore {
         field: &[u8],
         value: &[u8],
     ) -> RedisObjectResult;
+    fn hash_field_expire(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        expire_at_ms: u64,
+        cond: HashFieldExpireCond,
+    ) -> RedisObjectResult;
+    fn hash_field_ttl_query(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        as_millis: bool,
+        absolute: bool,
+    ) -> RedisObjectResult;
+    fn hash_field_persist(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult;
 }
 
 impl RedisHashStore for EmbeddedStore {
@@ -71,6 +103,36 @@ impl RedisHashStore for EmbeddedStore {
 
     fn hdel_many(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult {
         self.object_write(key, |bucket| bucket.hdel_many(key, fields))
+    }
+
+    fn hgetdel(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| bucket.hash_field_getdel(key, fields, now_ms))
+    }
+
+    fn hgetex(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        action: HashFieldGetExpireAction,
+    ) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| {
+            bucket.hash_field_getex(key, fields, action, now_ms)
+        })
+    }
+
+    fn hsetex(
+        &self,
+        key: &[u8],
+        fields: &[(&[u8], &[u8])],
+        condition: HashFieldSetCondition,
+        action: HashFieldSetExpireAction,
+    ) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| {
+            bucket.hash_field_setex(key, fields, condition, action, now_ms)
+        })
     }
 
     fn hlen(&self, key: &[u8]) -> RedisObjectResult {
@@ -165,5 +227,36 @@ impl RedisHashStore for EmbeddedStore {
             },
             |bucket, key_hash| bucket.hset_new_unchecked_hashed(key_hash, key, field, value),
         )
+    }
+
+    fn hash_field_expire(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        expire_at_ms: u64,
+        cond: HashFieldExpireCond,
+    ) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| {
+            bucket.hash_field_expire(key, fields, expire_at_ms, cond, now_ms)
+        })
+    }
+
+    fn hash_field_ttl_query(
+        &self,
+        key: &[u8],
+        fields: &[&[u8]],
+        as_millis: bool,
+        absolute: bool,
+    ) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_read(key, |bucket| {
+            bucket.hash_field_ttl_query(key, fields, as_millis, absolute, now_ms)
+        })
+    }
+
+    fn hash_field_persist(&self, key: &[u8], fields: &[&[u8]]) -> RedisObjectResult {
+        let now_ms = now_millis();
+        self.object_write(key, |bucket| bucket.hash_field_persist(key, fields, now_ms))
     }
 }

@@ -1521,19 +1521,24 @@ impl EmbeddedStore {
         }
 
         let mut guard = self.shards[route.shard_id].write();
-        let value = if let Some(session_prefix) = derived_session_storage_prefix(key)
+        if let Some(session_prefix) = derived_session_storage_prefix(key)
             && let Some(value) =
                 guard
                     .session_slots
                     .get_ref_hashed(&session_prefix, route.key_hash, key)
         {
-            value
-        } else if guard.map.has_no_ttl_entries() {
-            guard.map.get_ref_hashed_no_ttl(route.key_hash, key)?
-        } else {
-            guard
+            let value = value as *const [u8];
+            return Some(EmbeddedRef {
+                guard: views::EmbeddedRefGuard::Write(guard),
+                value,
+                _not_send: std::marker::PhantomData,
+            });
+        }
+        let value = match guard.map.has_no_ttl_entries().then_some(()) {
+            Some(()) => guard.map.get_ref_hashed_no_ttl(route.key_hash, key)?,
+            None => guard
                 .map
-                .get_ref_hashed(route.key_hash, key, now_millis())?
+                .get_ref_hashed(route.key_hash, key, now_millis())?,
         } as *const [u8];
         Some(EmbeddedRef {
             guard: views::EmbeddedRefGuard::Write(guard),

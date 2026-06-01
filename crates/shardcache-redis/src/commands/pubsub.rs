@@ -24,11 +24,14 @@ macro_rules! define_pubsub_command {
 }
 
 define_pubsub_command!(Publish, PUBLISH_COMMAND, "PUBLISH", false);
+define_pubsub_command!(SPublish, SPUBLISH_COMMAND, "SPUBLISH", false);
 define_pubsub_command!(PubSub, PUBSUB_COMMAND, "PUBSUB", false);
 define_pubsub_command!(Subscribe, SUBSCRIBE_COMMAND, "SUBSCRIBE", false);
 define_pubsub_command!(Unsubscribe, UNSUBSCRIBE_COMMAND, "UNSUBSCRIBE", false);
 define_pubsub_command!(PSubscribe, PSUBSCRIBE_COMMAND, "PSUBSCRIBE", false);
 define_pubsub_command!(PUnsubscribe, PUNSUBSCRIBE_COMMAND, "PUNSUBSCRIBE", false);
+define_pubsub_command!(SSubscribe, SSUBSCRIBE_COMMAND, "SSUBSCRIBE", false);
+define_pubsub_command!(SUnsubscribe, SUNSUBSCRIBE_COMMAND, "SUNSUBSCRIBE", false);
 
 impl crate::commands::redis::RedisCommand for Publish {
     fn execute(_store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
@@ -47,14 +50,44 @@ impl crate::commands::redis::RedisCommand for Publish {
     }
 }
 
+impl crate::commands::redis::RedisCommand for SPublish {
+    fn execute(_store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        match args {
+            [_channel, _message] => int(0),
+            _ => wrong_arity("SPUBLISH"),
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(_store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        match args {
+            [_channel, _message] => ServerWire::write_resp_integer(out, 0),
+            _ => write_resp_wrong_arity(out, "SPUBLISH"),
+        }
+    }
+}
+
 impl crate::commands::redis::RedisCommand for PubSub {
     fn execute(_store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         match args {
             [] => wrong_arity("PUBSUB"),
             [sub] if sub.eq_ignore_ascii_case(b"CHANNELS") => Frame::Array(Vec::new()),
             [sub, _pattern] if sub.eq_ignore_ascii_case(b"CHANNELS") => Frame::Array(Vec::new()),
+            [sub] if sub.eq_ignore_ascii_case(b"SHARDCHANNELS") => Frame::Array(Vec::new()),
+            [sub, _pattern] if sub.eq_ignore_ascii_case(b"SHARDCHANNELS") => {
+                Frame::Array(Vec::new())
+            }
             [sub] if sub.eq_ignore_ascii_case(b"NUMPAT") => int(0),
+            [sub] if sub.eq_ignore_ascii_case(b"SHARDNUMSUB") => Frame::Array(Vec::new()),
             [sub, channels @ ..] if sub.eq_ignore_ascii_case(b"NUMSUB") => {
+                let mut items = Vec::with_capacity(channels.len().saturating_mul(2));
+                for channel in channels {
+                    items.push(bulk(channel.to_vec()));
+                    items.push(int(0));
+                }
+                Frame::Array(items)
+            }
+            [sub, channels @ ..] if sub.eq_ignore_ascii_case(b"SHARDNUMSUB") => {
                 let mut items = Vec::with_capacity(channels.len().saturating_mul(2));
                 for channel in channels {
                     items.push(bulk(channel.to_vec()));
@@ -66,6 +99,8 @@ impl crate::commands::redis::RedisCommand for PubSub {
                 b"PUBSUB CHANNELS [pattern]".to_vec(),
                 b"PUBSUB NUMSUB [channel ...]".to_vec(),
                 b"PUBSUB NUMPAT".to_vec(),
+                b"PUBSUB SHARDCHANNELS [pattern]".to_vec(),
+                b"PUBSUB SHARDNUMSUB [channel ...]".to_vec(),
             ]),
             _ => error("ERR unknown PUBSUB subcommand or wrong number of arguments"),
         }
@@ -79,8 +114,17 @@ impl crate::commands::redis::RedisCommand for PubSub {
             [sub, _pattern] if sub.eq_ignore_ascii_case(b"CHANNELS") => {
                 write_resp_array_header(out, 0);
             }
+            [sub] if sub.eq_ignore_ascii_case(b"SHARDCHANNELS") => {
+                write_resp_array_header(out, 0);
+            }
+            [sub, _pattern] if sub.eq_ignore_ascii_case(b"SHARDCHANNELS") => {
+                write_resp_array_header(out, 0);
+            }
             [sub] if sub.eq_ignore_ascii_case(b"NUMPAT") => {
                 ServerWire::write_resp_integer(out, 0);
+            }
+            [sub] if sub.eq_ignore_ascii_case(b"SHARDNUMSUB") => {
+                write_resp_array_header(out, 0);
             }
             [sub, channels @ ..] if sub.eq_ignore_ascii_case(b"NUMSUB") => {
                 write_resp_array_header(out, channels.len().saturating_mul(2));
@@ -89,11 +133,20 @@ impl crate::commands::redis::RedisCommand for PubSub {
                     ServerWire::write_resp_integer(out, 0);
                 }
             }
+            [sub, channels @ ..] if sub.eq_ignore_ascii_case(b"SHARDNUMSUB") => {
+                write_resp_array_header(out, channels.len().saturating_mul(2));
+                for channel in channels {
+                    ServerWire::write_resp_blob_string(out, channel);
+                    ServerWire::write_resp_integer(out, 0);
+                }
+            }
             [sub] if sub.eq_ignore_ascii_case(b"HELP") => {
-                write_resp_array_header(out, 3);
+                write_resp_array_header(out, 5);
                 ServerWire::write_resp_blob_string(out, b"PUBSUB CHANNELS [pattern]");
                 ServerWire::write_resp_blob_string(out, b"PUBSUB NUMSUB [channel ...]");
                 ServerWire::write_resp_blob_string(out, b"PUBSUB NUMPAT");
+                ServerWire::write_resp_blob_string(out, b"PUBSUB SHARDCHANNELS [pattern]");
+                ServerWire::write_resp_blob_string(out, b"PUBSUB SHARDNUMSUB [channel ...]");
             }
             _ => ServerWire::write_resp_error(
                 out,
@@ -144,6 +197,28 @@ impl crate::commands::redis::RedisCommand for PUnsubscribe {
     #[cfg(feature = "server")]
     fn write_resp(_store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
         write_subscription_ack_resp(out, b"punsubscribe", args, false);
+    }
+}
+
+impl crate::commands::redis::RedisCommand for SSubscribe {
+    fn execute(_store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        subscription_ack("ssubscribe", args, true)
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(_store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_subscription_ack_resp(out, b"ssubscribe", args, true);
+    }
+}
+
+impl crate::commands::redis::RedisCommand for SUnsubscribe {
+    fn execute(_store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        subscription_ack("sunsubscribe", args, false)
+    }
+
+    #[cfg(feature = "server")]
+    fn write_resp(_store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_subscription_ack_resp(out, b"sunsubscribe", args, false);
     }
 }
 

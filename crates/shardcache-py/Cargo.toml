@@ -26,7 +26,7 @@ core_affinity = { workspace = true }
 dashmap = "6.1"
 libc = { workspace = true }
 shardmap = { workspace = true, default-features = false, features = ["sharded"] }
-shardcache-runtime = { path = "../shardcache-runtime", version = "0.1.0" }
+shardcache-runtime = { path = "../shardcache-runtime", version = "0.2.0" }
 shardcache-client-rs = { workspace = true }
 pyo3 = { version = "0.23", features = ["abi3-py311"] }
 xxhash-rust = { workspace = true }

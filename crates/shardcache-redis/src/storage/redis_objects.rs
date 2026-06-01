@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicIsize};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize};
+use std::sync::{Condvar, Mutex};
 
 use hashbrown::HashTable;
 use indextreemap::IndexTreeSet;
@@ -92,6 +93,9 @@ pub(crate) struct RedisObjectStore {
 pub(crate) struct RedisObjectShard {
     buckets: Vec<RwLock<RedisObjectBucket>>,
     object_count: AtomicIsize,
+    wait_generation: Mutex<u64>,
+    waiter_count: AtomicUsize,
+    wait_condvar: Condvar,
 }
 
 #[derive(Debug, Default)]
@@ -101,6 +105,11 @@ pub(crate) struct RedisObjectBucket {
     sets: SlotMap,
     zsets: SlotMap,
     expire_at_ms: FastHashMap<Bytes, u64>,
+    /// Per-field hash TTLs (Redis 7.2+): hash key -> field -> absolute unix ms.
+    /// Empty until the first HEXPIRE-family call, so TTL-free hashes cost
+    /// nothing. A field is logically gone once `now_ms >= its value`; reads
+    /// filter lazily and writes purge opportunistically.
+    hash_field_expire_at_ms: FastHashMap<Bytes, FastHashMap<Bytes, u64>>,
     hash_slab: ObjectSlab<HashObject>,
     list_slab: ObjectSlab<ListObject>,
     set_slab: ObjectSlab<SetObject>,
@@ -225,6 +234,11 @@ impl Ord for ZSetOrderKey {
 mod bucket_core;
 #[path = "redis_objects/bucket_hash.rs"]
 mod bucket_hash;
+#[path = "redis_objects/bucket_hash_ttl.rs"]
+mod bucket_hash_ttl;
+pub(crate) use bucket_hash_ttl::{
+    HashFieldExpireCond, HashFieldGetExpireAction, HashFieldSetCondition, HashFieldSetExpireAction,
+};
 #[path = "redis_objects/bucket_list.rs"]
 mod bucket_list;
 #[path = "redis_objects/bucket_set.rs"]

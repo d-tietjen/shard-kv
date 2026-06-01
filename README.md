@@ -17,14 +17,15 @@ GET payloads. Treat those as hardware-specific proof rows, not universal
 numbers; the memory-ceiling report records the denominator for local
 hardware-scaled claims.
 
-This workspace contains two related sharded key/value surfaces:
+This workspace contains four publishable Rust crate surfaces:
 
 - `shardmap`: the published embedded Rust map/cache crate.
-- `shardcache`: the source-only Redis/Valkey-style server and Docker image.
+- `shardcache`: the Redis/Valkey-style server and Docker image.
+- `shardcache-redis`: the Redis/Valkey compatibility command source package.
+- `shardcache-client-rs`: the blocking Rust SCNP client.
 
-The 0.1.x crates.io release ships only `shardmap` and
-`shardcache-client-rs`. The server, Docker image, Python bindings, and
-integration packages are built from this repository.
+Python, C ABI, runtime, benchmark, and integration packages remain built from
+this repository for now.
 
 ## Start Here
 
@@ -35,7 +36,7 @@ integration packages are built from this repository.
 | Native Rust client | [`crates/shardcache-client-rs/README.md`](crates/shardcache-client-rs/README.md) | You want a blocking Rust client for shardcache over SCNP, including optional Redis command helpers. |
 | LMCache storage backend | [`integrations/lmcache_storage_backend/README.md`](integrations/lmcache_storage_backend/README.md) | You want LMCache to store KV-cache payloads in embedded shardcache or a shardcache TCP server. |
 | vLLM/direct runtime | [`crates/shardcache-runtime/README.md`](crates/shardcache-runtime/README.md) | You want the experimental host/GPU restore path, including CUDA direct-DMA scaffolding. |
-| shardcache Docker/server | [`docs/SHARDCACHE_DOCKER.md`](docs/SHARDCACHE_DOCKER.md) | You want to build and run the source-only server locally or in a private container registry. |
+| shardcache Docker/server | [`docs/SHARDCACHE_DOCKER.md`](docs/SHARDCACHE_DOCKER.md) | You want to build and run the server locally or in a private container registry. |
 | Benchmarks | [`benchmarks/README.md`](benchmarks/README.md) | You want reproducible head-to-head and hardware-ceiling artifacts. |
 | Prefix-aware eviction | [`docs/PREFIX_AWARE_EVICTION.md`](docs/PREFIX_AWARE_EVICTION.md) | You want the feature-gated KV-cache hit-rate policy boundary beyond LRU/LFU. |
 
@@ -45,7 +46,7 @@ Embedded `shardmap`:
 
 ```toml
 [dependencies]
-shardmap = "0.1.0"
+shardmap = "0.2.0"
 ```
 
 ```rust
@@ -56,7 +57,7 @@ cache.insert_slice(b"user:42", b"ready");
 assert_eq!(cache.get_owned(b"user:42").unwrap().as_ref(), b"ready");
 ```
 
-Source-built `shardcache` server:
+`shardcache` server:
 
 ```sh
 cargo run -p shardcache -- --bind-addr 127.0.0.1:6380 --disable-persistence
@@ -168,9 +169,9 @@ optional metadata argument.
 ## Workspace
 
 - `crates/shardmap`: published embedded sharded map/cache crate plus shared internals.
+- `crates/shardcache`: published Redis/Valkey-compatible server package and binary.
+- `crates/shardcache-redis`: published Redis/Valkey compatibility source package.
 - `crates/shardcache-client-rs`: published blocking Rust client for SCNP.
-- `crates/shardcache`: source-only server package and binary.
-- `crates/shardcache-redis`: source-only Redis/Valkey compatibility package.
 - `crates/shardcache-py`: source-only PyO3 bindings for Python integrations.
 - `integrations`: LMCache and model-serving integration adapters.
 - `benchmarks`: benchmark and compatibility harnesses.

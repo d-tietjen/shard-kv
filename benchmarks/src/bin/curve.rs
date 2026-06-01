@@ -175,6 +175,7 @@ fn main() -> Result<(), BoxError> {
                 read_mode: args.read_mode,
                 ..BenchmarkCacheConfig::default()
             },
+            0,
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -209,12 +210,10 @@ fn parse_rates(s: &str) -> Result<Vec<u64>, BoxError> {
     s.split(',')
         .map(|tok| {
             let tok = tok.trim();
-            let (digits, mul) = if let Some(d) = tok.strip_suffix(['K', 'k']) {
-                (d, 1_000u64)
-            } else if let Some(d) = tok.strip_suffix(['M', 'm']) {
-                (d, 1_000_000u64)
-            } else {
-                (tok, 1u64)
+            let (digits, mul) = match (tok.strip_suffix(['K', 'k']), tok.strip_suffix(['M', 'm'])) {
+                (Some(digits), _) => (digits, 1_000u64),
+                (None, Some(digits)) => (digits, 1_000_000u64),
+                (None, None) => (tok, 1u64),
             };
             let n: f64 = digits.parse().map_err(|e| format!("rate `{tok}`: {e}"))?;
             Ok((n * mul as f64) as u64)
@@ -223,12 +222,10 @@ fn parse_rates(s: &str) -> Result<Vec<u64>, BoxError> {
 }
 
 fn fmt_rate(r: f64) -> String {
-    if r >= 1_000_000.0 {
-        format!("{:.2}M", r / 1_000_000.0)
-    } else if r >= 1_000.0 {
-        format!("{:.1}K", r / 1_000.0)
-    } else {
-        format!("{r:.0}")
+    match r {
+        r if r >= 1_000_000.0 => format!("{:.2}M", r / 1_000_000.0),
+        r if r >= 1_000.0 => format!("{:.1}K", r / 1_000.0),
+        r => format!("{r:.0}"),
     }
 }
 

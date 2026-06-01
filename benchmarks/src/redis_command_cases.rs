@@ -14,6 +14,8 @@ pub enum RedisCommandFamily {
     List,
     Set,
     ZSet,
+    Vector,
+    Module,
 }
 
 impl RedisCommandFamily {
@@ -33,6 +35,8 @@ impl RedisCommandFamily {
             Self::List => "list",
             Self::Set => "set",
             Self::ZSet => "zset",
+            Self::Vector => "vector",
+            Self::Module => "module",
         }
     }
 }
@@ -45,6 +49,7 @@ pub enum RedisCommandProfile {
     Small,
     Large,
     Destructive,
+    Module,
 }
 
 impl RedisCommandProfile {
@@ -53,6 +58,7 @@ impl RedisCommandProfile {
             Self::Small => "small",
             Self::Large => "large",
             Self::Destructive => "destructive",
+            Self::Module => "module",
         }
     }
 }
@@ -67,6 +73,7 @@ pub struct RedisCommandCase {
     pub script: RedisCommandSetup,
     pub setup: RedisCommandSetup,
     pub expect_error: bool,
+    pub ignore_setup_error: bool,
 }
 
 impl RedisCommandCase {
@@ -101,6 +108,7 @@ macro_rules! case {
             script: &[],
             setup: &[],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
@@ -116,6 +124,7 @@ macro_rules! error_case {
             script: &[],
             setup: &[],
             expect_error: true,
+            ignore_setup_error: false,
         }
     };
 }
@@ -137,6 +146,7 @@ macro_rules! case_with_setup {
             script: &[],
             setup: &[$(&[$($setup_part),+] as RedisCommandParts),*],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
@@ -158,6 +168,7 @@ macro_rules! case_script {
             script: &[$(&[$($script_part),+] as RedisCommandParts),+],
             setup: &[],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
@@ -179,6 +190,7 @@ macro_rules! destructive_case_script {
             script: &[$(&[$($script_part),+] as RedisCommandParts),+],
             setup: &[],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
@@ -200,9 +212,15 @@ macro_rules! large_case {
             script: &[],
             setup: &[$(&[$($setup_part),+] as RedisCommandParts),*],
             expect_error: false,
+            ignore_setup_error: false,
         }
     };
 }
+
+#[path = "redis_module_command_cases.rs"]
+mod redis_module_command_cases;
+
+pub use redis_module_command_cases::REDIS_MODULE_COMMAND_CASES;
 
 pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Connection, "AUTH", "AUTH", ["AUTH", "unused"]),
@@ -210,6 +228,7 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Connection, "ECHO", "ECHO", ["ECHO", "hello"]),
     case!(Connection, "HELLO", "HELLO 2", ["HELLO", "2"]),
     case!(Connection, "SELECT", "SELECT", ["SELECT", "0"]),
+    case!(Connection, "RESET", "RESET", ["RESET"]),
     case!(
         Connection,
         "CLIENT",
@@ -269,6 +288,12 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "EVAL return bulk",
         ["EVAL", "return 'ok'", "0"]
     ),
+    case!(
+        Scripting,
+        "EVAL_RO",
+        "EVAL_RO return bulk",
+        ["EVAL_RO", "return 'ok'", "0"]
+    ),
     case_with_setup!(
         Scripting,
         "EVALSHA",
@@ -276,6 +301,30 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["EVALSHA", "34f6a80fdc91746367dd8b572351df66b92c67ed", "0"],
         [["SCRIPT", "LOAD", "return 'ok'"]]
     ),
+    case_with_setup!(
+        Scripting,
+        "EVALSHA_RO",
+        "EVALSHA_RO return bulk",
+        [
+            "EVALSHA_RO",
+            "34f6a80fdc91746367dd8b572351df66b92c67ed",
+            "0"
+        ],
+        [["SCRIPT", "LOAD", "return 'ok'"]]
+    ),
+    error_case!(
+        Scripting,
+        "FCALL",
+        "FCALL missing function",
+        ["FCALL", "missing", "0"]
+    ),
+    error_case!(
+        Scripting,
+        "FCALL_RO",
+        "FCALL_RO missing function",
+        ["FCALL_RO", "missing", "0"]
+    ),
+    case!(Scripting, "FUNCTION", "FUNCTION LIST", ["FUNCTION", "LIST"]),
     case!(
         Scripting,
         "SCRIPT",
@@ -323,16 +372,207 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     error_case!(Server, "SHUTDOWN", "SHUTDOWN disabled", ["SHUTDOWN"]),
     case!(Server, "SLOWLOG", "SLOWLOG LEN", ["SLOWLOG", "LEN"]),
     case!(Server, "SORT", "SORT missing", ["SORT", "sort-missing"]),
+    case_with_setup!(
+        Server,
+        "SORT_RO",
+        "SORT_RO list",
+        ["SORT_RO", "sortrok"],
+        [["RPUSH", "sortrok", "3", "1", "2"]]
+    ),
     case!(Server, "SWAPDB", "SWAPDB 0 0", ["SWAPDB", "0", "0"]),
     error_case!(Server, "SYNC", "SYNC unsupported", ["SYNC"]),
     case!(Server, "WAIT", "WAIT", ["WAIT", "1", "1"]),
+    case!(
+        Server,
+        "WAITAOF",
+        "WAITAOF no aof",
+        ["WAITAOF", "0", "0", "0"]
+    ),
+    case_with_setup!(
+        Vector,
+        "VADD",
+        "VADD update 16d",
+        [
+            "VADD",
+            "$key:vset-vadd",
+            "$vector-values:16:7",
+            "elem:000007",
+            "SETATTR",
+            "{\"group\":3,\"keep\":true}"
+        ],
+        [["$vector-fixture:vset-vadd:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VCARD",
+        "VCARD 256 vectors",
+        ["VCARD", "$key:vset-card"],
+        [["$vector-fixture:vset-card:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VDIM",
+        "VDIM 16d",
+        ["VDIM", "$key:vset-dim"],
+        [["$vector-fixture:vset-dim:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VEMB",
+        "VEMB raw 16d",
+        ["VEMB", "$key:vset-emb", "elem:000001", "RAW"],
+        [["$vector-fixture:vset-emb:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VGETATTR",
+        "VGETATTR json",
+        ["VGETATTR", "$key:vset-attr", "elem:000001"],
+        [["$vector-fixture:vset-attr:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VINFO",
+        "VINFO 256 vectors",
+        ["VINFO", "$key:vset-info"],
+        [["$vector-fixture:vset-info:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VISMEMBER",
+        "VISMEMBER hit",
+        ["VISMEMBER", "$key:vset-member", "elem:000001"],
+        [["$vector-fixture:vset-member:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VLINKS",
+        "VLINKS with scores",
+        ["VLINKS", "$key:vset-links", "elem:000001", "WITHSCORES"],
+        [["$vector-fixture:vset-links:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VRANDMEMBER",
+        "VRANDMEMBER count",
+        ["VRANDMEMBER", "$key:vset-rand", "8"],
+        [["$vector-fixture:vset-rand:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VRANGE",
+        "VRANGE lex count",
+        [
+            "VRANGE",
+            "$key:vset-range",
+            "[elem:000000",
+            "[elem:999999",
+            "32"
+        ],
+        [["$vector-fixture:vset-range:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VREM",
+        "VREM miss",
+        ["VREM", "$key:vset-rem", "elem:999999"],
+        [["$vector-fixture:vset-rem:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSETATTR",
+        "VSETATTR update json",
+        [
+            "VSETATTR",
+            "$key:vset-setattr",
+            "elem:000001",
+            "{\"group\":1,\"keep\":true,\"updated\":true}"
+        ],
+        [["$vector-fixture:vset-setattr:256:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSIM",
+        "VSIM ele hnsw",
+        [
+            "VSIM",
+            "$key:vset-sim",
+            "ELE",
+            "elem:000001",
+            "COUNT",
+            "10",
+            "EF",
+            "64"
+        ],
+        [["$vector-fixture:vset-sim:1024:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSIM",
+        "VSIM values hnsw",
+        [
+            "VSIM",
+            "$key:vset-sim-values",
+            "$vector-values:16:1",
+            "COUNT",
+            "10",
+            "EF",
+            "64"
+        ],
+        [["$vector-fixture:vset-sim-values:1024:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSIM",
+        "VSIM filter exact",
+        [
+            "VSIM",
+            "$key:vset-sim-filter",
+            "ELE",
+            "elem:000001",
+            "COUNT",
+            "10",
+            "FILTER",
+            ".group == 1"
+        ],
+        [["$vector-fixture:vset-sim-filter:1024:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSIM",
+        "VSIM truth exact",
+        [
+            "VSIM",
+            "$key:vset-sim-truth",
+            "ELE",
+            "elem:000001",
+            "COUNT",
+            "10",
+            "TRUTH"
+        ],
+        [["$vector-fixture:vset-sim-truth:1024:16"]]
+    ),
+    case!(Server, "ACL", "ACL WHOAMI", ["ACL", "WHOAMI"]),
+    error_case!(Server, "FAILOVER", "FAILOVER unsupported", ["FAILOVER"]),
     case!(
         PubSub,
         "PUBLISH",
         "PUBLISH no subscribers",
         ["PUBLISH", "$key:bench-channel", "payload"]
     ),
+    case!(
+        PubSub,
+        "SPUBLISH",
+        "SPUBLISH no subscribers",
+        ["SPUBLISH", "$key:bench-shard-channel", "payload"]
+    ),
     case!(PubSub, "PUBSUB", "PUBSUB NUMPAT", ["PUBSUB", "NUMPAT"]),
+    case!(
+        PubSub,
+        "PUBSUB",
+        "PUBSUB SHARDNUMSUB",
+        ["PUBSUB", "SHARDNUMSUB", "$key:bench-shard-channel"]
+    ),
     case!(
         PubSub,
         "SUBSCRIBE",
@@ -353,9 +593,21 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(
         PubSub,
+        "SSUBSCRIBE",
+        "SSUBSCRIBE ack",
+        ["SSUBSCRIBE", "$key:bench-shard-channel"]
+    ),
+    case!(
+        PubSub,
         "PUNSUBSCRIBE",
         "PUNSUBSCRIBE ack",
         ["PUNSUBSCRIBE", "$key:bench-*"]
+    ),
+    case!(
+        PubSub,
+        "SUNSUBSCRIBE",
+        "SUNSUBSCRIBE ack",
+        ["SUNSUBSCRIBE", "$key:bench-shard-channel"]
     ),
     case_script!(
         Transaction,
@@ -568,7 +820,7 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "RENAME",
         "RENAME b to a",
         ["RENAME", "rename-b", "rename-a"],
-        [["SET", "rename-a", "v"]]
+        [["SET", "rename-b", "v"]]
     ),
     case_with_setup!(
         Key,
@@ -651,6 +903,13 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ],
         [["SET", "$key:bitfield-bench", "AB"]]
     ),
+    case_with_setup!(
+        String,
+        "BITFIELD_RO",
+        "BITFIELD_RO GET",
+        ["BITFIELD_RO", "$key:bitfield-ro-bench", "GET", "u8", "0"],
+        [["SET", "$key:bitfield-ro-bench", "AB"]]
+    ),
     case!(String, "GETSET", "GETSET", ["GETSET", "s", "old"]),
     case_with_setup!(
         String,
@@ -660,6 +919,23 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         [["SET", "$key:getex-bench", "v"]]
     ),
     case!(String, "GETDEL", "GETDEL", ["GETDEL", "s-del"]),
+    case_with_setup!(
+        String,
+        "LCS",
+        "LCS LEN",
+        ["LCS", "lcs-a", "lcs-b", "LEN"],
+        [["SET", "lcs-a", "ohmytext"], ["SET", "lcs-b", "mynewtext"]]
+    ),
+    case_with_setup!(
+        String,
+        "STRALGO",
+        "STRALGO LCS LEN",
+        ["STRALGO", "LCS", "stralgo-a", "stralgo-b", "LEN"],
+        [
+            ["SET", "stralgo-a", "ohmytext"],
+            ["SET", "stralgo-b", "mynewtext"]
+        ]
+    ),
     case!(String, "INCR", "INCR", ["INCR", "n"]),
     case!(String, "INCRBY", "INCRBY", ["INCRBY", "n", "4"]),
     case!(String, "DECR", "DECR", ["DECR", "n"]),
@@ -774,6 +1050,43 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         "GEORADIUSBYMEMBER_RO",
         ["GEORADIUSBYMEMBER_RO", "$key:geo", "empire", "2", "km"],
         [["GEOADD", "$key:geo", "-73.9857", "40.7484", "empire"]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEOSEARCH",
+        "GEOSEARCH radius",
+        [
+            "GEOSEARCH",
+            "$key:geo",
+            "FROMMEMBER",
+            "empire",
+            "BYRADIUS",
+            "2",
+            "km"
+        ],
+        [[
+            "GEOADD", "$key:geo", "-73.9857", "40.7484", "empire", "-73.9897", "40.7411",
+            "flatiron"
+        ]]
+    ),
+    case_with_setup!(
+        Geo,
+        "GEOSEARCHSTORE",
+        "GEOSEARCHSTORE radius",
+        [
+            "GEOSEARCHSTORE",
+            "$key:geo-store",
+            "$key:geo",
+            "FROMMEMBER",
+            "empire",
+            "BYRADIUS",
+            "2",
+            "km"
+        ],
+        [[
+            "GEOADD", "$key:geo", "-73.9857", "40.7484", "empire", "-73.9897", "40.7411",
+            "flatiron"
+        ]]
     ),
     case!(
         Stream,
@@ -939,6 +1252,24 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case_with_setup!(
         Stream,
+        "XAUTOCLAIM",
+        "XAUTOCLAIM empty",
+        [
+            "XAUTOCLAIM",
+            "$key:stream-xautoclaim",
+            "g",
+            "c2",
+            "0",
+            "0-0"
+        ],
+        [
+            ["DEL", "$key:stream-xautoclaim"],
+            ["XADD", "$key:stream-xautoclaim", "1-0", "field", "value"],
+            ["XGROUP", "CREATE", "$key:stream-xautoclaim", "g", "0-0"]
+        ]
+    ),
+    case_with_setup!(
+        Stream,
         "XACK",
         "XACK empty",
         ["XACK", "$key:stream-xack", "g", "1-0"],
@@ -977,6 +1308,31 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["HMSET", "hm", "f1", "v1", "f2", "v2"]
     ),
     case!(Hash, "HGET", "HGET", ["HGET", "h", "f1"]),
+    case_script!(
+        Hash,
+        "HGETDEL",
+        "HGETDEL field",
+        ["HGETDEL", "$key:hgetdel-bench", "FIELDS", "1", "f1"],
+        [
+            ["HSET", "$key:hgetdel-bench", "f1", "v1"],
+            ["HGETDEL", "$key:hgetdel-bench", "FIELDS", "1", "f1"]
+        ]
+    ),
+    case_with_setup!(
+        Hash,
+        "HGETEX",
+        "HGETEX EX field",
+        [
+            "HGETEX",
+            "$key:hgetex-bench",
+            "EX",
+            "60",
+            "FIELDS",
+            "1",
+            "f1"
+        ],
+        [["HSET", "$key:hgetex-bench", "f1", "v1"]]
+    ),
     case!(
         Hash,
         "HMGET",
@@ -985,7 +1341,85 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(Hash, "HLEN", "HLEN", ["HLEN", "h"]),
     case!(Hash, "HEXISTS", "HEXISTS", ["HEXISTS", "h", "f2"]),
+    case_with_setup!(
+        Hash,
+        "HEXPIRE",
+        "HEXPIRE field",
+        ["HEXPIRE", "hflds", "100", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HTTL",
+        "HTTL field",
+        ["HTTL", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPTTL",
+        "HPTTL field",
+        ["HPTTL", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HEXPIRETIME",
+        "HEXPIRETIME field",
+        ["HEXPIRETIME", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPEXPIRETIME",
+        "HPEXPIRETIME field",
+        ["HPEXPIRETIME", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPERSIST",
+        "HPERSIST field",
+        ["HPERSIST", "hflds", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPEXPIRE",
+        "HPEXPIRE field",
+        ["HPEXPIRE", "hflds", "100000", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HEXPIREAT",
+        "HEXPIREAT field",
+        ["HEXPIREAT", "hflds", "4102444800", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
+    case_with_setup!(
+        Hash,
+        "HPEXPIREAT",
+        "HPEXPIREAT field",
+        ["HPEXPIREAT", "hflds", "4102444800000", "FIELDS", "1", "f1"],
+        [["HSET", "hflds", "f1", "v1"]]
+    ),
     case!(Hash, "HSETNX", "HSETNX", ["HSETNX", "h", "f3", "v3"]),
+    case!(
+        Hash,
+        "HSETEX",
+        "HSETEX EX field",
+        [
+            "HSETEX",
+            "$key:hsetex-bench",
+            "EX",
+            "60",
+            "FIELDS",
+            "1",
+            "f1",
+            "v1"
+        ]
+    ),
     case_with_setup!(
         Hash,
         "HSTRLEN",
@@ -1042,8 +1476,21 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     ),
     case!(List, "LLEN", "LLEN", ["LLEN", "l"]),
     case!(List, "LINDEX", "LINDEX", ["LINDEX", "l", "1"]),
-    case!(List, "LSET", "LSET", ["LSET", "l", "1", "B"]),
+    case_with_setup!(
+        List,
+        "LSET",
+        "LSET",
+        ["LSET", "l", "1", "B"],
+        [["RPUSH", "l", "a", "b", "c"]]
+    ),
     case!(List, "LREM", "LREM", ["LREM", "l", "0", "B"]),
+    case_with_setup!(
+        List,
+        "LPOS",
+        "LPOS rank count",
+        ["LPOS", "lpos-bench", "b", "RANK", "1", "COUNT", "0"],
+        [["RPUSH", "lpos-bench", "a", "b", "c", "b", "b"]]
+    ),
     case!(
         List,
         "LINSERT",
@@ -1111,6 +1558,12 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case!(Set, "SMEMBERS", "SMEMBERS", ["SMEMBERS", "set-a"]),
     case!(Set, "SUNION", "SUNION", ["SUNION", "set-a", "set-b"]),
     case!(Set, "SINTER", "SINTER", ["SINTER", "set-a", "set-b"]),
+    case!(
+        Set,
+        "SINTERCARD",
+        "SINTERCARD limit",
+        ["SINTERCARD", "2", "set-a", "set-b", "LIMIT", "0"]
+    ),
     case!(Set, "SDIFF", "SDIFF", ["SDIFF", "set-a", "set-b"]),
     case!(
         Set,
@@ -1723,6 +2176,7 @@ pub const REDIS_COMMAND_LARGE_CASES: &[RedisCommandCase] = &[
 ];
 
 pub const BENCHMARKED_COMMANDS: &[&str] = &[
+    "ACL",
     "APPEND",
     "ASKING",
     "AUTH",
@@ -1730,6 +2184,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "BGSAVE",
     "BITCOUNT",
     "BITFIELD",
+    "BITFIELD_RO",
     "BITOP",
     "BITPOS",
     "BLMOVE",
@@ -1754,14 +2209,20 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "DUMP",
     "ECHO",
     "EVAL",
+    "EVAL_RO",
     "EVALSHA",
+    "EVALSHA_RO",
     "EXEC",
     "EXISTS",
     "EXPIRE",
     "EXPIREAT",
     "EXPIRETIME",
+    "FAILOVER",
+    "FCALL",
+    "FCALL_RO",
     "FLUSHALL",
     "FLUSHDB",
+    "FUNCTION",
     "GEOADD",
     "GEODIST",
     "GEOHASH",
@@ -1770,6 +2231,8 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "GEORADIUSBYMEMBER",
     "GEORADIUSBYMEMBER_RO",
     "GEORADIUS_RO",
+    "GEOSEARCH",
+    "GEOSEARCHSTORE",
     "GET",
     "GETBIT",
     "GETDEL",
@@ -1779,7 +2242,18 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "HELLO",
     "HDEL",
     "HEXISTS",
+    "HEXPIRE",
+    "HTTL",
+    "HPTTL",
+    "HEXPIRETIME",
+    "HPEXPIRETIME",
+    "HPERSIST",
+    "HPEXPIRE",
+    "HEXPIREAT",
+    "HPEXPIREAT",
     "HGET",
+    "HGETDEL",
+    "HGETEX",
     "HGETALL",
     "HINCRBY",
     "HINCRBYFLOAT",
@@ -1790,6 +2264,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "HRANDFIELD",
     "HSCAN",
     "HSET",
+    "HSETEX",
     "HSETNX",
     "HSTRLEN",
     "HVALS",
@@ -1801,6 +2276,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "KEYS",
     "LASTSAVE",
     "LATENCY",
+    "LCS",
     "LINDEX",
     "LINSERT",
     "LLEN",
@@ -1808,6 +2284,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "LMOVE",
     "LMPOP",
     "LPOP",
+    "LPOS",
     "LPUSH",
     "LPUSHX",
     "LRANGE",
@@ -1849,6 +2326,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "RENAMENX",
     "REPLCONF",
     "REPLICAOF",
+    "RESET",
     "RESTORE",
     "RESTORE-ASKING",
     "ROLE",
@@ -1871,6 +2349,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "SETRANGE",
     "SHUTDOWN",
     "SINTER",
+    "SINTERCARD",
     "SINTERSTORE",
     "SISMEMBER",
     "SLAVEOF",
@@ -1879,15 +2358,20 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "SMISMEMBER",
     "SMOVE",
     "SORT",
+    "SORT_RO",
+    "SPUBLISH",
     "SPOP",
     "SRANDMEMBER",
     "SREM",
+    "SSUBSCRIBE",
     "SSCAN",
+    "STRALGO",
     "STRLEN",
     "SUBSCRIBE",
     "SUBSTR",
     "SUNION",
     "SUNIONSTORE",
+    "SUNSUBSCRIBE",
     "SWAPDB",
     "SYNC",
     "TIME",
@@ -1897,10 +2381,25 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "UNLINK",
     "UNSUBSCRIBE",
     "UNWATCH",
+    "VADD",
+    "VCARD",
+    "VDIM",
+    "VEMB",
+    "VGETATTR",
+    "VINFO",
+    "VISMEMBER",
+    "VLINKS",
+    "VRANDMEMBER",
+    "VRANGE",
+    "VREM",
+    "VSETATTR",
+    "VSIM",
     "WAIT",
+    "WAITAOF",
     "WATCH",
     "XACK",
     "XADD",
+    "XAUTOCLAIM",
     "XCLAIM",
     "XDEL",
     "XGROUP",
@@ -2168,7 +2667,8 @@ mod tests {
 
     use super::{
         BENCHMARKED_COMMANDS, REDIS_5_0_14_COMMANDS, REDIS_5_0_14_EXCLUSIONS, REDIS_COMMAND_CASES,
-        REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES, RedisCommandFamily,
+        REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES, REDIS_MODULE_COMMAND_CASES,
+        RedisCommandFamily, RedisCommandProfile,
     };
 
     fn has_cases<T>(items: &[T]) -> bool {
@@ -2198,6 +2698,22 @@ mod tests {
             extra.is_empty(),
             "benchmark cases include undeclared commands: {extra:?}"
         );
+    }
+
+    #[test]
+    fn module_benchmark_cases_cover_registered_module_commands() {
+        let commands = REDIS_MODULE_COMMAND_CASES
+            .iter()
+            .map(|case| case.command_name)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(commands.len(), 227);
+        assert_eq!(commands.len(), REDIS_MODULE_COMMAND_CASES.len());
+        assert!(REDIS_MODULE_COMMAND_CASES.iter().all(|case| {
+            case.family == RedisCommandFamily::Module
+                && case.profile == RedisCommandProfile::Module
+                && case.ignore_setup_error
+        }));
     }
 
     #[test]
@@ -2285,7 +2801,8 @@ mod tests {
             .map(|case| case.command_name)
             .collect::<BTreeSet<_>>();
         let expected = [
-            "CLUSTER", "HOST:", "MIGRATE", "MONITOR", "MOVE", "POST", "PSYNC", "SHUTDOWN", "SYNC",
+            "CLUSTER", "FAILOVER", "FCALL", "FCALL_RO", "HOST:", "MIGRATE", "MONITOR", "MOVE",
+            "POST", "PSYNC", "SHUTDOWN", "SYNC",
         ]
         .into_iter()
         .collect::<BTreeSet<_>>();

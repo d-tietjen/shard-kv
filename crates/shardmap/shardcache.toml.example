@@ -4,6 +4,10 @@ shard_count = 4
 ttl_sweep_interval_ms = 1000
 stats_interval_ms = 5000
 transaction_mode = "shard_local"
+# "fanout" exposes one public listener. Use "direct_shard" to also expose
+# shard-owned direct ports starting at bind_addr + 1, or at
+# SHARDCACHE_DIRECT_SHARD_BASE_PORT when that environment variable is set.
+server_endpoint_mode = "fanout"
 
 [tiers]
 hot_capacity = 2048

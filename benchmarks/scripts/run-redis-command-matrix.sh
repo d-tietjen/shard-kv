@@ -23,6 +23,7 @@
 #   START_SHARDCACHE=0
 #   DOCKER=0
 #   DOCKER_SERVICES="redis valkey dragonfly"
+#   DOCKER_SERVICES="redis-stack" TARGETS=redis-stack=127.0.0.1:6379 CASES=profile:modules
 #   DOCKER_CPUSET=0
 #   SERVER_DIRECT_SHARD_PORTS=1
 #   SHARDCACHE_DIRECT_SHARD_BASE_PORT=6384
@@ -49,7 +50,7 @@ if [[ "${SERVER_DIRECT_SHARD_PORTS:-0}" != "0" ]]; then
 fi
 
 if [[ "$start_shardcache" == "1" ]]; then
-  cargo build --release -p shardcache --features redis-server --bin shardcache
+  cargo build --release -p shardcache --features "${SHARDCACHE_FEATURES:-redis-server}" --bin shardcache
 fi
 cargo build --release -p shardcache-benchmarks --bin redis_command_matrix
 report_pinning

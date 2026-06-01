@@ -45,7 +45,7 @@ floating helper methods.
 ## Compatibility Staging
 
 Redis/Valkey compatibility is documented by upstream server version and by
-claim strength. For 0.1.0, `docs/REDIS_COMPATIBILITY.md` is the source of
+claim strength. For 0.2.0, `docs/REDIS_COMPATIBILITY.md` is the source of
 truth: it is generated from the live command benchmark registry and currently
 tracks every Redis 5.0.14 command as supported, with standalone-only
 expected-error behavior called out explicitly.
@@ -57,7 +57,7 @@ forms such as `GETDEL`, `GETEX`, `BLMOVE`, `BLMPOP`, `BZMPOP`, `COPY`,
 
 Do not describe this as byte-for-byte Redis server parity. The compatibility
 claim is a Redis/Valkey-compatible cache-command profile with live RESP command
-coverage. Important 0.1.0 caveats:
+coverage. Important 0.2.0 caveats:
 
 - Expected-error standalone commands, including disabled cluster, replication,
   monitor, module, migration, cross-DB, shutdown, and security-warning paths,
@@ -73,13 +73,14 @@ coverage. Important 0.1.0 caveats:
   remains intentionally lightweight.
 - Pub/Sub support covers publish-without-subscribers, subscription and
   unsubscribe acknowledgements, and empty introspection. Persistent subscriber
-  fanout is not part of the 0.1.0 semantics.
+  fanout is not part of the 0.2.0 semantics.
 - HyperLogLog commands return compatible cardinalities for covered operations,
   but use an exact internal representation rather than Redis' binary HLL
   encoding.
-- Blocking list and sorted-set commands are live-tested on ready and
-  short-timeout paths. Long-lived blocking wakeups across clients require
-  separate proofing before being described as full Redis parity.
+- Blocking list and sorted-set commands wait on the owning shard for shard-local
+  key sets, with ready, timeout, and cross-client wakeup paths covered by tests.
+  Empty multi-key waits that span shards return `CROSSSLOT` instead of using a
+  global waiter.
 - RESP2/RESP3 support is covered by protocol tests and command smoke tests, but
   exact error wording and obscure inline-frame edge cases should still be
   checked against the target upstream version before expanding public claims.

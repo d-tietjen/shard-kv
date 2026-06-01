@@ -15,6 +15,8 @@ impl EmbeddedStore {
         let route = self.route_key(&key);
         let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
         #[cfg(feature = "redis")]
+        self.delete_pinned_vector_value_if_distinct(route, &key, now_ms);
+        #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -91,6 +93,8 @@ impl EmbeddedStore {
             false => self.route_key(key),
         };
         #[cfg(feature = "redis")]
+        self.delete_pinned_vector_value_if_distinct(route, key, 0);
+        #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -142,6 +146,8 @@ impl EmbeddedStore {
             false => self.route_key(key),
         };
         #[cfg(feature = "redis")]
+        self.delete_pinned_vector_value_if_distinct(route, key, now_ms);
+        #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
@@ -182,6 +188,8 @@ impl EmbeddedStore {
         V: Into<Bytes>,
     {
         let key = key.into();
+        #[cfg(feature = "redis")]
+        self.delete_pinned_vector_value_if_distinct(route, &key, 0);
         let mut shard = self.shards[route.shard_id].write();
         if let Some(session_prefix) = point_write_session_storage_prefix(&key) {
             shard
@@ -195,6 +203,8 @@ impl EmbeddedStore {
     }
 
     pub fn set_slice_routed_no_ttl(&self, route: EmbeddedKeyRoute, key: &[u8], value: &[u8]) {
+        #[cfg(feature = "redis")]
+        self.delete_pinned_vector_value_if_distinct(route, key, 0);
         let mut shard = self.shards[route.shard_id].write();
         if let Some(session_prefix) = point_write_session_storage_prefix(key) {
             shard

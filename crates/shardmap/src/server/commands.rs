@@ -366,6 +366,20 @@ pub(super) static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis")]
     &crate::commands::admin::DEBUG_COMMAND,
     #[cfg(feature = "redis")]
+    &crate::commands::admin::FAILOVER_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::acl::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::reset::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::lpos::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::lcs::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stralgo::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::stream::XAUTOCLAIM_COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::admin::HOST_WARNING_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::LASTSAVE_COMMAND,
@@ -375,7 +389,7 @@ pub(super) static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::admin::LOLWUT_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::MIGRATE_COMMAND,
-    #[cfg(feature = "redis")]
+    #[cfg(feature = "redis-modules")]
     &crate::commands::admin::MODULE_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::MONITOR_COMMAND,
@@ -414,7 +428,11 @@ pub(super) static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis")]
     &crate::commands::scripting::EVAL_COMMAND,
     #[cfg(feature = "redis")]
+    &crate::commands::scripting::EVAL_RO_COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::scripting::EVALSHA_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::scripting::EVALSHA_RO_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::scripting::SCRIPT_COMMAND,
     #[cfg(feature = "redis")]
@@ -431,10 +449,18 @@ pub(super) static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::flush::FLUSHDB_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::flush::FLUSHALL_COMMAND,
+    #[cfg(feature = "redis-functions")]
+    &crate::commands::function_cmd::FUNCTION_COMMAND,
+    #[cfg(feature = "redis-functions")]
+    &crate::commands::function_cmd::FCALL_COMMAND,
+    #[cfg(feature = "redis-functions")]
+    &crate::commands::function_cmd::FCALL_RO_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::memory::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::pubsub::PUBLISH_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::SPUBLISH_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::pubsub::PUBSUB_COMMAND,
     #[cfg(feature = "redis")]
@@ -445,6 +471,10 @@ pub(super) static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::pubsub::PSUBSCRIBE_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::pubsub::PUNSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::SSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::SUNSUBSCRIBE_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::hll::PFADD_COMMAND,
     #[cfg(feature = "redis")]
@@ -471,6 +501,10 @@ pub(super) static RAW_DIRECT_CATALOG: &[&dyn RawDirectCommand] = &[
     &crate::commands::geo::GEORADIUS_RO_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::geo::GEORADIUSBYMEMBER_RO_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEOSEARCH_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEOSEARCHSTORE_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::stream::XACK_COMMAND,
     #[cfg(feature = "redis")]
@@ -629,10 +663,16 @@ static RAW_DIRECT_LEN_3: &[&dyn RawDirectCommand] = &[
     &crate::commands::set::COMMAND,
     &crate::commands::del::COMMAND,
     &crate::commands::ttl::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::acl::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::lcs::COMMAND,
 ];
 
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_4: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::httl::COMMAND,
     &crate::commands::pttl::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::MOVE_COMMAND,
@@ -663,6 +703,8 @@ static RAW_DIRECT_LEN_4: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis")]
     &crate::commands::llen::COMMAND,
     #[cfg(feature = "redis")]
+    &crate::commands::lpos::COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::copy::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::dump::COMMAND,
@@ -678,6 +720,8 @@ static RAW_DIRECT_LEN_4: &[&dyn RawDirectCommand] = &[
 
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_5: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::hpttl::COMMAND,
     &crate::commands::getex::COMMAND,
     &crate::commands::setex::COMMAND,
     #[cfg(feature = "redis")]
@@ -686,6 +730,10 @@ static RAW_DIRECT_LEN_5: &[&dyn RawDirectCommand] = &[
     &crate::commands::admin::HOST_WARNING_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::PSYNC_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::reset::COMMAND,
+    #[cfg(feature = "redis-functions")]
+    &crate::commands::function_cmd::FCALL_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::touch::COMMAND,
     #[cfg(feature = "redis")]
@@ -739,7 +787,7 @@ static RAW_DIRECT_LEN_6: &[&dyn RawDirectCommand] = &[
     &crate::commands::admin::BGSAVE_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::LOLWUT_COMMAND,
-    #[cfg(feature = "redis")]
+    #[cfg(feature = "redis-modules")]
     &crate::commands::admin::MODULE_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::SWAPDB_COMMAND,
@@ -749,6 +797,8 @@ static RAW_DIRECT_LEN_6: &[&dyn RawDirectCommand] = &[
     &crate::commands::object::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::memory::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::client::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::pubsub::PUBSUB_COMMAND,
     #[cfg(feature = "redis")]
@@ -799,8 +849,14 @@ static RAW_DIRECT_LEN_6: &[&dyn RawDirectCommand] = &[
 
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_7: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::SORT_RO_COMMAND,
     &crate::commands::pexpire::COMMAND,
     &crate::commands::persist::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::waitaof::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hexpire::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::CLUSTER_COMMAND,
     #[cfg(feature = "redis")]
@@ -816,6 +872,8 @@ static RAW_DIRECT_LEN_7: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis")]
     &crate::commands::scripting::EVALSHA_COMMAND,
     #[cfg(feature = "redis")]
+    &crate::commands::scripting::EVAL_RO_COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::flush::FLUSHDB_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::pubsub::PUBLISH_COMMAND,
@@ -830,6 +888,8 @@ static RAW_DIRECT_LEN_7: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis")]
     &crate::commands::geo::GEOHASH_COMMAND,
     #[cfg(feature = "redis")]
+    &crate::commands::stralgo::COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::restore::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::hstrlen::COMMAND,
@@ -840,7 +900,19 @@ static RAW_DIRECT_LEN_7: &[&dyn RawDirectCommand] = &[
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_8: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis")]
+    &crate::commands::hpersist::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hpexpire::COMMAND,
+    #[cfg(feature = "redis-functions")]
+    &crate::commands::function_cmd::FUNCTION_COMMAND,
+    #[cfg(feature = "redis-functions")]
+    &crate::commands::function_cmd::FCALL_RO_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::SPUBLISH_COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::expireat::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::admin::FAILOVER_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::LASTSAVE_COMMAND,
     #[cfg(feature = "redis")]
@@ -870,6 +942,8 @@ static RAW_DIRECT_LEN_8: &[&dyn RawDirectCommand] = &[
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_9: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis")]
+    &crate::commands::hexpireat::COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::pexpireat::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::READWRITE_COMMAND,
@@ -881,6 +955,8 @@ static RAW_DIRECT_LEN_9: &[&dyn RawDirectCommand] = &[
     &crate::commands::pubsub::SUBSCRIBE_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::geo::GEORADIUS_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEOSEARCH_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::stream::XREVRANGE_COMMAND,
     #[cfg(feature = "redis")]
@@ -894,23 +970,37 @@ static RAW_DIRECT_LEN_9: &[&dyn RawDirectCommand] = &[
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_10: &[&dyn RawDirectCommand] = &[
     #[cfg(feature = "redis")]
+    &crate::commands::hpexpireat::COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::expiretime::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::pubsub::PSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::SSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::scripting::EVALSHA_RO_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::hll::PFSELFTEST_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::stream::XREADGROUP_COMMAND,
     #[cfg(feature = "redis")]
+    &crate::commands::stream::XAUTOCLAIM_COMMAND,
+    #[cfg(feature = "redis")]
     &crate::commands::brpoplpush::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::smismember::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::sintercard::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::zintercard::COMMAND,
 ];
 
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_11: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::bitfield_ro::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::hexpiretime::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::pexpiretime::COMMAND,
     #[cfg(feature = "redis")]
@@ -925,11 +1015,15 @@ static RAW_DIRECT_LEN_11: &[&dyn RawDirectCommand] = &[
 
 #[cfg(feature = "embedded")]
 static RAW_DIRECT_LEN_12: &[&dyn RawDirectCommand] = &[
+    #[cfg(feature = "redis")]
+    &crate::commands::hpexpiretime::COMMAND,
     &crate::commands::semantic::SEMANTIC_SET_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::admin::BGREWRITEAOF_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::pubsub::PUNSUBSCRIBE_COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::pubsub::SUNSUBSCRIBE_COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::geo::GEORADIUS_RO_COMMAND,
 ];
@@ -946,6 +1040,8 @@ static RAW_DIRECT_LEN_14: &[&dyn RawDirectCommand] = &[
     &crate::commands::zrevrangebylex::COMMAND,
     #[cfg(feature = "redis")]
     &crate::commands::zremrangebylex::COMMAND,
+    #[cfg(feature = "redis")]
+    &crate::commands::geo::GEOSEARCHSTORE_COMMAND,
 ];
 
 #[cfg(feature = "embedded")]
@@ -1147,6 +1243,90 @@ fn find_hot_raw_command(command: &[u8]) -> Option<&'static dyn RawDirectCommand>
         #[cfg(feature = "redis")]
         4 if command.eq_ignore_ascii_case(b"ECHO") => Some(&crate::commands::echo::COMMAND),
         #[cfg(feature = "redis")]
+        3 if command.eq_ignore_ascii_case(b"ACL") => Some(&crate::commands::acl::COMMAND),
+        #[cfg(feature = "redis")]
+        3 if command.eq_ignore_ascii_case(b"LCS") => Some(&crate::commands::lcs::COMMAND),
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"LPOS") => Some(&crate::commands::lpos::COMMAND),
+        #[cfg(feature = "redis")]
+        5 if command.eq_ignore_ascii_case(b"RESET") => Some(&crate::commands::reset::COMMAND),
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VADD") => {
+            Some(&crate::commands::vector_set::VADD_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        5 if command.eq_ignore_ascii_case(b"VCARD") => {
+            Some(&crate::commands::vector_set::VCARD_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VDIM") => {
+            Some(&crate::commands::vector_set::VDIM_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VEMB") => {
+            Some(&crate::commands::vector_set::VEMB_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        8 if command.eq_ignore_ascii_case(b"VGETATTR") => {
+            Some(&crate::commands::vector_set::VGETATTR_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        5 if command.eq_ignore_ascii_case(b"VINFO") => {
+            Some(&crate::commands::vector_set::VINFO_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        9 if command.eq_ignore_ascii_case(b"VISMEMBER") => {
+            Some(&crate::commands::vector_set::VISMEMBER_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        6 if command.eq_ignore_ascii_case(b"VLINKS") => {
+            Some(&crate::commands::vector_set::VLINKS_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        11 if command.eq_ignore_ascii_case(b"VRANDMEMBER") => {
+            Some(&crate::commands::vector_set::VRANDMEMBER_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        6 if command.eq_ignore_ascii_case(b"VRANGE") => {
+            Some(&crate::commands::vector_set::VRANGE_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VREM") => {
+            Some(&crate::commands::vector_set::VREM_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        8 if command.eq_ignore_ascii_case(b"VSETATTR") => {
+            Some(&crate::commands::vector_set::VSETATTR_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        4 if command.eq_ignore_ascii_case(b"VSIM") => {
+            Some(&crate::commands::vector_set::VSIM_COMMAND)
+        }
+        #[cfg(feature = "redis-functions")]
+        5 if command.eq_ignore_ascii_case(b"FCALL") => {
+            Some(&crate::commands::function_cmd::FCALL_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        6 if command.eq_ignore_ascii_case(b"CLIENT") => Some(&crate::commands::client::COMMAND),
+        #[cfg(feature = "redis")]
+        6 if command.eq_ignore_ascii_case(b"OBJECT") => Some(&crate::commands::object::COMMAND),
+        #[cfg(feature = "redis-functions")]
+        8 if command.eq_ignore_ascii_case(b"FUNCTION") => {
+            Some(&crate::commands::function_cmd::FUNCTION_COMMAND)
+        }
+        #[cfg(feature = "redis-functions")]
+        8 if command.eq_ignore_ascii_case(b"FCALL_RO") => {
+            Some(&crate::commands::function_cmd::FCALL_RO_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        7 if command.eq_ignore_ascii_case(b"EVAL_RO") => {
+            Some(&crate::commands::scripting::EVAL_RO_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        10 if command.eq_ignore_ascii_case(b"EVALSHA_RO") => {
+            Some(&crate::commands::scripting::EVALSHA_RO_COMMAND)
+        }
+        #[cfg(feature = "redis")]
         6 if command.eq_ignore_ascii_case(b"PUBSUB") => {
             Some(&crate::commands::pubsub::PUBSUB_COMMAND)
         }
@@ -1155,8 +1335,16 @@ fn find_hot_raw_command(command: &[u8]) -> Option<&'static dyn RawDirectCommand>
             Some(&crate::commands::pubsub::PUBLISH_COMMAND)
         }
         #[cfg(feature = "redis")]
+        8 if command.eq_ignore_ascii_case(b"SPUBLISH") => {
+            Some(&crate::commands::pubsub::SPUBLISH_COMMAND)
+        }
+        #[cfg(feature = "redis")]
         9 if command.eq_ignore_ascii_case(b"SUBSCRIBE") => {
             Some(&crate::commands::pubsub::SUBSCRIBE_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        10 if command.eq_ignore_ascii_case(b"SSUBSCRIBE") => {
+            Some(&crate::commands::pubsub::SSUBSCRIBE_COMMAND)
         }
         #[cfg(feature = "redis")]
         10 if command.eq_ignore_ascii_case(b"PSUBSCRIBE") => {
@@ -1169,6 +1357,10 @@ fn find_hot_raw_command(command: &[u8]) -> Option<&'static dyn RawDirectCommand>
         #[cfg(feature = "redis")]
         12 if command.eq_ignore_ascii_case(b"PUNSUBSCRIBE") => {
             Some(&crate::commands::pubsub::PUNSUBSCRIBE_COMMAND)
+        }
+        #[cfg(feature = "redis")]
+        12 if command.eq_ignore_ascii_case(b"SUNSUBSCRIBE") => {
+            Some(&crate::commands::pubsub::SUNSUBSCRIBE_COMMAND)
         }
         _ => None,
     }
@@ -1224,6 +1416,16 @@ impl RawCommandDispatcher {
             .iter()
             .copied()
             .find(|candidate| candidate.matches(command))
+            .or_else(|| {
+                #[cfg(feature = "redis-modules")]
+                {
+                    crate::commands::redis_modules::find_raw_direct_command(command)
+                }
+                #[cfg(not(feature = "redis-modules"))]
+                {
+                    None
+                }
+            })
     }
 
     #[inline(always)]
@@ -1439,6 +1641,58 @@ impl RawCommandDispatcher {
             crate::protocol::FastCommandKind::ZMPop => Some(&crate::commands::zmpop::COMMAND),
             #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::BZMPop => Some(&crate::commands::bzmpop::COMMAND),
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VAdd => {
+                Some(&crate::commands::vector_set::VADD_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VCard => {
+                Some(&crate::commands::vector_set::VCARD_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VDim => {
+                Some(&crate::commands::vector_set::VDIM_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VEmb => {
+                Some(&crate::commands::vector_set::VEMB_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VGetAttr => {
+                Some(&crate::commands::vector_set::VGETATTR_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VInfo => {
+                Some(&crate::commands::vector_set::VINFO_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VIsMember => {
+                Some(&crate::commands::vector_set::VISMEMBER_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VLinks => {
+                Some(&crate::commands::vector_set::VLINKS_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VRandMember => {
+                Some(&crate::commands::vector_set::VRANDMEMBER_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VRange => {
+                Some(&crate::commands::vector_set::VRANGE_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VRem => {
+                Some(&crate::commands::vector_set::VREM_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VSetAttr => {
+                Some(&crate::commands::vector_set::VSETATTR_COMMAND)
+            }
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::VSim => {
+                Some(&crate::commands::vector_set::VSIM_COMMAND)
+            }
             _ => None,
         }
     }

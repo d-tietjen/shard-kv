@@ -42,6 +42,12 @@ mod telemetry;
 pub use command::{BorrowedCommand, Command};
 #[cfg(feature = "sharded")]
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
+#[doc(hidden)]
+pub use embedded_store::ShardArcEmbeddedStore;
+#[cfg(feature = "redis-module-timeseries")]
+pub(crate) use embedded_store::TimeSeriesMultiRangeWriter;
+#[cfg(feature = "redis-module-topk")]
+pub(crate) use embedded_store::TopKError;
 #[cfg(feature = "redis")]
 pub(crate) use embedded_store::{
     DEFAULT_SCAN_COUNT, RedisHashStore, RedisKeyScanType, RedisKeyStore, RedisListStore,
@@ -55,6 +61,8 @@ pub use embedded_store::{
     OwnedEmbeddedShard, OwnedEmbeddedWorkerReadSession, OwnedEmbeddedWorkerShards,
     PackedSessionWrite, shift_for, stripe_index,
 };
+#[cfg(feature = "redis-modules")]
+pub use embedded_store::{RedisModuleApi, RedisModuleApiResult, RedisModuleFamily};
 #[cfg(feature = "sharded")]
 pub use embedded_store_sharded::{
     LocalRouteError, LocalStoreAccessError, LocalStoreInstallError,
@@ -93,6 +101,10 @@ pub use flat_map::FlatMap;
 pub use records::{MutationBytes, MutationOp, MutationRecord, StoredEntry};
 #[cfg(feature = "redis")]
 pub(crate) use redis_objects::{
+    HashFieldExpireCond, HashFieldGetExpireAction, HashFieldSetCondition, HashFieldSetExpireAction,
+};
+#[cfg(feature = "redis")]
+pub(crate) use redis_objects::{
     RedisObjectBucket, RedisObjectReadOutcome, RedisObjectStore, RedisObjectValue,
     RedisObjectWriteAttempt, RedisObjectZSetRangeItem, WRONGTYPE_MESSAGE,
 };
@@ -114,6 +126,8 @@ pub use telemetry::{CacheMetrics, CacheMetricsSnapshot, CacheTelemetry, CacheTel
 
 /// Owned byte buffer used for cache keys and values.
 pub type Bytes = Vec<u8>;
+#[cfg(feature = "redis")]
+pub(crate) const VECTOR_SET_PREFIX: &[u8] = b"FC:VSET:v1\0";
 /// Hash map with the crate's default XXH3 hasher.
 pub type FastHashMap<K, V> = HashMap<K, V, xxhash_rust::xxh3::Xxh3DefaultBuilder>;
 /// Hash set with the crate's default XXH3 hasher.

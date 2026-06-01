@@ -1,5 +1,29 @@
 use super::super::*;
 
+impl EmbeddedStore {
+    pub(crate) fn redis_object_shard_wait_generation(&self, shard_id: usize) -> u64 {
+        self.objects.shard_wait_generation(shard_id)
+    }
+
+    pub(crate) fn wait_for_redis_object_shard_change(
+        &self,
+        shard_id: usize,
+        observed_generation: u64,
+        timeout: Option<std::time::Duration>,
+    ) -> bool {
+        self.objects
+            .wait_for_shard_change(shard_id, observed_generation, timeout)
+    }
+
+    pub(crate) fn notify_redis_object_shard(&self, shard_id: usize) {
+        self.objects.notify_shard_waiters(shard_id);
+    }
+
+    pub(crate) fn notify_redis_object_key(&self, key: &[u8]) {
+        self.notify_redis_object_shard(self.route_key(key).shard_id);
+    }
+}
+
 #[allow(dead_code)]
 pub(crate) trait RedisObjectStoreAccess {
     /// Returns true when Redis object containers are present.
@@ -107,21 +131,32 @@ impl RedisObjectStoreAccess for EmbeddedStore {
             };
         }
         let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-        if bucket.has_expirations() {
-            let now_ms = now_millis();
-            if bucket.object_is_expired(key, now_ms) {
-                drop(bucket);
-                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-                if bucket.delete_expired(key, now_ms) {
-                    self.objects.note_deleted(route.shard_id);
-                }
-                drop(bucket);
-                return if self.string_exists_routed(route, key) {
-                    RedisObjectReadOutcome::WrongType
-                } else {
-                    RedisObjectReadOutcome::Missing
-                };
+        let now_ms = now_millis();
+        if bucket.has_expirations() && bucket.object_is_expired(key, now_ms) {
+            drop(bucket);
+            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+            if bucket.delete_expired(key, now_ms) {
+                self.objects.note_deleted(route.shard_id);
             }
+            drop(bucket);
+            return if self.string_exists_routed(route, key) {
+                RedisObjectReadOutcome::WrongType
+            } else {
+                RedisObjectReadOutcome::Missing
+            };
+        }
+        if bucket.hash_needs_empty_expiry_cleanup(key, now_ms) {
+            drop(bucket);
+            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+            if bucket.remove_expired_hash_if_empty(key, now_ms) {
+                self.objects.note_deleted(route.shard_id);
+            }
+            drop(bucket);
+            return if self.string_exists_routed(route, key) {
+                RedisObjectReadOutcome::WrongType
+            } else {
+                RedisObjectReadOutcome::Missing
+            };
         }
         let outcome = op(&bucket);
         if !matches!(outcome, RedisObjectReadOutcome::Missing) {
@@ -142,21 +177,32 @@ impl RedisObjectStoreAccess for EmbeddedStore {
         op: impl FnOnce(&RedisObjectBucket) -> RedisObjectResult,
     ) -> RedisObjectResult {
         let bucket = self.objects.read_bucket(route.shard_id, route.key_hash);
-        if bucket.has_expirations() {
-            let now_ms = now_millis();
-            if bucket.object_is_expired(key, now_ms) {
-                drop(bucket);
-                let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-                if bucket.delete_expired(key, now_ms) {
-                    self.objects.note_deleted(route.shard_id);
-                }
-                drop(bucket);
-                return if self.string_exists_routed(route, key) {
-                    RedisObjectResult::WrongType
-                } else {
-                    op(&self.objects.read_bucket(route.shard_id, route.key_hash))
-                };
+        let now_ms = now_millis();
+        if bucket.has_expirations() && bucket.object_is_expired(key, now_ms) {
+            drop(bucket);
+            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+            if bucket.delete_expired(key, now_ms) {
+                self.objects.note_deleted(route.shard_id);
             }
+            drop(bucket);
+            return if self.string_exists_routed(route, key) {
+                RedisObjectResult::WrongType
+            } else {
+                op(&self.objects.read_bucket(route.shard_id, route.key_hash))
+            };
+        }
+        if bucket.hash_needs_empty_expiry_cleanup(key, now_ms) {
+            drop(bucket);
+            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+            if bucket.remove_expired_hash_if_empty(key, now_ms) {
+                self.objects.note_deleted(route.shard_id);
+            }
+            drop(bucket);
+            return if self.string_exists_routed(route, key) {
+                RedisObjectResult::WrongType
+            } else {
+                op(&self.objects.read_bucket(route.shard_id, route.key_hash))
+            };
         }
         let result = op(&bucket);
         if matches!(result, RedisObjectResult::WrongType) || bucket.contains_object(key) {
@@ -197,7 +243,10 @@ impl RedisObjectStoreAccess for EmbeddedStore {
     ) -> RedisObjectResult {
         let route = self.route_key_prehashed(key_hash, key);
         let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-        if bucket.has_expirations() && bucket.delete_expired(key, now_millis()) {
+        let now_ms = now_millis();
+        if (bucket.has_expirations() && bucket.delete_expired(key, now_ms))
+            || bucket.remove_expired_hash_if_empty(key, now_ms)
+        {
             self.objects.note_deleted(route.shard_id);
         }
         match existing(&mut bucket, route.key_hash) {
@@ -221,7 +270,10 @@ impl RedisObjectStoreAccess for EmbeddedStore {
         op: impl FnOnce(&mut RedisObjectBucket) -> (RedisObjectResult, bool),
     ) -> RedisObjectResult {
         let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-        if bucket.has_expirations() && bucket.delete_expired(key, now_millis()) {
+        let now_ms = now_millis();
+        if (bucket.has_expirations() && bucket.delete_expired(key, now_ms))
+            || bucket.remove_expired_hash_if_empty(key, now_ms)
+        {
             self.objects.note_deleted(route.shard_id);
         }
         let had_object = bucket.contains_object(key);

@@ -4,8 +4,8 @@ use bytes::BytesMut;
 #[cfg(feature = "server")]
 use crate::commands::redis::write_frame;
 use crate::commands::redis::{
-    bulk, error, frame_from_result, parse_f64, parse_usize, write_resp_array_header,
-    write_resp_null, write_resp_wrong_arity, write_result_resp, wrong_arity,
+    bulk, error, frame_from_result, parse_usize, write_resp_wrong_arity, write_result_resp,
+    wrong_arity,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
@@ -115,7 +115,26 @@ pub(crate) fn blocking_pop(
     if args.len() < 2 {
         return wrong_arity(name);
     }
-    for key in &args[..args.len() - 1] {
+    let keys = &args[..args.len() - 1];
+    let timeout = match crate::commands::blocking::parse_blocking_timeout(args[args.len() - 1]) {
+        Ok(timeout) => timeout,
+        Err(frame) => return frame,
+    };
+    let frame = blocking_pop_once(store, keys, front);
+    if !matches!(frame, Frame::Null) {
+        return frame;
+    }
+    let shard_id = match crate::commands::blocking::single_shard_for_keys(store, keys) {
+        Ok(shard_id) => shard_id,
+        Err(frame) => return frame,
+    };
+    crate::commands::blocking::block_on_shard(store, shard_id, timeout, || {
+        blocking_pop_once(store, keys, front)
+    })
+}
+
+fn blocking_pop_once(store: &EmbeddedStore, keys: &[&[u8]], front: bool) -> Frame {
+    for key in keys {
         let popped = if front {
             store.lpop(key)
         } else {
@@ -142,6 +161,24 @@ pub(crate) fn list_mpop(
         Ok(parsed) => parsed,
         Err(frame) => return frame,
     };
+    if blocking {
+        let frame = list_mpop_once(store, parsed);
+        if !matches!(frame, Frame::Null) {
+            return frame;
+        }
+        let shard_id = match crate::commands::blocking::single_shard_for_keys(store, parsed.keys) {
+            Ok(shard_id) => shard_id,
+            Err(frame) => return frame,
+        };
+        crate::commands::blocking::block_on_shard(store, shard_id, parsed.timeout, || {
+            list_mpop_once(store, parsed)
+        })
+    } else {
+        list_mpop_once(store, parsed)
+    }
+}
+
+fn list_mpop_once(store: &EmbeddedStore, parsed: ListMpopArgs<'_>) -> Frame {
     for key in parsed.keys {
         let popped = if parsed.front {
             store.lpop_count(key, parsed.count)
@@ -164,6 +201,7 @@ struct ListMpopArgs<'a> {
     keys: &'a [&'a [u8]],
     front: bool,
     count: usize,
+    timeout: Option<std::time::Duration>,
 }
 
 fn parse_list_mpop_args<'a>(
@@ -175,14 +213,10 @@ fn parse_list_mpop_args<'a>(
     if args.len() < offset + 3 {
         return Err(wrong_arity(name));
     }
-    if blocking {
-        let Ok(timeout) = parse_f64(args[0]) else {
-            return Err(error("ERR timeout is not a float or out of range"));
-        };
-        if timeout < 0.0 {
-            return Err(error("ERR timeout is negative"));
-        }
-    }
+    let timeout = match blocking {
+        true => crate::commands::blocking::parse_blocking_timeout(args[0])?,
+        false => None,
+    };
     let Ok(numkeys) = parse_usize(args[offset]) else {
         return Err(error("ERR value is not an integer or out of range"));
     };
@@ -220,6 +254,7 @@ fn parse_list_mpop_args<'a>(
         keys: &args[offset + 1..direction_index],
         front,
         count,
+        timeout,
     })
 }
 
@@ -235,26 +270,7 @@ pub(crate) fn write_blocking_pop_resp(
         write_resp_wrong_arity(out, name);
         return;
     }
-    for key in &args[..args.len() - 1] {
-        match if front {
-            store.lpop(key)
-        } else {
-            store.rpop(key)
-        } {
-            crate::storage::RedisObjectResult::Bulk(Some(value)) => {
-                write_resp_array_header(out, 2);
-                ServerWire::write_resp_blob_string(out, key);
-                ServerWire::write_resp_blob_string(out, &value);
-                return;
-            }
-            crate::storage::RedisObjectResult::WrongType => {
-                crate::commands::redis::write_resp_wrongtype(out);
-                return;
-            }
-            _ => {}
-        }
-    }
-    write_resp_null(out);
+    write_frame(out, &blocking_pop(store, args, front, name));
 }
 
 #[cfg(feature = "server")]

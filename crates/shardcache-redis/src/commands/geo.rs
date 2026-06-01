@@ -53,6 +53,13 @@ define_geo_command!(
     "GEORADIUSBYMEMBER_RO",
     false
 );
+define_geo_command!(GeoSearch, GEOSEARCH_COMMAND, "GEOSEARCH", false);
+define_geo_command!(
+    GeoSearchStore,
+    GEOSEARCHSTORE_COMMAND,
+    "GEOSEARCHSTORE",
+    true
+);
 
 impl crate::commands::redis::RedisCommand for GeoAdd {
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
@@ -189,16 +196,12 @@ struct GeoUnit {
 
 impl GeoUnit {
     fn parse(raw: &[u8]) -> Option<Self> {
-        if eq_ignore_ascii_case(raw, b"m") {
-            Some(Self { meters: 1.0 })
-        } else if eq_ignore_ascii_case(raw, b"km") {
-            Some(Self { meters: 1_000.0 })
-        } else if eq_ignore_ascii_case(raw, b"mi") {
-            Some(Self { meters: 1_609.344 })
-        } else if eq_ignore_ascii_case(raw, b"ft") {
-            Some(Self { meters: 0.3048 })
-        } else {
-            None
+        match raw {
+            raw if eq_ignore_ascii_case(raw, b"m") => Some(Self { meters: 1.0 }),
+            raw if eq_ignore_ascii_case(raw, b"km") => Some(Self { meters: 1_000.0 }),
+            raw if eq_ignore_ascii_case(raw, b"mi") => Some(Self { meters: 1_609.344 }),
+            raw if eq_ignore_ascii_case(raw, b"ft") => Some(Self { meters: 0.3048 }),
+            _ => None,
         }
     }
 
@@ -363,16 +366,7 @@ fn georadius_result<'a>(
         GeoRadiusQueryResult::Query(query) => query,
     };
     let mut hits = geo_hits(store, query.key, query.center, query.radius_m)?;
-    match query.options.sort {
-        SortOrder::Asc => hits.sort_by(|left, right| left.distance_m.total_cmp(&right.distance_m)),
-        SortOrder::Desc => {
-            hits.sort_by(|left, right| right.distance_m.total_cmp(&left.distance_m));
-        }
-        SortOrder::None => {}
-    }
-    if let Some(count) = query.options.count {
-        hits.truncate(count);
-    }
+    sort_and_limit_hits(&mut hits, query.options.sort, query.options.count);
     if let Some((dest, store_dist)) = query.options.store {
         store.delete(dest);
         for hit in &hits {
@@ -654,52 +648,60 @@ fn parse_radius_options<'a>(
     let mut index = 0;
     while index < args.len() {
         let option = args[index];
-        if eq_ignore_ascii_case(option, b"WITHCOORD") {
-            options.with_coord = true;
-            index += 1;
-        } else if eq_ignore_ascii_case(option, b"WITHDIST") {
-            options.with_dist = true;
-            index += 1;
-        } else if eq_ignore_ascii_case(option, b"WITHHASH") {
-            options.with_hash = true;
-            index += 1;
-        } else if eq_ignore_ascii_case(option, b"ASC") {
-            options.sort = SortOrder::Asc;
-            index += 1;
-        } else if eq_ignore_ascii_case(option, b"DESC") {
-            options.sort = SortOrder::Desc;
-            index += 1;
-        } else if eq_ignore_ascii_case(option, b"COUNT") {
-            let Some(count) = args.get(index + 1) else {
-                return Err(error("ERR syntax error"));
-            };
-            let Ok(count) = parse_usize(count) else {
-                return Err(error("ERR value is not an integer or out of range"));
-            };
-            options.count = Some(count);
-            index += if args
-                .get(index + 2)
-                .is_some_and(|arg| eq_ignore_ascii_case(arg, b"ANY"))
-            {
-                3
-            } else {
-                2
-            };
-        } else if eq_ignore_ascii_case(option, b"STORE")
-            || eq_ignore_ascii_case(option, b"STOREDIST")
-        {
-            if read_only {
-                return Err(error(
-                    "ERR STORE option is not allowed for read-only GEO command",
-                ));
+        match option {
+            option if eq_ignore_ascii_case(option, b"WITHCOORD") => {
+                options.with_coord = true;
+                index += 1;
             }
-            let Some(dest) = args.get(index + 1) else {
-                return Err(error("ERR syntax error"));
-            };
-            options.store = Some((*dest, eq_ignore_ascii_case(option, b"STOREDIST")));
-            index += 2;
-        } else {
-            return Err(error("ERR syntax error"));
+            option if eq_ignore_ascii_case(option, b"WITHDIST") => {
+                options.with_dist = true;
+                index += 1;
+            }
+            option if eq_ignore_ascii_case(option, b"WITHHASH") => {
+                options.with_hash = true;
+                index += 1;
+            }
+            option if eq_ignore_ascii_case(option, b"ASC") => {
+                options.sort = SortOrder::Asc;
+                index += 1;
+            }
+            option if eq_ignore_ascii_case(option, b"DESC") => {
+                options.sort = SortOrder::Desc;
+                index += 1;
+            }
+            option if eq_ignore_ascii_case(option, b"COUNT") => {
+                let Some(count) = args.get(index + 1) else {
+                    return Err(error("ERR syntax error"));
+                };
+                let Ok(count) = parse_usize(count) else {
+                    return Err(error("ERR value is not an integer or out of range"));
+                };
+                options.count = Some(count);
+                index += if args
+                    .get(index + 2)
+                    .is_some_and(|arg| eq_ignore_ascii_case(arg, b"ANY"))
+                {
+                    3
+                } else {
+                    2
+                };
+            }
+            option
+                if eq_ignore_ascii_case(option, b"STORE")
+                    || eq_ignore_ascii_case(option, b"STOREDIST") =>
+            {
+                if read_only {
+                    return Err(error(
+                        "ERR STORE option is not allowed for read-only GEO command",
+                    ));
+                }
+                let Some(dest) = args.get(index + 1) else {
+                    return Err(error("ERR syntax error"));
+                };
+                options.store = Some((*dest, eq_ignore_ascii_case(option, b"STOREDIST")));
+                index += 2;
+            }
+            _ => return Err(error("ERR syntax error")),
         }
     }
     Ok(options)
@@ -836,4 +838,329 @@ fn format_float(value: f64) -> String {
         out.push('0');
     }
     out
+}
+
+impl crate::commands::redis::RedisCommand for GeoSearch {
+    fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        geo_search(store, args, false)
+    }
+}
+
+impl crate::commands::redis::RedisCommand for GeoSearchStore {
+    fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
+        geo_search(store, args, true)
+    }
+}
+
+/// One of the two GEOSEARCH search shapes.
+enum SearchShape {
+    Radius(f64),
+    Box { width_m: f64, height_m: f64 },
+}
+
+/// Parsed GEOSEARCH / GEOSEARCHSTORE request.
+struct SearchRequest<'a> {
+    key: &'a [u8],
+    center: Position,
+    shape: SearchShape,
+    unit: GeoUnit,
+    options: GeoRadiusOptions<'a>,
+    store_dest: Option<&'a [u8]>,
+    store_dist: bool,
+}
+
+/// GEOSEARCH (read) / GEOSEARCHSTORE (write) — Redis 6.2 unified geo queries.
+///
+/// GEOSEARCH key <FROMMEMBER m | FROMLONLAT lon lat>
+///   <BYRADIUS r unit | BYBOX w h unit> [ASC|DESC] [COUNT n [ANY]]
+///   [WITHCOORD] [WITHDIST] [WITHHASH]
+///
+/// GEOSEARCHSTORE dest src <same FROM/BY ...> [ASC|DESC] [COUNT n [ANY]]
+///   [STOREDIST]
+fn geo_search(store: &EmbeddedStore, args: &[&[u8]], store_variant: bool) -> Frame {
+    let request = match parse_search_request(store, args, store_variant) {
+        Ok(Some(request)) => request,
+        Ok(None) => {
+            // Missing source key: empty result (or empty store).
+            return if store_variant {
+                int(0)
+            } else {
+                Frame::Array(Vec::new())
+            };
+        }
+        Err(frame) => return frame,
+    };
+
+    let mut hits = match &request.shape {
+        SearchShape::Radius(radius_m) => {
+            match geo_hits(store, request.key, request.center, *radius_m) {
+                Ok(hits) => hits,
+                Err(frame) => return frame,
+            }
+        }
+        SearchShape::Box { width_m, height_m } => {
+            match geo_box_hits(store, request.key, request.center, *width_m, *height_m) {
+                Ok(hits) => hits,
+                Err(frame) => return frame,
+            }
+        }
+    };
+
+    sort_and_limit_hits(&mut hits, request.options.sort, request.options.count);
+
+    if let Some(dest) = request.store_dest {
+        store_search_hits(store, dest, hits, &request)
+    } else {
+        radius_response(hits, request.unit, &request.options)
+    }
+}
+
+fn sort_and_limit_hits(hits: &mut Vec<GeoHit>, sort: SortOrder, count: Option<usize>) {
+    match sort {
+        SortOrder::Asc => hits.sort_by(|a, b| a.distance_m.total_cmp(&b.distance_m)),
+        SortOrder::Desc => hits.sort_by(|a, b| b.distance_m.total_cmp(&a.distance_m)),
+        SortOrder::None => {}
+    }
+    if let Some(count) = count {
+        hits.truncate(count);
+    }
+}
+
+/// Sort + truncate then write the hits into `dest` as a sorted set, mirroring
+/// the GEORADIUS STORE / STOREDIST behavior.
+fn store_search_hits(
+    store: &EmbeddedStore,
+    dest: &[u8],
+    hits: Vec<GeoHit>,
+    request: &SearchRequest<'_>,
+) -> Frame {
+    store.delete(dest);
+    for hit in &hits {
+        let score = if request.store_dist {
+            request.unit.meters_to_unit(hit.distance_m)
+        } else {
+            hit.score
+        };
+        if matches!(
+            store.zadd(dest, score, &hit.member),
+            RedisObjectResult::WrongType
+        ) {
+            return wrongtype();
+        }
+    }
+    int(hits.len() as i64)
+}
+
+/// Collect members whose position falls inside the axis-aligned box centered on
+/// `center` with the given width (longitude span) and height (latitude span).
+fn geo_box_hits(
+    store: &EmbeddedStore,
+    key: &[u8],
+    center: Position,
+    width_m: f64,
+    height_m: f64,
+) -> Result<Vec<GeoHit>, Frame> {
+    let half_width = width_m / 2.0;
+    let half_height = height_m / 2.0;
+    let mut hits = Vec::new();
+    match store.zrange_entries_visit(key, 0, -1, false, |item| match item {
+        RedisObjectZSetRangeItem::Begin(count) => hits.reserve(count.min(64)),
+        RedisObjectZSetRangeItem::Entry { member, score } => {
+            let position = decode_geo_score(score);
+            // Distance along the longitude axis (same latitude as the center) and
+            // along the latitude axis (same longitude as the center).
+            let lon_distance = distance_m(
+                center,
+                Position {
+                    lon: position.lon,
+                    lat: center.lat,
+                },
+            );
+            let lat_distance = distance_m(
+                center,
+                Position {
+                    lon: center.lon,
+                    lat: position.lat,
+                },
+            );
+            if lon_distance <= half_width && lat_distance <= half_height {
+                hits.push(GeoHit {
+                    member: member.to_vec(),
+                    score,
+                    position,
+                    distance_m: distance_m(center, position),
+                });
+            }
+        }
+    }) {
+        RedisObjectReadOutcome::Written => Ok(hits),
+        RedisObjectReadOutcome::Missing => Ok(Vec::new()),
+        RedisObjectReadOutcome::WrongType => Err(wrongtype()),
+    }
+}
+
+fn parse_search_request<'a>(
+    store: &EmbeddedStore,
+    args: &'a [&'a [u8]],
+    store_variant: bool,
+) -> Result<Option<SearchRequest<'a>>, Frame> {
+    let name = if store_variant {
+        "GEOSEARCHSTORE"
+    } else {
+        "GEOSEARCH"
+    };
+    let mut cursor = 0;
+
+    let store_dest = if store_variant {
+        let dest = *args.get(cursor).ok_or_else(|| wrong_arity(name))?;
+        cursor += 1;
+        Some(dest)
+    } else {
+        None
+    };
+    let key = *args.get(cursor).ok_or_else(|| wrong_arity(name))?;
+    cursor += 1;
+
+    let mut center: Option<Position> = None;
+    let mut shape: Option<SearchShape> = None;
+    let mut unit = GeoUnit { meters: 1.0 };
+    let mut options = GeoRadiusOptions {
+        with_coord: false,
+        with_dist: false,
+        with_hash: false,
+        count: None,
+        sort: SortOrder::None,
+        store: None,
+    };
+    let mut store_dist = false;
+    let mut member_missing = false;
+
+    while cursor < args.len() {
+        let option = args[cursor];
+        cursor += 1;
+        match option {
+            option if eq_ignore_ascii_case(option, b"FROMMEMBER") => {
+                if center.is_some() || member_missing {
+                    return Err(error(
+                        "ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for GEOSEARCH",
+                    ));
+                }
+                let member = *args.get(cursor).ok_or_else(|| error("ERR syntax error"))?;
+                cursor += 1;
+                match member_position(store, key, member)? {
+                    Some(position) => center = Some(position),
+                    None => member_missing = true,
+                }
+            }
+            option if eq_ignore_ascii_case(option, b"FROMLONLAT") => {
+                if center.is_some() || member_missing {
+                    return Err(error(
+                        "ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for GEOSEARCH",
+                    ));
+                }
+                let lon = parse_required_f64(args.get(cursor).copied())?;
+                let lat = parse_required_f64(args.get(cursor + 1).copied())?;
+                cursor += 2;
+                let Some(score) = encode_geo_score(lon, lat) else {
+                    return Err(error("ERR invalid longitude,latitude pair"));
+                };
+                center = Some(decode_geo_score(score));
+            }
+            option if eq_ignore_ascii_case(option, b"BYRADIUS") => {
+                if shape.is_some() {
+                    return Err(error(
+                        "ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCH",
+                    ));
+                }
+                let radius = parse_required_f64(args.get(cursor).copied())?;
+                let parsed_unit = parse_required_unit(args.get(cursor + 1).copied())?;
+                cursor += 2;
+                unit = parsed_unit;
+                shape = Some(SearchShape::Radius(parsed_unit.to_meters(radius)));
+            }
+            option if eq_ignore_ascii_case(option, b"BYBOX") => {
+                if shape.is_some() {
+                    return Err(error(
+                        "ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCH",
+                    ));
+                }
+                let width = parse_required_f64(args.get(cursor).copied())?;
+                let height = parse_required_f64(args.get(cursor + 1).copied())?;
+                let parsed_unit = parse_required_unit(args.get(cursor + 2).copied())?;
+                cursor += 3;
+                unit = parsed_unit;
+                shape = Some(SearchShape::Box {
+                    width_m: parsed_unit.to_meters(width),
+                    height_m: parsed_unit.to_meters(height),
+                });
+            }
+            option if eq_ignore_ascii_case(option, b"ASC") => options.sort = SortOrder::Asc,
+            option if eq_ignore_ascii_case(option, b"DESC") => options.sort = SortOrder::Desc,
+            option if eq_ignore_ascii_case(option, b"COUNT") => {
+                let raw = *args.get(cursor).ok_or_else(|| error("ERR syntax error"))?;
+                cursor += 1;
+                let parsed = std::str::from_utf8(raw)
+                    .ok()
+                    .and_then(|text| text.parse::<usize>().ok())
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| error("ERR COUNT must be > 0"))?;
+                options.count = Some(parsed);
+                if args
+                    .get(cursor)
+                    .is_some_and(|next| eq_ignore_ascii_case(next, b"ANY"))
+                {
+                    cursor += 1;
+                }
+            }
+            option if !store_variant && eq_ignore_ascii_case(option, b"WITHCOORD") => {
+                options.with_coord = true;
+            }
+            option if !store_variant && eq_ignore_ascii_case(option, b"WITHDIST") => {
+                options.with_dist = true;
+            }
+            option if !store_variant && eq_ignore_ascii_case(option, b"WITHHASH") => {
+                options.with_hash = true;
+            }
+            option if store_variant && eq_ignore_ascii_case(option, b"STOREDIST") => {
+                store_dist = true;
+            }
+            _ => return Err(error("ERR syntax error")),
+        }
+    }
+
+    let Some(shape) = shape else {
+        return Err(error(
+            "ERR exactly one of BYRADIUS and BYBOX can be specified for GEOSEARCH",
+        ));
+    };
+    if center.is_none() && !member_missing {
+        return Err(error(
+            "ERR exactly one of FROMMEMBER or FROMLONLAT can be specified for GEOSEARCH",
+        ));
+    }
+    if member_missing {
+        // FROMMEMBER referenced a member that does not exist: empty result.
+        return Ok(None);
+    }
+    let center = center.expect("center resolved");
+
+    Ok(Some(SearchRequest {
+        key,
+        center,
+        shape,
+        unit,
+        options,
+        store_dest,
+        store_dist,
+    }))
+}
+
+fn parse_required_f64(raw: Option<&[u8]>) -> Result<f64, Frame> {
+    raw.and_then(|bytes| parse_f64(bytes).ok())
+        .ok_or_else(|| error("ERR syntax error"))
+}
+
+fn parse_required_unit(raw: Option<&[u8]>) -> Result<GeoUnit, Frame> {
+    raw.and_then(GeoUnit::parse)
+        .ok_or_else(|| error("ERR unsupported unit provided. please use M, KM, FT, MI"))
 }

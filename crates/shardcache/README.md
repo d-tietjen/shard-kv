@@ -1,16 +1,19 @@
 # shardcache
 
-`shardcache` is the source-only Redis/Valkey-style server for `shard-kv`. It is
-built on `shardmap` and exposes RESP plus the native SCNP protocol used by
+`shardcache` is the Redis/Valkey-style server for `shard-kv`. It is built on
+`shardmap` and exposes RESP plus the native SCNP protocol used by
 `shardcache-client-rs`.
-
-`shardcache` is not published to crates.io in the 0.1.x release line. Build it
-from this repository for local or private deployments.
 
 ## Run From Source
 
 ```sh
 cargo run -p shardcache -- --bind-addr 127.0.0.1:6380 --disable-persistence
+```
+
+Install the binary from crates.io:
+
+```sh
+cargo install shardcache --version 0.2.0 --locked
 ```
 
 Install the binary from a checkout:
@@ -52,6 +55,25 @@ fn main() -> shardcache_client_rs::Result<()> {
 }
 ```
 
+## Endpoint Topology
+
+`server_endpoint_mode = "fanout"` is the default. It binds one public RESP/SCNP
+listener on `bind_addr` and routes each request internally.
+
+Use `server_endpoint_mode = "direct_shard"` when shard-aware clients should
+also connect to one shard-owned port per shard. Direct ports start at
+`bind_addr + 1` unless `SHARDCACHE_DIRECT_SHARD_BASE_PORT` sets the first direct
+port:
+
+```toml
+bind_addr = "127.0.0.1:6380"
+shard_count = 4
+server_endpoint_mode = "direct_shard"
+```
+
+With that config, the fanout listener is `127.0.0.1:6380` and the default
+direct shard listeners are `127.0.0.1:6381` through `127.0.0.1:6384`.
+
 Semantic cache commands are available through RESP when the server is used as a
 networked semantic cache:
 
@@ -79,6 +101,9 @@ the Docker/server runbook.
 | `redis-server` | Yes | RESP/SCNP server with Redis/Valkey compatibility. |
 | `server` | No | Lean RESP/SCNP server without the Redis compatibility catalog. |
 | `redis` | No | Redis/Valkey object and command behavior without the server feature. |
+| `redis-functions` | Via `redis-server` | Redis 7 `FUNCTION`/`FCALL` compatibility stubs with an empty function registry. |
+| `redis-modules` | Via `redis-server` | Redis `MODULE` compatibility stubs with an empty module registry and disabled loading. |
+| `redis-modules-all` | No | Aggregate Redis Modules compatibility facades, concrete command discovery metadata, and embedded APIs; individual `redis-module-*` flags can enable one module family at a time. |
 | `monoio` | No | Linux-only transport option for server experiments. |
 
 Build the lean server with:
@@ -94,4 +119,5 @@ cargo run -p shardcache --no-default-features --features server -- \
 - `--server-mode direct` requires `--disable-persistence`.
 - The default Docker command uses direct, in-memory mode.
 - Use a stable `--data-dir` or `--config` path for persistent source-built deployments.
-- Publishable Rust clients should depend on `shardcache-client-rs`, not this source-only package.
+- Rust clients should depend on `shardcache-client-rs`; server deployments use
+  this crate's `shardcache` binary.

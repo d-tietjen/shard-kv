@@ -210,6 +210,15 @@ fn command_metadata() -> &'static [CommandInfoMetadata] {
                 })
                 .collect::<Vec<_>>();
             commands.extend_from_slice(EXTRA_COMMANDS);
+            #[cfg(feature = "redis-modules")]
+            commands.extend(
+                crate::commands::redis_modules::command_info_metadata()
+                    .into_iter()
+                    .map(|command| CommandInfoMetadata {
+                        name: command.name,
+                        mutates: command.mutates,
+                    }),
+            );
             commands.sort_unstable_by(|left, right| left.name.cmp(right.name));
             commands.dedup_by(|left, right| left.name.eq_ignore_ascii_case(right.name));
             commands
@@ -344,45 +353,47 @@ fn command_getkeys(command: &[&[u8]], with_flags: bool) -> Frame {
 }
 
 fn key_args_for_command<'a>(name: &[u8], args: &'a [&'a [u8]]) -> Vec<&'a [u8]> {
-    if eq_ignore_ascii_case(name, b"MEMORY") {
-        return args.get(1).copied().into_iter().collect();
+    match name {
+        name if eq_ignore_ascii_case(name, b"MEMORY") => args.get(1).copied().into_iter().collect(),
+        name if eq_ignore_ascii_case(name, b"MSET") || eq_ignore_ascii_case(name, b"MSETNX") => {
+            args.iter().step_by(2).copied().collect()
+        }
+        name if eq_ignore_ascii_case(name, b"WATCH") => args.to_vec(),
+        name if eq_ignore_ascii_case(name, b"MGET")
+            || eq_ignore_ascii_case(name, b"DEL")
+            || eq_ignore_ascii_case(name, b"EXISTS")
+            || eq_ignore_ascii_case(name, b"TOUCH")
+            || eq_ignore_ascii_case(name, b"UNLINK") =>
+        {
+            args.to_vec()
+        }
+        name if eq_ignore_ascii_case(name, b"LMPOP")
+            || eq_ignore_ascii_case(name, b"ZMPOP")
+            || eq_ignore_ascii_case(name, b"ZUNION")
+            || eq_ignore_ascii_case(name, b"ZINTER")
+            || eq_ignore_ascii_case(name, b"ZDIFF")
+            || eq_ignore_ascii_case(name, b"ZINTERCARD") =>
+        {
+            counted_keys(args, 0)
+        }
+        name if eq_ignore_ascii_case(name, b"EVAL")
+            || eq_ignore_ascii_case(name, b"EVALSHA")
+            || eq_ignore_ascii_case(name, b"EVAL_RO")
+            || eq_ignore_ascii_case(name, b"EVALSHA_RO") =>
+        {
+            counted_keys(args, 1)
+        }
+        name if eq_ignore_ascii_case(name, b"BLMPOP") || eq_ignore_ascii_case(name, b"BZMPOP") => {
+            counted_keys(args, 1)
+        }
+        name if eq_ignore_ascii_case(name, b"ZUNIONSTORE")
+            || eq_ignore_ascii_case(name, b"ZINTERSTORE")
+            || eq_ignore_ascii_case(name, b"ZDIFFSTORE") =>
+        {
+            zaggregate_store_keys(args)
+        }
+        _ => args.first().copied().into_iter().collect(),
     }
-    if eq_ignore_ascii_case(name, b"MSET") || eq_ignore_ascii_case(name, b"MSETNX") {
-        return args.iter().step_by(2).copied().collect();
-    }
-    if eq_ignore_ascii_case(name, b"WATCH") {
-        return args.to_vec();
-    }
-    if eq_ignore_ascii_case(name, b"MGET")
-        || eq_ignore_ascii_case(name, b"DEL")
-        || eq_ignore_ascii_case(name, b"EXISTS")
-        || eq_ignore_ascii_case(name, b"TOUCH")
-        || eq_ignore_ascii_case(name, b"UNLINK")
-    {
-        return args.to_vec();
-    }
-    if eq_ignore_ascii_case(name, b"LMPOP")
-        || eq_ignore_ascii_case(name, b"ZMPOP")
-        || eq_ignore_ascii_case(name, b"ZUNION")
-        || eq_ignore_ascii_case(name, b"ZINTER")
-        || eq_ignore_ascii_case(name, b"ZDIFF")
-        || eq_ignore_ascii_case(name, b"ZINTERCARD")
-    {
-        return counted_keys(args, 0);
-    }
-    if eq_ignore_ascii_case(name, b"EVAL") || eq_ignore_ascii_case(name, b"EVALSHA") {
-        return counted_keys(args, 1);
-    }
-    if eq_ignore_ascii_case(name, b"BLMPOP") || eq_ignore_ascii_case(name, b"BZMPOP") {
-        return counted_keys(args, 1);
-    }
-    if eq_ignore_ascii_case(name, b"ZUNIONSTORE")
-        || eq_ignore_ascii_case(name, b"ZINTERSTORE")
-        || eq_ignore_ascii_case(name, b"ZDIFFSTORE")
-    {
-        return zaggregate_store_keys(args);
-    }
-    args.first().copied().into_iter().collect()
 }
 
 fn counted_keys<'a>(args: &'a [&'a [u8]], numkeys_index: usize) -> Vec<&'a [u8]> {

@@ -559,12 +559,12 @@ fn run_load<const SHARDS: usize>(
     if args.disable_semantic_query_cache {
         cache.disable_semantic_query_cache();
     }
-    let query_pool = Arc::new(if args.load_miss_random {
-        build_miss_queries(args.load_query_pool, dims, args.seed ^ 0xbad5eed)
-    } else if args.load_exact_hits {
-        build_exact_queries(pairs, args.load_query_pool, dims)
-    } else {
-        build_cycling_queries(pairs, args.load_query_pool, args.load_query_pool, dims)
+    let query_pool = Arc::new(match (args.load_miss_random, args.load_exact_hits) {
+        (true, _) => build_miss_queries(args.load_query_pool, dims, args.seed ^ 0xbad5eed),
+        (false, true) => build_exact_queries(pairs, args.load_query_pool, dims),
+        (false, false) => {
+            build_cycling_queries(pairs, args.load_query_pool, args.load_query_pool, dims)
+        }
     });
     for query in query_pool.iter().take(args.load_warmup_queries) {
         black_box(cache.semantic_search(query, min_score)?);
@@ -649,12 +649,10 @@ fn run_load<const SHARDS: usize>(
         .unwrap_or_else(|| args.dataset.clone());
     let row = LoadRow {
         dataset,
-        mode: if args.load_miss_random {
-            "miss-random"
-        } else if args.load_unique_queries {
-            "unique-stream"
-        } else {
-            "hot-cycling"
+        mode: match (args.load_miss_random, args.load_unique_queries) {
+            (true, _) => "miss-random",
+            (false, true) => "unique-stream",
+            (false, false) => "hot-cycling",
         },
         workers: args.load_workers,
         index_entries: args.index_entries,

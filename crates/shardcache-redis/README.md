@@ -1,25 +1,38 @@
 # shardcache-redis
 
-Redis/Valkey compatibility source package for `shardcache`.
+Redis/Valkey command compatibility layer for `shardcache`.
 
 This crate owns the Redis-only command families and Redis object storage
 implementation. Its source root is `crates/shardcache-redis/src`.
 
-The crate defaults to `redis`, so `cargo check -p shardcache-redis`
-exercises the Redis compatibility source instead of compiling an empty marker
-package.
+## Install
+
+Use the published crate from crates.io:
+
+```toml
+[dependencies]
+shardcache-redis = "0.2.0"
+```
+
+From a workspace checkout, use a path dependency:
+
+```toml
+[dependencies]
+shardcache-redis = { path = "crates/shardcache-redis" }
+```
+
+The crate defaults to `redis`, so `cargo check -p shardcache-redis` exercises
+the Redis compatibility implementation.
 
 Compatibility status is generated from the live command benchmark registry in
-[`docs/REDIS_COMPATIBILITY.md`](../../docs/REDIS_COMPATIBILITY.md). The 0.1.0
-target covers the Redis 5.0.14 command table plus selected later cache-command
-extensions, with standalone expected-error behavior and semantic caveats
-documented there.
+[`docs/REDIS_COMPATIBILITY.md`](../../docs/REDIS_COMPATIBILITY.md). The 0.2.0
+target covers the Redis 5.0.14 command table plus Redis 6, 7, 8, and
+feature-gated module command families tracked in the manifest, with standalone
+expected-error behavior and semantic caveats documented there.
 
-The intended long-term direction is to narrow the remaining internal extension
-points until this package can become an ordinary optional dependency instead of
-a source-owned compatibility package. During that transition, core still
-includes these files by path behind its `redis` feature, but the files no
-longer live inside the core crate tree.
+The intended long-term direction is to keep narrowing the remaining internal
+extension points while preserving this crate as the public Redis-compatible
+command surface for `shardcache`.
 
 ## Example Commands
 

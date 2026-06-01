@@ -1,0 +1,7 @@
+id = "redis-modules"
+title = "Redis Module Commands"
+driver = "redis_command_matrix"
+cases = "modules"
+fixture_scope = "per-client"
+destructive = false
+requires_modules = true

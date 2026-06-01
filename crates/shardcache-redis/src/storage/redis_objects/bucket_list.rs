@@ -174,6 +174,26 @@ impl RedisObjectBucket {
         }
     }
 
+    pub(crate) fn lpos_visit(
+        &self,
+        key: &[u8],
+        element: &[u8],
+        rank: i64,
+        count: Option<i64>,
+        maxlen: i64,
+        write: impl FnOnce(Vec<i64>),
+    ) -> RedisObjectReadOutcome {
+        match self.lists.get(key).copied() {
+            Some(slot) => {
+                let list = self.list_slab.get(slot).expect("list slab slot missing");
+                write(lpos_scan(list, element, rank, count, maxlen));
+                RedisObjectReadOutcome::Written
+            }
+            None if self.has_non_list(key) => RedisObjectReadOutcome::WrongType,
+            None => RedisObjectReadOutcome::Missing,
+        }
+    }
+
     pub(crate) fn lindex(&self, key: &[u8], index: i64) -> RedisObjectResult {
         match self.lists.get(key).copied() {
             Some(slot) => {
@@ -392,4 +412,74 @@ impl RedisObjectBucket {
             None => RedisObjectReadOutcome::Missing,
         }
     }
+}
+
+/// In-place LPOS scan over the stored list. `rank` is non-zero (validated by the
+/// caller); positive scans head->tail, negative scans tail->head. `count` follows
+/// Redis semantics: `None` returns the first match, `Some(0)` returns all matches,
+/// `Some(n)` caps at `n`. `maxlen` of 0 means unlimited; otherwise it bounds how
+/// many elements are compared from the scan's starting side.
+fn lpos_scan(
+    list: &ListObject,
+    element: &[u8],
+    rank: i64,
+    count: Option<i64>,
+    maxlen: i64,
+) -> Vec<i64> {
+    let len = list.len();
+    let mut results = Vec::new();
+    if len == 0 {
+        return results;
+    }
+
+    let mut skip = (rank.unsigned_abs() - 1) as usize;
+    let wanted = count.map(|value| value as usize);
+    let compare_limit = maxlen as usize;
+
+    let collect = |position: i64, skip: &mut usize, results: &mut Vec<i64>| -> bool {
+        if *skip > 0 {
+            *skip -= 1;
+            return false;
+        }
+        results.push(position);
+        match wanted {
+            None => true,
+            Some(0) => false,
+            Some(limit) => results.len() >= limit,
+        }
+    };
+
+    if rank > 0 {
+        // Forward scan; the iterator is forward-only so this streams with early exit.
+        for (index, item) in list.iter().enumerate() {
+            if compare_limit != 0 && index >= compare_limit {
+                break;
+            }
+            if item.as_slice() == element && collect(index as i64, &mut skip, &mut results) {
+                break;
+            }
+        }
+    } else {
+        // Backward scan; the compared window is the last `compare_limit` elements.
+        // ListObject only iterates forward, so collect matches in the window during a
+        // single forward pass, then walk them tail-first.
+        let window_start = if compare_limit == 0 {
+            0
+        } else {
+            len.saturating_sub(compare_limit)
+        };
+        let mut matched = Vec::new();
+        for (index, item) in list.iter().enumerate() {
+            if index >= window_start && item.as_slice() == element {
+                matched.push(index as i64);
+            }
+        }
+        for &position in matched.iter().rev() {
+            if collect(position, &mut skip, &mut results) {
+                break;
+            }
+        }
+    }
+
+    results
 }

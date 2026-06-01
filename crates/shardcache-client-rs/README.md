@@ -8,9 +8,8 @@ server ports. This crate is intentionally small and synchronous: one client owns
 one or more TCP connections and is meant to be used directly from worker
 threads.
 
-This is one of the two publishable crates in the 0.1.x release line. The
-`shardcache` server itself is source-only and is built from the `shard-kv`
-repository.
+This is one of the four publishable crates in the 0.2.x release line alongside
+`shardmap`, `shardcache`, and `shardcache-redis`.
 
 ## Install
 
@@ -18,7 +17,7 @@ Use the published crate from crates.io:
 
 ```toml
 [dependencies]
-shardcache-client-rs = "0.1.0"
+shardcache-client-rs = "0.2.0"
 ```
 
 From a workspace checkout, use a path dependency:
@@ -47,7 +46,23 @@ cargo run -p shardcache --features server --bin shardcache -- \
   --shard-count 4
 ```
 
-For direct shard routing, enable shard-owned SCNP listeners on the server:
+For direct shard routing, enable shard-owned listeners on the server config:
+
+```toml
+bind_addr = "127.0.0.1:6380"
+shard_count = 4
+server_endpoint_mode = "direct_shard"
+```
+
+Then start the server with that config:
+
+```bash
+cargo run -p shardcache --features server --bin shardcache -- \
+  --config shardcache.toml
+```
+
+For scripts and container runs that do not write a config file, the compatibility
+environment switch exposes the same direct port shape:
 
 ```bash
 SHARDCACHE_DIRECT_SHARD_PORTS=1 \
@@ -188,7 +203,7 @@ building RESP request frames in user code.
 
 ```toml
 [dependencies]
-shardcache-client-rs = { version = "0.1.0", features = ["redis"] }
+shardcache-client-rs = { version = "0.2.0", features = ["redis"] }
 ```
 
 The primary API is the first-party Redis namespace on the client. Common

@@ -15,7 +15,7 @@ compatibility surface, and benchmark claims evolve.
 | --- | --- |
 | `quick` | Formatting, benchmark harness unit tests, compatibility manifest freshness, feature-flag compile matrix, and whitespace diff checks. |
 | `redis` | Everything in `quick`, plus Redis compatibility tests, raw RESP server tests, and the live differential test against `SHARDCACHE_COMPAT_SERVER_BIN` or `redis-server`. |
-| `release` | Everything in `redis`, plus the workspace test suite, formal support tests, rustdoc, and the `shardmap` package dry run. |
+| `release` | Everything in `redis`, plus the workspace test suite, formal support tests, rustdoc, and package dry runs for crates that do not depend on an unpublished workspace version. |
 
 Use `quick` while iterating on source layout, feature flags, command registry,
 or docs. Use `redis` before merging compatibility changes. Use `release`
@@ -28,7 +28,7 @@ before tagging or publishing.
 ./scripts/check-redis-compatibility-doc.sh
 ```
 
-`check-feature-matrix.sh` compiles the public 0.1.0 feature contract for
+`check-feature-matrix.sh` compiles the public 0.2.0 feature contract for
 `shardcache`, `shardmap`, and `shardcache-redis`, and verifies that
 embedded-only builds do not depend on `shardcache-redis`.
 
@@ -62,9 +62,9 @@ The bundle contains:
 | File | Purpose |
 | --- | --- |
 | `metadata.txt` | Git SHA, dirty status, host/runtime versions, benchmark knobs, pinning knobs. |
-| `redis-command-matrix.csv` | Raw per-target, per-command output from the live RESP harness. |
-| `report.md` | Target summary, throughput ratios, and slowest-case tables. |
-| `summary.json` | Machine-readable target totals and ratios. |
+| `redis-command-matrix.csv` | Raw per-target, per-command throughput plus p50/p95/p99/p999 latency from the live RESP harness. |
+| `report.md` | Target summary, throughput ratios, mean p99, and slowest-case tables. |
+| `summary.json` | Machine-readable target totals, p99 summaries, and ratios. |
 | `redis-compatibility.json` | JSON command compatibility manifest captured with the run. |
 
 When Redis, Valkey, or Dragonfly references are already captured for the same

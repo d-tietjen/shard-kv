@@ -1,0 +1,8 @@
+id = "redis-v8-vector"
+title = "Redis 8 Vector Set Commands"
+driver = "redis_command_matrix"
+cases = "family:vector"
+fixture_scope = "per-client"
+destructive = false
+requires_modules = false
+requires_redis = "8"

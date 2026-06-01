@@ -1,4 +1,4 @@
-use super::{EmbeddedRouteMode, EmbeddedStore, PackedSessionWrite};
+use super::{EmbeddedRouteMode, EmbeddedStore, PackedSessionWrite, ShardArcEmbeddedStore};
 use crate::config::EvictionPolicy;
 #[cfg(feature = "telemetry")]
 use crate::storage::CacheTelemetry;
@@ -10,6 +10,20 @@ use crate::storage::{RedisObjectResult, RedisStringLookup};
 use std::collections::BTreeMap;
 #[cfg(feature = "telemetry")]
 use std::sync::Arc;
+
+#[test]
+fn shard_arc_store_routes_and_serves_blob_reads() {
+    let store = ShardArcEmbeddedStore::new(4);
+    let key = b"shard-arc-key";
+    let route = store.route_key(key);
+    store.set_slice_routed_no_ttl(route, key, b"value");
+
+    assert!(store.contains_routed_no_ttl(route, key));
+
+    let mut out = bytes::BytesMut::new();
+    assert!(store.get_blob_string_hashed_into(hash_key(key), key, &mut out));
+    assert_eq!(out.as_ref(), b"$5\r\nvalue\r\n");
+}
 
 #[test]
 fn visit_string_keys_and_entries_do_not_require_snapshots() {
@@ -797,6 +811,35 @@ fn memory_cap_lru_evicts_colder_generic_entry_before_session_slot() {
     assert_eq!(store.get(b"s:1:c:0"), Some(b"x".to_vec()));
     assert_eq!(store.len(), 1);
     assert!(store.stored_bytes() <= 8);
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn vector_shard_can_use_total_memory_budget() {
+    let store = EmbeddedStore::with_route_mode(4, EmbeddedRouteMode::FullKey);
+    let per_shard_limit = 64;
+    let total_limit = 1024;
+    store.configure_memory_policy(Some(per_shard_limit), EvictionPolicy::Lru);
+    store.configure_vector_memory_policy(Some(total_limit), EvictionPolicy::Lru);
+
+    let key = (0..10_000)
+        .map(|index| format!("vector-budget-{index}").into_bytes())
+        .find(|candidate| store.route_key(candidate).shard_id != store.vector_shard_id())
+        .expect("key routed away from vector shard");
+    let route = store.route_vector_key(&key);
+    let mut value = crate::storage::VECTOR_SET_PREFIX.to_vec();
+    value.resize(512, b'v');
+
+    store.set_value_bytes_routed_no_ttl_then(route, &key, bytes::Bytes::from(value), || {});
+
+    let mut stored_len = 0;
+    assert!(
+        store.with_shared_value_bytes_routed(route, &key, &mut |bytes| {
+            stored_len = bytes.len();
+        })
+    );
+    assert!(stored_len > per_shard_limit);
+    assert!(stored_len < total_limit);
 }
 
 #[test]

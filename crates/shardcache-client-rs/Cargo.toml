@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Blocking Rust client for shardcache's native SCNP protocol"
+documentation = "https://docs.rs/shardcache-client-rs"
 readme = "README.md"
 categories = ["caching", "database-implementations", "network-programming"]
 keywords = ["shardcache", "scnp", "client", "cache", "kv"]

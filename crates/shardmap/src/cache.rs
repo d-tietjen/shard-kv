@@ -7,6 +7,7 @@
 
 use bytes::Bytes as SharedBytes;
 
+use crate::ShardCacheError;
 use crate::config::EvictionPolicy;
 use crate::storage::{
     EmbeddedKeyRoute, EmbeddedRouteMode, PreparedPointKey, SemanticCacheError, SemanticMatch,
@@ -416,10 +417,15 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
     /// surface when multiple processes or machines need to coordinate through
     /// one lock table.
     #[inline(always)]
-    pub fn try_acquire_lock(&self, key: &[u8], token: &[u8], ttl_ms: u64) -> bool {
-        assert!(ttl_ms > 0, "lock ttl_ms must be greater than zero");
-        self.inner
-            .insert_slice_if_absent_with_ttl(key, token, Some(ttl_ms))
+    pub fn try_acquire_lock(&self, key: &[u8], token: &[u8], ttl_ms: u64) -> crate::Result<bool> {
+        if ttl_ms == 0 {
+            return Err(ShardCacheError::Command(
+                "lock ttl_ms must be greater than zero".into(),
+            ));
+        }
+        Ok(self
+            .inner
+            .insert_slice_if_absent_with_ttl(key, token, Some(ttl_ms)))
     }
 
     /// Releases a token lock only when the stored token matches.
@@ -430,8 +436,12 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
 
     /// Renews a token lock only when the stored token matches.
     #[inline(always)]
-    pub fn renew_lock(&self, key: &[u8], token: &[u8], ttl_ms: u64) -> bool {
-        assert!(ttl_ms > 0, "lock ttl_ms must be greater than zero");
+    pub fn renew_lock(&self, key: &[u8], token: &[u8], ttl_ms: u64) -> crate::Result<bool> {
+        if ttl_ms == 0 {
+            return Err(ShardCacheError::Command(
+                "lock ttl_ms must be greater than zero".into(),
+            ));
+        }
         self.inner.update_ttl_if_value_eq(key, token, ttl_ms)
     }
 }
@@ -674,11 +684,23 @@ mod tests {
     fn fast_map_token_locks_are_compare_and_delete() {
         let cache = SharedCache::<4>::new();
 
-        assert!(cache.try_acquire_lock(b"lock:alpha", b"token-1", 60_000));
-        assert!(!cache.try_acquire_lock(b"lock:alpha", b"token-2", 60_000));
+        assert!(
+            cache
+                .try_acquire_lock(b"lock:alpha", b"token-1", 60_000)
+                .unwrap()
+        );
+        assert!(
+            !cache
+                .try_acquire_lock(b"lock:alpha", b"token-2", 60_000)
+                .unwrap()
+        );
         assert!(!cache.release_lock(b"lock:alpha", b"token-2"));
-        assert!(cache.renew_lock(b"lock:alpha", b"token-1", 60_000));
+        assert!(cache.renew_lock(b"lock:alpha", b"token-1", 60_000).unwrap());
         assert!(cache.release_lock(b"lock:alpha", b"token-1"));
-        assert!(cache.try_acquire_lock(b"lock:alpha", b"token-2", 60_000));
+        assert!(
+            cache
+                .try_acquire_lock(b"lock:alpha", b"token-2", 60_000)
+                .unwrap()
+        );
     }
 }

@@ -143,9 +143,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.validate()?;
 
     let server_mode = ServerMode::from(cli.server_mode);
-    let runtime_threads = std::thread::available_parallelism()
-        .map(|count| count.get().clamp(2, 4))
-        .unwrap_or(2);
+    let available_threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1);
+    let runtime_threads = match server_mode {
+        ServerMode::Direct => available_threads.clamp(1, 4),
+        ServerMode::Auto | ServerMode::Engine => available_threads.clamp(2, 4),
+    };
     let runtime = Builder::new_multi_thread()
         .worker_threads(runtime_threads)
         .enable_all()

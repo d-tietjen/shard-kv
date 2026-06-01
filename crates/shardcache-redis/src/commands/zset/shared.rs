@@ -307,6 +307,23 @@ pub(crate) fn zmpop(store: &EmbeddedStore, args: &[&[u8]], blocking: bool) -> Fr
         Ok(parsed) => parsed,
         Err(frame) => return frame,
     };
+    if blocking {
+        let frame = zmpop_once(store, parsed);
+        if !matches!(frame, Frame::Null) {
+            return frame;
+        }
+        let shard_id = match crate::commands::blocking::single_shard_for_keys(store, parsed.keys) {
+            Ok(shard_id) => shard_id,
+            Err(frame) => return frame,
+        };
+        return crate::commands::blocking::block_on_shard(store, shard_id, parsed.timeout, || {
+            zmpop_once(store, parsed)
+        });
+    }
+    zmpop_once(store, parsed)
+}
+
+fn zmpop_once(store: &EmbeddedStore, parsed: ZMpopArgs<'_>) -> Frame {
     for key in parsed.keys {
         match store.zpop(key, parsed.count, parsed.max) {
             RedisObjectResult::Array(values) if values.is_empty() => {}
@@ -325,6 +342,7 @@ struct ZMpopArgs<'a> {
     keys: &'a [&'a [u8]],
     max: bool,
     count: usize,
+    timeout: Option<std::time::Duration>,
 }
 
 #[derive(Clone, Copy)]
@@ -365,13 +383,13 @@ impl ZMpopCommand {
     fn without_timeout<'a>(
         self,
         args: &'a [&'a [u8]],
-    ) -> std::result::Result<&'a [&'a [u8]], Frame> {
+    ) -> std::result::Result<(&'a [&'a [u8]], Option<std::time::Duration>), Frame> {
         match self {
-            Self::NonBlocking => Ok(args),
+            Self::NonBlocking => Ok((args, None)),
             Self::Blocking => {
                 let (timeout, rest) = args.split_first().ok_or_else(|| wrong_arity(self.name()))?;
-                validate_zmpop_timeout(timeout)?;
-                Ok(rest)
+                let timeout = crate::commands::blocking::parse_blocking_timeout(timeout)?;
+                Ok((rest, timeout))
             }
         }
     }
@@ -421,7 +439,7 @@ fn parse_zmpop_args<'a>(
 ) -> std::result::Result<ZMpopArgs<'a>, Frame> {
     let command = ZMpopCommand::from_blocking(blocking);
     command.validate_arity(args)?;
-    let args = command.without_timeout(args)?;
+    let (args, timeout) = command.without_timeout(args)?;
     let (keys, direction, options) = split_zmpop_key_direction(args)?;
     let direction = ZMpopDirection::from_name(direction).ok_or_else(zmpop_syntax_error)?;
     let count = parse_zmpop_options(options)?;
@@ -429,16 +447,8 @@ fn parse_zmpop_args<'a>(
         keys,
         max: direction.pops_max(),
         count,
+        timeout,
     })
-}
-
-fn validate_zmpop_timeout(timeout: &[u8]) -> std::result::Result<(), Frame> {
-    let timeout =
-        parse_f64(timeout).map_err(|_| error("ERR timeout is not a float or out of range"))?;
-    match timeout < 0.0 {
-        true => Err(error("ERR timeout is negative")),
-        false => Ok(()),
-    }
 }
 
 fn split_zmpop_key_direction<'a>(
@@ -1128,7 +1138,26 @@ pub(crate) fn bzpop(store: &EmbeddedStore, args: &[&[u8]], max: bool) -> Frame {
     if args.len() < 2 {
         return wrong_arity(if max { "BZPOPMAX" } else { "BZPOPMIN" });
     }
-    for key in &args[..args.len() - 1] {
+    let keys = &args[..args.len() - 1];
+    let timeout = match crate::commands::blocking::parse_blocking_timeout(args[args.len() - 1]) {
+        Ok(timeout) => timeout,
+        Err(frame) => return frame,
+    };
+    let frame = bzpop_once(store, keys, max);
+    if !matches!(frame, Frame::Null) {
+        return frame;
+    }
+    let shard_id = match crate::commands::blocking::single_shard_for_keys(store, keys) {
+        Ok(shard_id) => shard_id,
+        Err(frame) => return frame,
+    };
+    crate::commands::blocking::block_on_shard(store, shard_id, timeout, || {
+        bzpop_once(store, keys, max)
+    })
+}
+
+fn bzpop_once(store: &EmbeddedStore, keys: &[&[u8]], max: bool) -> Frame {
+    for key in keys {
         let mut entries = match store.zentries(key) {
             Ok(entries) => entries,
             Err(RedisObjectError::WrongType) => return wrongtype(),
@@ -1162,28 +1191,5 @@ pub(crate) fn write_bzpop_resp(
         write_resp_wrong_arity(out, if max { "BZPOPMAX" } else { "BZPOPMIN" });
         return;
     }
-    for key in &args[..args.len() - 1] {
-        let mut entries = match store.zentries(key) {
-            Ok(entries) => entries,
-            Err(RedisObjectError::WrongType) => {
-                write_resp_wrongtype(out);
-                return;
-            }
-            Err(RedisObjectError::MissingKey) => Vec::new(),
-        };
-        if entries.is_empty() {
-            continue;
-        }
-        if max {
-            entries.reverse();
-        }
-        let (member, score) = entries[0].clone();
-        let _ = store.zrem(key, &member);
-        write_resp_array_header(out, 3);
-        ServerWire::write_resp_blob_string(out, key);
-        ServerWire::write_resp_blob_string(out, &member);
-        write_resp_score(out, score);
-        return;
-    }
-    write_resp_null(out);
+    write_frame(out, &bzpop(store, args, max));
 }

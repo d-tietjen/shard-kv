@@ -2,6 +2,11 @@ use super::*;
 
 impl SlotMap {
     #[inline(always)]
+    pub(super) fn len(&self) -> usize {
+        self.table.len()
+    }
+
+    #[inline(always)]
     pub(super) fn contains_key(&self, key: &[u8]) -> bool {
         self.get(key).is_some()
     }

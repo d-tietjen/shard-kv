@@ -45,10 +45,12 @@ cargo build --release -p shardcache-benchmarks \
   echo "server_cpuset=${SERVER_CPUSET:-}"
   echo "shard_count=${SHARD_COUNT:-4}"
   echo "server_direct_shard_ports=${SERVER_DIRECT_SHARD_PORTS:-0}"
+  echo "shardcache_features=${SHARDCACHE_FEATURES:-redis-server}"
   echo "shardcache_direct_shard_base_port=${SHARDCACHE_DIRECT_SHARD_BASE_PORT:-}"
   echo "start_shardcache=${START_SHARDCACHE:-1}"
   echo "docker=${DOCKER:-1}"
   echo "docker_services=${DOCKER_SERVICES:-redis valkey}"
+  echo "redis_stack_image=${REDIS_STACK_IMAGE:-redis/redis-stack-server:latest}"
   echo "reference_csvs=${REFERENCE_CSVS:-}"
 } >"$out_dir/metadata.txt"
 

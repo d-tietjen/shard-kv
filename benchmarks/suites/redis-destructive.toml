@@ -1,0 +1,7 @@
+id = "redis-destructive"
+title = "Redis Destructive Commands"
+driver = "redis_command_matrix"
+cases = "profile:destructive"
+fixture_scope = "shared-keyspace"
+destructive = true
+requires_modules = false

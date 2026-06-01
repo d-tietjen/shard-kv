@@ -8,10 +8,10 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Redis/Valkey-compatible server built on shardmap"
+documentation = "https://docs.rs/shardcache"
 keywords = ["cache", "redis", "kv", "storage", "server"]
 categories = ["caching", "database-implementations"]
 readme = "README.md"
-publish = false
 autobins = false
 autotests = false
 autobenches = false
@@ -20,7 +20,46 @@ autobenches = false
 default = ["redis-server"]
 server = ["shardmap/server"]
 redis = ["shardmap/redis"]
-redis-server = ["server", "redis", "shardmap/redis-server"]
+redis-functions = ["redis", "shardmap/redis-functions"]
+redis-modules = ["redis", "shardmap/redis-modules"]
+redis-module-search = ["redis-modules", "shardmap/redis-module-search"]
+redis-module-bloom = ["redis-modules", "shardmap/redis-module-bloom"]
+redis-module-timeseries = ["redis-modules", "shardmap/redis-module-timeseries"]
+redis-module-graph = ["redis-modules", "shardmap/redis-module-graph"]
+redis-module-json = ["redis-modules", "shardmap/redis-module-json"]
+redis-module-ai = ["redis-modules", "shardmap/redis-module-ai"]
+redis-module-gears = ["redis-modules", "shardmap/redis-module-gears"]
+redis-module-cell = ["redis-modules", "shardmap/redis-module-cell"]
+redis-module-neural = ["redis-modules", "shardmap/redis-module-neural"]
+redis-module-tdigest = ["redis-modules", "shardmap/redis-module-tdigest"]
+redis-module-cthulhu = ["redis-modules", "shardmap/redis-module-cthulhu"]
+redis-module-snowflake = ["redis-modules", "shardmap/redis-module-snowflake"]
+redis-module-roaring = ["redis-modules", "shardmap/redis-module-roaring"]
+redis-module-session-gate = ["redis-modules", "shardmap/redis-module-session-gate"]
+redis-module-rede = ["redis-modules", "shardmap/redis-module-rede"]
+redis-module-topk = ["redis-modules", "shardmap/redis-module-topk"]
+redis-module-cms = ["redis-modules", "shardmap/redis-module-cms"]
+redis-modules-all = [
+    "redis-module-search",
+    "redis-module-bloom",
+    "redis-module-timeseries",
+    "redis-module-graph",
+    "redis-module-json",
+    "redis-module-ai",
+    "redis-module-gears",
+    "redis-module-cell",
+    "redis-module-neural",
+    "redis-module-tdigest",
+    "redis-module-cthulhu",
+    "redis-module-snowflake",
+    "redis-module-roaring",
+    "redis-module-session-gate",
+    "redis-module-rede",
+    "redis-module-topk",
+    "redis-module-cms",
+    "shardmap/redis-modules-all",
+]
+redis-server = ["server", "redis", "redis-functions", "redis-modules", "shardmap/redis-server"]
 monoio = ["server", "shardmap/monoio"]
 prefix-eviction = ["shardmap/prefix-eviction"]
 

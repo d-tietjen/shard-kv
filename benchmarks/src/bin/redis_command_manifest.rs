@@ -178,7 +178,7 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     writeln!(out).unwrap();
     writeln!(
         out,
-        "`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in shardcache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.1.0 compatibility surface."
+        "`supported` means there is a Redis/Valkey-compatible implementation and at least one live RESP benchmark case. Expected-error cases are commands whose Redis-compatible behavior in shardcache's standalone mode is an error reply, such as disabled cluster, replication, monitor, shutdown, missing function invocation, or security-warning commands. Destructive keyspace-wide cases live in the explicit `profile:destructive` matrix so they do not poison ordinary mixed runs. `missing` means it is outside the 0.2.0 compatibility surface."
     )
     .unwrap();
     writeln!(out).unwrap();
@@ -206,7 +206,7 @@ fn render_markdown(entries: &[CommandEntry]) -> String {
     .unwrap();
     writeln!(
         out,
-        "| Redis 5.0.14 commands explicitly excluded from 0.1.0 | {} |",
+        "| Redis 5.0.14 commands explicitly excluded from 0.2.0 | {} |",
         redis5_excluded.len()
     )
     .unwrap();
@@ -314,12 +314,17 @@ fn render_semantic_notes(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "- Expected-error commands are part of the compatibility surface in standalone mode. They intentionally return Redis-style errors for disabled cluster, replication, monitor, shutdown, module loading, migration, cross-DB movement, and security-warning paths."
+        "- Expected-error commands are part of the compatibility surface in standalone mode. They intentionally return Redis-style errors for disabled cluster, replication, monitor, shutdown, module loading, migration, cross-DB movement, missing function invocation, and security-warning paths."
     )
     .unwrap();
     writeln!(
         out,
-        "- Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.1.0 compatibility semantics."
+        "- Redis Functions and Redis module-loading compatibility live behind the `redis-functions` and `redis-modules` Cargo features. The default `redis-server` feature set enables both so Redis 7 clients can discover those surfaces without loading executable code."
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "- Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.2.0 compatibility semantics."
     )
     .unwrap();
     writeln!(
@@ -339,7 +344,7 @@ fn render_semantic_notes(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "- Blocking list and sorted-set commands are live-tested on ready or short-timeout paths. Long-lived blocking wakeups across clients need separate proofing before being described as full Redis parity."
+        "- Blocking list and sorted-set commands wait on the owning shard for shard-local key sets. Ready, timeout, and cross-client wakeup paths are covered; empty multi-key waits that span shards report CROSSSLOT instead of using a global waiter."
     )
     .unwrap();
     writeln!(
@@ -556,6 +561,24 @@ fn notes_for(entry: &CommandEntry) -> String {
             join_set(&entry.cases)
         );
     }
+    if entry.command == "FCALL" || entry.command == "FCALL_RO" {
+        return format!(
+            "Empty function registry returns a Redis-style missing-function error. Benchmark cases: {}",
+            join_set(&entry.cases)
+        );
+    }
+    if entry.command == "FUNCTION" {
+        return format!(
+            "`redis-functions` feature: empty function registry introspection/stub commands for Redis 7 clients. Benchmark cases: {}",
+            join_set(&entry.cases)
+        );
+    }
+    if entry.command == "MODULE" {
+        return format!(
+            "`redis-modules` feature: empty module registry introspection and disabled load/unload stubs. Benchmark cases: {}",
+            join_set(&entry.cases)
+        );
+    }
     if entry.expected_error {
         return format!(
             "Expected RESP error reply in standalone compatibility mode. Benchmark cases: {}",
@@ -620,7 +643,7 @@ mod tests {
     #[test]
     fn manifest_counts_are_intentional() {
         let entries = build_manifest();
-        assert_eq!(count_status(&entries, CompatStatus::Supported), 222);
+        assert_eq!(count_status(&entries, CompatStatus::Supported), 268);
         assert_eq!(count_status(&entries, CompatStatus::Missing), 0);
     }
 
@@ -629,7 +652,18 @@ mod tests {
         let entries = build_manifest();
         assert_eq!(redis_5_supported_commands(&entries).len(), 200);
         assert_eq!(redis_5_missing_commands(&entries).len(), 0);
-        assert_eq!(redis_5_extension_commands(&entries).len(), 22);
+        assert_eq!(redis_5_extension_commands(&entries).len(), 68);
+    }
+
+    #[test]
+    fn manifest_includes_redis_8_commands() {
+        let entries = build_manifest();
+        for command in ["HGETDEL", "HGETEX", "HSETEX", "VADD", "VISMEMBER", "VSIM"] {
+            assert!(
+                entries.iter().any(|entry| entry.command == command),
+                "{command} should be listed in the generated compatibility manifest"
+            );
+        }
     }
 
     #[test]
@@ -661,8 +695,8 @@ mod tests {
         assert_eq!(
             expected_error,
             [
-                "CLUSTER", "HOST:", "MIGRATE", "MONITOR", "MOVE", "POST", "PSYNC", "SHUTDOWN",
-                "SYNC",
+                "CLUSTER", "FAILOVER", "FCALL", "FCALL_RO", "HOST:", "MIGRATE", "MONITOR", "MOVE",
+                "POST", "PSYNC", "SHUTDOWN", "SYNC",
             ]
         );
     }

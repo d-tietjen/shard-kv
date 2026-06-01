@@ -9,12 +9,14 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, ValueEnum};
+use serde::Serialize;
+use shardcache_benchmarks::histogram::LatencyHistogram;
 use shardcache_benchmarks::redis_command_cases::{
     REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES, REDIS_COMMAND_LARGE_CASES,
-    RedisCommandCase,
+    REDIS_MODULE_COMMAND_CASES, RedisCommandCase,
 };
 use shardmap::protocol::{
     FAST_FLAG_REDIS_COMMAND_ARGS, FAST_PROTOCOL_VERSION, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC,
@@ -76,6 +78,42 @@ struct Args {
     /// Optional CSV output path.
     #[arg(long)]
     csv: Option<String>,
+
+    /// Append CSV rows without writing a header.
+    #[arg(long)]
+    append_csv: bool,
+
+    /// Stable run identifier written into CSV and plan metadata.
+    #[arg(long)]
+    run_id: Option<String>,
+
+    /// Stable plan identifier shared by isolated target runs.
+    #[arg(long)]
+    resolved_plan_id: Option<String>,
+
+    /// Suite label written into CSV and plan metadata.
+    #[arg(long, default_value = "ad-hoc")]
+    suite: String,
+
+    /// Scenario label written into CSV and plan metadata.
+    #[arg(long, default_value = "redis-command-matrix")]
+    scenario: String,
+
+    /// Server vCPU allocation for this isolated run.
+    #[arg(long)]
+    vcpus: Option<usize>,
+
+    /// Total precomposed command-pool memory budget across all clients.
+    #[arg(long, default_value_t = 256)]
+    memory_budget_mib: usize,
+
+    /// Total precomposed command count budget across all clients. Zero means memory-bounded only.
+    #[arg(long, default_value_t = 0)]
+    command_budget: usize,
+
+    /// Optional resolved plan JSON output path.
+    #[arg(long)]
+    plan_json: Option<String>,
 
     /// Treat RESP error replies as benchmark failures.
     #[arg(long)]
@@ -181,7 +219,7 @@ impl FixtureScope {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct RunConfig {
     clients: usize,
     key_shards: usize,
@@ -189,6 +227,17 @@ struct RunConfig {
     pipeline_depth: usize,
     warmup: Duration,
     duration: Duration,
+    memory_budget_mib: usize,
+    command_budget: usize,
+}
+
+struct PlanLabels<'a> {
+    run_id: &'a str,
+    resolved_plan_id: &'a str,
+    suite: &'a str,
+    scenario: &'a str,
+    cases_filter: &'a str,
+    skip_cases: &'a str,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -197,6 +246,7 @@ struct CaseStats {
     errors: u64,
     expected_errors: u64,
     elapsed_ns: u128,
+    latency: LatencyHistogram,
 }
 
 impl CaseStats {
@@ -205,6 +255,7 @@ impl CaseStats {
         self.errors = self.errors.saturating_add(other.errors);
         self.expected_errors = self.expected_errors.saturating_add(other.expected_errors);
         self.elapsed_ns = self.elapsed_ns.saturating_add(other.elapsed_ns);
+        self.latency.merge(&other.latency);
     }
 
     fn ops_per_sec(&self, duration: Duration) -> f64 {
@@ -217,6 +268,81 @@ impl CaseStats {
             ops => self.elapsed_ns as f64 / ops as f64 / 1_000.0,
         }
     }
+
+    fn p50_us(&self) -> f64 {
+        self.latency.p50_ns() as f64 / 1_000.0
+    }
+
+    fn p95_us(&self) -> f64 {
+        self.latency.p95_ns() as f64 / 1_000.0
+    }
+
+    fn p99_us(&self) -> f64 {
+        self.latency.p99_ns() as f64 / 1_000.0
+    }
+
+    fn p999_us(&self) -> f64 {
+        self.latency.p999_ns() as f64 / 1_000.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PlannedCommand {
+    case_index: usize,
+    responses: usize,
+    encoded: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkerCommandPlan {
+    commands: Vec<PlannedCommand>,
+    encoded_bytes: usize,
+}
+
+impl WorkerCommandPlan {
+    fn operation_count(&self) -> usize {
+        self.commands.len()
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ResolvedPlanMetadata {
+    schema_version: u32,
+    run_id: String,
+    resolved_plan_id: String,
+    suite: String,
+    scenario: String,
+    cases_filter: String,
+    skip_cases: String,
+    protocol: String,
+    clients: usize,
+    key_shards: usize,
+    fixture_scope: String,
+    pipeline_depth: usize,
+    memory_budget_mib: usize,
+    command_budget: usize,
+    selected_cases: Vec<ResolvedPlanCase>,
+    workers: Vec<ResolvedPlanWorker>,
+    total_operations: usize,
+    total_encoded_bytes: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ResolvedPlanCase {
+    family: String,
+    category: String,
+    command: String,
+    case: String,
+    profile: String,
+    expected_error: bool,
+    keyspace_wide: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ResolvedPlanWorker {
+    worker_id: usize,
+    operations: usize,
+    encoded_bytes: usize,
 }
 
 fn main() -> Result<(), BoxError> {
@@ -233,14 +359,48 @@ fn main() -> Result<(), BoxError> {
     if args.pipeline_depth == 0 {
         return Err("--pipeline-depth must be at least 1".into());
     }
+    if args.memory_budget_mib == 0 {
+        return Err("--memory-budget-mib must be at least 1".into());
+    }
 
     let targets = parse_targets(&args.targets)?;
     let cases = select_cases(&args.cases, &args.skip_cases)?;
     let duration = Duration::from_secs(args.duration);
     let warmup = Duration::from_secs(args.warmup);
+    let run_config = RunConfig {
+        clients: args.clients,
+        key_shards: args.key_shards,
+        fixture_scope: args.fixture_scope,
+        pipeline_depth: args.pipeline_depth,
+        warmup,
+        duration,
+        memory_budget_mib: args.memory_budget_mib,
+        command_budget: args.command_budget,
+    };
+    let run_id = args.run_id.clone().unwrap_or_else(default_run_id);
+    let resolved_plan_id = args
+        .resolved_plan_id
+        .clone()
+        .unwrap_or_else(|| compute_plan_id(&args.suite, &args.scenario, &cases, &run_config));
+    let labels = PlanLabels {
+        run_id: &run_id,
+        resolved_plan_id: &resolved_plan_id,
+        suite: &args.suite,
+        scenario: &args.scenario,
+        cases_filter: &args.cases,
+        skip_cases: &args.skip_cases,
+    };
+    let plan_metadata = build_plan_metadata(&labels, targets[0].protocol, &cases, &run_config)?;
+    if let Some(path) = args.plan_json.as_deref() {
+        std::fs::write(path, serde_json::to_string_pretty(&plan_metadata)?)?;
+    }
 
     println!(
-        "redis-command-matrix: targets={} cases={} clients={} key_shards={} fixture_scope={} pipeline_depth={} warmup={}s duration={}s",
+        "redis-command-matrix: run_id={} resolved_plan_id={} suite={} scenario={} targets={} cases={} clients={} key_shards={} fixture_scope={} pipeline_depth={} warmup={}s duration={}s memory_budget_mib={} command_budget={}",
+        run_id,
+        resolved_plan_id,
+        args.suite,
+        args.scenario,
         targets
             .iter()
             .map(|target| format!(
@@ -258,35 +418,36 @@ fn main() -> Result<(), BoxError> {
         args.pipeline_depth,
         args.warmup,
         args.duration,
+        args.memory_budget_mib,
+        args.command_budget,
     );
     println!();
-    println!("| target | family | command | case | ops/sec | avg us | errors | expected errors |");
-    println!("| --- | --- | --- | --- | ---: | ---: | ---: | ---: |");
+    println!(
+        "| target | family | command | case | ops/sec | avg us | p99 us | errors | expected errors |"
+    );
+    println!("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |");
 
     let mut csv = match args.csv.as_deref() {
+        Some(path) if args.append_csv => Some(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?,
+        ),
         Some(path) => Some(std::fs::File::create(path)?),
         None => None,
     };
-    if let Some(csv) = csv.as_mut() {
+    if let Some(csv) = csv.as_mut()
+        && !args.append_csv
+    {
         writeln!(
             csv,
-            "target,family,command,case,clients,key_shards,pipeline_depth,duration_s,ops,ops_per_sec,avg_us,errors,expected_errors,profile"
+            "run_id,resolved_plan_id,suite,scenario,category,target,family,command,case,clients,key_shards,pipeline_depth,vcpus,duration_s,ops,ops_per_sec,avg_us,p50_us,p95_us,p99_us,p999_us,errors,expected_errors,profile,memory_budget_mib,command_budget,command_bytes,host"
         )?;
     }
 
     for target in targets {
-        let stats = run_target(
-            &target,
-            &cases,
-            RunConfig {
-                clients: args.clients,
-                key_shards: args.key_shards,
-                fixture_scope: args.fixture_scope,
-                pipeline_depth: args.pipeline_depth,
-                warmup,
-                duration,
-            },
-        )?;
+        let stats = run_target(&target, &cases, run_config.clone())?;
         for (case, stats) in cases.iter().zip(stats.iter()) {
             if args.fail_on_error && stats.errors > 0 {
                 return Err(format!(
@@ -297,20 +458,26 @@ fn main() -> Result<(), BoxError> {
             }
 
             println!(
-                "| {} | {} | {} | {} | {:.0} | {:.2} | {} | {} |",
+                "| {} | {} | {} | {} | {:.0} | {:.2} | {:.2} | {} | {} |",
                 target.name,
                 case.family.label(),
                 case.command_name,
                 case.case_name,
                 stats.ops_per_sec(duration),
                 stats.avg_us(),
+                stats.p99_us(),
                 stats.errors,
                 stats.expected_errors
             );
             if let Some(csv) = csv.as_mut() {
                 writeln!(
                     csv,
-                    "{},{},{},{},{},{},{},{},{},{:.3},{:.3},{},{},{}",
+                    "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{},{}",
+                    run_id,
+                    resolved_plan_id,
+                    args.suite,
+                    args.scenario,
+                    case_category(case),
                     target.name,
                     case.family.label(),
                     case.command_name,
@@ -318,13 +485,22 @@ fn main() -> Result<(), BoxError> {
                     args.clients,
                     args.key_shards,
                     args.pipeline_depth,
+                    args.vcpus.unwrap_or(0),
                     args.duration,
                     stats.ops,
                     stats.ops_per_sec(duration),
                     stats.avg_us(),
+                    stats.p50_us(),
+                    stats.p95_us(),
+                    stats.p99_us(),
+                    stats.p999_us(),
                     stats.errors,
                     stats.expected_errors,
-                    case.profile.label()
+                    case.profile.label(),
+                    args.memory_budget_mib,
+                    args.command_budget,
+                    plan_metadata.total_encoded_bytes,
+                    host_label(),
                 )?;
             }
         }
@@ -444,6 +620,65 @@ fn parse_filters(raw: &str) -> Vec<&str> {
         .collect()
 }
 
+fn default_run_id() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("run-{secs}")
+}
+
+fn compute_plan_id(
+    suite: &str,
+    scenario: &str,
+    cases: &[RedisCommandCase],
+    config: &RunConfig,
+) -> String {
+    let mut text = format!(
+        "{suite}|{scenario}|{clients}|{key_shards}|{}|{pipeline_depth}|{memory_budget_mib}|{command_budget}",
+        config.fixture_scope.label(),
+        clients = config.clients,
+        key_shards = config.key_shards,
+        pipeline_depth = config.pipeline_depth,
+        memory_budget_mib = config.memory_budget_mib,
+        command_budget = config.command_budget,
+    );
+    for case in cases {
+        text.push('|');
+        text.push_str(case.command_name);
+        text.push(':');
+        text.push_str(case.case_name);
+    }
+    format!("plan-{:016x}", xxh3_64(text.as_bytes()))
+}
+
+fn case_category(case: &RedisCommandCase) -> String {
+    if case.profile.label() == "destructive" {
+        return "destructive".to_string();
+    }
+    if case.family.label() == "module" {
+        return format!("module:{}", module_prefix(case.command_name));
+    }
+    if case.is_keyspace_wide() {
+        return "keyspace".to_string();
+    }
+    case.family.label().to_string()
+}
+
+fn module_prefix(command_name: &str) -> String {
+    command_name
+        .split_once('.')
+        .map(|(prefix, _)| prefix)
+        .unwrap_or(command_name)
+        .to_ascii_lowercase()
+}
+
+fn host_label() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
 fn all_non_destructive_cases() -> impl Iterator<Item = RedisCommandCase> {
     REDIS_COMMAND_CASES
         .iter()
@@ -476,6 +711,26 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
     if filter.eq_ignore_ascii_case("extended-with-destructive") {
         return all_cases().collect();
     }
+    if filter.eq_ignore_ascii_case("modules")
+        || filter.eq_ignore_ascii_case("module")
+        || filter.eq_ignore_ascii_case("profile:module")
+        || filter.eq_ignore_ascii_case("profile:modules")
+    {
+        return REDIS_MODULE_COMMAND_CASES.to_vec();
+    }
+    if let Some(module) = filter.strip_prefix("module:") {
+        return REDIS_MODULE_COMMAND_CASES
+            .iter()
+            .copied()
+            .filter(|case| {
+                let prefix_len = case
+                    .command_name
+                    .find('.')
+                    .unwrap_or(case.command_name.len());
+                module.eq_ignore_ascii_case(&case.command_name[..prefix_len])
+            })
+            .collect();
+    }
     if filter.eq_ignore_ascii_case("extended-no-keyspace")
         || filter.eq_ignore_ascii_case("no-keyspace")
         || filter.eq_ignore_ascii_case("profile:no-keyspace")
@@ -501,6 +756,7 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
     }
 
     let command_matches = all_cases()
+        .chain(REDIS_MODULE_COMMAND_CASES.iter().copied())
         .filter(|case| filter.eq_ignore_ascii_case(case.command_name))
         .collect::<Vec<_>>();
     if !command_matches.is_empty() {
@@ -508,6 +764,7 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
     }
 
     let family_matches = all_cases()
+        .chain(REDIS_MODULE_COMMAND_CASES.iter().copied())
         .filter(|case| filter.eq_ignore_ascii_case(case.family.label()))
         .collect::<Vec<_>>();
     if !family_matches.is_empty() {
@@ -515,8 +772,167 @@ fn matching_cases(filter: &str) -> Vec<RedisCommandCase> {
     }
 
     all_cases()
+        .chain(REDIS_MODULE_COMMAND_CASES.iter().copied())
         .filter(|case| filter.eq_ignore_ascii_case(case.case_name))
         .collect()
+}
+
+fn build_plan_metadata(
+    labels: &PlanLabels<'_>,
+    protocol: TargetProtocol,
+    cases: &[RedisCommandCase],
+    config: &RunConfig,
+) -> Result<ResolvedPlanMetadata, BoxError> {
+    let mut workers = Vec::with_capacity(config.clients);
+    let mut total_operations = 0_usize;
+    let mut total_encoded_bytes = 0_usize;
+    for worker_id in 0..config.clients {
+        let suffixes = WorkerSuffixes::new(worker_id, config.key_shards);
+        let plan = build_worker_command_plan(protocol, cases, &suffixes, config)?;
+        total_operations = total_operations.saturating_add(plan.operation_count());
+        total_encoded_bytes = total_encoded_bytes.saturating_add(plan.encoded_bytes);
+        workers.push(ResolvedPlanWorker {
+            worker_id,
+            operations: plan.operation_count(),
+            encoded_bytes: plan.encoded_bytes,
+        });
+    }
+
+    Ok(ResolvedPlanMetadata {
+        schema_version: 1,
+        run_id: labels.run_id.to_string(),
+        resolved_plan_id: labels.resolved_plan_id.to_string(),
+        suite: labels.suite.to_string(),
+        scenario: labels.scenario.to_string(),
+        cases_filter: labels.cases_filter.to_string(),
+        skip_cases: labels.skip_cases.to_string(),
+        protocol: protocol.label().to_string(),
+        clients: config.clients,
+        key_shards: config.key_shards,
+        fixture_scope: config.fixture_scope.label().to_string(),
+        pipeline_depth: config.pipeline_depth,
+        memory_budget_mib: config.memory_budget_mib,
+        command_budget: config.command_budget,
+        selected_cases: cases
+            .iter()
+            .map(|case| ResolvedPlanCase {
+                family: case.family.label().to_string(),
+                category: case_category(case),
+                command: case.command_name.to_string(),
+                case: case.case_name.to_string(),
+                profile: case.profile.label().to_string(),
+                expected_error: case.expect_error,
+                keyspace_wide: case.is_keyspace_wide(),
+            })
+            .collect(),
+        workers,
+        total_operations,
+        total_encoded_bytes,
+    })
+}
+
+fn build_worker_command_plan(
+    protocol: TargetProtocol,
+    cases: &[RedisCommandCase],
+    suffixes: &WorkerSuffixes,
+    config: &RunConfig,
+) -> Result<WorkerCommandPlan, BoxError> {
+    let base = cases
+        .iter()
+        .enumerate()
+        .map(|(case_index, case)| {
+            let namespace = suffixes.for_case(case, config.fixture_scope);
+            let encoded = encode_case(protocol, case, namespace)?;
+            Ok(PlannedCommand {
+                case_index,
+                responses: case.script.len().max(1),
+                encoded,
+            })
+        })
+        .collect::<Result<Vec<_>, BoxError>>()?;
+    if base.is_empty() {
+        return Err("resolved command plan has no commands".into());
+    }
+
+    let base_bytes = encoded_bytes(&base);
+    let memory_budget_bytes = config
+        .memory_budget_mib
+        .checked_mul(1024 * 1024)
+        .ok_or("--memory-budget-mib is too large")?;
+    let worker_memory_budget = memory_budget_bytes / config.clients.max(1);
+    if base_bytes > worker_memory_budget {
+        return Err(format!(
+            "memory budget is too small for one command pass: worker needs at least {} bytes, budget allows {} bytes",
+            base_bytes, worker_memory_budget
+        )
+        .into());
+    }
+
+    let worker_command_budget = if config.command_budget == 0 {
+        usize::MAX
+    } else {
+        let per_worker = config.command_budget / config.clients.max(1);
+        if per_worker < base.len() {
+            return Err(format!(
+                "command budget is too small for one command pass: worker needs at least {} commands, budget allows {} commands",
+                base.len(),
+                per_worker
+            )
+            .into());
+        }
+        per_worker
+    };
+
+    let mut commands = base.clone();
+    let mut bytes = base_bytes;
+    while commands.len().saturating_add(base.len()) <= worker_command_budget
+        && bytes.saturating_add(base_bytes) <= worker_memory_budget
+    {
+        commands.extend(base.iter().cloned());
+        bytes = bytes.saturating_add(base_bytes);
+    }
+
+    Ok(WorkerCommandPlan {
+        commands,
+        encoded_bytes: bytes,
+    })
+}
+
+fn encoded_bytes(commands: &[PlannedCommand]) -> usize {
+    commands
+        .iter()
+        .map(|command| command.encoded.len())
+        .sum::<usize>()
+}
+
+fn encode_case(
+    protocol: TargetProtocol,
+    case: &RedisCommandCase,
+    namespace: &KeyNamespace,
+) -> Result<Vec<u8>, BoxError> {
+    let mut encoded = Vec::new();
+    if case.script.is_empty() {
+        append_encoded_command(protocol, case.parts, namespace, &mut encoded)?;
+    } else {
+        for parts in case.script {
+            append_encoded_command(protocol, parts, namespace, &mut encoded)?;
+        }
+    }
+    Ok(encoded)
+}
+
+fn append_encoded_command(
+    protocol: TargetProtocol,
+    parts: &[&str],
+    namespace: &KeyNamespace,
+    out: &mut Vec<u8>,
+) -> Result<(), BoxError> {
+    let encoded = match protocol {
+        TargetProtocol::Resp => encode_command(parts, namespace)?,
+        TargetProtocol::Scnp => encode_scnp_command(parts, namespace)?,
+    };
+    out.extend_from_slice(&encoded);
+    Ok(())
 }
 
 fn run_target(
@@ -540,6 +956,7 @@ fn run_target(
     for worker_id in 0..config.clients {
         let target = target.clone();
         let cases = Arc::clone(&cases);
+        let config = config.clone();
         handles.push(thread::spawn(move || {
             run_worker(worker_id, &target, &cases, config)
         }));
@@ -564,15 +981,15 @@ fn run_worker(
     config: RunConfig,
 ) -> Result<Vec<CaseStats>, BoxError> {
     let suffixes = WorkerSuffixes::new(worker_id, config.key_shards);
+    let plan = build_worker_command_plan(target.protocol, cases, &suffixes, &config)?;
     let addr = target.addr.addr_for_lane(suffixes.worker.shard_lane)?;
     let mut conn = BenchConn::connect(target.protocol, &addr)?;
     run_setup(&mut conn, cases, &suffixes, config.fixture_scope)?;
     if !config.warmup.is_zero() {
-        run_script(
+        run_plan(
             &mut conn,
             cases,
-            &suffixes,
-            config.fixture_scope,
+            &plan,
             config.pipeline_depth,
             Instant::now() + config.warmup,
             None,
@@ -585,11 +1002,10 @@ fn run_worker(
 
     let deadline = Instant::now() + config.duration;
     let mut stats = vec![CaseStats::default(); cases.len()];
-    run_script(
+    run_plan(
         &mut conn,
         cases,
-        &suffixes,
-        config.fixture_scope,
+        &plan,
         config.pipeline_depth,
         deadline,
         Some(&mut stats),
@@ -660,7 +1076,15 @@ fn run_setup(
     for case in cases {
         let namespace = suffixes.for_case(case, fixture_scope);
         for parts in case.setup {
-            if conn.execute(parts, namespace)? {
+            let error = if let Some(directive) = parts
+                .first()
+                .and_then(|part| part.strip_prefix("$vector-fixture:"))
+            {
+                run_vector_fixture(conn, directive, namespace)?
+            } else {
+                conn.execute(parts, namespace)?
+            };
+            if error && !case.ignore_setup_error {
                 return Err(format!("setup for `{}` produced a RESP error", case.case_name).into());
             }
         }
@@ -668,32 +1092,74 @@ fn run_setup(
     Ok(())
 }
 
-fn run_script(
+fn run_vector_fixture(
+    conn: &mut BenchConn,
+    directive: &str,
+    namespace: &KeyNamespace,
+) -> Result<bool, BoxError> {
+    let mut parts = directive.split(':');
+    let key = parts.next().ok_or("vector fixture is missing key")?;
+    let count = parse_required_count("vector fixture count", parts.next())?;
+    let dim = parse_required_count("vector fixture dim", parts.next())?;
+    if parts.next().is_some() {
+        return Err(format!("invalid vector fixture directive: {directive}").into());
+    }
+
+    let mut saw_error = conn.execute(&["DEL", &format!("$key:{key}")], namespace)?;
+    for index in 0..count {
+        let command = vector_add_command(key, index, dim);
+        let refs = command.iter().map(String::as_str).collect::<Vec<_>>();
+        saw_error |= conn.execute(&refs, namespace)?;
+    }
+    Ok(saw_error)
+}
+
+fn parse_required_count(label: &str, raw: Option<&str>) -> Result<usize, BoxError> {
+    let raw = raw.ok_or_else(|| format!("{label} is missing"))?;
+    parse_token_count(label, raw)
+}
+
+fn vector_add_command(key: &str, index: usize, dim: usize) -> Vec<String> {
+    let mut parts = Vec::with_capacity(dim + 7);
+    parts.push("VADD".to_string());
+    parts.push(format!("$key:{key}"));
+    push_vector_values(&mut parts, dim, index);
+    parts.push(format!("elem:{index:06}"));
+    parts.push("SETATTR".to_string());
+    parts.push(format!(
+        "{{\"group\":{},\"keep\":{}}}",
+        index % 4,
+        index.is_multiple_of(2)
+    ));
+    parts
+}
+
+fn run_plan(
     conn: &mut BenchConn,
     cases: &[RedisCommandCase],
-    suffixes: &WorkerSuffixes,
-    fixture_scope: FixtureScope,
+    plan: &WorkerCommandPlan,
     pipeline_depth: usize,
     deadline: Instant,
     mut stats: Option<&mut [CaseStats]>,
 ) -> Result<(), BoxError> {
     let mut pending = Vec::with_capacity(pipeline_depth);
+    let mut cursor = 0;
     while Instant::now() < deadline {
-        for (index, case) in cases.iter().enumerate() {
-            if Instant::now() >= deadline {
-                break;
-            }
-            let namespace = suffixes.for_case(case, fixture_scope);
-            let started = Instant::now();
-            conn.write_case(case, namespace)?;
-            pending.push((index, started));
-            if pending.len() >= pipeline_depth {
-                drain_pipeline(conn, cases, &mut pending, stats.as_deref_mut())?;
-            }
+        let op = &plan.commands[cursor];
+        cursor += 1;
+        if cursor == plan.commands.len() {
+            cursor = 0;
         }
-        if !pending.is_empty() {
+
+        let started = Instant::now();
+        conn.write_raw(&op.encoded)?;
+        pending.push((op.case_index, op.responses, started));
+        if pending.len() >= pipeline_depth {
             drain_pipeline(conn, cases, &mut pending, stats.as_deref_mut())?;
         }
+    }
+    if !pending.is_empty() {
+        drain_pipeline(conn, cases, &mut pending, stats)?;
     }
     Ok(())
 }
@@ -701,18 +1167,20 @@ fn run_script(
 fn drain_pipeline(
     conn: &mut BenchConn,
     cases: &[RedisCommandCase],
-    pending: &mut Vec<(usize, Instant)>,
+    pending: &mut Vec<(usize, usize, Instant)>,
     mut stats: Option<&mut [CaseStats]>,
 ) -> Result<(), BoxError> {
     conn.flush()?;
-    for (index, started) in pending.drain(..) {
-        let error = conn.read_case(&cases[index])?;
+    for (index, responses, started) in pending.drain(..) {
+        let error = conn.read_responses(responses)?;
         if let Some(stats) = stats.as_deref_mut() {
+            let elapsed_ns = started.elapsed().as_nanos();
             let case_stats = &mut stats[index];
             case_stats.ops = case_stats.ops.saturating_add(1);
-            case_stats.elapsed_ns = case_stats
-                .elapsed_ns
-                .saturating_add(started.elapsed().as_nanos());
+            case_stats.elapsed_ns = case_stats.elapsed_ns.saturating_add(elapsed_ns);
+            case_stats
+                .latency
+                .record(elapsed_ns.min(u128::from(u64::MAX)) as u64);
             if error {
                 if cases[index].expect_error {
                     case_stats.expected_errors = case_stats.expected_errors.saturating_add(1);
@@ -745,14 +1213,10 @@ impl BenchConn {
         }
     }
 
-    fn write_case(
-        &mut self,
-        case: &RedisCommandCase,
-        namespace: &KeyNamespace,
-    ) -> Result<(), BoxError> {
+    fn write_raw(&mut self, encoded: &[u8]) -> Result<(), BoxError> {
         match self {
-            Self::Resp(conn) => conn.write_case(case, namespace),
-            Self::Scnp(conn) => conn.write_case(case, namespace),
+            Self::Resp(conn) => conn.write_raw(encoded),
+            Self::Scnp(conn) => conn.write_raw(encoded),
         }
     }
 
@@ -763,10 +1227,10 @@ impl BenchConn {
         }
     }
 
-    fn read_case(&mut self, case: &RedisCommandCase) -> Result<bool, BoxError> {
+    fn read_responses(&mut self, responses: usize) -> Result<bool, BoxError> {
         match self {
-            Self::Resp(conn) => conn.read_case(case),
-            Self::Scnp(conn) => conn.read_case(case),
+            Self::Resp(conn) => conn.read_responses(responses),
+            Self::Scnp(conn) => conn.read_responses(responses),
         }
     }
 }
@@ -783,6 +1247,7 @@ struct CommandCacheKey {
     len: usize,
     suffix_ptr: usize,
     suffix_len: usize,
+    fingerprint: u64,
 }
 
 impl RespConn {
@@ -803,17 +1268,8 @@ impl RespConn {
         self.read_frame()
     }
 
-    fn write_case(
-        &mut self,
-        case: &RedisCommandCase,
-        namespace: &KeyNamespace,
-    ) -> Result<(), BoxError> {
-        if case.script.is_empty() {
-            return self.write_command(case.parts, namespace);
-        }
-        for parts in case.script {
-            self.write_command(parts, namespace)?;
-        }
+    fn write_raw(&mut self, encoded: &[u8]) -> Result<(), BoxError> {
+        self.reader.get_mut().write_all(encoded)?;
         Ok(())
     }
 
@@ -822,8 +1278,7 @@ impl RespConn {
         Ok(())
     }
 
-    fn read_case(&mut self, case: &RedisCommandCase) -> Result<bool, BoxError> {
-        let responses = case.script.len().max(1);
+    fn read_responses(&mut self, responses: usize) -> Result<bool, BoxError> {
         let mut saw_error = false;
         for _ in 0..responses {
             saw_error |= self.read_frame()?;
@@ -838,6 +1293,7 @@ impl RespConn {
             len: parts.len(),
             suffix_ptr: cache_label.as_ptr() as usize,
             suffix_len: cache_label.len(),
+            fingerprint: command_cache_fingerprint(parts, namespace),
         };
         let encoded = match self.command_cache.entry(cache_key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -960,17 +1416,8 @@ impl ScnpConn {
         self.read_frame()
     }
 
-    fn write_case(
-        &mut self,
-        case: &RedisCommandCase,
-        namespace: &KeyNamespace,
-    ) -> Result<(), BoxError> {
-        if case.script.is_empty() {
-            return self.write_command(case.parts, namespace);
-        }
-        for parts in case.script {
-            self.write_command(parts, namespace)?;
-        }
+    fn write_raw(&mut self, encoded: &[u8]) -> Result<(), BoxError> {
+        self.reader.get_mut().write_all(encoded)?;
         Ok(())
     }
 
@@ -979,8 +1426,7 @@ impl ScnpConn {
         Ok(())
     }
 
-    fn read_case(&mut self, case: &RedisCommandCase) -> Result<bool, BoxError> {
-        let responses = case.script.len().max(1);
+    fn read_responses(&mut self, responses: usize) -> Result<bool, BoxError> {
         let mut saw_error = false;
         for _ in 0..responses {
             saw_error |= self.read_frame()?;
@@ -995,6 +1441,7 @@ impl ScnpConn {
             len: parts.len(),
             suffix_ptr: cache_label.as_ptr() as usize,
             suffix_len: cache_label.len(),
+            fingerprint: command_cache_fingerprint(parts, namespace),
         };
         let encoded = match self.command_cache.entry(cache_key) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -1055,6 +1502,22 @@ fn encode_command(parts: &[&str], namespace: &KeyNamespace) -> Result<Vec<u8>, B
         encoded.write_all(b"\r\n")?;
     }
     Ok(encoded)
+}
+
+fn command_cache_fingerprint(parts: &[&str], namespace: &KeyNamespace) -> u64 {
+    let mut bytes = Vec::with_capacity(
+        namespace
+            .label()
+            .len()
+            .saturating_add(parts.iter().map(|part| part.len() + 1).sum::<usize>()),
+    );
+    bytes.extend_from_slice(namespace.label().as_bytes());
+    bytes.push(0xff);
+    for part in parts {
+        bytes.extend_from_slice(part.as_bytes());
+        bytes.push(0);
+    }
+    xxh3_64(&bytes)
 }
 
 fn encode_scnp_command(parts: &[&str], namespace: &KeyNamespace) -> Result<Vec<u8>, BoxError> {
@@ -1248,6 +1711,13 @@ fn append_rewritten_parts(
         }
         return Ok(());
     }
+    if let Some(spec) = part.strip_prefix("$vector-values:") {
+        let (dim, seed) = parse_vector_values_spec(spec)?;
+        let mut values = Vec::with_capacity(dim + 2);
+        push_vector_values(&mut values, dim, seed);
+        out.extend(values.into_iter().map(String::into_bytes));
+        return Ok(());
+    }
     if let Some(count) = part.strip_prefix("$kvpairs:") {
         for index in 0..parse_token_count("$kvpairs", count)? {
             out.push(rewrite_key(&format!("ks:{index:06}"), namespace)?);
@@ -1262,6 +1732,30 @@ fn append_rewritten_parts(
 
     out.push(rewrite_part(part, namespace)?);
     Ok(())
+}
+
+fn parse_vector_values_spec(spec: &str) -> Result<(usize, usize), BoxError> {
+    let Some((dim, seed)) = spec.split_once(':') else {
+        return Err(format!("$vector-values spec `{spec}` must use dim:seed").into());
+    };
+    Ok((
+        parse_token_count("$vector-values dim", dim)?,
+        seed.parse::<usize>()
+            .map_err(|error| format!("$vector-values seed `{seed}` is invalid: {error}"))?,
+    ))
+}
+
+fn push_vector_values(parts: &mut Vec<String>, dim: usize, seed: usize) {
+    parts.push("VALUES".to_string());
+    parts.push(dim.to_string());
+    for component in 0..dim {
+        parts.push(format!("{:.6}", vector_component(seed, component)));
+    }
+}
+
+fn vector_component(seed: usize, component: usize) -> f64 {
+    let raw = ((seed.wrapping_mul(31) + component.wrapping_mul(17) + 13) % 201) as f64;
+    (raw - 100.0) / 100.0
 }
 
 fn parse_token_count(token: &str, raw: &str) -> Result<usize, BoxError> {
@@ -1334,17 +1828,20 @@ fn make_string_dump_payload(value: &[u8]) -> Vec<u8> {
 }
 
 fn write_rdb_len(out: &mut Vec<u8>, len: u64) {
-    if len < (1 << 6) {
-        out.push(len as u8);
-    } else if len < (1 << 14) {
-        out.push(((len >> 8) as u8) | 0x40);
-        out.push((len & 0xff) as u8);
-    } else if u32::try_from(len).is_ok() {
-        out.push(0x80);
-        out.extend_from_slice(&(len as u32).to_be_bytes());
-    } else {
-        out.push(0x81);
-        out.extend_from_slice(&len.to_be_bytes());
+    match len {
+        len if len < (1 << 6) => out.push(len as u8),
+        len if len < (1 << 14) => {
+            out.push(((len >> 8) as u8) | 0x40);
+            out.push((len & 0xff) as u8);
+        }
+        len if u32::try_from(len).is_ok() => {
+            out.push(0x80);
+            out.extend_from_slice(&(len as u32).to_be_bytes());
+        }
+        len => {
+            out.push(0x81);
+            out.extend_from_slice(&len.to_be_bytes());
+        }
     }
 }
 
@@ -1409,6 +1906,7 @@ fn is_probable_key(part: &str) -> bool {
             | "mb"
             | "mc"
             | "h"
+            | "hflds"
             | "hm"
             | "l"
             | "lmove-bench"
@@ -1444,10 +1942,12 @@ fn is_probable_key(part: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        FixtureScope, REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES, WorkerSuffixes,
-        all_non_destructive_cases, parse_target_addr, rewrite_key, select_cases, shift_for,
-        stripe_index,
+        FixtureScope, REDIS_COMMAND_CASES, REDIS_COMMAND_DESTRUCTIVE_CASES,
+        REDIS_COMMAND_LARGE_CASES, REDIS_MODULE_COMMAND_CASES, RunConfig, TargetProtocol,
+        WorkerSuffixes, all_non_destructive_cases, build_worker_command_plan, case_category,
+        parse_target_addr, rewrite_key, select_cases, shift_for, stripe_index,
     };
+    use std::time::Duration;
 
     #[test]
     fn skip_cases_excludes_command_filters() {
@@ -1520,6 +2020,40 @@ mod tests {
     }
 
     #[test]
+    fn module_filter_is_opt_in() {
+        let default_cases = select_cases("all", "").unwrap();
+        assert!(
+            !default_cases
+                .iter()
+                .any(|case| case.profile.label() == "module")
+        );
+
+        let module_cases = select_cases("modules", "").unwrap();
+        assert_eq!(module_cases.len(), REDIS_MODULE_COMMAND_CASES.len());
+        assert!(
+            module_cases
+                .iter()
+                .all(|case| case.profile.label() == "module")
+        );
+        assert!(
+            module_cases
+                .iter()
+                .all(|case| case.family.label() == "module")
+        );
+    }
+
+    #[test]
+    fn module_prefix_filter_selects_namespace() {
+        let json_cases = select_cases("module:json", "").unwrap();
+        assert!(!json_cases.is_empty());
+        assert!(
+            json_cases
+                .iter()
+                .all(|case| case.command_name.starts_with("JSON."))
+        );
+    }
+
+    #[test]
     fn expected_error_cases_remain_in_default_matrix() {
         let cases = select_cases("all", "").unwrap();
         let expected_errors = cases
@@ -1531,8 +2065,8 @@ mod tests {
         assert_eq!(
             expected_errors,
             [
-                "CLUSTER", "HOST:", "MIGRATE", "MONITOR", "MOVE", "POST", "PSYNC", "SHUTDOWN",
-                "SYNC",
+                "CLUSTER", "FAILOVER", "FCALL", "FCALL_RO", "HOST:", "MIGRATE", "MONITOR", "MOVE",
+                "POST", "PSYNC", "SHUTDOWN", "SYNC",
             ]
             .into_iter()
             .collect()
@@ -1628,5 +2162,85 @@ mod tests {
                 .label(),
             "shared-keyspace"
         );
+    }
+
+    fn test_config(clients: usize, command_budget: usize) -> RunConfig {
+        RunConfig {
+            clients,
+            key_shards: 1,
+            fixture_scope: FixtureScope::PerClient,
+            pipeline_depth: 1,
+            warmup: Duration::from_secs(0),
+            duration: Duration::from_secs(1),
+            memory_budget_mib: 1,
+            command_budget,
+        }
+    }
+
+    #[test]
+    fn precomposed_plan_is_deterministic() {
+        let cases = &REDIS_COMMAND_CASES[..2];
+        let suffixes = WorkerSuffixes::new(0, 1);
+        let config = test_config(1, 4);
+
+        let left =
+            build_worker_command_plan(TargetProtocol::Resp, cases, &suffixes, &config).unwrap();
+        let right =
+            build_worker_command_plan(TargetProtocol::Resp, cases, &suffixes, &config).unwrap();
+
+        assert_eq!(left.operation_count(), 4);
+        assert_eq!(left.encoded_bytes, right.encoded_bytes);
+        assert_eq!(left.commands.len(), right.commands.len());
+        for (left, right) in left.commands.iter().zip(right.commands.iter()) {
+            assert_eq!(left.case_index, right.case_index);
+            assert_eq!(left.responses, right.responses);
+            assert_eq!(left.encoded, right.encoded);
+        }
+    }
+
+    #[test]
+    fn precomposed_plan_respects_total_command_budget() {
+        let cases = &REDIS_COMMAND_CASES[..2];
+        let suffixes = WorkerSuffixes::new(0, 1);
+        let config = test_config(2, 4);
+
+        let plan =
+            build_worker_command_plan(TargetProtocol::Resp, cases, &suffixes, &config).unwrap();
+
+        assert_eq!(plan.operation_count(), 2);
+        assert!(plan.encoded_bytes > 0);
+    }
+
+    #[test]
+    fn precomposed_plan_rejects_too_small_memory_budget() {
+        let cases = &REDIS_COMMAND_CASES[..2];
+        let suffixes = WorkerSuffixes::new(0, 1);
+        let config = test_config(usize::MAX, 0);
+
+        let error = build_worker_command_plan(TargetProtocol::Resp, cases, &suffixes, &config)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("memory budget is too small"));
+    }
+
+    #[test]
+    fn every_selected_case_has_a_category() {
+        for case in REDIS_COMMAND_CASES
+            .iter()
+            .chain(REDIS_COMMAND_LARGE_CASES.iter())
+            .chain(REDIS_COMMAND_DESTRUCTIVE_CASES.iter())
+            .chain(REDIS_MODULE_COMMAND_CASES.iter())
+        {
+            let category = case_category(case);
+            assert!(
+                !category.is_empty(),
+                "{} has empty category",
+                case.case_name
+            );
+            if case.family.label() == "module" {
+                assert!(category.starts_with("module:"));
+            }
+        }
     }
 }

@@ -41,6 +41,44 @@ default = ["sharded"]
 embedded = []
 sharded = ["embedded"]
 redis = ["embedded"]
+redis-functions = ["redis"]
+redis-modules = ["redis"]
+redis-module-search = ["redis-modules"]
+redis-module-bloom = ["redis-modules"]
+redis-module-timeseries = ["redis-modules"]
+redis-module-graph = ["redis-modules"]
+redis-module-json = ["redis-modules"]
+redis-module-ai = ["redis-modules"]
+redis-module-gears = ["redis-modules"]
+redis-module-cell = ["redis-modules"]
+redis-module-neural = ["redis-modules"]
+redis-module-tdigest = ["redis-modules"]
+redis-module-cthulhu = ["redis-modules"]
+redis-module-snowflake = ["redis-modules"]
+redis-module-roaring = ["redis-modules"]
+redis-module-session-gate = ["redis-modules"]
+redis-module-rede = ["redis-modules"]
+redis-module-topk = ["redis-modules"]
+redis-module-cms = ["redis-modules"]
+redis-modules-all = [
+    "redis-module-search",
+    "redis-module-bloom",
+    "redis-module-timeseries",
+    "redis-module-graph",
+    "redis-module-json",
+    "redis-module-ai",
+    "redis-module-gears",
+    "redis-module-cell",
+    "redis-module-neural",
+    "redis-module-tdigest",
+    "redis-module-cthulhu",
+    "redis-module-snowflake",
+    "redis-module-roaring",
+    "redis-module-session-gate",
+    "redis-module-rede",
+    "redis-module-topk",
+    "redis-module-cms",
+]
 server = [
     "sharded",
     "dep:bytes-handoff",
@@ -49,7 +87,7 @@ server = [
     "dep:socket2",
     "dep:tracing-subscriber",
 ]
-redis-server = ["server", "redis"]
+redis-server = ["server", "redis", "redis-functions", "redis-modules"]
 
 # Runtime and platform integrations.
 monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
@@ -121,6 +159,11 @@ path = "tests/redis_tier1_coverage_test.rs"
 [[test]]
 name = "protocol_test"
 path = "tests/protocol_test.rs"
+
+[[test]]
+name = "embedded_server_test"
+path = "tests/embedded_server_test.rs"
+required-features = ["redis-server"]
 
 [[test]]
 name = "fuzz_harness_test"

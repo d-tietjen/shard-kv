@@ -47,6 +47,12 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     vcpu_budget: usize,
 
+    /// SCNP direct-shard client fan-out: number of shard-owned ports to connect
+    /// and route keys across. Must equal the server's `--shard-count`. 0 means
+    /// "use --vcpu-budget" (back-compat with the historical coupling).
+    #[arg(long, default_value_t = 0)]
+    scnp_shards: usize,
+
     /// Concurrent client threads / connections.
     #[arg(long, default_value_t = 16)]
     clients: usize,
@@ -243,6 +249,7 @@ fn main() -> Result<(), BoxError> {
             args.addr.as_deref(),
             args.key_count,
             cache_config,
+            args.scnp_shards,
         ) {
             Ok(backend) => match run_one(&args, backend.as_ref(), workload.clone(), mix) {
                 Ok(result) => {

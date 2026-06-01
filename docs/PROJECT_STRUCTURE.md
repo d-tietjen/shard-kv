@@ -2,7 +2,7 @@
 
 This repository is organized as a Rust workspace with optional Python
 integration packages and local benchmark tooling. The goal is to keep the
-two published crate surfaces easy to find while leaving generated artifacts, raw
+published crate surfaces easy to find while leaving generated artifacts, raw
 benchmark outputs, and local verification caches outside version control.
 
 ## Top-Level Map
@@ -10,11 +10,11 @@ benchmark outputs, and local verification caches outside version control.
 | Path | Purpose |
 | --- | --- |
 | `crates/shardmap` | Published embedded cache crate. Core embedded cache, storage, protocol, persistence, replication, and opt-in server internals. Start here for base-cache behavior. |
-| `crates/shardcache` | Source-only server package and optional `shardcache` binary. |
+| `crates/shardcache` | Published server package and optional `shardcache` binary. |
 | `crates/shardcache-client-rs` | Published blocking Rust client for the native SCNP protocol and direct shard routing. |
 | `crates/shardcache-runtime` | Source-only Rust-native CPU/GPU transfer runtime used by model-serving integrations. |
 | `crates/shardcache-py` | Source-only PyO3 bindings used by benchmarks and integration adapters. |
-| `crates/shardcache-redis` | Redis/Valkey compatibility crate and source root. Core includes these files by path only while the extension API is being finished. |
+| `crates/shardcache-redis` | Published Redis/Valkey compatibility crate and source root. Core includes these files by path only while the extension API is being finished. |
 | `crates/shardcache-formal` | Formal-model support crate used with the verification workspace. |
 | `benchmarks` | Local benchmark harnesses, reproduction scripts, and curated benchmark writeups. Raw run outputs live under ignored `benchmarks/results/`. |
 | `integrations/lmcache_storage_backend` | Python LMCache storage backend package. |
@@ -39,7 +39,7 @@ Most production code lives under `crates/shardmap/src`:
 | `persistence/` | WAL, snapshots, recovery, and TCP WAL export. |
 | `replication/` | Native replication protocol, backlog, transport, and batching. |
 | `config/` | TOML configuration, geometry, and validation. |
-| `crates/shardcache/src/main.rs` | Server entry point for the source-only `shardcache` package. |
+| `crates/shardcache/src/main.rs` | Server entry point for the `shardcache` package. |
 | `tests/` | Integration tests for storage, protocol, persistence, server, and compatibility behavior. |
 | `fuzz/` | LibFuzzer harnesses for command-sequence validation. |
 
@@ -78,18 +78,19 @@ stay aligned.
 
 New contributors should be able to answer the first set of questions from:
 
-- `README.md`: project overview and links to the four public docs.
+- `README.md`: project overview and links to the public docs.
 - `crates/shardmap/README.md`: published embedded crate guide.
+- `crates/shardcache/README.md`: published server crate guide.
+- `crates/shardcache-redis/README.md`: published Redis/Valkey compatibility crate guide.
 - `crates/shardcache-client-rs/README.md`: published native Rust client guide.
 - `docs/SHARDCACHE_DOCKER.md`: source-built server and Docker runbook.
 - `integrations/lmcache_storage_backend/README.md`: LMCache storage backend guide.
-- `crates/shardcache/README.md`: source-only server package notes.
 - `crates/shardmap/SAFETY.md`: reviewed unsafe inventory and invariants.
 - `CONTRIBUTING.md`: setup, pull-request expectations, and verification
   commands.
 - `SECURITY.md`: vulnerability reporting.
 - `RELEASE.md`: release checklist.
-- `docs/RELEASE_0_1_READINESS.md`: current 0.1.0 proof, benchmark, and known
+- `docs/RELEASE_0_2_READINESS.md`: current 0.2.0 proof, benchmark, and known
   limitation checklist.
 - `docs/REDIS_COMPATIBILITY.md`: generated Redis command compatibility
   manifest based on the live command matrix registry, including supported
