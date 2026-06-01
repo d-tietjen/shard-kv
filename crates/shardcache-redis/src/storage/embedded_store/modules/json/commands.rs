@@ -129,14 +129,12 @@ impl EmbeddedStore {
             "JSON.ARRINSERT" if args.len() >= 4 => {
                 let index = parse_usize_lossy(args[2]).unwrap_or(0);
                 self.json_array_mutation(args[0], args[1], |array| {
-                    let mut offset = index.min(array.len());
-                    for raw in &args[3..] {
+                    for (offset, raw) in (index.min(array.len())..).zip(args[3..].iter()) {
                         let value = serde_json::from_slice::<serde_json::Value>(raw)
                             .unwrap_or_else(|_| {
                                 serde_json::Value::String(String::from_utf8_lossy(raw).into())
                             });
                         array.insert(offset, value);
-                        offset += 1;
                     }
                     array.len() as i64
                 })
