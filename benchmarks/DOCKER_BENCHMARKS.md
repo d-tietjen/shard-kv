@@ -295,10 +295,12 @@ Suite manifests live under `benchmarks/suites/`.
 | --- | --- |
 | `redis-core` | Non-destructive Redis-compatible core commands. |
 | `redis-v6-v7` | Redis 6/7 extension commands, including functions and hash-field TTL. |
+| `redis-v8` | Redis 8 command coverage, including hash helpers and vector-set commands. |
+| `redis-v8-vector` | Focused Redis 8 vector-set subset for vector-only sweeps. |
 | `redis-keyspace` | Keyspace-wide commands such as scan-style workloads. |
 | `redis-destructive` | Explicit destructive commands such as flush workloads. |
 | `redis-modules` | Redis module command coverage by module prefix. |
-| `all` | Expands to every suite above. |
+| `all` | Expands to every complete suite above, including Redis 8 and module suites. Focused subsets such as `redis-v8-vector` stay opt-in. |
 
 Each suite resolves to command filters for `redis_command_matrix`. The resolved
 plan is written to the output bundle so the exact selected cases are visible.
@@ -425,7 +427,7 @@ When comparing targets:
 
 ### Adam Prime Sweep Reference
 
-The 2026-06-01 PR validation sweep used this runner on the Adam Ubuntu server:
+The 2026-06-01 Adam prime sweep used this runner on the Adam Ubuntu server:
 
 ```bash
 SHARDCACHE_FEATURES=redis-server,redis-modules-all \
@@ -445,9 +447,12 @@ RUN_ID=adam-prime-new-commands-20260601T012301Z \
 The run completed 50 isolated target/suite/vCPU legs with no runner-level
 errors and wrote `benchmarks/results/adam-prime-new-commands-20260601T012301Z/`.
 Shardcache RESP and shardcache SCNP completed every Redis v6/v7 and module row
-with 0 unexpected errors. Redis module performance rows should use
-`redis-stack`; Valkey and Dragonfly module rows remain compatibility/error
-coverage unless those deployments are replaced with module-enabled images.
+with 0 unexpected errors. Redis 8 vector rows were run separately with the
+`redis-v8-vector` suite; see
+[`REDIS_V8_VECTOR_BENCHMARKS.md`](REDIS_V8_VECTOR_BENCHMARKS.md). Redis module
+performance rows should use `redis-stack`; Valkey and Dragonfly module rows
+remain compatibility/error coverage unless those deployments are replaced with
+module-enabled images.
 
 ## Troubleshooting
 

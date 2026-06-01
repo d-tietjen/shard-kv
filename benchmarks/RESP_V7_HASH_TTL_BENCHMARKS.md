@@ -5,7 +5,7 @@ cycle: `HEXPIRE`, `HPEXPIRE`, `HEXPIREAT`, `HPEXPIREAT`, `HTTL`, `HPTTL`,
 `HEXPIRETIME`, `HPEXPIRETIME`, `HPERSIST`.
 
 - **Re-run:** 2026-05-30
-- **shardcache:** branch `redis-v7-hash-field-ttl`, RESP server, single shard.
+- **shardcache:** branch `redis-v6-v8-command-coverage`, RESP server, single shard.
 - **Baseline:** `redis:7.4-alpine` (7.4.9), default config.
 - **Topology:** 32-core Linux host. Both servers pinned to **one** core
   (`taskset -c 24`, i.e. 1 vCPU each — a true equal-resource comparison); the
@@ -84,6 +84,10 @@ The `resp_blast` tables below are retained as the saturated/tail-latency
 snapshot from 2026-05-30. Their printed summary omitted `HPEXPIREAT`; the fresh
 2026-05-31 command matrix above covers `HPEXPIREAT` and the rest of the full
 Hash family at git `b74397c`.
+
+Redis 8 hash and vector additions, such as `HGETEX`/`HGETDEL` and vector-set
+commands, are covered by the broader Redis 8 command documentation rather than
+this Redis 7 hash-field-TTL report.
 
 ## Depth 1 — strict request/response (1 vCPU each)
 

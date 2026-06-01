@@ -909,8 +909,15 @@ fn run_setup(
     for case in cases {
         let namespace = suffixes.for_case(case, fixture_scope);
         for parts in case.setup {
-            let command = prepare_command(parts, namespace)?;
-            if frame_contains_error(&redis.execute_prepared(&command)) && !case.ignore_setup_error {
+            let error = if let Some(directive) = parts
+                .first()
+                .and_then(|part| part.strip_prefix("$vector-fixture:"))
+            {
+                run_vector_fixture(redis, directive, namespace)?
+            } else {
+                execute_setup_command(redis, parts, namespace)?
+            };
+            if error && !case.ignore_setup_error {
                 return Err(
                     format!("setup for `{}` produced a Redis error", case.case_name).into(),
                 );
@@ -918,6 +925,57 @@ fn run_setup(
         }
     }
     Ok(())
+}
+
+fn execute_setup_command(
+    redis: &EmbeddedRedis,
+    parts: &[&str],
+    namespace: &KeyNamespace,
+) -> Result<bool, BoxError> {
+    let command = prepare_command(parts, namespace)?;
+    Ok(frame_contains_error(&redis.execute_prepared(&command)))
+}
+
+fn run_vector_fixture(
+    redis: &EmbeddedRedis,
+    directive: &str,
+    namespace: &KeyNamespace,
+) -> Result<bool, BoxError> {
+    let mut parts = directive.split(':');
+    let key = parts.next().ok_or("vector fixture is missing key")?;
+    let count = parse_required_count("vector fixture count", parts.next())?;
+    let dim = parse_required_count("vector fixture dim", parts.next())?;
+    if parts.next().is_some() {
+        return Err(format!("invalid vector fixture directive: {directive}").into());
+    }
+
+    let mut saw_error = execute_setup_command(redis, &["DEL", &format!("$key:{key}")], namespace)?;
+    for index in 0..count {
+        let command = vector_add_command(key, index, dim);
+        let refs = command.iter().map(String::as_str).collect::<Vec<_>>();
+        saw_error |= execute_setup_command(redis, &refs, namespace)?;
+    }
+    Ok(saw_error)
+}
+
+fn parse_required_count(label: &str, raw: Option<&str>) -> Result<usize, BoxError> {
+    let raw = raw.ok_or_else(|| format!("{label} is missing"))?;
+    parse_token_count(label, raw)
+}
+
+fn vector_add_command(key: &str, index: usize, dim: usize) -> Vec<String> {
+    let mut parts = Vec::with_capacity(dim + 7);
+    parts.push("VADD".to_string());
+    parts.push(format!("$key:{key}"));
+    push_vector_values(&mut parts, dim, index);
+    parts.push(format!("elem:{index:06}"));
+    parts.push("SETATTR".to_string());
+    parts.push(format!(
+        "{{\"group\":{},\"keep\":{}}}",
+        index % 4,
+        index.is_multiple_of(2)
+    ));
+    parts
 }
 
 fn run_plan(
@@ -1036,6 +1094,13 @@ fn append_rewritten_parts(
         }
         return Ok(());
     }
+    if let Some(spec) = part.strip_prefix("$vector-values:") {
+        let (dim, seed) = parse_vector_values_spec(spec)?;
+        let mut values = Vec::with_capacity(dim + 2);
+        push_vector_values(&mut values, dim, seed);
+        out.extend(values.into_iter().map(String::into_bytes));
+        return Ok(());
+    }
     if let Some(count) = part.strip_prefix("$kvpairs:") {
         for index in 0..parse_token_count("$kvpairs", count)? {
             out.push(rewrite_key(&format!("ks:{index:06}"), namespace)?);
@@ -1050,6 +1115,30 @@ fn append_rewritten_parts(
 
     out.push(rewrite_part(part, namespace)?);
     Ok(())
+}
+
+fn parse_vector_values_spec(spec: &str) -> Result<(usize, usize), BoxError> {
+    let Some((dim, seed)) = spec.split_once(':') else {
+        return Err(format!("$vector-values spec `{spec}` must use dim:seed").into());
+    };
+    Ok((
+        parse_token_count("$vector-values dim", dim)?,
+        seed.parse::<usize>()
+            .map_err(|error| format!("$vector-values seed `{seed}` is invalid: {error}"))?,
+    ))
+}
+
+fn push_vector_values(parts: &mut Vec<String>, dim: usize, seed: usize) {
+    parts.push("VALUES".to_string());
+    parts.push(dim.to_string());
+    for component in 0..dim {
+        parts.push(format!("{:.6}", vector_component(seed, component)));
+    }
+}
+
+fn vector_component(seed: usize, component: usize) -> f64 {
+    let raw = ((seed.wrapping_mul(31) + component.wrapping_mul(17) + 13) % 201) as f64;
+    (raw - 100.0) / 100.0
 }
 
 fn parse_token_count(token: &str, raw: &str) -> Result<usize, BoxError> {

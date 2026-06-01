@@ -643,7 +643,7 @@ mod tests {
     #[test]
     fn manifest_counts_are_intentional() {
         let entries = build_manifest();
-        assert_eq!(count_status(&entries, CompatStatus::Supported), 252);
+        assert_eq!(count_status(&entries, CompatStatus::Supported), 268);
         assert_eq!(count_status(&entries, CompatStatus::Missing), 0);
     }
 
@@ -652,7 +652,18 @@ mod tests {
         let entries = build_manifest();
         assert_eq!(redis_5_supported_commands(&entries).len(), 200);
         assert_eq!(redis_5_missing_commands(&entries).len(), 0);
-        assert_eq!(redis_5_extension_commands(&entries).len(), 52);
+        assert_eq!(redis_5_extension_commands(&entries).len(), 68);
+    }
+
+    #[test]
+    fn manifest_includes_redis_8_commands() {
+        let entries = build_manifest();
+        for command in ["HGETDEL", "HGETEX", "HSETEX", "VADD", "VISMEMBER", "VSIM"] {
+            assert!(
+                entries.iter().any(|entry| entry.command == command),
+                "{command} should be listed in the generated compatibility manifest"
+            );
+        }
     }
 
     #[test]

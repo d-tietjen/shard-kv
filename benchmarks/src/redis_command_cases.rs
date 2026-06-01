@@ -1308,6 +1308,31 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         ["HMSET", "hm", "f1", "v1", "f2", "v2"]
     ),
     case!(Hash, "HGET", "HGET", ["HGET", "h", "f1"]),
+    case_script!(
+        Hash,
+        "HGETDEL",
+        "HGETDEL field",
+        ["HGETDEL", "$key:hgetdel-bench", "FIELDS", "1", "f1"],
+        [
+            ["HSET", "$key:hgetdel-bench", "f1", "v1"],
+            ["HGETDEL", "$key:hgetdel-bench", "FIELDS", "1", "f1"]
+        ]
+    ),
+    case_with_setup!(
+        Hash,
+        "HGETEX",
+        "HGETEX EX field",
+        [
+            "HGETEX",
+            "$key:hgetex-bench",
+            "EX",
+            "60",
+            "FIELDS",
+            "1",
+            "f1"
+        ],
+        [["HSET", "$key:hgetex-bench", "f1", "v1"]]
+    ),
     case!(
         Hash,
         "HMGET",
@@ -1380,6 +1405,21 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
         [["HSET", "hflds", "f1", "v1"]]
     ),
     case!(Hash, "HSETNX", "HSETNX", ["HSETNX", "h", "f3", "v3"]),
+    case!(
+        Hash,
+        "HSETEX",
+        "HSETEX EX field",
+        [
+            "HSETEX",
+            "$key:hsetex-bench",
+            "EX",
+            "60",
+            "FIELDS",
+            "1",
+            "f1",
+            "v1"
+        ]
+    ),
     case_with_setup!(
         Hash,
         "HSTRLEN",
@@ -2212,6 +2252,8 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "HEXPIREAT",
     "HPEXPIREAT",
     "HGET",
+    "HGETDEL",
+    "HGETEX",
     "HGETALL",
     "HINCRBY",
     "HINCRBYFLOAT",
@@ -2222,6 +2264,7 @@ pub const BENCHMARKED_COMMANDS: &[&str] = &[
     "HRANDFIELD",
     "HSCAN",
     "HSET",
+    "HSETEX",
     "HSETNX",
     "HSTRLEN",
     "HVALS",

@@ -3,8 +3,9 @@
 The embedded Redis command suite runs every Redis-compatible command case
 directly against shardcache's in-process Redis API. It uses the same suite
 manifests as the Docker server runner, so `redis-core`, `redis-v6-v7`,
-`redis-keyspace`, `redis-destructive`, and `redis-modules` resolve to the same
-command cases.
+`redis-v8`, `redis-keyspace`, `redis-destructive`, and `redis-modules` resolve
+to the same command cases. The focused `redis-v8-vector` subset is also
+available for vector-only sweeps.
 
 ## Quick Start
 
@@ -64,8 +65,8 @@ as the Docker server runner:
 - output directory
 
 Suite manifests live in `benchmarks/suites/`. For example,
-`redis-v6-v7.toml` and `redis-modules.toml` are shared by server and embedded
-command runs.
+`redis-v6-v7.toml`, `redis-v8.toml`, `redis-v8-vector.toml`, and
+`redis-modules.toml` are shared by server and embedded command runs.
 
 ## Output Bundle
 

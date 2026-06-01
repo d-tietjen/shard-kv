@@ -10,9 +10,9 @@ cargo run -p shardcache-benchmarks --bin redis_command_manifest -- --output docs
 
 | Metric | Count |
 | --- | ---: |
-| Supported commands | 252 |
+| Supported commands | 268 |
 | Missing commands | 0 |
-| Live benchmark cases | 320 |
+| Live benchmark cases | 339 |
 | Expected-error benchmark cases | 12 |
 | Large-profile cases | 29 |
 | Destructive-profile cases | 2 |
@@ -30,13 +30,13 @@ Official baseline: Redis 5.0.14 `redisCommandTable` from <https://github.com/red
 | Redis 5.0.14 commands supported and live-benchmarked | 200 |
 | Redis 5.0.14 commands explicitly excluded from 0.1.0 | 0 |
 | Redis 5.0.14 commands missing | 0 |
-| Supported extensions beyond Redis 5.0.14 | 52 |
+| Supported extensions beyond Redis 5.0.14 | 68 |
 
 No Redis 5.0.14 commands are excluded from the compatibility target. Redis 5.0.14 commands that are not supported yet are tracked as missing compatibility work.
 
 Missing Redis 5.0.14 commands: none.
 
-Supported extensions beyond Redis 5.0.14: `ACL`, `BITFIELD_RO`, `BLMOVE`, `BLMPOP`, `BZMPOP`, `COPY`, `EVALSHA_RO`, `EVAL_RO`, `EXPIRETIME`, `FAILOVER`, `FCALL`, `FCALL_RO`, `FUNCTION`, `GEOSEARCH`, `GEOSEARCHSTORE`, `GETDEL`, `GETEX`, `HELLO`, `HEXPIRE`, `HEXPIREAT`, `HEXPIRETIME`, `HPERSIST`, `HPEXPIRE`, `HPEXPIREAT`, `HPEXPIRETIME`, `HPTTL`, `HRANDFIELD`, `HTTL`, `LCS`, `LMOVE`, `LMPOP`, `LPOS`, `PEXPIRETIME`, `RESET`, `SINTERCARD`, `SMISMEMBER`, `SORT_RO`, `SPUBLISH`, `SSUBSCRIBE`, `STRALGO`, `SUNSUBSCRIBE`, `WAITAOF`, `XAUTOCLAIM`, `ZDIFF`, `ZDIFFSTORE`, `ZINTER`, `ZINTERCARD`, `ZMPOP`, `ZMSCORE`, `ZRANDMEMBER`, `ZRANGESTORE`, `ZUNION`.
+Supported extensions beyond Redis 5.0.14: `ACL`, `BITFIELD_RO`, `BLMOVE`, `BLMPOP`, `BZMPOP`, `COPY`, `EVALSHA_RO`, `EVAL_RO`, `EXPIRETIME`, `FAILOVER`, `FCALL`, `FCALL_RO`, `FUNCTION`, `GEOSEARCH`, `GEOSEARCHSTORE`, `GETDEL`, `GETEX`, `HELLO`, `HEXPIRE`, `HEXPIREAT`, `HEXPIRETIME`, `HGETDEL`, `HGETEX`, `HPERSIST`, `HPEXPIRE`, `HPEXPIREAT`, `HPEXPIRETIME`, `HPTTL`, `HRANDFIELD`, `HSETEX`, `HTTL`, `LCS`, `LMOVE`, `LMPOP`, `LPOS`, `PEXPIRETIME`, `RESET`, `SINTERCARD`, `SMISMEMBER`, `SORT_RO`, `SPUBLISH`, `SSUBSCRIBE`, `STRALGO`, `SUNSUBSCRIBE`, `VADD`, `VCARD`, `VDIM`, `VEMB`, `VGETATTR`, `VINFO`, `VISMEMBER`, `VLINKS`, `VRANDMEMBER`, `VRANGE`, `VREM`, `VSETATTR`, `VSIM`, `WAITAOF`, `XAUTOCLAIM`, `ZDIFF`, `ZDIFFSTORE`, `ZINTER`, `ZINTERCARD`, `ZMPOP`, `ZMSCORE`, `ZRANDMEMBER`, `ZRANGESTORE`, `ZUNION`.
 
 Explicit Redis 5.0.14 exclusions: none.
 
@@ -45,12 +45,11 @@ Explicit Redis 5.0.14 exclusions: none.
 - The manifest tracks live RESP command acceptance and benchmark coverage, not a promise that every edge case, exact error string, or background subsystem is byte-for-byte identical to Redis.
 - Expected-error commands are part of the compatibility surface in standalone mode. They intentionally return Redis-style errors for disabled cluster, replication, monitor, shutdown, module loading, migration, cross-DB movement, missing function invocation, and security-warning paths.
 - Redis Functions and Redis module-loading compatibility live behind the `redis-functions` and `redis-modules` Cargo features. The default `redis-server` feature set enables both so Redis 7 clients can discover those surfaces without loading executable code.
-- Redis Modules command families and embedded API facades live behind `redis-modules-all` or individual `redis-module-*` Cargo features. Enabled module families expose concrete command names through `COMMAND LIST`/`COMMAND INFO`, accept the module namespace, and report enabled modules while returning explicit unsupported-engine errors until each module's storage engine is implemented.
 - Pub/Sub coverage currently validates publish-without-subscribers, subscription acknowledgements, unsubscribe acknowledgements, and empty introspection. Persistent subscriber fanout is not part of the 0.1.0 compatibility semantics.
 - Stream coverage includes basic append, length, range, reverse range, delete, trim, set-id, read, and minimal group/readgroup paths. Pending-entry-list, claim, ack, and detailed group/consumer introspection behavior is intentionally lightweight.
 - Scripting uses a constrained evaluator for return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. It is not a general Lua VM.
 - HyperLogLog commands return compatible cardinalities for the covered operations, but shardcache stores exact sets in its own representation rather than Redis' binary HLL encoding.
-- Blocking list and sorted-set commands are live-tested on ready or short-timeout paths. Long-lived blocking wakeups across clients need separate proofing before being described as full Redis parity.
+- Blocking list and sorted-set commands wait on the owning shard for shard-local key sets. Ready, timeout, and cross-client wakeup paths are covered; empty multi-key waits that span shards report CROSSSLOT instead of using a global waiter.
 - SCNP one-byte opcodes cover the hot command set. Commands outside that compact opcode table use the RESP/SCNP command-name fallback path so the server can still route and execute them.
 
 ## Commands
@@ -128,6 +127,8 @@ Explicit Redis 5.0.14 exclusions: none.
 | hash | `HEXPIRETIME` | supported | 1 | small | no | no | Benchmark cases: HEXPIRETIME field |
 | hash | `HGET` | supported | 1 | small | no | no | Benchmark cases: HGET |
 | hash | `HGETALL` | supported | 2 | large, small | no | no | Benchmark cases: HGETALL, HGETALL large 1K fields |
+| hash | `HGETDEL` | supported | 1 | small | no | no | Benchmark cases: HGETDEL field |
+| hash | `HGETEX` | supported | 1 | small | no | no | Benchmark cases: HGETEX EX field |
 | hash | `HINCRBY` | supported | 1 | small | no | no | Benchmark cases: HINCRBY |
 | hash | `HINCRBYFLOAT` | supported | 1 | small | no | no | Benchmark cases: HINCRBYFLOAT |
 | hash | `HKEYS` | supported | 2 | large, small | no | no | Benchmark cases: HKEYS, HKEYS large 1K fields |
@@ -143,6 +144,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | hash | `HRANDFIELD` | supported | 1 | small | no | no | Benchmark cases: HRANDFIELD WITHVALUES |
 | hash | `HSCAN` | supported | 2 | large, small | no | no | Benchmark cases: HSCAN, HSCAN large 1K fields |
 | hash | `HSET` | supported | 1 | small | no | no | Benchmark cases: HSET |
+| hash | `HSETEX` | supported | 1 | small | no | no | Benchmark cases: HSETEX EX field |
 | hash | `HSETNX` | supported | 1 | small | no | no | Benchmark cases: HSETNX |
 | hash | `HSTRLEN` | supported | 1 | small | no | no | Benchmark cases: HSTRLEN |
 | hash | `HTTL` | supported | 1 | small | no | no | Benchmark cases: HTTL field |
@@ -259,6 +261,19 @@ Explicit Redis 5.0.14 exclusions: none.
 | key | `UNLINK` | supported | 1 | small | no | no | Benchmark cases: UNLINK missing |
 | pubsub | `UNSUBSCRIBE` | supported | 1 | small | no | no | Benchmark cases: UNSUBSCRIBE ack |
 | transaction | `UNWATCH` | supported | 1 | small | no | no | Benchmark cases: UNWATCH simple |
+| vector | `VADD` | supported | 1 | small | no | no | Benchmark cases: VADD update 16d |
+| vector | `VCARD` | supported | 1 | small | no | no | Benchmark cases: VCARD 256 vectors |
+| vector | `VDIM` | supported | 1 | small | no | no | Benchmark cases: VDIM 16d |
+| vector | `VEMB` | supported | 1 | small | no | no | Benchmark cases: VEMB raw 16d |
+| vector | `VGETATTR` | supported | 1 | small | no | no | Benchmark cases: VGETATTR json |
+| vector | `VINFO` | supported | 1 | small | no | no | Benchmark cases: VINFO 256 vectors |
+| vector | `VISMEMBER` | supported | 1 | small | no | no | Benchmark cases: VISMEMBER hit |
+| vector | `VLINKS` | supported | 1 | small | no | no | Benchmark cases: VLINKS with scores |
+| vector | `VRANDMEMBER` | supported | 1 | small | no | no | Benchmark cases: VRANDMEMBER count |
+| vector | `VRANGE` | supported | 1 | small | no | no | Benchmark cases: VRANGE lex count |
+| vector | `VREM` | supported | 1 | small | no | no | Benchmark cases: VREM miss |
+| vector | `VSETATTR` | supported | 1 | small | no | no | Benchmark cases: VSETATTR update json |
+| vector | `VSIM` | supported | 4 | small | no | no | Benchmark cases: VSIM ele hnsw, VSIM filter exact, VSIM truth exact, VSIM values hnsw |
 | server | `WAIT` | supported | 1 | small | no | no | Benchmark cases: WAIT |
 | server | `WAITAOF` | supported | 1 | small | no | no | Benchmark cases: WAITAOF no aof |
 | transaction | `WATCH` | supported | 1 | small | no | no | Benchmark cases: WATCH simple |

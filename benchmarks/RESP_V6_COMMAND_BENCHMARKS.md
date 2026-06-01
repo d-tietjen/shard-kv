@@ -117,7 +117,7 @@ workers engage on the compute-bearing commands.
 
 ## 3a. Optimization follow-up — formerly Redis-faster rows
 
-2026-05-31 follow-up on branch `redis-v7-hash-field-ttl`. The older
+2026-05-31 follow-up on branch `redis-v6-v8-command-coverage`. The older
 `redis-benchmark` rows above identified the cases where Redis had led in at
 least one shape: `RESET`, `ACL WHOAMI`, `OBJECT ENCODING`, `CLIENT GETNAME`,
 `CLIENT ID`, `LPOS rank count`, and `LCS LEN`. The follow-up added direct RESP
@@ -297,9 +297,12 @@ same resolved command plan for every target.
 
 - Artifact: `benchmarks/results/adam-prime-new-commands-20260601T012301Z/report.md`.
 - Suite rows: 53 Redis v6/v7 extension cases per target per vCPU.
-- Runner validation: 50 total target/suite/vCPU legs across `redis-v6-v7` and
+- Runner coverage: 50 total target/suite/vCPU legs across `redis-v6-v7` and
   `redis-modules`, no runner-level `Error:` lines, and no lingering benchmark
   containers or ports on Adam after cleanup.
+
+Redis 8 vector-set command rows are tracked in
+[`REDIS_V8_VECTOR_BENCHMARKS.md`](REDIS_V8_VECTOR_BENCHMARKS.md).
 
 This standardized run is a coverage and broad mixed-loop comparison. Because
 `BLMOVE`, `BLMPOP`, and `BZMPOP` are co-selected, the Redis and Valkey mixed

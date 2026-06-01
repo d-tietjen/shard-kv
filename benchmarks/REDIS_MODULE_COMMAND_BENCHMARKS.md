@@ -18,15 +18,16 @@ This is a command-coverage and strict request/response comparison. Redis Stack d
 
 The 2026-06-01 Adam prime sweep exercised the same 227 module command cases
 through the standardized Docker runner against Redis, Valkey, Dragonfly,
-shardcache RESP, and shardcache SCNP. This was the PR validation shape for the
+shardcache RESP, and shardcache SCNP. This was the prime coverage shape for the
 feature-gated module command surface: 1 client, pipeline depth 1, 2s warmup,
 10s measurement, `1,2,4,8,16` vCPU, 512 MiB command-precomposition budget, and
 `SHARDCACHE_FEATURES=redis-server,redis-modules-all`.
 
 - Artifact: `benchmarks/results/adam-prime-new-commands-20260601T012301Z/report.md`.
 - Command bundle: `redis-modules` plus the Redis v6/v7 extension suite in the
-  same isolated run.
-- Runner validation: 50 target/suite/vCPU legs started, no runner-level
+  same isolated run. Redis 8 vector rows are tracked separately in
+  [`REDIS_V8_VECTOR_BENCHMARKS.md`](REDIS_V8_VECTOR_BENCHMARKS.md).
+- Runner coverage: 50 target/suite/vCPU legs started, no runner-level
   `Error:` lines, all target CSVs shared the resolved plan IDs, and Adam had no
   lingering `bench-*` containers or benchmark ports after cleanup.
 
