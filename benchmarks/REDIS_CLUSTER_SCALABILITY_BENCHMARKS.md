@@ -59,25 +59,26 @@ Run settings:
 | Redis protocol | RESP, direct Redis Cluster node routing |
 | Git SHA | `1d68c75c408456f2aaba1ee8404e550a47c69b49` |
 
-Results:
+Raw results:
 
-| Size | Command | Redis Cluster ops/sec | Redis Cluster p99 ms | shardcache SCNP ops/sec | shardcache SCNP p99 ms | Throughput ratio | p99 ratio |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| small | GET | 9513826.1 | 6.468 | 17356968.4 | 3.654 | 1.82x | 1.77x |
-| small | SET | 9513826.1 | 6.468 | 17356968.4 | 3.656 | 1.82x | 1.77x |
-| 1 KiB | GET | 3283024.9 | 15.876 | 4185756.6 | 16.720 | 1.27x | 0.95x |
-| 1 KiB | SET | 3283024.9 | 15.991 | 4185756.6 | 16.720 | 1.27x | 0.96x |
-| 4 KiB | GET | 1010362.7 | 58.262 | 1508316.6 | 39.944 | 1.49x | 1.46x |
-| 4 KiB | SET | 1010362.7 | 58.786 | 1508316.6 | 39.944 | 1.49x | 1.47x |
-| 16 KiB | GET | 201067.2 | 255.721 | 363960.8 | 156.238 | 1.81x | 1.64x |
-| 16 KiB | SET | 201067.2 | 257.688 | 363960.8 | 156.238 | 1.81x | 1.65x |
-| 64 KiB | GET | 45580.3 | 881.328 | 90017.6 | 592.445 | 1.97x | 1.49x |
-| 64 KiB | SET | 45580.3 | 881.328 | 90017.6 | 592.970 | 1.97x | 1.49x |
-| 256 KiB | GET | 11318.1 | 861.405 | 18476.0 | 665.846 | 1.63x | 1.29x |
-| 256 KiB | SET | 11318.1 | 861.405 | 18476.0 | 676.332 | 1.63x | 1.27x |
+| Size | Command | Redis Cluster ops/sec | Redis Cluster p99 ms | shardcache SCNP ops/sec | shardcache SCNP p99 ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| small | GET | 9,513,826.1 | 6.468 | 17,356,968.4 | 3.654 |
+| small | SET | 9,513,826.1 | 6.468 | 17,356,968.4 | 3.656 |
+| 1 KiB | GET | 3,283,024.9 | 15.876 | 4,185,756.6 | 16.720 |
+| 1 KiB | SET | 3,283,024.9 | 15.991 | 4,185,756.6 | 16.720 |
+| 4 KiB | GET | 1,010,362.7 | 58.262 | 1,508,316.6 | 39.944 |
+| 4 KiB | SET | 1,010,362.7 | 58.786 | 1,508,316.6 | 39.944 |
+| 16 KiB | GET | 201,067.2 | 255.721 | 363,960.8 | 156.238 |
+| 16 KiB | SET | 201,067.2 | 257.688 | 363,960.8 | 156.238 |
+| 64 KiB | GET | 45,580.3 | 881.328 | 90,017.6 | 592.445 |
+| 64 KiB | SET | 45,580.3 | 881.328 | 90,017.6 | 592.970 |
+| 256 KiB | GET | 11,318.1 | 861.405 | 18,476.0 | 665.846 |
+| 256 KiB | SET | 11,318.1 | 861.405 | 18,476.0 | 676.332 |
 
-`p99 ratio` is Redis Cluster p99 divided by shardcache SCNP p99. Values above
-`1.00x` mean shardcache had lower p99 latency.
+Shardcache SCNP direct routing had higher ops/sec than Redis Cluster for every
+tested value size. It also had lower p99 latency for every row except the 1 KiB
+GET/SET rows, where Redis Cluster p99 was slightly lower.
 
 ## Takeaways
 
