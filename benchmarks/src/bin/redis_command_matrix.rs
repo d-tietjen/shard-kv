@@ -130,6 +130,7 @@ struct Target {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetProtocol {
     Resp,
+    RespCluster,
     Scnp,
 }
 
@@ -137,6 +138,7 @@ impl TargetProtocol {
     fn label(self) -> &'static str {
         match self {
             Self::Resp => "resp",
+            Self::RespCluster => "resp-cluster",
             Self::Scnp => "scnp",
         }
     }
@@ -571,6 +573,18 @@ fn parse_target_protocol(raw: &str) -> Result<(TargetProtocol, &str), String> {
         }
         return Ok((TargetProtocol::Resp, addr));
     }
+    if let Some(addr) = raw.strip_prefix("resp-cluster:") {
+        if addr.is_empty() {
+            return Err("RESP cluster target address must not be empty".to_string());
+        }
+        return Ok((TargetProtocol::RespCluster, addr));
+    }
+    if let Some(addr) = raw.strip_prefix("cluster:") {
+        if addr.is_empty() {
+            return Err("RESP cluster target address must not be empty".to_string());
+        }
+        return Ok((TargetProtocol::RespCluster, addr));
+    }
     Ok((TargetProtocol::Resp, raw))
 }
 
@@ -787,7 +801,7 @@ fn build_plan_metadata(
     let mut total_operations = 0_usize;
     let mut total_encoded_bytes = 0_usize;
     for worker_id in 0..config.clients {
-        let suffixes = WorkerSuffixes::new(worker_id, config.key_shards);
+        let suffixes = WorkerSuffixes::new(worker_id, config.key_shards, protocol)?;
         let plan = build_worker_command_plan(protocol, cases, &suffixes, config)?;
         total_operations = total_operations.saturating_add(plan.operation_count());
         total_encoded_bytes = total_encoded_bytes.saturating_add(plan.encoded_bytes);
@@ -928,7 +942,7 @@ fn append_encoded_command(
     out: &mut Vec<u8>,
 ) -> Result<(), BoxError> {
     let encoded = match protocol {
-        TargetProtocol::Resp => encode_command(parts, namespace)?,
+        TargetProtocol::Resp | TargetProtocol::RespCluster => encode_command(parts, namespace)?,
         TargetProtocol::Scnp => encode_scnp_command(parts, namespace)?,
     };
     out.extend_from_slice(&encoded);
@@ -980,7 +994,7 @@ fn run_worker(
     cases: &[RedisCommandCase],
     config: RunConfig,
 ) -> Result<Vec<CaseStats>, BoxError> {
-    let suffixes = WorkerSuffixes::new(worker_id, config.key_shards);
+    let suffixes = WorkerSuffixes::new(worker_id, config.key_shards, target.protocol)?;
     let plan = build_worker_command_plan(target.protocol, cases, &suffixes, &config)?;
     let addr = target.addr.addr_for_lane(suffixes.worker.shard_lane)?;
     let mut conn = BenchConn::connect(target.protocol, &addr)?;
@@ -1019,16 +1033,36 @@ struct WorkerSuffixes {
 }
 
 impl WorkerSuffixes {
-    fn new(worker_id: usize, key_shards: usize) -> Self {
+    fn new(
+        worker_id: usize,
+        key_shards: usize,
+        protocol: TargetProtocol,
+    ) -> Result<Self, BoxError> {
         let shard_lane = worker_id % key_shards;
-        Self {
+        let worker_cluster_tag = match protocol {
+            TargetProtocol::RespCluster => {
+                Some(redis_cluster_tag_for_lane(shard_lane, key_shards)?)
+            }
+            TargetProtocol::Resp | TargetProtocol::Scnp => None,
+        };
+        let shared_cluster_tag = match protocol {
+            TargetProtocol::RespCluster => Some(redis_cluster_tag_for_lane(0, key_shards)?),
+            TargetProtocol::Resp | TargetProtocol::Scnp => None,
+        };
+        Ok(Self {
             worker: KeyNamespace::new(
                 format!("shard:{shard_lane}:worker:{worker_id}"),
                 shard_lane,
                 key_shards,
+                worker_cluster_tag,
             ),
-            shared_keyspace: KeyNamespace::unsharded("shared-keyspace"),
-        }
+            shared_keyspace: KeyNamespace::new(
+                "shared-keyspace".to_string(),
+                0,
+                1,
+                shared_cluster_tag,
+            ),
+        })
     }
 
     fn for_case(&self, case: &RedisCommandCase, fixture_scope: FixtureScope) -> &KeyNamespace {
@@ -1043,27 +1077,30 @@ struct KeyNamespace {
     label: String,
     shard_lane: usize,
     key_shards: usize,
+    redis_cluster_tag: Option<String>,
 }
 
 impl KeyNamespace {
-    fn new(label: String, shard_lane: usize, key_shards: usize) -> Self {
+    fn new(
+        label: String,
+        shard_lane: usize,
+        key_shards: usize,
+        redis_cluster_tag: Option<String>,
+    ) -> Self {
         Self {
             label,
             shard_lane,
             key_shards,
-        }
-    }
-
-    fn unsharded(label: &str) -> Self {
-        Self {
-            label: label.to_string(),
-            shard_lane: 0,
-            key_shards: 1,
+            redis_cluster_tag,
         }
     }
 
     fn label(&self) -> &str {
         &self.label
+    }
+
+    fn redis_cluster_tag(&self) -> Option<&str> {
+        self.redis_cluster_tag.as_deref()
     }
 }
 
@@ -1201,7 +1238,9 @@ enum BenchConn {
 impl BenchConn {
     fn connect(protocol: TargetProtocol, addr: &str) -> Result<Self, BoxError> {
         match protocol {
-            TargetProtocol::Resp => Ok(Self::Resp(RespConn::connect(addr)?)),
+            TargetProtocol::Resp | TargetProtocol::RespCluster => {
+                Ok(Self::Resp(RespConn::connect(addr)?))
+            }
             TargetProtocol::Scnp => Ok(Self::Scnp(ScnpConn::connect(addr)?)),
         }
     }
@@ -1785,6 +1824,9 @@ fn rewrite_part(part: &str, namespace: &KeyNamespace) -> Result<Vec<u8>, BoxErro
 }
 
 fn rewrite_key(key: &str, namespace: &KeyNamespace) -> Result<Vec<u8>, BoxError> {
+    if let Some(tag) = namespace.redis_cluster_tag() {
+        return Ok(format!("{key}:{{{tag}}}").into_bytes());
+    }
     if namespace.key_shards <= 1 {
         return Ok(format!("{key}:{{{}}}", namespace.label()).into_bytes());
     }
@@ -1801,6 +1843,46 @@ fn rewrite_key(key: &str, namespace: &KeyNamespace) -> Result<Vec<u8>, BoxError>
         namespace.shard_lane, namespace.key_shards
     )
     .into())
+}
+
+fn redis_cluster_tag_for_lane(shard_lane: usize, shard_count: usize) -> Result<String, BoxError> {
+    if shard_count == 0 {
+        return Err("Redis cluster shard count must be greater than zero".into());
+    }
+    if shard_lane >= shard_count {
+        return Err(format!(
+            "Redis cluster shard lane {shard_lane} is outside shard count {shard_count}"
+        )
+        .into());
+    }
+    let start = shard_lane * 16_384 / shard_count;
+    let end = ((shard_lane + 1) * 16_384 / shard_count).saturating_sub(1);
+    for nonce in 0..1_000_000 {
+        let tag = format!("cluster:{shard_lane}:n:{nonce}");
+        let slot = usize::from(redis_cluster_slot(tag.as_bytes()));
+        if (start..=end).contains(&slot) {
+            return Ok(tag);
+        }
+    }
+    Err(format!(
+        "could not find Redis cluster hash tag for shard lane {shard_lane} of {shard_count}"
+    )
+    .into())
+}
+
+fn redis_cluster_slot(key: &[u8]) -> u16 {
+    let mut crc = 0_u16;
+    for byte in key {
+        crc ^= u16::from(*byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc & 0x3fff
 }
 
 fn stripe_index(hash: u64, shift: u32) -> usize {
@@ -2081,7 +2163,7 @@ mod tests {
 
     #[test]
     fn worker_suffixes_include_logical_key_shard_lane() {
-        let suffixes = WorkerSuffixes::new(5, 4);
+        let suffixes = WorkerSuffixes::new(5, 4, TargetProtocol::Resp).unwrap();
         let case = REDIS_COMMAND_CASES
             .iter()
             .find(|case| !case.is_keyspace_wide())
@@ -2095,7 +2177,7 @@ mod tests {
 
     #[test]
     fn sharded_worker_suffix_routes_rewritten_keys_to_lane() {
-        let suffixes = WorkerSuffixes::new(5, 4);
+        let suffixes = WorkerSuffixes::new(5, 4, TargetProtocol::Resp).unwrap();
         let namespace = suffixes.for_case(&REDIS_COMMAND_CASES[0], FixtureScope::PerClient);
         let key = rewrite_key("dump-bench", namespace).unwrap();
 
@@ -2113,6 +2195,38 @@ mod tests {
         assert!(target.addr_for_lane(4).is_err());
     }
 
+    fn hash_tag_bytes(key: &[u8]) -> &[u8] {
+        let start = key.iter().position(|byte| *byte == b'{').unwrap() + 1;
+        let end = key.iter().position(|byte| *byte == b'}').unwrap();
+        &key[start..end]
+    }
+
+    #[test]
+    fn redis_cluster_crc16_slot_matches_reference_vector() {
+        assert_eq!(super::redis_cluster_slot(b"123456789"), 12_739);
+    }
+
+    #[test]
+    fn redis_cluster_tags_route_to_lane_slot_range() {
+        let tag = super::redis_cluster_tag_for_lane(2, 4).unwrap();
+        let slot = usize::from(super::redis_cluster_slot(tag.as_bytes()));
+
+        assert!((2 * 16_384 / 4..=((3 * 16_384 / 4) - 1)).contains(&slot));
+    }
+
+    #[test]
+    fn redis_cluster_worker_keys_share_a_hash_slot() {
+        let suffixes = WorkerSuffixes::new(5, 4, TargetProtocol::RespCluster).unwrap();
+        let namespace = suffixes.for_case(&REDIS_COMMAND_CASES[0], FixtureScope::PerClient);
+        let first = rewrite_key("set-a", namespace).unwrap();
+        let second = rewrite_key("set-b", namespace).unwrap();
+        let first_slot = super::redis_cluster_slot(hash_tag_bytes(&first));
+        let second_slot = super::redis_cluster_slot(hash_tag_bytes(&second));
+
+        assert_eq!(first_slot, second_slot);
+        assert!((16_384 / 4..=((2 * 16_384 / 4) - 1)).contains(&usize::from(first_slot)));
+    }
+
     #[test]
     fn dump_restore_workers_route_to_matching_direct_shard_ports() {
         let target = parse_target_addr("127.0.0.1:6384+4").unwrap();
@@ -2126,7 +2240,7 @@ mod tests {
             .unwrap();
 
         for worker_id in 0..8 {
-            let suffixes = WorkerSuffixes::new(worker_id, 4);
+            let suffixes = WorkerSuffixes::new(worker_id, 4, TargetProtocol::Resp).unwrap();
             let lane = worker_id % 4;
             let addr = target.addr_for_lane(lane).unwrap();
             let dump_key = rewrite_key(
@@ -2151,7 +2265,7 @@ mod tests {
 
     #[test]
     fn shared_keyspace_scope_still_uses_shared_suffix_for_keyspace_cases() {
-        let suffixes = WorkerSuffixes::new(5, 4);
+        let suffixes = WorkerSuffixes::new(5, 4, TargetProtocol::Resp).unwrap();
         let case = all_non_destructive_cases()
             .find(|case| case.is_keyspace_wide())
             .unwrap();
@@ -2180,7 +2294,7 @@ mod tests {
     #[test]
     fn precomposed_plan_is_deterministic() {
         let cases = &REDIS_COMMAND_CASES[..2];
-        let suffixes = WorkerSuffixes::new(0, 1);
+        let suffixes = WorkerSuffixes::new(0, 1, TargetProtocol::Resp).unwrap();
         let config = test_config(1, 4);
 
         let left =
@@ -2201,7 +2315,7 @@ mod tests {
     #[test]
     fn precomposed_plan_respects_total_command_budget() {
         let cases = &REDIS_COMMAND_CASES[..2];
-        let suffixes = WorkerSuffixes::new(0, 1);
+        let suffixes = WorkerSuffixes::new(0, 1, TargetProtocol::Resp).unwrap();
         let config = test_config(2, 4);
 
         let plan =
@@ -2214,7 +2328,7 @@ mod tests {
     #[test]
     fn precomposed_plan_rejects_too_small_memory_budget() {
         let cases = &REDIS_COMMAND_CASES[..2];
-        let suffixes = WorkerSuffixes::new(0, 1);
+        let suffixes = WorkerSuffixes::new(0, 1, TargetProtocol::Resp).unwrap();
         let config = test_config(usize::MAX, 0);
 
         let error = build_worker_command_plan(TargetProtocol::Resp, cases, &suffixes, &config)

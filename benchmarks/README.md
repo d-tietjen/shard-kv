@@ -27,20 +27,26 @@ Docker runner:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis,valkey,dragonfly,shardcache-resp,shardcache-scnp \
+  --targets redis,redis-cluster,valkey,dragonfly,shardcache-resp,shardcache-scnp \
   --suite redis-core \
-  --vcpus 1,2,4,8,16
+  --vcpus 1,2,4,8,16 \
+  --key-shards vcpus
 ```
 
-This runner treats Redis, Redis Stack, Valkey, Dragonfly, shardcache RESP, and
-shardcache SCNP as first-class server targets. It starts one target at a time,
-applies the same vCPU and optional memory limits, reuses the same resolved
-command plan, and writes one portable CSV per target. The standard server
-matrix is `1,2,4,8,16` vCPU. The shared defaults live in
+This runner treats Redis, Redis Cluster, Redis Stack, Valkey, Dragonfly,
+shardcache RESP, and shardcache SCNP as first-class server targets. It starts
+one target at a time, applies the same vCPU and optional memory limits, reuses
+the same resolved command plan, and writes one portable CSV per target. The
+standard server matrix is `1,2,4,8,16` vCPU. The shared defaults live in
 `benchmarks/bench.toml`; suite manifests live in `benchmarks/suites/`. See
 [`DOCKER_BENCHMARKS.md`](DOCKER_BENCHMARKS.md) for the full workflow, including
 multi-vCPU runs, module suites, command precomposition budgets, and saved-CSV
 comparison.
+
+For direct-routing scalability comparisons, include `redis-cluster` and
+`shardcache-scnp-direct` with `--key-shards vcpus`. The Redis Cluster harness
+uses deterministic hash tags and direct node connections, so the comparison is
+Redis Cluster slot routing versus shardcache direct shard routing.
 
 For Redis module command benchmarks, use the `redis-stack` target. It runs the
 Redis Stack server image with the common module set loaded so module rows can
