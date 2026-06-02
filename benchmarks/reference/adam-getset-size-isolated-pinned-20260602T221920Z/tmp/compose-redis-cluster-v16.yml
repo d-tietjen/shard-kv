@@ -1,0 +1,4 @@
+services:
+  redis-cluster:
+    cpus: "16"
+    cpuset: "0-15"
