@@ -246,16 +246,30 @@ wait_for_port() {
 
 configure_started_target() {
   local target="$1"
+  local vcpus="${2:-1}"
   case "$target" in
     redis-cluster)
+      local nodes
+      nodes="$(redis_cluster_nodes "$vcpus")"
       for _ in {1..100}; do
-        if docker exec bench-redis-cluster redis-cli -p 7000 CLUSTER INFO 2>/dev/null \
-          | grep -q '^cluster_state:ok'; then
+        local ok=1
+        for offset in $(seq 0 "$((nodes - 1))"); do
+          local port info
+          port="$((7000 + offset))"
+          info="$(docker exec bench-redis-cluster redis-cli -p "$port" CLUSTER INFO 2>/dev/null || true)"
+          if ! grep -q '^cluster_state:ok' <<<"$info" \
+            || ! grep -q '^cluster_slots_assigned:16384' <<<"$info" \
+            || ! grep -q "^cluster_known_nodes:$nodes" <<<"$info"; then
+            ok=0
+            break
+          fi
+        done
+        if [[ "$ok" == "1" ]]; then
           return
         fi
         sleep 0.1
       done
-      echo "redis-cluster did not reach cluster_state:ok" >&2
+      echo "redis-cluster did not reach a fully assigned healthy state on all nodes" >&2
       exit 1
       ;;
     redis-stack)
@@ -321,7 +335,7 @@ start_target() {
   docker compose -f "$compose_file" -f "$override_file" up -d --build "$service"
 
   wait_for_port "$(target_port "$target")" "$target"
-  configure_started_target "$target"
+  configure_started_target "$target" "$vcpus"
 }
 
 stop_targets() {
