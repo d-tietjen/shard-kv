@@ -296,14 +296,27 @@ struct PlannedCommand {
 }
 
 #[derive(Debug, Clone)]
+struct PlannedResponse {
+    case_index: usize,
+    responses: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedBatch {
+    responses: Vec<PlannedResponse>,
+    encoded: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 struct WorkerCommandPlan {
-    commands: Vec<PlannedCommand>,
+    batches: Vec<PlannedBatch>,
     encoded_bytes: usize,
+    operations: usize,
 }
 
 impl WorkerCommandPlan {
     fn operation_count(&self) -> usize {
-        self.commands.len()
+        self.operations
     }
 }
 
@@ -906,9 +919,13 @@ fn build_worker_command_plan(
         bytes = bytes.saturating_add(base_bytes);
     }
 
+    let operations = commands.len();
+    let batches = build_planned_batches(&commands, config.pipeline_depth);
+
     Ok(WorkerCommandPlan {
-        commands,
+        batches,
         encoded_bytes: bytes,
+        operations,
     })
 }
 
@@ -917,6 +934,29 @@ fn encoded_bytes(commands: &[PlannedCommand]) -> usize {
         .iter()
         .map(|command| command.encoded.len())
         .sum::<usize>()
+}
+
+fn build_planned_batches(commands: &[PlannedCommand], pipeline_depth: usize) -> Vec<PlannedBatch> {
+    let chunk_size = pipeline_depth.max(1);
+    commands
+        .chunks(chunk_size)
+        .map(|chunk| {
+            let encoded_len = chunk
+                .iter()
+                .map(|command| command.encoded.len())
+                .sum::<usize>();
+            let mut encoded = Vec::with_capacity(encoded_len);
+            let mut responses = Vec::with_capacity(chunk.len());
+            for command in chunk {
+                encoded.extend_from_slice(&command.encoded);
+                responses.push(PlannedResponse {
+                    case_index: command.case_index,
+                    responses: command.responses,
+                });
+            }
+            PlannedBatch { responses, encoded }
+        })
+        .collect()
 }
 
 fn encode_case(
@@ -1175,51 +1215,45 @@ fn run_plan(
     conn: &mut BenchConn,
     cases: &[RedisCommandCase],
     plan: &WorkerCommandPlan,
-    pipeline_depth: usize,
+    _pipeline_depth: usize,
     deadline: Instant,
     mut stats: Option<&mut [CaseStats]>,
 ) -> Result<(), BoxError> {
-    let mut pending = Vec::with_capacity(pipeline_depth);
     let mut cursor = 0;
     while Instant::now() < deadline {
-        let op = &plan.commands[cursor];
+        let batch = &plan.batches[cursor];
         cursor += 1;
-        if cursor == plan.commands.len() {
+        if cursor == plan.batches.len() {
             cursor = 0;
         }
 
         let started = Instant::now();
-        conn.write_raw(&op.encoded)?;
-        pending.push((op.case_index, op.responses, started));
-        if pending.len() >= pipeline_depth {
-            drain_pipeline(conn, cases, &mut pending, stats.as_deref_mut())?;
-        }
-    }
-    if !pending.is_empty() {
-        drain_pipeline(conn, cases, &mut pending, stats)?;
+        conn.write_raw(&batch.encoded)?;
+        conn.flush()?;
+        drain_cached_batch(conn, cases, batch, started, stats.as_deref_mut())?;
     }
     Ok(())
 }
 
-fn drain_pipeline(
+fn drain_cached_batch(
     conn: &mut BenchConn,
     cases: &[RedisCommandCase],
-    pending: &mut Vec<(usize, usize, Instant)>,
+    batch: &PlannedBatch,
+    started: Instant,
     mut stats: Option<&mut [CaseStats]>,
 ) -> Result<(), BoxError> {
-    conn.flush()?;
-    for (index, responses, started) in pending.drain(..) {
-        let error = conn.read_responses(responses)?;
+    for response in &batch.responses {
+        let error = conn.read_responses(response.responses)?;
         if let Some(stats) = stats.as_deref_mut() {
             let elapsed_ns = started.elapsed().as_nanos();
-            let case_stats = &mut stats[index];
+            let case_stats = &mut stats[response.case_index];
             case_stats.ops = case_stats.ops.saturating_add(1);
             case_stats.elapsed_ns = case_stats.elapsed_ns.saturating_add(elapsed_ns);
             case_stats
                 .latency
                 .record(elapsed_ns.min(u128::from(u64::MAX)) as u64);
             if error {
-                if cases[index].expect_error {
+                if cases[response.case_index].expect_error {
                     case_stats.expected_errors = case_stats.expected_errors.saturating_add(1);
                 } else {
                     case_stats.errors = case_stats.errors.saturating_add(1);
@@ -2304,12 +2338,31 @@ mod tests {
 
         assert_eq!(left.operation_count(), 4);
         assert_eq!(left.encoded_bytes, right.encoded_bytes);
-        assert_eq!(left.commands.len(), right.commands.len());
-        for (left, right) in left.commands.iter().zip(right.commands.iter()) {
-            assert_eq!(left.case_index, right.case_index);
-            assert_eq!(left.responses, right.responses);
+        assert_eq!(left.batches.len(), right.batches.len());
+        for (left, right) in left.batches.iter().zip(right.batches.iter()) {
             assert_eq!(left.encoded, right.encoded);
+            assert_eq!(left.responses.len(), right.responses.len());
+            for (left, right) in left.responses.iter().zip(right.responses.iter()) {
+                assert_eq!(left.case_index, right.case_index);
+                assert_eq!(left.responses, right.responses);
+            }
         }
+    }
+
+    #[test]
+    fn precomposed_plan_caches_pipeline_batches() {
+        let cases = &REDIS_COMMAND_CASES[..2];
+        let suffixes = WorkerSuffixes::new(0, 1, TargetProtocol::Resp).unwrap();
+        let mut config = test_config(1, 4);
+        config.pipeline_depth = 2;
+
+        let plan =
+            build_worker_command_plan(TargetProtocol::Resp, cases, &suffixes, &config).unwrap();
+
+        assert_eq!(plan.operation_count(), 4);
+        assert_eq!(plan.batches.len(), 2);
+        assert!(plan.batches.iter().all(|batch| batch.responses.len() == 2));
+        assert!(plan.batches.iter().all(|batch| !batch.encoded.is_empty()));
     }
 
     #[test]
