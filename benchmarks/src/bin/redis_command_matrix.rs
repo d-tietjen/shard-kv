@@ -103,6 +103,10 @@ struct Args {
     #[arg(long)]
     vcpus: Option<usize>,
 
+    /// CPU ids or ranges used to pin benchmark client worker threads.
+    #[arg(long, default_value = "")]
+    client_cpuset: String,
+
     /// Total precomposed command-pool memory budget across all clients.
     #[arg(long, default_value_t = 256)]
     memory_budget_mib: usize,
@@ -231,6 +235,8 @@ struct RunConfig {
     duration: Duration,
     memory_budget_mib: usize,
     command_budget: usize,
+    client_cpuset: String,
+    client_core_ids: Vec<usize>,
 }
 
 struct PlanLabels<'a> {
@@ -330,6 +336,7 @@ struct ResolvedPlanMetadata {
     cases_filter: String,
     skip_cases: String,
     protocol: String,
+    client_cpuset: String,
     clients: usize,
     key_shards: usize,
     fixture_scope: String,
@@ -380,6 +387,7 @@ fn main() -> Result<(), BoxError> {
 
     let targets = parse_targets(&args.targets)?;
     let cases = select_cases(&args.cases, &args.skip_cases)?;
+    let client_core_ids = parse_client_cpuset(&args.client_cpuset)?;
     let duration = Duration::from_secs(args.duration);
     let warmup = Duration::from_secs(args.warmup);
     let run_config = RunConfig {
@@ -391,6 +399,8 @@ fn main() -> Result<(), BoxError> {
         duration,
         memory_budget_mib: args.memory_budget_mib,
         command_budget: args.command_budget,
+        client_cpuset: args.client_cpuset.clone(),
+        client_core_ids,
     };
     let run_id = args.run_id.clone().unwrap_or_else(default_run_id);
     let resolved_plan_id = args
@@ -436,6 +446,9 @@ fn main() -> Result<(), BoxError> {
         args.memory_budget_mib,
         args.command_budget,
     );
+    if !args.client_cpuset.is_empty() {
+        println!("redis-command-matrix: client_cpuset={}", args.client_cpuset);
+    }
     println!();
     println!(
         "| target | family | command | case | ops/sec | avg us | p99 us | errors | expected errors |"
@@ -647,6 +660,72 @@ fn parse_filters(raw: &str) -> Vec<&str> {
         .collect()
 }
 
+fn parse_client_cpuset(raw: &str) -> Result<Vec<usize>, BoxError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut ids = Vec::new();
+    for part in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if let Some((start, end)) = part.split_once('-') {
+            let start = start
+                .trim()
+                .parse::<usize>()
+                .map_err(|error| format!("invalid --client-cpuset start `{part}`: {error}"))?;
+            let end = end
+                .trim()
+                .parse::<usize>()
+                .map_err(|error| format!("invalid --client-cpuset end `{part}`: {error}"))?;
+            if start > end {
+                return Err(format!("invalid --client-cpuset range `{part}`").into());
+            }
+            ids.extend(start..=end);
+        } else {
+            ids.push(
+                part.parse::<usize>()
+                    .map_err(|error| format!("invalid --client-cpuset id `{part}`: {error}"))?,
+            );
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+
+    let Some(available) = core_affinity::get_core_ids() else {
+        return Err("could not query CPU cores for --client-cpuset".into());
+    };
+    let available_ids = available
+        .iter()
+        .map(|core| core.id)
+        .collect::<BTreeSet<_>>();
+    for id in &ids {
+        if !available_ids.contains(id) {
+            return Err(format!("--client-cpuset CPU {id} is not available").into());
+        }
+    }
+    Ok(ids)
+}
+
+fn pin_worker_thread(worker_id: usize, client_core_ids: &[usize]) -> Result<(), BoxError> {
+    if client_core_ids.is_empty() {
+        return Ok(());
+    }
+    let target_id = client_core_ids[worker_id % client_core_ids.len()];
+    let Some(core_id) = core_affinity::get_core_ids()
+        .and_then(|cores| cores.into_iter().find(|core| core.id == target_id))
+    else {
+        return Err(format!("benchmark client CPU {target_id} is not available").into());
+    };
+    if !core_affinity::set_for_current(core_id) {
+        return Err(format!("failed to pin benchmark client worker to CPU {target_id}").into());
+    }
+    Ok(())
+}
+
 fn default_run_id() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -834,6 +913,7 @@ fn build_plan_metadata(
         cases_filter: labels.cases_filter.to_string(),
         skip_cases: labels.skip_cases.to_string(),
         protocol: protocol.label().to_string(),
+        client_cpuset: config.client_cpuset.clone(),
         clients: config.clients,
         key_shards: config.key_shards,
         fixture_scope: config.fixture_scope.label().to_string(),
@@ -1034,6 +1114,7 @@ fn run_worker(
     cases: &[RedisCommandCase],
     config: RunConfig,
 ) -> Result<Vec<CaseStats>, BoxError> {
+    pin_worker_thread(worker_id, &config.client_core_ids)?;
     let suffixes = WorkerSuffixes::new(worker_id, config.key_shards, target.protocol)?;
     let plan = build_worker_command_plan(target.protocol, cases, &suffixes, &config)?;
     let addr = target.addr.addr_for_lane(suffixes.worker.shard_lane)?;
@@ -2322,6 +2403,8 @@ mod tests {
             duration: Duration::from_secs(1),
             memory_budget_mib: 1,
             command_budget,
+            client_cpuset: String::new(),
+            client_core_ids: Vec::new(),
         }
     }
 
@@ -2389,6 +2472,21 @@ mod tests {
             .to_string();
 
         assert!(error.contains("memory budget is too small"));
+    }
+
+    #[test]
+    fn client_cpuset_parser_accepts_ranges_and_deduplicates() {
+        let available = core_affinity::get_core_ids().unwrap();
+        let first = available[0].id;
+        let raw = format!("{first},{first}");
+        let parsed = super::parse_client_cpuset(&raw).unwrap();
+        assert_eq!(parsed, vec![first]);
+    }
+
+    #[test]
+    fn client_cpuset_parser_rejects_inverted_ranges() {
+        let error = super::parse_client_cpuset("3-1").unwrap_err().to_string();
+        assert!(error.contains("invalid --client-cpuset range"));
     }
 
     #[test]

@@ -300,6 +300,38 @@ docker_cpuset_for_vcpus() {
   fi
 }
 
+host_cpu_count() {
+  if command -v nproc >/dev/null 2>&1; then
+    nproc --all
+  elif command -v getconf >/dev/null 2>&1; then
+    getconf _NPROCESSORS_ONLN
+  elif command -v sysctl >/dev/null 2>&1; then
+    sysctl -n hw.ncpu
+  else
+    printf '0'
+  fi
+}
+
+client_cpuset_for_vcpus() {
+  local vcpus="$1"
+  local total start
+  if [[ -n "${CLIENT_CPUSET_CPUS:-}" ]]; then
+    printf '%s' "$CLIENT_CPUSET_CPUS"
+  elif [[ -n "${BENCH_CLIENT_CPUSET:-}" ]]; then
+    printf '%s' "$BENCH_CLIENT_CPUSET"
+  elif [[ "$(uname -s)" == "Linux" && -z "${CPUSET_CPUS:-}" ]]; then
+    total="$(host_cpu_count)"
+    if [[ "$total" =~ ^[0-9]+$ && "$total" -gt "$vcpus" ]]; then
+      start="$vcpus"
+      if [[ "$start" == "$((total - 1))" ]]; then
+        printf '%s' "$start"
+      else
+        printf '%s-%s' "$start" "$((total - 1))"
+      fi
+    fi
+  fi
+}
+
 start_target() {
   local target="$1"
   local vcpus="$2"
@@ -485,7 +517,8 @@ cat > "$out_dir/metadata.json" <<EOF
   "fixture_scope": "$fixture_scope",
   "memory_budget_mib": $memory_budget_mib,
   "command_budget": $command_budget,
-  "cpu_pinning": "${CPUSET_CPUS:-first-n-linux-cpus}",
+  "server_cpu_pinning": "${CPUSET_CPUS:-first-n-linux-cpus}",
+  "client_cpu_pinning": "${CLIENT_CPUSET_CPUS:-${BENCH_CLIENT_CPUSET:-remaining-linux-cpus}}",
   "server_memory_limit": "${SERVER_MEMORY_LIMIT:-}"
 }
 EOF
@@ -500,6 +533,7 @@ for suite in "${suites[@]}"; do
   for vcpu in "${vcpus[@]}"; do
     vcpu="$(trim "$vcpu")"
     lane_count="$(effective_key_shards "$vcpu")"
+    client_cpuset="$(client_cpuset_for_vcpus "$vcpu")"
     for pipeline_depth in "${pipeline_depths[@]}"; do
       pipeline_depth="$(trim "$pipeline_depth")"
       plan_id="$suite-v${vcpu}-p${pipeline_depth}-c${clients}-k${lane_count}-m${memory_budget_mib}-b${command_budget}"
@@ -513,8 +547,16 @@ for suite in "${suites[@]}"; do
         target_csvs+=("$target_csv")
 
         echo "benchmark target=$target suite=$suite vcpus=$vcpu pipeline_depth=$pipeline_depth"
+        if [[ -n "$client_cpuset" ]]; then
+          echo "benchmark client_cpuset=$client_cpuset"
+        fi
         stop_targets
         start_target "$target" "$vcpu"
+
+        client_pin_args=()
+        if [[ -n "$client_cpuset" ]]; then
+          client_pin_args=(--client-cpuset "$client_cpuset")
+        fi
 
         "$ws_root/target/release/redis_command_matrix" \
           --targets "$(target_spec "$target" "$vcpu")" \
@@ -533,7 +575,8 @@ for suite in "${suites[@]}"; do
           --scenario "$scenario" \
           --vcpus "$vcpu" \
           --plan-json "$plan_file" \
-          --csv "$tmp_csv"
+          --csv "$tmp_csv" \
+          "${client_pin_args[@]}"
 
         append_csv "$tmp_csv" "$target_csv"
       done
