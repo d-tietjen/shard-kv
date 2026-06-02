@@ -16,7 +16,7 @@ Usage:
 
 Options:
   --config PATH              Benchmark config TOML (default: benchmarks/bench.toml)
-  --suite LIST               Suites: redis-core,redis-v6-v7,redis-v8,redis-v8-vector,redis-keyspace,redis-destructive,redis-modules,all
+  --suite LIST               Suites: redis-core,redis-getset-sizes,redis-v6-v7,redis-v8,redis-v8-vector,redis-keyspace,redis-destructive,redis-modules,all
   --targets LIST             Targets: redis,redis-cluster,redis-stack,valkey,dragonfly,shardcache-resp,shardcache-scnp,shardcache-scnp-direct,shardcache,all
   --vcpus LIST               Comma-separated vCPU matrix, for example 1,2,4,8,16
   --clients N                Concurrent clients

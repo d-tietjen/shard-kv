@@ -1889,6 +1889,20 @@ pub const REDIS_COMMAND_LARGE_CASES: &[RedisCommandCase] = &[
     large_case!(
         String,
         "SET",
+        "SET large 1KiB value",
+        ["SET", "$key:large-s-1k", "$value:1024"],
+        []
+    ),
+    large_case!(
+        String,
+        "GET",
+        "GET large 1KiB value",
+        ["GET", "$key:large-s-1k"],
+        [["SET", "$key:large-s-1k", "$value:1024"]]
+    ),
+    large_case!(
+        String,
+        "SET",
         "SET large 4KiB value",
         ["SET", "$key:large-s-4k", "$value:4096"],
         []
@@ -1903,6 +1917,20 @@ pub const REDIS_COMMAND_LARGE_CASES: &[RedisCommandCase] = &[
     large_case!(
         String,
         "SET",
+        "SET large 16KiB value",
+        ["SET", "$key:large-s-16k", "$value:16384"],
+        []
+    ),
+    large_case!(
+        String,
+        "GET",
+        "GET large 16KiB value",
+        ["GET", "$key:large-s-16k"],
+        [["SET", "$key:large-s-16k", "$value:16384"]]
+    ),
+    large_case!(
+        String,
+        "SET",
         "SET large 64KiB value",
         ["SET", "$key:large-s-64k", "$value:65536"],
         []
@@ -1913,6 +1941,20 @@ pub const REDIS_COMMAND_LARGE_CASES: &[RedisCommandCase] = &[
         "GET large 64KiB value",
         ["GET", "$key:large-s-64k"],
         [["SET", "$key:large-s-64k", "$value:65536"]]
+    ),
+    large_case!(
+        String,
+        "SET",
+        "SET large 256KiB value",
+        ["SET", "$key:large-s-256k", "$value:262144"],
+        []
+    ),
+    large_case!(
+        String,
+        "GET",
+        "GET large 256KiB value",
+        ["GET", "$key:large-s-256k"],
+        [["SET", "$key:large-s-256k", "$value:262144"]]
     ),
     large_case!(
         String,
