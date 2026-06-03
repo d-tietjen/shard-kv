@@ -12,9 +12,9 @@ cargo run -p shardcache-benchmarks --bin redis_command_manifest -- --output docs
 | --- | ---: |
 | Supported commands | 268 |
 | Missing commands | 0 |
-| Live benchmark cases | 339 |
+| Live benchmark cases | 345 |
 | Expected-error benchmark cases | 12 |
-| Large-profile cases | 29 |
+| Large-profile cases | 35 |
 | Destructive-profile cases | 2 |
 | Keyspace-wide benchmark cases | 8 |
 
@@ -113,7 +113,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | geo | `GEORADIUS_RO` | supported | 1 | small | no | no | Benchmark cases: GEORADIUS_RO |
 | geo | `GEOSEARCH` | supported | 1 | small | no | no | Benchmark cases: GEOSEARCH radius |
 | geo | `GEOSEARCHSTORE` | supported | 1 | small | no | no | Benchmark cases: GEOSEARCHSTORE radius |
-| string | `GET` | supported | 3 | large, small | no | no | Benchmark cases: GET large 4KiB value, GET large 64KiB value, GET string |
+| string | `GET` | supported | 6 | large, small | no | no | Benchmark cases: GET large 16KiB value, GET large 1KiB value, GET large 256KiB value, GET large 4KiB value, GET large 64KiB value, GET string |
 | string | `GETBIT` | supported | 1 | small | no | no | Benchmark cases: GETBIT |
 | string | `GETDEL` | supported | 1 | small | no | no | Benchmark cases: GETDEL |
 | string | `GETEX` | supported | 1 | small | no | no | Benchmark cases: GETEX PX |
@@ -222,7 +222,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | set | `SDIFF` | supported | 1 | small | no | no | Benchmark cases: SDIFF |
 | set | `SDIFFSTORE` | supported | 1 | small | no | no | Benchmark cases: SDIFFSTORE |
 | connection | `SELECT` | supported | 1 | small | no | no | Benchmark cases: SELECT |
-| string | `SET` | supported | 6 | large, small | no | no | Benchmark cases: SET EX, SET NX miss, SET XX hit, SET large 4KiB value, SET large 64KiB value, SET string |
+| string | `SET` | supported | 9 | large, small | no | no | Benchmark cases: SET EX, SET NX miss, SET XX hit, SET large 16KiB value, SET large 1KiB value, SET large 256KiB value, SET large 4KiB value, SET large 64KiB value, SET string |
 | string | `SETBIT` | supported | 1 | small | no | no | Benchmark cases: SETBIT |
 | string | `SETEX` | supported | 1 | small | no | no | Benchmark cases: SETEX |
 | string | `SETNX` | supported | 1 | small | no | no | Benchmark cases: SETNX existing |
