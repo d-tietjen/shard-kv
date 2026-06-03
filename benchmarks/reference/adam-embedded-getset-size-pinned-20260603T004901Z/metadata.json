@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "created_at_utc": "2026-06-03T00:49:19Z",
+  "run_id": "adam-embedded-getset-size-pinned-20260603T004901Z",
+  "git_sha": "4651dedf84ba9fd69eabd92c1867b77e891f2e85",
+  "git_branch": "benchmark/redis-cluster-scalability",
+  "config_file": "/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/embedded.toml",
+  "suites": "embedded-core",
+  "vcpus": "16",
+  "clients": "match-vcpus",
+  "value_sizes": "64,1024,4096,16384,65536,262144",
+  "mixes": "100-0,0-100",
+  "warmup": 2,
+  "duration": 10,
+  "latency_sample_rate": 1,
+  "key_memory_cap_bytes": 2147483648,
+  "large_value_key_floor": 64,
+  "key_pattern": "point",
+  "key_distribution": "uniform",
+  "cpu_pinning": "first-n-linux-cpus"
+}
