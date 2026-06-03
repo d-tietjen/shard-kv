@@ -10,7 +10,7 @@ Redis-compatible server benchmarking, use `DOCKER_BENCHMARKS.md` instead.
 For Redis command-by-command benchmarks in embedded mode, use
 `REDIS_EMBEDDED_COMMAND_BENCHMARKS.md`.
 
-For a saved Adam 16-vCPU value-size pass comparing `fc-embed` and `fc-shared`
+For a saved server 16-vCPU value-size pass comparing `fc-embed` and `fc-shared`
 against DashMap, Moka, LRU, and `RwLock<HashMap>`, see
 [`EMBEDDED_HEAD_TO_HEAD_BENCHMARKS.md`](EMBEDDED_HEAD_TO_HEAD_BENCHMARKS.md).
 

@@ -142,10 +142,10 @@ Release build, same direct server entrypoint, no network. Lower is better.
 | LPOS rank count | 182.4 | 149.7 | 1.22x faster |
 | LCS LEN | 305.3 | 295.8 | 1.03x faster |
 
-### Adam focused head-to-head
+### Server focused head-to-head
 
-Fresh focused command-matrix runs on Adam after the optimization. Artifacts were
-pulled locally to:
+Fresh focused command-matrix runs on the benchmark server after the optimization.
+Artifacts were pulled locally to:
 
 - `benchmarks/results/optimized-redis-faster-c8p1/report.md`
 - `benchmarks/results/optimized-redis-faster-c16p16/report.md`
@@ -165,7 +165,7 @@ ops/s (5.34x). No errors were reported by either server.
 | LPOS rank count | 37,238 | 8,861 | 4.20x | 142,961 | 26,753 | 5.34x |
 | LCS LEN | 37,238 | 8,861 | 4.20x | 142,960 | 26,753 | 5.34x |
 
-### Adam equal-resource 1-vCPU focused head-to-head
+### Server equal-resource 1-vCPU focused head-to-head
 
 Same seven formerly Redis-faster cases, but with both servers pinned to one
 server core: shardcache via `taskset -c 24`, Redis via Docker
@@ -189,18 +189,18 @@ Redis was not faster on any focused case.
 | LPOS rank count | 90,772 | 84,135 | 1.08x | 994,244 | 488,756 | 2.03x |
 | LCS LEN | 91,154 | 85,283 | 1.07x | 938,772 | 536,413 | 1.75x |
 
-## 4. Full v6/v7 extension command matrix — Adam, 2026-05-31
+## 4. Full v6/v7 extension command matrix — server, 2026-05-31
 
-Fresh live RESP command-matrix run on Adam for git `b74397c`, Redis 7.4.9, 4
-clients, 4 key lanes, 1s warmup + 2s measurement, pipeline depth 1. This table
+Fresh live RESP command-matrix run on the benchmark server for git `b74397c`,
+Redis 7.4.9, 4 clients, 4 key lanes, 1s warmup + 2s measurement, pipeline depth 1. This table
 covers the nonblocking Redis 6/7 extension surface beyond Redis 5.0.14 in the
 benchmark registry, including the Redis 7 hash-field-TTL and function-command
 surface.
 
 Artifacts:
 
-- `/tmp/shard-kv-docbench-b74397c/benchmarks/results/adam-v6-v7-extensions-nonblocking-b74397c/report.md`
-- `/tmp/shard-kv-docbench-b74397c/benchmarks/results/adam-v6-v7-extensions-nonblocking-b74397c/redis-command-matrix.csv`
+- `/tmp/shard-kv-docbench-b74397c/benchmarks/results/server-v6-v7-extensions-nonblocking-b74397c/report.md`
+- `/tmp/shard-kv-docbench-b74397c/benchmarks/results/server-v6-v7-extensions-nonblocking-b74397c/redis-command-matrix.csv`
 
 Summary: 45 cases in the nonblocking matrix. shardcache had zero unexpected
 errors and summed 131,054 ops/s. Redis summed 49,790.5 ops/s and had zero errors
@@ -264,7 +264,7 @@ later iterations wait for the blocking timeout. Keep these rows as coverage, not
 publishable throughput.
 
 Artifact:
-`/tmp/shard-kv-docbench-b74397c/benchmarks/results/adam-v6-v7-extensions-b74397c/redis-command-matrix.csv`
+`/tmp/shard-kv-docbench-b74397c/benchmarks/results/server-v6-v7-extensions-b74397c/redis-command-matrix.csv`
 
 | Family | Command | Case | shardcache ops/s | Redis mixed-loop ops/s | shardcache avg us | Redis avg us | Errors |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
@@ -287,19 +287,19 @@ request/response, while an earlier mixed matrix made it look artificially slow.
 The 2026-05-31 matrix is still useful because it covers the full v6/v7 surface
 at one git SHA and records errors/expected errors for every selected case.
 
-## 5. Standardized Docker server sweep — Adam, 2026-06-01
+## 5. Standardized Docker server sweep — server, 2026-06-01
 
 The PR prime sweep reran the full `redis-v6-v7` suite through the standardized
 Docker runner against Redis, Valkey, Dragonfly, shardcache RESP, and shardcache
-SCNP. Shape: Adam Ubuntu 24.04.4, 1 client, pipeline depth 1, 2s warmup, 10s
+SCNP. Shape: benchmark server on Ubuntu 24.04.4, 1 client, pipeline depth 1, 2s warmup, 10s
 measurement, `1,2,4,8,16` vCPU, 512 MiB command-precomposition budget, and the
 same resolved command plan for every target.
 
-- Artifact: `benchmarks/results/adam-prime-new-commands-20260601T012301Z/report.md`.
+- Artifact: `benchmarks/results/server-prime-new-commands-20260601T012301Z/report.md`.
 - Suite rows: 53 Redis v6/v7 extension cases per target per vCPU.
 - Runner coverage: 50 total target/suite/vCPU legs across `redis-v6-v7` and
   `redis-modules`, no runner-level `Error:` lines, and no lingering benchmark
-  containers or ports on Adam after cleanup.
+  containers or ports on the benchmark server after cleanup.
 
 Redis 8 vector-set command rows are tracked in
 [`REDIS_V8_VECTOR_BENCHMARKS.md`](REDIS_V8_VECTOR_BENCHMARKS.md).

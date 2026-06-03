@@ -172,7 +172,7 @@ This records Redis Cluster RESP, shardcache's native direct-shard SCNP client,
 and shardcache's RESP compatibility path. The value-size suites are split by
 payload size on purpose. Use these isolated suites for final claims so small
 payload rows do not inherit the memory and batch behavior of larger precomposed
-command plans. A saved Adam 16-vCPU result bundle and summary live in
+command plans. A saved server 16-vCPU result bundle and summary live in
 [`REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md`](REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md).
 
 Full command coverage matrix:
@@ -478,13 +478,13 @@ When comparing targets:
   performance wins or losses.
 - Do not compare module unsupported-error rows as throughput claims.
 
-### Adam Prime Sweep Reference
+### Server Prime Sweep Reference
 
-The 2026-06-01 Adam prime sweep used this runner on the Adam Ubuntu server:
+The 2026-06-01 server prime sweep used this runner on the benchmark server:
 
 ```bash
 SHARDCACHE_FEATURES=redis-server,redis-modules-all \
-RUN_ID=adam-prime-new-commands-20260601T012301Z \
+RUN_ID=server-prime-new-commands-20260601T012301Z \
 ./benchmarks/scripts/run-benchmark-suite.sh \
   --targets redis-stack,valkey,dragonfly,shardcache-resp,shardcache-scnp \
   --suite redis-v6-v7,redis-modules \
@@ -498,7 +498,7 @@ RUN_ID=adam-prime-new-commands-20260601T012301Z \
 ```
 
 The run completed 50 isolated target/suite/vCPU legs with no runner-level
-errors and wrote `benchmarks/results/adam-prime-new-commands-20260601T012301Z/`.
+errors and wrote `benchmarks/results/server-prime-new-commands-20260601T012301Z/`.
 Shardcache RESP and shardcache SCNP completed every Redis v6/v7 and module row
 with 0 unexpected errors. Redis 8 vector rows were run separately with the
 `redis-v8-vector` suite; see

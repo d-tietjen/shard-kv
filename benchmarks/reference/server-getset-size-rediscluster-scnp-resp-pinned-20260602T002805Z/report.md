@@ -1,9 +1,9 @@
-# standardized server benchmark adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z
+# standardized server benchmark server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z
 
-Primary CSV: `/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/redis-cluster.csv`
+Primary CSV: `/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/redis-cluster.csv`
 Reference CSVs:
-- `/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-scnp-direct.csv`
-- `/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-resp.csv`
+- `/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-scnp-direct.csv`
+- `/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-resp.csv`
 
 ## Target Summary
 

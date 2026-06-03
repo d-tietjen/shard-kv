@@ -1,4 +1,4 @@
-# Embedded Benchmark Suite adam-embedded-getset-size-pinned-20260603T004901Z
+# Embedded Benchmark Suite server-embedded-getset-size-pinned-20260603T004901Z
 
 This run compares in-process cache backends with the same generated workload,
 same vCPU budget, same client count policy, same value sizes, and same key

@@ -33,19 +33,19 @@ The size suites are intentionally isolated. Do not use one mixed tiny-to-large
 suite for final claims, because a single cached command plan can make tiny rows
 inherit the batch and memory behavior of the largest payload.
 
-## Adam 16-vCPU Client And RESP Value-Size Sweep
+## Server 16-vCPU Client And RESP Value-Size Sweep
 
 Run bundle:
-`benchmarks/reference/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/`
+`benchmarks/reference/server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/`
 
 Remote source:
-`/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z`
+`/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z`
 
 Run settings:
 
 | Setting | Value |
 | --- | --- |
-| Host | Adam, Ubuntu 24.04, 32 logical CPUs |
+| Host | Benchmark server, Ubuntu 24.04, 32 logical CPUs |
 | Targets | `redis-cluster`, `shardcache-scnp-direct`, `shardcache-resp` |
 | Server vCPU | 16 |
 | Server CPU set | Linux CPUs `0-15` |

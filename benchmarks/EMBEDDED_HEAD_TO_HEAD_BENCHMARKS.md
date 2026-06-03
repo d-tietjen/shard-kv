@@ -16,7 +16,7 @@ copying those bytes per operation.
 ## Reproduce The Value-Size Pass
 
 ```bash
-RUN_ID=adam-embedded-getset-size-pinned-$(date -u +%Y%m%dT%H%M%SZ) \
+RUN_ID=server-embedded-getset-size-pinned-$(date -u +%Y%m%dT%H%M%SZ) \
 ./benchmarks/scripts/run-embedded-benchmark-suite.sh \
   --suite embedded-core \
   --backends fc-embed,fc-shared,dashmap,dashmap-worker-shards,dashmap-ref,moka,rwlock-hashmap,lru \
@@ -36,19 +36,19 @@ rows. This pass uses `read_mode=ref`, so GET rows measure embedded lookup and
 reference access; they are not copy-out payload bandwidth claims. Use the
 `embedded-copy` suite when comparing materialized read/copy-out behavior.
 
-## Adam 16-vCPU Embedded Value-Size Pass
+## Server 16-vCPU Embedded Value-Size Pass
 
 Run bundle:
-`benchmarks/reference/adam-embedded-getset-size-pinned-20260603T004901Z/`
+`benchmarks/reference/server-embedded-getset-size-pinned-20260603T004901Z/`
 
 Remote source:
-`/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-embedded-getset-size-pinned-20260603T004901Z`
+`/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/server-embedded-getset-size-pinned-20260603T004901Z`
 
 Run settings:
 
 | Setting | Value |
 | --- | --- |
-| Host | Adam, Ubuntu 24.04, 32 logical CPUs |
+| Host | Benchmark server, Ubuntu 24.04, 32 logical CPUs |
 | Suite | `embedded-core` |
 | vCPU | 16 |
 | CPU set | Linux CPUs `0-15` |

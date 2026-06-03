@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run shardmap semantic-cache benchmark rows and package Adam-ready artifacts.
+# Run shardmap semantic-cache benchmark rows and package server-ready artifacts.
 
 set -euo pipefail
 

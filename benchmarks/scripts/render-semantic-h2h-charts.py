@@ -532,7 +532,7 @@ def render_vcpu_scaling_chart(rows: list[dict[str, object]]) -> str:
         "</defs>",
         '<rect x="0" y="0" width="100%" height="100%" fill="#ffffff"/>',
         f'<text x="{left}" y="38" class="title">ShardCache vCPU scaling</text>',
-        f'<text x="{left}" y="63" class="subtitle">Throughput speedup from 1 vCPU to 8 vCPU, taskset-pinned on Adam</text>',
+        f'<text x="{left}" y="63" class="subtitle">Throughput speedup from 1 vCPU to 8 vCPU, taskset-pinned on the benchmark server</text>',
     ]
 
     for tick in ticks:

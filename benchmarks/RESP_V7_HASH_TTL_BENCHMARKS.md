@@ -17,15 +17,15 @@ cycle: `HEXPIRE`, `HPEXPIRE`, `HEXPIREAT`, `HPEXPIREAT`, `HTTL`, `HPTTL`,
 
 ## Full Hash-family command matrix
 
-Fresh live RESP command-matrix run on Adam for git `b74397c`, Redis 7.4.9, 4
-clients, 4 key lanes, 1s warmup + 2s measurement, pipeline depth 1. This is the
+Fresh live RESP command-matrix run on the benchmark server for git `b74397c`,
+Redis 7.4.9, 4 clients, 4 key lanes, 1s warmup + 2s measurement, pipeline depth 1. This is the
 full `hash` family in the benchmark registry: the Redis 7 hash-field-TTL
 commands, the ordinary Redis hash commands, and the large 1K-field hash cases.
 
 Artifacts:
 
-- `/tmp/shard-kv-docbench-b74397c/benchmarks/results/adam-full-hash-b74397c/report.md`
-- `/tmp/shard-kv-docbench-b74397c/benchmarks/results/adam-full-hash-b74397c/redis-command-matrix.csv`
+- `/tmp/shard-kv-docbench-b74397c/benchmarks/results/server-full-hash-b74397c/report.md`
+- `/tmp/shard-kv-docbench-b74397c/benchmarks/results/server-full-hash-b74397c/redis-command-matrix.csv`
 
 Summary: 31 common hash cases, zero unexpected errors on both servers.
 shardcache summed 73,244 ops/s across the matrix versus Redis at 24,635 ops/s

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run the semantic-cache head-to-head with explicit CPU isolation.
 #
-# Default topology for Adam:
+# Default topology for the benchmark server:
 #   - SUT_CPUSET=0-15: Redis/Qdrant server containers, or embedded-only process.
 #   - LOAD_CPUSET=16-31: Python load process for networked/server-backed rows.
 #   - WORKERS=16: one load worker per logical CPU in the active budget.
@@ -37,7 +37,7 @@ cpuset_width() {
 }
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-out_dir="${OUT_DIR:-$bench_root/results/adam-semantic-h2h-isolated-$stamp}"
+out_dir="${OUT_DIR:-$bench_root/results/server-semantic-h2h-isolated-$stamp}"
 
 pairs_csv="${PAIRS_CSV:-}"
 dataset="${DATASET:-semantic-fixture}"
