@@ -20,6 +20,13 @@ The embedded runner uses the existing `saturation` benchmark driver. For each
 suite it generates the same workload for every backend, then records throughput,
 logical payload bandwidth, CPU use, and p50/p99/p99.9 latency.
 
+For `read_mode=ref`, GET rows return references to resident values. In that
+mode, value size is still useful for fixture shape and cache topology, but the
+GET path is not copying that many bytes out of memory per operation. Treat
+logical payload bandwidth on reference-read rows as a nominal value-size-scaled
+counter. Use `embedded-copy` when the claim is about materializing or copying
+values on read.
+
 The default standard matrix is:
 
 ```text

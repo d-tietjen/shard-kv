@@ -6,6 +6,13 @@ Docker, or external database server overhead. It compares the embedded
 owner-local path against shared-handle shardcache and common Rust cache
 baselines with the same generated workload.
 
+This is an embedded reference-access benchmark. The pure GET rows use
+`read_mode=ref`, so they measure how quickly each backend can find and hand out
+a reference to the stored value. They do not copy the stored value out of memory
+on every GET. That matters most for the larger value sizes: the 64 KiB and 256
+KiB GET rows are pointer/reference lookup rows, not claims that the benchmark is
+copying those bytes per operation.
+
 ## Reproduce The Value-Size Pass
 
 ```bash
@@ -56,7 +63,11 @@ Run settings:
 | Key memory cap | 2147483648 bytes |
 | Git SHA | `4651dedf84ba9fd69eabd92c1867b77e891f2e85` |
 
-## Pure GET Results
+## Pure GET Reference Results
+
+These GET rows are pointer/reference lookups. They show the embedded
+read/lookup ceiling for resident values of each configured size, but they do
+not copy the configured value size out of memory on each operation.
 
 | Size | fc-embed ops/sec | fc-embed p99 us | fc-shared ops/sec | fc-shared p99 us | Best competitor | Best competitor ops/sec | Best competitor p99 us |
 | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
@@ -69,6 +80,9 @@ Run settings:
 
 ## Pure SET Results
 
+These SET rows write the configured value payload, so large values are expected
+to converge toward memory-copy behavior.
+
 | Size | fc-embed ops/sec | fc-embed p99 us | fc-shared ops/sec | fc-shared p99 us | Best competitor | Best competitor ops/sec | Best competitor p99 us |
 | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
 | 64 B | 86,364,003 | 0.230 | 5,059,052 | 25.439 | `dashmap-ref` | 30,688,876 | 1.440 |
@@ -80,10 +94,12 @@ Run settings:
 
 ## Takeaways
 
-- `fc-embed` was the highest-throughput backend in every pure GET and pure SET
-  row in this 16-vCPU pass.
+- `fc-embed` was the highest-throughput backend in every pure GET reference
+  lookup row and every pure SET row in this 16-vCPU pass.
 - For pure GET/reference-read rows, `fc-embed` was also the lowest-p99 backend
-  across all tested value sizes. The strongest competitor was `dashmap-ref`.
+  across all tested value sizes. These rows are a pointer/reference-access
+  benchmark, not a copy-out benchmark. The strongest competitor was
+  `dashmap-ref`.
 - For pure SET/write rows, large values converge because the benchmark becomes
   dominated by copying the value payload. `fc-embed` stayed slightly ahead on
   ops/sec at every tested size, but the gap narrowed substantially at 16 KiB and
