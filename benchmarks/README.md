@@ -27,20 +27,26 @@ Docker runner:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis,valkey,dragonfly,shardcache-resp,shardcache-scnp \
+  --targets redis,redis-cluster,valkey,dragonfly,shardcache-resp,shardcache-scnp \
   --suite redis-core \
-  --vcpus 1,2,4,8,16
+  --vcpus 1,2,4,8,16 \
+  --key-shards vcpus
 ```
 
-This runner treats Redis, Redis Stack, Valkey, Dragonfly, shardcache RESP, and
-shardcache SCNP as first-class server targets. It starts one target at a time,
-applies the same vCPU and optional memory limits, reuses the same resolved
-command plan, and writes one portable CSV per target. The standard server
-matrix is `1,2,4,8,16` vCPU. The shared defaults live in
+This runner treats Redis, Redis Cluster, Redis Stack, Valkey, Dragonfly,
+shardcache RESP, and shardcache SCNP as first-class server targets. It starts
+one target at a time, applies the same vCPU and optional memory limits, reuses
+the same resolved command plan, and writes one portable CSV per target. The
+standard server matrix is `1,2,4,8,16` vCPU. The shared defaults live in
 `benchmarks/bench.toml`; suite manifests live in `benchmarks/suites/`. See
 [`DOCKER_BENCHMARKS.md`](DOCKER_BENCHMARKS.md) for the full workflow, including
 multi-vCPU runs, module suites, command precomposition budgets, and saved-CSV
 comparison.
+
+For direct-routing scalability comparisons, include `redis-cluster` and
+`shardcache-scnp-direct` with `--key-shards vcpus`. The Redis Cluster harness
+uses deterministic hash tags and direct node connections, so the comparison is
+Redis Cluster slot routing versus shardcache direct shard routing.
 
 For Redis module command benchmarks, use the `redis-stack` target. It runs the
 Redis Stack server image with the common module set loaded so module rows can
@@ -168,11 +174,13 @@ artifact or still needs a fresh run.
 | --- | --- | --- | --- |
 | shardcache vs Redis / Valkey / Dragonfly TCP | [`SHARDCACHE_VS_REDIS_TCP.md`](SHARDCACHE_VS_REDIS_TCP.md) | Saturation matrix across value sizes, mixes, clients, and pipeline depths | Publishable for TCP throughput claims. |
 | shardcache vs Redis command-by-command | [`REDIS_HEAD_TO_HEAD_BENCHMARKS.md`](REDIS_HEAD_TO_HEAD_BENCHMARKS.md) | Redis 5.0 compatibility surface and saved per-command rows | Compatibility coverage is complete; some saved head-to-head cells are marked `n/a` where that exact shape has not been rerun. |
-| RESP v6/v7 command surface (LPOS, LCS/STRALGO, XAUTOCLAIM, RESET, ACL, FAILOVER, function commands, Redis 7 hash-field TTL, and other Redis 6/7 extensions) | [`RESP_V6_COMMAND_BENCHMARKS.md`](RESP_V6_COMMAND_BENCHMARKS.md), [`RESP_V7_HASH_TTL_BENCHMARKS.md`](RESP_V7_HASH_TTL_BENCHMARKS.md) | In-process/server throughput snapshots plus Adam command-matrix coverage for the full v6/v7 extension set and full Hash family, including the 2026-06-01 standardized Docker sweep across Redis, Valkey, Dragonfly, shardcache RESP, and shardcache SCNP | Publishable for the focused rows; use the full matrix as coverage/broad mixed-loop comparison and isolate blocking commands for single-command claims. |
-| Redis 8 command surface | [`REDIS_V8_VECTOR_BENCHMARKS.md`](REDIS_V8_VECTOR_BENCHMARKS.md), [`REDIS_COMPATIBILITY.md`](../docs/REDIS_COMPATIBILITY.md) | `redis-v8` coverage for `HGETDEL`, `HGETEX`, `HSETEX`, and vector-set commands; focused `redis-v8-vector` Adam rows across Redis/reference, shardcache RESP, shardcache SCNP, and direct SCNP shapes | Publishable for vector suite totals and generated command coverage; isolate a single command before making microbenchmark claims. |
+| RESP v6/v7 command surface (LPOS, LCS/STRALGO, XAUTOCLAIM, RESET, ACL, FAILOVER, function commands, Redis 7 hash-field TTL, and other Redis 6/7 extensions) | [`RESP_V6_COMMAND_BENCHMARKS.md`](RESP_V6_COMMAND_BENCHMARKS.md), [`RESP_V7_HASH_TTL_BENCHMARKS.md`](RESP_V7_HASH_TTL_BENCHMARKS.md) | In-process/server throughput snapshots plus server command-matrix coverage for the full v6/v7 extension set and full Hash family, including the 2026-06-01 standardized Docker sweep across Redis, Valkey, Dragonfly, shardcache RESP, and shardcache SCNP | Publishable for the focused rows; use the full matrix as coverage/broad mixed-loop comparison and isolate blocking commands for single-command claims. |
+| Redis 8 command surface | [`REDIS_V8_VECTOR_BENCHMARKS.md`](REDIS_V8_VECTOR_BENCHMARKS.md), [`REDIS_COMPATIBILITY.md`](../docs/REDIS_COMPATIBILITY.md) | `redis-v8` coverage for `HGETDEL`, `HGETEX`, `HSETEX`, and vector-set commands; focused `redis-v8-vector` server rows across Redis/reference, shardcache RESP, shardcache SCNP, and direct SCNP shapes | Publishable for vector suite totals and generated command coverage; isolate a single command before making microbenchmark claims. |
 | Redis module command surface | [`REDIS_MODULE_COMMAND_BENCHMARKS.md`](REDIS_MODULE_COMMAND_BENCHMARKS.md) | 2026-05-31 Redis Stack command-matrix coverage plus the 2026-06-01 standardized Docker sweep for 227 feature-gated module command cases across Redis Stack, Valkey, Dragonfly, shardcache RESP, and shardcache SCNP | Full shardcache module coverage recorded; Redis Stack and plain-server unsupported-module rows are compatibility/error coverage, not performance claims. |
-| shardcache server vs Memcached | [`MEMCACHE_BENCHMARKS.md`](MEMCACHE_BENCHMARKS.md) | Docker-isolated GET/SET/mixed cache workload across value sizes, clients, pipeline depths, and vCPU counts | Harness is now available; run on Linux/Adam before publishing specific numbers. |
-| Embedded store exposed as public server | [`EMBEDDED_BENCHMARKS.md`](EMBEDDED_BENCHMARKS.md) | Current-code Adam rerun of shared-arc fanout, benchmark-only shard-arc, and owner-local topologies with a simultaneous embedded GET worker and third-party RESP clients against the same 1KiB hot key | Harness and methodology are documented; raw local result bundles remain ignored under `benchmarks/results`. |
+| Redis Cluster direct routing vs shardcache direct routing | [`REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md`](REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md) | Server Redis Cluster RESP vs shardcache native direct-shard client and shardcache RESP GET/SET sweep with isolated small, 1 KiB, 4 KiB, 16 KiB, 64 KiB, and 256 KiB value-size suites | Publishable for the saved 16-vCPU value-size run; rerun the same suites for new hardware or a full 1,2,4,8,16 vCPU matrix. |
+| shardcache server vs Memcached | [`MEMCACHE_BENCHMARKS.md`](MEMCACHE_BENCHMARKS.md) | Docker-isolated GET/SET/mixed cache workload across value sizes, clients, pipeline depths, and vCPU counts | Harness is now available; run on a Linux benchmark server before publishing specific numbers. |
+| Embedded store exposed as public server | [`EMBEDDED_BENCHMARKS.md`](EMBEDDED_BENCHMARKS.md) | Current-code server rerun of shared-arc fanout, benchmark-only shard-arc, and owner-local topologies with a simultaneous embedded GET worker and third-party RESP clients against the same 1KiB hot key | Harness and methodology are documented; raw local result bundles remain ignored under `benchmarks/results`. |
+| shardcache embedded vs Rust cache baselines | [`EMBEDDED_HEAD_TO_HEAD_BENCHMARKS.md`](EMBEDDED_HEAD_TO_HEAD_BENCHMARKS.md), [`EMBEDDED_BENCHMARKS.md`](EMBEDDED_BENCHMARKS.md) | Server 16-vCPU embedded-core pass comparing `fc-embed` and `fc-shared` against DashMap, Moka, LRU, and `RwLock<HashMap>` across 64 B through 256 KiB pure GET and pure SET rows | Publishable for the saved 16-vCPU embedded value-size pass; use `embedded-copy` before making copy-out read claims. |
 | shardmap embedded vs Moka | [`SHARDMAP_VS_MOKA_EMBEDDED.md`](SHARDMAP_VS_MOKA_EMBEDDED.md) | Embedded owner-local shardmap against `moka::sync::Cache` | Publishable for this embedded comparison. |
 | Embedded release matrix | [`SHARDMAP_EMBEDDED_RELEASE.md`](SHARDMAP_EMBEDDED_RELEASE.md) | Direct, shared, TTL, LRU, and selected Rust-cache baselines | Publishable as a release proof, not a single competitor-only report. |
 | LMCache plugin vs Redis TCP | [`LMCACHE_VS_REDIS.md`](LMCACHE_VS_REDIS.md) | shardcache LMCache embedded and SCNP/TCP against Redis TCP | Publishable for the recorded Linux run; rerun before making new M5 or 5MiB LMCache claims. |
@@ -251,11 +259,11 @@ cargo run --release -p shardcache-benchmarks --bin semantic_cache_matrix -- \
 Hot-query load mode primes the query-result cache before measuring, then reports
 aggregate ops/sec plus merged p50/p95/p99 lookup latency across workers.
 
-For Adam/publishable runs, prefer the bundle wrapper so metadata, quality,
+For server/publishable runs, prefer the bundle wrapper so metadata, quality,
 latency, scale, and hot-load artifacts stay together:
 
 ```bash
-OUT_DIR=benchmarks/results/adam-semantic-cache-$(date -u +%Y%m%dT%H%M%SZ) \
+OUT_DIR=benchmarks/results/server-semantic-cache-$(date -u +%Y%m%dT%H%M%SZ) \
 PAIRS=5000 \
 DIMS=384 \
 INDEX_ENTRIES=5000 \
@@ -271,13 +279,13 @@ and `DATASET=SemBenchmarkLmArena` when running against a real fixture. Set
 `PEER_CSVS=/path/to/redisvl.csv,/path/to/betterdb.csv` to record externally
 generated RedisVL/BetterDB artifacts in the report bundle.
 
-If Adam is reachable by SSH, the remote wrapper syncs the current checkout,
-runs the same bundle there, and fetches artifacts back:
+If a benchmark server is reachable by SSH, the remote wrapper syncs the current
+checkout, runs the same bundle there, and fetches artifacts back:
 
 ```bash
-ADAM_HOST=adam.example.com \
+BENCHMARK_HOST=server.example.com \
 LOAD_SECONDS=10 \
-./benchmarks/scripts/run-adam-semantic-cache-benchmark.sh
+./benchmarks/scripts/run-server-semantic-cache-benchmark.sh
 ```
 
 To place the isolated 1-vCPU and 16-vCPU semantic-cache head-to-head results in
@@ -285,9 +293,9 @@ one Markdown/LaTeX report, pass both result directories to the report renderer:
 
 ```bash
 python3 benchmarks/scripts/render-semantic-h2h-report.py \
-  --combined-output-dir benchmarks/results/adam-semantic-h2h-isolated-combined \
-  benchmarks/results/adam-semantic-h2h-isolated-1vcpu-YYYYMMDDTHHMMSSZ \
-  benchmarks/results/adam-semantic-h2h-isolated-YYYYMMDDTHHMMSSZ
+  --combined-output-dir benchmarks/results/server-semantic-h2h-isolated-combined \
+  benchmarks/results/server-semantic-h2h-isolated-1vcpu-YYYYMMDDTHHMMSSZ \
+  benchmarks/results/server-semantic-h2h-isolated-YYYYMMDDTHHMMSSZ
 ```
 
 ## Redis Command Matrix
@@ -361,10 +369,10 @@ run metadata, the raw CSV, a Markdown report, a JSON summary, and the Redis
 compatibility manifest captured at the same git SHA. Use
 `docs/PROOF_GATES.md` for the exact artifact contract.
 
-### Current Adam Command Snapshot
+### Current Server Command Snapshot
 
 The latest single-vCPU, strict request/response Redis-command coverage run was
-run on `adam` on 2026-05-31 at git
+run on the benchmark server on 2026-05-31 at git
 `51c9dcede546310afb97657b81c18c4599d63da8`. Both shardcache and Redis were
 pinned to one server CPU, with 1 client, 1 key shard, `SHARD_COUNT=1`, pipeline
 depth 1, 1s warmup, and 2s measurement. Redis ran as an isolated
@@ -381,9 +389,9 @@ head-to-head results are tracked in the Redis Stack module-command matrix.
 
 Artifacts:
 
-- `benchmarks/results/adam-core-no-keyspace-1vcpu-p1-20260531T212743Z/report.md`
-- `benchmarks/results/adam-core-keyspace-1vcpu-p1-20260531T212808Z/report.md`
-- `benchmarks/results/adam-core-destructive-1vcpu-p1-20260531T212831Z/report.md`
+- `benchmarks/results/server-core-no-keyspace-1vcpu-p1-20260531T212743Z/report.md`
+- `benchmarks/results/server-core-keyspace-1vcpu-p1-20260531T212808Z/report.md`
+- `benchmarks/results/server-core-destructive-1vcpu-p1-20260531T212831Z/report.md`
 
 | Profile | Cases | shardcache ops/sec | Redis ops/sec | sc/redis | shardcache mean avg us | Redis mean avg us | Errors |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -395,9 +403,9 @@ Artifacts:
 Redis was not faster by average command latency on any zero-error common case in
 these profiles: 0/297 no-keyspace, 0/6 keyspace-wide, and 0/2 destructive.
 
-### Current Adam Module Command Snapshot
+### Current Server Module Command Snapshot
 
-The optimized Redis Stack module-command matrix was run on `adam` on
+The optimized Redis Stack module-command matrix was run on the benchmark server on
 2026-05-31. shardcache was built with `redis-server,redis-modules-all`; both
 servers were pinned to one server CPU with 1 client, 1 key shard, pipeline depth
 1, 1s warmup, and 2s measurement. The baseline was
@@ -405,9 +413,9 @@ servers were pinned to one server CPU with 1 client, 1 key shard, pipeline depth
 
 Artifacts:
 
-- `benchmarks/results/adam-module-command-matrix-1vcpu-p1-20260531T214753Z/report.md`
-- `benchmarks/results/adam-module-command-matrix-optimized5-modules-1vcpu-p1-20260531T221741Z/report.md`
-- `benchmarks/results/adam-module-command-matrix-p99-opt3-modules-1vcpu-p1-20260531T231229Z/report.md`
+- `benchmarks/results/server-module-command-matrix-1vcpu-p1-20260531T214753Z/report.md`
+- `benchmarks/results/server-module-command-matrix-optimized5-modules-1vcpu-p1-20260531T221741Z/report.md`
+- `benchmarks/results/server-module-command-matrix-p99-opt3-modules-1vcpu-p1-20260531T231229Z/report.md`
 - [`REDIS_MODULE_COMMAND_BENCHMARKS.md`](REDIS_MODULE_COMMAND_BENCHMARKS.md)
 
 | Scope | Cases | shardcache ops/sec | Redis Stack ops/sec | sc/redis | shardcache mean avg us | Redis Stack mean avg us | shardcache mean p99 us | Redis Stack mean p99 us | Redis faster cases | Redis lower p99 cases |
@@ -428,11 +436,11 @@ shardcache ahead on throughput, average latency, and p99 latency after
 optimizing module index listing, RedisTimeSeries filter matching, and
 multi-series range serialization.
 
-The earlier scaling-oriented no-keyspace Redis-command matrix was run on `adam`
+The earlier scaling-oriented no-keyspace Redis-command matrix was run on the benchmark server
 on 2026-05-24 with 16 clients, 16 key shards, `SHARD_COUNT=16`, shared keyspace
 fixtures, and direct shard ports enabled at `127.0.0.1:6384+16`. The shardcache
 rows use the pass-2 optimized artifacts below; Redis/Valkey/Dragonfly rows are
-saved reference rows from the same Adam setup so shardcache can be rerun without
+saved reference rows from the same server setup so shardcache can be rerun without
 rerunning external services. Transaction cases are skipped for direct shard ports
 because transactions are connection-scoped and intentionally unsupported on
 shard-owned listeners.
@@ -469,8 +477,8 @@ ops/sec at `88.5 us`, SCNP shared `1,315,982` at `88.2 us`, RESP `833,734`
 at `117.1 us`, Redis `37,123` at `5,150.4 us`, and Valkey `46,436` at
 `4,125.1 us`.
 
-Scripting command spot-check, rerun on `adam` after adding `EVAL`, `EVALSHA`,
-and `SCRIPT` support:
+Scripting command spot-check, rerun on the benchmark server after adding
+`EVAL`, `EVALSHA`, and `SCRIPT` support:
 
 | Mode | Target | Cases | Ops/sec | Mean avg us | Errors |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -944,7 +952,7 @@ header plus stored `Bytes` payload instead of always materializing a contiguous
 response buffer.
 
 The server monoio default is `auto`: one worker uses the io_uring driver, while
-multi-worker runs use monoio's legacy socket driver. Adam profiling showed the
+multi-worker runs use monoio's legacy socket driver. Server profiling showed the
 legacy driver avoids enough per-request `io_uring_enter` cost to improve the
 16-worker RESP hot mix, while io_uring remains faster for the one-worker shape.
 

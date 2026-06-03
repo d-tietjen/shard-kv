@@ -97,10 +97,10 @@ This is the mode for claims like "Repeated prompt latency is X times lower."
 
 ## Fairness Rules
 
-- Run all local targets on the same Adam host.
+- Run all local targets on the same benchmark server.
 - Pin Redis/Valkey/vector services to localhost; record container image digests
   or package versions.
-- For publishable max-load rows on Adam, pin the system under test to
+- For publishable max-load rows on the benchmark server, pin the system under test to
   `SUT_CPUSET=0-15`, pin external load/client workers to `LOAD_CPUSET=16-31`,
   and use `WORKERS=16`. Embedded/in-process adapters must be marked as such
   because their benchmark process is also the system under test.
@@ -174,7 +174,7 @@ class SemanticCacheAdapter:
 Adapters may implement only `lookup_vector` or only `lookup_prompt`; unsupported
 scenario rows are reported as `n/a`, not silently skipped.
 
-## First Adam Matrix
+## First Server Matrix
 
 Run this first, because it is broad enough for an honest claim while still
 small enough to debug quickly.

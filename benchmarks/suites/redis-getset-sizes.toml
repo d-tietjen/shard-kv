@@ -1,0 +1,7 @@
+id = "redis-getset-sizes"
+title = "Redis GET/SET Value Size Sweep"
+driver = "redis_command_matrix"
+cases = "GET string,SET string,GET large 1KiB value,SET large 1KiB value,GET large 4KiB value,SET large 4KiB value,GET large 16KiB value,SET large 16KiB value,GET large 64KiB value,SET large 64KiB value,GET large 256KiB value,SET large 256KiB value"
+fixture_scope = "per-client"
+destructive = false
+requires_modules = false

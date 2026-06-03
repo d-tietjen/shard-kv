@@ -5,30 +5,30 @@ Head-to-head command-matrix run for the feature-gated Redis module command surfa
 ## Initial Audit Scope
 
 - Date: 2026-05-31.
-- Host: `adam`, Ubuntu 24.04.4 LTS.
+- Host: `server`, Ubuntu 24.04.4 LTS.
 - Git SHA: `9db56cb9fe575daa363478074d582708a6d10948`.
 - shardcache features: `redis-server,redis-modules-all`.
 - Baseline: `redis/redis-stack-server:latest` on `127.0.0.1:6391`.
 - Shape: 1 server vCPU, 1 client, 1 key shard, pipeline depth 1, 1s warmup, 2s measurement.
-- Artifact: `benchmarks/results/adam-module-command-matrix-1vcpu-p1-20260531T214753Z/report.md`.
+- Artifact: `benchmarks/results/server-module-command-matrix-1vcpu-p1-20260531T214753Z/report.md`.
 
 This is a command-coverage and strict request/response comparison. Redis Stack does not ship every third-party or retired module represented by the feature-gated shardcache module surface, so rows where Redis Stack reports command errors are recorded as baseline-error coverage rows rather than performance claims.
 
 ## Standardized Docker Server Sweep
 
-The 2026-06-01 Adam prime sweep exercised the same 227 module command cases
+The 2026-06-01 server prime sweep exercised the same 227 module command cases
 through the standardized Docker runner against Redis, Valkey, Dragonfly,
 shardcache RESP, and shardcache SCNP. This was the prime coverage shape for the
 feature-gated module command surface: 1 client, pipeline depth 1, 2s warmup,
 10s measurement, `1,2,4,8,16` vCPU, 512 MiB command-precomposition budget, and
 `SHARDCACHE_FEATURES=redis-server,redis-modules-all`.
 
-- Artifact: `benchmarks/results/adam-prime-new-commands-20260601T012301Z/report.md`.
+- Artifact: `benchmarks/results/server-prime-new-commands-20260601T012301Z/report.md`.
 - Command bundle: `redis-modules` plus the Redis v6/v7 extension suite in the
   same isolated run. Redis 8 vector rows are tracked separately in
   [`REDIS_V8_VECTOR_BENCHMARKS.md`](REDIS_V8_VECTOR_BENCHMARKS.md).
 - Runner coverage: 50 target/suite/vCPU legs started, no runner-level
-  `Error:` lines, all target CSVs shared the resolved plan IDs, and Adam had no
+  `Error:` lines, all target CSVs shared the resolved plan IDs, and the benchmark server had no
   lingering `bench-*` containers or benchmark ports after cleanup.
 
 Plain `redis:7.4-alpine`, `valkey/valkey:8.0-alpine`, and Dragonfly do not load
@@ -76,9 +76,9 @@ Initial status counts: `ok` 96, `expected-error` 13, `redis-stack error` 118, `s
 
 ## Slower-Row Optimization Follow-Up
 
-The initial full matrix showed no Redis Stack throughput wins, but three clean rows had higher shardcache average latency: `FT._LIST`, `TS.MRANGE`, and `TS.MREVRANGE`. After optimizing those paths, the same 227-command module matrix was rerun on Adam with the same 1 vCPU, 1 client, 1 key shard, pipeline-depth-1, 1s warmup, and 2s measurement shape. The optimized clean subset has 0 Redis Stack throughput wins and 0 Redis Stack lower-latency rows.
+The initial full matrix showed no Redis Stack throughput wins, but three clean rows had higher shardcache average latency: `FT._LIST`, `TS.MRANGE`, and `TS.MREVRANGE`. After optimizing those paths, the same 227-command module matrix was rerun on the benchmark server with the same 1 vCPU, 1 client, 1 key shard, pipeline-depth-1, 1s warmup, and 2s measurement shape. The optimized clean subset has 0 Redis Stack throughput wins and 0 Redis Stack lower-latency rows.
 
-- Artifact: `benchmarks/results/adam-module-command-matrix-optimized5-modules-1vcpu-p1-20260531T221741Z/report.md`.
+- Artifact: `benchmarks/results/server-module-command-matrix-optimized5-modules-1vcpu-p1-20260531T221741Z/report.md`.
 
 | Optimized scope | Cases | shardcache ops/sec | Redis Stack ops/sec | sc/redis | shardcache mean avg us | Redis Stack mean avg us | Redis faster cases |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -94,9 +94,9 @@ The initial full matrix showed no Redis Stack throughput wins, but three clean r
 
 ## P99 Tail-Latency Follow-Up
 
-The command matrix now records per-command p50/p95/p99/p999 latency in the raw CSV and reports mean p99 in Markdown/JSON. A final 1-vCPU, pipeline-depth-1 Adam run used that harness after adding filter-aware RedisTimeSeries multi-range matching, a single-shard multi-range response path, and pre-encoded time-series sample rows. In the clean Redis Stack-comparable subset, Redis Stack has 0 throughput wins, 0 average-latency wins, and 0 p99-latency wins.
+The command matrix now records per-command p50/p95/p99/p999 latency in the raw CSV and reports mean p99 in Markdown/JSON. A final 1-vCPU, pipeline-depth-1 server run used that harness after adding filter-aware RedisTimeSeries multi-range matching, a single-shard multi-range response path, and pre-encoded time-series sample rows. In the clean Redis Stack-comparable subset, Redis Stack has 0 throughput wins, 0 average-latency wins, and 0 p99-latency wins.
 
-- Artifact: `benchmarks/results/adam-module-command-matrix-p99-opt3-modules-1vcpu-p1-20260531T231229Z/report.md`.
+- Artifact: `benchmarks/results/server-module-command-matrix-p99-opt3-modules-1vcpu-p1-20260531T231229Z/report.md`.
 
 | Final optimized scope | Cases | shardcache ops/sec | Redis Stack ops/sec | sc/redis | shardcache mean avg us | Redis Stack mean avg us | shardcache mean p99 us | Redis Stack mean p99 us | Redis faster cases | Redis lower p99 cases |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

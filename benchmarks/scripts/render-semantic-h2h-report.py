@@ -94,7 +94,7 @@ def main() -> None:
         render_single_report(args.results_dir[0])
         return
 
-    output_dir = args.combined_output_dir or args.results_dir[0].parent / "adam-semantic-h2h-isolated-combined"
+    output_dir = args.combined_output_dir or args.results_dir[0].parent / "server-semantic-h2h-isolated-combined"
     render_combined_report(args.results_dir, output_dir)
 
 
@@ -577,7 +577,7 @@ def render_optimization_markdown(
     return [
         "## Why The Optimized Path Is Faster",
         "",
-        f"ShardCache now sustains {row_metric(cold, 'ops')} cold misses/s and {row_metric(unique, 'ops')} cold unique semantic hits/s in the no-memo lookup path, then jumps to {row_metric(hot, 'ops')} lookups/s when the exact-query cache is warm. Earlier exploratory no-memo profiling was around 452 ops/s, so the optimized cold path is {baseline_improvement_text(float(cold['ops']))} that baseline in this Adam run.",
+        f"ShardCache now sustains {row_metric(cold, 'ops')} cold misses/s and {row_metric(unique, 'ops')} cold unique semantic hits/s in the no-memo lookup path, then jumps to {row_metric(hot, 'ops')} lookups/s when the exact-query cache is warm. Earlier exploratory no-memo profiling was around 452 ops/s, so the optimized cold path is {baseline_improvement_text(float(cold['ops']))} that baseline in this server run.",
         "",
         "The performance improvement comes from moving semantic caching into the cache engine instead of treating it as an application-side wrapper around a vector database:",
         "",
@@ -793,7 +793,7 @@ def render_optimization_latex(
     return [
         r"\subsection{Why The Optimized Path Is Faster}",
         "",
-        f"ShardCache now sustains {tex_count(cold['ops'])} cold misses/s and {tex_count(unique['ops'])} cold unique semantic hits/s in the no-memo lookup path, then jumps to {tex_count(hot['ops'])} lookups/s when the exact-query cache is warm. Earlier exploratory no-memo profiling was around 452 ops/s, so the optimized cold path is {tex_baseline_improvement(float(cold['ops']))} that baseline in this Adam run.",
+        f"ShardCache now sustains {tex_count(cold['ops'])} cold misses/s and {tex_count(unique['ops'])} cold unique semantic hits/s in the no-memo lookup path, then jumps to {tex_count(hot['ops'])} lookups/s when the exact-query cache is warm. Earlier exploratory no-memo profiling was around 452 ops/s, so the optimized cold path is {tex_baseline_improvement(float(cold['ops']))} that baseline in this server run.",
         "",
         "The performance improvement comes from moving semantic caching into the cache engine instead of treating it as an application-side wrapper around a vector database:",
         "",
@@ -954,7 +954,7 @@ def render_markdown(rows: dict[tuple[str, str], dict[str, object]], metadata: di
     out: list[str] = [
         f"# {report_title(metadata)}",
         "",
-        f"- Host: {metadata.get('host', 'adam')}",
+        f"- Host: {metadata.get('host', 'server')}",
         f"- SUT CPU set: {metadata.get('sut_cpuset', '0-15')}",
         f"- Load/client CPU set: {metadata.get('load_cpuset', '16-31')}",
         f"- Workers: {metadata.get('workers', '16')}",
@@ -1017,11 +1017,11 @@ def render_combined_markdown(
     out: list[str] = [
         f"# {title}",
         "",
-        "This report combines the isolated 1-vCPU and 16-vCPU Adam benchmark runs into unified head-to-head tables. Each scenario table shows peer comparison and CPU scaling in the same row, so a reader can see both relative performance and how each system scales with the larger CPU allocation.",
+        "This report combines the isolated 1-vCPU and 16-vCPU server benchmark runs into unified head-to-head tables. Each scenario table shows peer comparison and CPU scaling in the same row, so a reader can see both relative performance and how each system scales with the larger CPU allocation.",
         "",
         "## Run Shape",
         "",
-        f"- Host: {combined_metadata_value(runs, 'host', 'adam')}",
+        f"- Host: {combined_metadata_value(runs, 'host', 'server')}",
         f"- Entries: {format_int(combined_metadata_value(runs, 'entries', '100000'))}",
         f"- Dims: {combined_metadata_value(runs, 'dims', '384')}",
         f"- Threshold distance: {combined_metadata_value(runs, 'threshold', '0.35')}",
@@ -1319,7 +1319,7 @@ def render_latex_section(
         rf"\section{{{tex_escape(report_title(metadata))}}}",
         rf"\label{{sec:shardcache-semantic-head-to-head-{tex_escape(label_scope)}}}",
         "",
-        "We reran the semantic-cache head-to-head on the Adam Ubuntu server with explicit CPU isolation. "
+        "We reran the semantic-cache head-to-head on the benchmark server with explicit CPU isolation. "
         f"The system under test was limited to {vcpus} logical CPU(s) ({tex_escape(metadata.get('sut_cpuset', '0-15'))}), "
         f"and external load/client workers were pinned to logical CPUs {tex_escape(metadata.get('load_cpuset', '16-31'))}. "
         f"Each measured row used {tex_escape(metadata.get('workers', '16'))} workers, a "
@@ -1413,7 +1413,7 @@ def render_latex_section(
         [
             r"\subsection{Caveats}",
             "",
-            r"The Redis-backed rows used Redis Stack; the image digest is captured in \texttt{metadata.txt}. Python package versions are captured in \texttt{python-freeze.txt}; this isolated run used a fresh benchmark virtual environment on Adam, so package versions can differ from earlier uncapped exploratory rows. GPTCache and managed Redis LangCache are not included in this isolated matrix: GPTCache previously failed the concurrent 100k run cleanly, and no Redis LangCache endpoint or credentials were available. Embedded rows cannot separate load-generator CPU from system CPU because the database/index is a library in the benchmark process; those rows are marked by zero load vCPU and process CPU equal to SUT CPU.",
+            r"The Redis-backed rows used Redis Stack; the image digest is captured in \texttt{metadata.txt}. Python package versions are captured in \texttt{python-freeze.txt}; this isolated run used a fresh benchmark virtual environment on the benchmark server, so package versions can differ from earlier uncapped exploratory rows. GPTCache and managed Redis LangCache are not included in this isolated matrix: GPTCache previously failed the concurrent 100k run cleanly, and no Redis LangCache endpoint or credentials were available. Embedded rows cannot separate load-generator CPU from system CPU because the database/index is a library in the benchmark process; those rows are marked by zero load vCPU and process CPU equal to SUT CPU.",
             "",
         ]
     )
@@ -1493,7 +1493,7 @@ def render_combined_whitepaper_intro_latex(
         "",
         r"\subsection{Abstract}",
         "",
-        "Semantic caching is usually evaluated as a thin framework layer on top of a vector database. That framing hides the cache-engine work required for production use: deciding whether a candidate is reusable, returning the cached value, invalidating repeated-query decisions, accounting for memory, and preventing cross-user data leakage. This report evaluates ShardCache as a native semantic-cache feature and compares it against BetterDB, RedisVL/LangChain Redis semantic-cache integrations, Redis vector search, FAISS, hnswlib, and Qdrant on an isolated Adam server benchmark.",
+        "Semantic caching is usually evaluated as a thin framework layer on top of a vector database. That framing hides the cache-engine work required for production use: deciding whether a candidate is reusable, returning the cached value, invalidating repeated-query decisions, accounting for memory, and preventing cross-user data leakage. This report evaluates ShardCache as a native semantic-cache feature and compares it against BetterDB, RedisVL/LangChain Redis semantic-cache integrations, Redis vector search, FAISS, hnswlib, and Qdrant on an isolated server benchmark.",
         "",
         f"In the 16-vCPU run, ShardCache Embedded reached {tex_metric(cold_16, 'ops')} cold misses/s, {tex_metric(unique_16, 'ops')} cold unique semantic hits/s at {tex_percent(unique_16, 'hit_rate')} hit rate, and {tex_metric(hot_16, 'ops')} hot exact cached lookups/s at {tex_percent(hot_16, 'hit_rate')} hit rate. ShardCache Server reached {tex_metric(server_hot_16, 'ops')} hot exact cached lookups/s through the RESP semantic command path. Redis HNSW remained a strong raw ANN baseline, but its cold unique hit rate was {tex_percent(redis_hnsw_unique_16, 'hit_rate')} in the same 16-vCPU run, while BetterDB reached {tex_metric(betterdb_hot_16, 'ops')} hot exact lookups/s.",
         "",
@@ -1515,7 +1515,7 @@ def render_combined_methodology_latex(
         r"\section{Methodology}",
         r"\label{sec:semantic-cache-methodology}",
         "",
-        "This report combines the isolated 1-vCPU and 16-vCPU Adam benchmark runs into unified head-to-head tables. Each scenario table shows peer comparison and CPU scaling in the same row, so a reader can see both relative performance and how each system scales with the larger CPU allocation.",
+        "This report combines the isolated 1-vCPU and 16-vCPU server benchmark runs into unified head-to-head tables. Each scenario table shows peer comparison and CPU scaling in the same row, so a reader can see both relative performance and how each system scales with the larger CPU allocation.",
         "",
         rf"All rows use {tex_count(combined_metadata_value(runs, 'entries', '100000'))} entries, {tex_escape(str(combined_metadata_value(runs, 'dims', '384')))}-dimensional normalized embeddings, and a cosine-distance threshold of {tex_escape(str(combined_metadata_value(runs, 'threshold', '0.35')))}. The 1-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(one, 'sut_cpuset', '0'))} and the load client to CPU set {tex_escape(run_metadata_value(one, 'load_cpuset', '16-31'))} with {tex_escape(run_metadata_value(one, 'workers', '16'))} workers. The 16-vCPU run pins the SUT to CPU set {tex_escape(run_metadata_value(sixteen, 'sut_cpuset', '0-15'))} and the load client to CPU set {tex_escape(run_metadata_value(sixteen, 'load_cpuset', '16-31'))} with {tex_escape(run_metadata_value(sixteen, 'workers', '16'))} workers.",
         "",
@@ -1605,7 +1605,7 @@ def combined_execution_mode_note(runs: list[dict[str, object]]) -> str:
     )
     if has_server:
         return "ShardCache Embedded is the in-process native semantic-cache API. ShardCache Server is the shardcache TCP server through RESP semantic commands, so the same report shows both library-mode performance and service-mode performance."
-    return "These Adam result files currently include ShardCache Embedded only. The harness now has a ShardCache Server semantic adapter; rerunning the isolated benchmark will add server rows next to the embedded rows."
+    return "These server result files currently include ShardCache Embedded only. The harness now has a ShardCache Server semantic adapter; rerunning the isolated benchmark will add server rows next to the embedded rows."
 
 
 def combined_row(

@@ -2,13 +2,13 @@
 # same names to override these values for one run.
 
 suites = "redis-core"
-targets = "redis,valkey,dragonfly,shardcache-resp,shardcache-scnp"
+targets = "redis,redis-cluster,valkey,dragonfly,shardcache-resp,shardcache-scnp"
 vcpus = "1,2,4,8,16"
 clients = 1
 pipeline_depths = "1"
 warmup = 1
 duration = 5
-key_shards = 1
+key_shards = "vcpus"
 fixture_scope = "per-client"
 memory_budget_mib = 256
 command_budget = 0

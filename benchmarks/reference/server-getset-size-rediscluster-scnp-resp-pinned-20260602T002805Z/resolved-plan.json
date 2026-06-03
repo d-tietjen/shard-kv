@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "run_id": "adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z",
+  "plans": [
+    "plans/redis-cluster-redis-getset-size-small-v16-p256.json",
+    "plans/shardcache-scnp-direct-redis-getset-size-small-v16-p256.json",
+    "plans/shardcache-resp-redis-getset-size-small-v16-p256.json",
+    "plans/redis-cluster-redis-getset-size-1k-v16-p256.json",
+    "plans/shardcache-scnp-direct-redis-getset-size-1k-v16-p256.json",
+    "plans/shardcache-resp-redis-getset-size-1k-v16-p256.json",
+    "plans/redis-cluster-redis-getset-size-4k-v16-p256.json",
+    "plans/shardcache-scnp-direct-redis-getset-size-4k-v16-p256.json",
+    "plans/shardcache-resp-redis-getset-size-4k-v16-p256.json",
+    "plans/redis-cluster-redis-getset-size-16k-v16-p256.json",
+    "plans/shardcache-scnp-direct-redis-getset-size-16k-v16-p256.json",
+    "plans/shardcache-resp-redis-getset-size-16k-v16-p256.json",
+    "plans/redis-cluster-redis-getset-size-64k-v16-p256.json",
+    "plans/shardcache-scnp-direct-redis-getset-size-64k-v16-p256.json",
+    "plans/shardcache-resp-redis-getset-size-64k-v16-p256.json",
+    "plans/redis-cluster-redis-getset-size-256k-v16-p256.json",
+    "plans/shardcache-scnp-direct-redis-getset-size-256k-v16-p256.json",
+    "plans/shardcache-resp-redis-getset-size-256k-v16-p256.json"
+  ]
+}

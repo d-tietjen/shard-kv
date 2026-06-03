@@ -18,6 +18,96 @@ services:
         "6379",
       ]
 
+  redis-cluster:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    container_name: bench-redis-cluster
+    profiles: ["redis-cluster", "servers"]
+    ports:
+      - "127.0.0.1:7000-7015:7000-7015"
+    environment:
+      REDIS_CLUSTER_NODES: ${REDIS_CLUSTER_NODES:-3}
+      REDIS_CLUSTER_SLOT_LANES: ${REDIS_CLUSTER_SLOT_LANES:-3}
+      REDIS_CLUSTER_BASE_PORT: ${REDIS_CLUSTER_BASE_PORT:-7000}
+    command: |
+      sh -lc '
+        set -eu
+        nodes="$${REDIS_CLUSTER_NODES:-3}"
+        slot_lanes="$${REDIS_CLUSTER_SLOT_LANES:-$$nodes}"
+        base="$${REDIS_CLUSTER_BASE_PORT:-7000}"
+        if [ "$$nodes" -lt 3 ] || [ "$$nodes" -gt 16 ]; then
+          echo "REDIS_CLUSTER_NODES must be between 3 and 16" >&2
+          exit 2
+        fi
+        if [ "$$slot_lanes" -lt 1 ] || [ "$$slot_lanes" -gt "$$nodes" ]; then
+          echo "REDIS_CLUSTER_SLOT_LANES must be between 1 and REDIS_CLUSTER_NODES" >&2
+          exit 2
+        fi
+
+        pids=""
+        for index in $$(seq 0 "$$((nodes - 1))"); do
+          port="$$((base + index))"
+          dir="/tmp/redis-cluster/$$port"
+          mkdir -p "$$dir"
+          redis-server \
+            --cluster-enabled yes \
+            --cluster-config-file nodes.conf \
+            --cluster-node-timeout 5000 \
+            --appendonly no \
+            --save "" \
+            --protected-mode no \
+            --bind 0.0.0.0 \
+            --port "$$port" \
+            --cluster-announce-ip 127.0.0.1 \
+            --cluster-announce-port "$$port" \
+            --cluster-announce-bus-port "$$((port + 10000))" \
+            --dir "$$dir" &
+          pids="$$pids $$!"
+        done
+
+        sleep 1
+        for index in $$(seq 1 "$$((nodes - 1))"); do
+          redis-cli -p "$$base" CLUSTER MEET 127.0.0.1 "$$((base + index))" >/dev/null
+        done
+
+        add_slots() {
+          port="$$1"
+          start="$$2"
+          end="$$3"
+          slot="$$start"
+          chunk=""
+          count=0
+          while [ "$$slot" -le "$$end" ]; do
+            chunk="$$chunk $$slot"
+            count="$$((count + 1))"
+            if [ "$$count" -ge 512 ]; then
+              redis-cli -p "$$port" CLUSTER ADDSLOTS $$chunk >/dev/null
+              chunk=""
+              count=0
+            fi
+            slot="$$((slot + 1))"
+          done
+          if [ "$$count" -gt 0 ]; then
+            redis-cli -p "$$port" CLUSTER ADDSLOTS $$chunk >/dev/null
+          fi
+        }
+
+        for index in $$(seq 0 "$$((slot_lanes - 1))"); do
+          port="$$((base + index))"
+          start="$$((index * 16384 / slot_lanes))"
+          end="$$((((index + 1) * 16384 / slot_lanes) - 1))"
+          add_slots "$$port" "$$start" "$$end"
+        done
+
+        for _ in $$(seq 1 100); do
+          if redis-cli -p "$$base" CLUSTER INFO 2>/dev/null | grep -q "^cluster_state:ok"; then
+            wait $$pids
+          fi
+          sleep 0.1
+        done
+        echo "redis cluster did not become healthy" >&2
+        exit 1
+      '
+
   redis-stack:
     image: ${REDIS_STACK_IMAGE:-redis/redis-stack-server:latest}
     container_name: bench-redis-stack

@@ -103,6 +103,10 @@ struct Args {
     #[arg(long)]
     vcpus: Option<usize>,
 
+    /// CPU ids or ranges used to pin benchmark client worker threads.
+    #[arg(long, default_value = "")]
+    client_cpuset: String,
+
     /// Total precomposed command-pool memory budget across all clients.
     #[arg(long, default_value_t = 256)]
     memory_budget_mib: usize,
@@ -130,6 +134,7 @@ struct Target {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetProtocol {
     Resp,
+    RespCluster,
     Scnp,
 }
 
@@ -137,6 +142,7 @@ impl TargetProtocol {
     fn label(self) -> &'static str {
         match self {
             Self::Resp => "resp",
+            Self::RespCluster => "resp-cluster",
             Self::Scnp => "scnp",
         }
     }
@@ -229,6 +235,8 @@ struct RunConfig {
     duration: Duration,
     memory_budget_mib: usize,
     command_budget: usize,
+    client_cpuset: String,
+    client_core_ids: Vec<usize>,
 }
 
 struct PlanLabels<'a> {
@@ -294,14 +302,27 @@ struct PlannedCommand {
 }
 
 #[derive(Debug, Clone)]
+struct PlannedResponse {
+    case_index: usize,
+    responses: usize,
+}
+
+#[derive(Debug, Clone)]
+struct PlannedBatch {
+    responses: Vec<PlannedResponse>,
+    encoded: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
 struct WorkerCommandPlan {
-    commands: Vec<PlannedCommand>,
+    batches: Vec<PlannedBatch>,
     encoded_bytes: usize,
+    operations: usize,
 }
 
 impl WorkerCommandPlan {
     fn operation_count(&self) -> usize {
-        self.commands.len()
+        self.operations
     }
 }
 
@@ -315,6 +336,7 @@ struct ResolvedPlanMetadata {
     cases_filter: String,
     skip_cases: String,
     protocol: String,
+    client_cpuset: String,
     clients: usize,
     key_shards: usize,
     fixture_scope: String,
@@ -365,6 +387,7 @@ fn main() -> Result<(), BoxError> {
 
     let targets = parse_targets(&args.targets)?;
     let cases = select_cases(&args.cases, &args.skip_cases)?;
+    let client_core_ids = parse_client_cpuset(&args.client_cpuset)?;
     let duration = Duration::from_secs(args.duration);
     let warmup = Duration::from_secs(args.warmup);
     let run_config = RunConfig {
@@ -376,6 +399,8 @@ fn main() -> Result<(), BoxError> {
         duration,
         memory_budget_mib: args.memory_budget_mib,
         command_budget: args.command_budget,
+        client_cpuset: args.client_cpuset.clone(),
+        client_core_ids,
     };
     let run_id = args.run_id.clone().unwrap_or_else(default_run_id);
     let resolved_plan_id = args
@@ -421,6 +446,9 @@ fn main() -> Result<(), BoxError> {
         args.memory_budget_mib,
         args.command_budget,
     );
+    if !args.client_cpuset.is_empty() {
+        println!("redis-command-matrix: client_cpuset={}", args.client_cpuset);
+    }
     println!();
     println!(
         "| target | family | command | case | ops/sec | avg us | p99 us | errors | expected errors |"
@@ -571,6 +599,18 @@ fn parse_target_protocol(raw: &str) -> Result<(TargetProtocol, &str), String> {
         }
         return Ok((TargetProtocol::Resp, addr));
     }
+    if let Some(addr) = raw.strip_prefix("resp-cluster:") {
+        if addr.is_empty() {
+            return Err("RESP cluster target address must not be empty".to_string());
+        }
+        return Ok((TargetProtocol::RespCluster, addr));
+    }
+    if let Some(addr) = raw.strip_prefix("cluster:") {
+        if addr.is_empty() {
+            return Err("RESP cluster target address must not be empty".to_string());
+        }
+        return Ok((TargetProtocol::RespCluster, addr));
+    }
     Ok((TargetProtocol::Resp, raw))
 }
 
@@ -618,6 +658,72 @@ fn parse_filters(raw: &str) -> Vec<&str> {
         .map(str::trim)
         .filter(|filter| !filter.is_empty())
         .collect()
+}
+
+fn parse_client_cpuset(raw: &str) -> Result<Vec<usize>, BoxError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut ids = Vec::new();
+    for part in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if let Some((start, end)) = part.split_once('-') {
+            let start = start
+                .trim()
+                .parse::<usize>()
+                .map_err(|error| format!("invalid --client-cpuset start `{part}`: {error}"))?;
+            let end = end
+                .trim()
+                .parse::<usize>()
+                .map_err(|error| format!("invalid --client-cpuset end `{part}`: {error}"))?;
+            if start > end {
+                return Err(format!("invalid --client-cpuset range `{part}`").into());
+            }
+            ids.extend(start..=end);
+        } else {
+            ids.push(
+                part.parse::<usize>()
+                    .map_err(|error| format!("invalid --client-cpuset id `{part}`: {error}"))?,
+            );
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+
+    let Some(available) = core_affinity::get_core_ids() else {
+        return Err("could not query CPU cores for --client-cpuset".into());
+    };
+    let available_ids = available
+        .iter()
+        .map(|core| core.id)
+        .collect::<BTreeSet<_>>();
+    for id in &ids {
+        if !available_ids.contains(id) {
+            return Err(format!("--client-cpuset CPU {id} is not available").into());
+        }
+    }
+    Ok(ids)
+}
+
+fn pin_worker_thread(worker_id: usize, client_core_ids: &[usize]) -> Result<(), BoxError> {
+    if client_core_ids.is_empty() {
+        return Ok(());
+    }
+    let target_id = client_core_ids[worker_id % client_core_ids.len()];
+    let Some(core_id) = core_affinity::get_core_ids()
+        .and_then(|cores| cores.into_iter().find(|core| core.id == target_id))
+    else {
+        return Err(format!("benchmark client CPU {target_id} is not available").into());
+    };
+    if !core_affinity::set_for_current(core_id) {
+        return Err(format!("failed to pin benchmark client worker to CPU {target_id}").into());
+    }
+    Ok(())
 }
 
 fn default_run_id() -> String {
@@ -787,7 +893,7 @@ fn build_plan_metadata(
     let mut total_operations = 0_usize;
     let mut total_encoded_bytes = 0_usize;
     for worker_id in 0..config.clients {
-        let suffixes = WorkerSuffixes::new(worker_id, config.key_shards);
+        let suffixes = WorkerSuffixes::new(worker_id, config.key_shards, protocol)?;
         let plan = build_worker_command_plan(protocol, cases, &suffixes, config)?;
         total_operations = total_operations.saturating_add(plan.operation_count());
         total_encoded_bytes = total_encoded_bytes.saturating_add(plan.encoded_bytes);
@@ -807,6 +913,7 @@ fn build_plan_metadata(
         cases_filter: labels.cases_filter.to_string(),
         skip_cases: labels.skip_cases.to_string(),
         protocol: protocol.label().to_string(),
+        client_cpuset: config.client_cpuset.clone(),
         clients: config.clients,
         key_shards: config.key_shards,
         fixture_scope: config.fixture_scope.label().to_string(),
@@ -892,9 +999,13 @@ fn build_worker_command_plan(
         bytes = bytes.saturating_add(base_bytes);
     }
 
+    let operations = commands.len();
+    let batches = build_planned_batches(&commands, config.pipeline_depth);
+
     Ok(WorkerCommandPlan {
-        commands,
+        batches,
         encoded_bytes: bytes,
+        operations,
     })
 }
 
@@ -903,6 +1014,29 @@ fn encoded_bytes(commands: &[PlannedCommand]) -> usize {
         .iter()
         .map(|command| command.encoded.len())
         .sum::<usize>()
+}
+
+fn build_planned_batches(commands: &[PlannedCommand], pipeline_depth: usize) -> Vec<PlannedBatch> {
+    let chunk_size = pipeline_depth.max(1);
+    commands
+        .chunks(chunk_size)
+        .map(|chunk| {
+            let encoded_len = chunk
+                .iter()
+                .map(|command| command.encoded.len())
+                .sum::<usize>();
+            let mut encoded = Vec::with_capacity(encoded_len);
+            let mut responses = Vec::with_capacity(chunk.len());
+            for command in chunk {
+                encoded.extend_from_slice(&command.encoded);
+                responses.push(PlannedResponse {
+                    case_index: command.case_index,
+                    responses: command.responses,
+                });
+            }
+            PlannedBatch { responses, encoded }
+        })
+        .collect()
 }
 
 fn encode_case(
@@ -928,7 +1062,7 @@ fn append_encoded_command(
     out: &mut Vec<u8>,
 ) -> Result<(), BoxError> {
     let encoded = match protocol {
-        TargetProtocol::Resp => encode_command(parts, namespace)?,
+        TargetProtocol::Resp | TargetProtocol::RespCluster => encode_command(parts, namespace)?,
         TargetProtocol::Scnp => encode_scnp_command(parts, namespace)?,
     };
     out.extend_from_slice(&encoded);
@@ -980,7 +1114,8 @@ fn run_worker(
     cases: &[RedisCommandCase],
     config: RunConfig,
 ) -> Result<Vec<CaseStats>, BoxError> {
-    let suffixes = WorkerSuffixes::new(worker_id, config.key_shards);
+    pin_worker_thread(worker_id, &config.client_core_ids)?;
+    let suffixes = WorkerSuffixes::new(worker_id, config.key_shards, target.protocol)?;
     let plan = build_worker_command_plan(target.protocol, cases, &suffixes, &config)?;
     let addr = target.addr.addr_for_lane(suffixes.worker.shard_lane)?;
     let mut conn = BenchConn::connect(target.protocol, &addr)?;
@@ -1019,16 +1154,36 @@ struct WorkerSuffixes {
 }
 
 impl WorkerSuffixes {
-    fn new(worker_id: usize, key_shards: usize) -> Self {
+    fn new(
+        worker_id: usize,
+        key_shards: usize,
+        protocol: TargetProtocol,
+    ) -> Result<Self, BoxError> {
         let shard_lane = worker_id % key_shards;
-        Self {
+        let worker_cluster_tag = match protocol {
+            TargetProtocol::RespCluster => {
+                Some(redis_cluster_tag_for_lane(shard_lane, key_shards)?)
+            }
+            TargetProtocol::Resp | TargetProtocol::Scnp => None,
+        };
+        let shared_cluster_tag = match protocol {
+            TargetProtocol::RespCluster => Some(redis_cluster_tag_for_lane(0, key_shards)?),
+            TargetProtocol::Resp | TargetProtocol::Scnp => None,
+        };
+        Ok(Self {
             worker: KeyNamespace::new(
                 format!("shard:{shard_lane}:worker:{worker_id}"),
                 shard_lane,
                 key_shards,
+                worker_cluster_tag,
             ),
-            shared_keyspace: KeyNamespace::unsharded("shared-keyspace"),
-        }
+            shared_keyspace: KeyNamespace::new(
+                "shared-keyspace".to_string(),
+                0,
+                1,
+                shared_cluster_tag,
+            ),
+        })
     }
 
     fn for_case(&self, case: &RedisCommandCase, fixture_scope: FixtureScope) -> &KeyNamespace {
@@ -1043,27 +1198,30 @@ struct KeyNamespace {
     label: String,
     shard_lane: usize,
     key_shards: usize,
+    redis_cluster_tag: Option<String>,
 }
 
 impl KeyNamespace {
-    fn new(label: String, shard_lane: usize, key_shards: usize) -> Self {
+    fn new(
+        label: String,
+        shard_lane: usize,
+        key_shards: usize,
+        redis_cluster_tag: Option<String>,
+    ) -> Self {
         Self {
             label,
             shard_lane,
             key_shards,
-        }
-    }
-
-    fn unsharded(label: &str) -> Self {
-        Self {
-            label: label.to_string(),
-            shard_lane: 0,
-            key_shards: 1,
+            redis_cluster_tag,
         }
     }
 
     fn label(&self) -> &str {
         &self.label
+    }
+
+    fn redis_cluster_tag(&self) -> Option<&str> {
+        self.redis_cluster_tag.as_deref()
     }
 }
 
@@ -1138,51 +1296,45 @@ fn run_plan(
     conn: &mut BenchConn,
     cases: &[RedisCommandCase],
     plan: &WorkerCommandPlan,
-    pipeline_depth: usize,
+    _pipeline_depth: usize,
     deadline: Instant,
     mut stats: Option<&mut [CaseStats]>,
 ) -> Result<(), BoxError> {
-    let mut pending = Vec::with_capacity(pipeline_depth);
     let mut cursor = 0;
     while Instant::now() < deadline {
-        let op = &plan.commands[cursor];
+        let batch = &plan.batches[cursor];
         cursor += 1;
-        if cursor == plan.commands.len() {
+        if cursor == plan.batches.len() {
             cursor = 0;
         }
 
         let started = Instant::now();
-        conn.write_raw(&op.encoded)?;
-        pending.push((op.case_index, op.responses, started));
-        if pending.len() >= pipeline_depth {
-            drain_pipeline(conn, cases, &mut pending, stats.as_deref_mut())?;
-        }
-    }
-    if !pending.is_empty() {
-        drain_pipeline(conn, cases, &mut pending, stats)?;
+        conn.write_raw(&batch.encoded)?;
+        conn.flush()?;
+        drain_cached_batch(conn, cases, batch, started, stats.as_deref_mut())?;
     }
     Ok(())
 }
 
-fn drain_pipeline(
+fn drain_cached_batch(
     conn: &mut BenchConn,
     cases: &[RedisCommandCase],
-    pending: &mut Vec<(usize, usize, Instant)>,
+    batch: &PlannedBatch,
+    started: Instant,
     mut stats: Option<&mut [CaseStats]>,
 ) -> Result<(), BoxError> {
-    conn.flush()?;
-    for (index, responses, started) in pending.drain(..) {
-        let error = conn.read_responses(responses)?;
+    for response in &batch.responses {
+        let error = conn.read_responses(response.responses)?;
         if let Some(stats) = stats.as_deref_mut() {
             let elapsed_ns = started.elapsed().as_nanos();
-            let case_stats = &mut stats[index];
+            let case_stats = &mut stats[response.case_index];
             case_stats.ops = case_stats.ops.saturating_add(1);
             case_stats.elapsed_ns = case_stats.elapsed_ns.saturating_add(elapsed_ns);
             case_stats
                 .latency
                 .record(elapsed_ns.min(u128::from(u64::MAX)) as u64);
             if error {
-                if cases[index].expect_error {
+                if cases[response.case_index].expect_error {
                     case_stats.expected_errors = case_stats.expected_errors.saturating_add(1);
                 } else {
                     case_stats.errors = case_stats.errors.saturating_add(1);
@@ -1201,7 +1353,9 @@ enum BenchConn {
 impl BenchConn {
     fn connect(protocol: TargetProtocol, addr: &str) -> Result<Self, BoxError> {
         match protocol {
-            TargetProtocol::Resp => Ok(Self::Resp(RespConn::connect(addr)?)),
+            TargetProtocol::Resp | TargetProtocol::RespCluster => {
+                Ok(Self::Resp(RespConn::connect(addr)?))
+            }
             TargetProtocol::Scnp => Ok(Self::Scnp(ScnpConn::connect(addr)?)),
         }
     }
@@ -1785,6 +1939,9 @@ fn rewrite_part(part: &str, namespace: &KeyNamespace) -> Result<Vec<u8>, BoxErro
 }
 
 fn rewrite_key(key: &str, namespace: &KeyNamespace) -> Result<Vec<u8>, BoxError> {
+    if let Some(tag) = namespace.redis_cluster_tag() {
+        return Ok(format!("{key}:{{{tag}}}").into_bytes());
+    }
     if namespace.key_shards <= 1 {
         return Ok(format!("{key}:{{{}}}", namespace.label()).into_bytes());
     }
@@ -1801,6 +1958,46 @@ fn rewrite_key(key: &str, namespace: &KeyNamespace) -> Result<Vec<u8>, BoxError>
         namespace.shard_lane, namespace.key_shards
     )
     .into())
+}
+
+fn redis_cluster_tag_for_lane(shard_lane: usize, shard_count: usize) -> Result<String, BoxError> {
+    if shard_count == 0 {
+        return Err("Redis cluster shard count must be greater than zero".into());
+    }
+    if shard_lane >= shard_count {
+        return Err(format!(
+            "Redis cluster shard lane {shard_lane} is outside shard count {shard_count}"
+        )
+        .into());
+    }
+    let start = shard_lane * 16_384 / shard_count;
+    let end = ((shard_lane + 1) * 16_384 / shard_count).saturating_sub(1);
+    for nonce in 0..1_000_000 {
+        let tag = format!("cluster:{shard_lane}:n:{nonce}");
+        let slot = usize::from(redis_cluster_slot(tag.as_bytes()));
+        if (start..=end).contains(&slot) {
+            return Ok(tag);
+        }
+    }
+    Err(format!(
+        "could not find Redis cluster hash tag for shard lane {shard_lane} of {shard_count}"
+    )
+    .into())
+}
+
+fn redis_cluster_slot(key: &[u8]) -> u16 {
+    let mut crc = 0_u16;
+    for byte in key {
+        crc ^= u16::from(*byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc & 0x3fff
 }
 
 fn stripe_index(hash: u64, shift: u32) -> usize {
@@ -2081,7 +2278,7 @@ mod tests {
 
     #[test]
     fn worker_suffixes_include_logical_key_shard_lane() {
-        let suffixes = WorkerSuffixes::new(5, 4);
+        let suffixes = WorkerSuffixes::new(5, 4, TargetProtocol::Resp).unwrap();
         let case = REDIS_COMMAND_CASES
             .iter()
             .find(|case| !case.is_keyspace_wide())
@@ -2095,7 +2292,7 @@ mod tests {
 
     #[test]
     fn sharded_worker_suffix_routes_rewritten_keys_to_lane() {
-        let suffixes = WorkerSuffixes::new(5, 4);
+        let suffixes = WorkerSuffixes::new(5, 4, TargetProtocol::Resp).unwrap();
         let namespace = suffixes.for_case(&REDIS_COMMAND_CASES[0], FixtureScope::PerClient);
         let key = rewrite_key("dump-bench", namespace).unwrap();
 
@@ -2113,6 +2310,38 @@ mod tests {
         assert!(target.addr_for_lane(4).is_err());
     }
 
+    fn hash_tag_bytes(key: &[u8]) -> &[u8] {
+        let start = key.iter().position(|byte| *byte == b'{').unwrap() + 1;
+        let end = key.iter().position(|byte| *byte == b'}').unwrap();
+        &key[start..end]
+    }
+
+    #[test]
+    fn redis_cluster_crc16_slot_matches_reference_vector() {
+        assert_eq!(super::redis_cluster_slot(b"123456789"), 12_739);
+    }
+
+    #[test]
+    fn redis_cluster_tags_route_to_lane_slot_range() {
+        let tag = super::redis_cluster_tag_for_lane(2, 4).unwrap();
+        let slot = usize::from(super::redis_cluster_slot(tag.as_bytes()));
+
+        assert!((2 * 16_384 / 4..=((3 * 16_384 / 4) - 1)).contains(&slot));
+    }
+
+    #[test]
+    fn redis_cluster_worker_keys_share_a_hash_slot() {
+        let suffixes = WorkerSuffixes::new(5, 4, TargetProtocol::RespCluster).unwrap();
+        let namespace = suffixes.for_case(&REDIS_COMMAND_CASES[0], FixtureScope::PerClient);
+        let first = rewrite_key("set-a", namespace).unwrap();
+        let second = rewrite_key("set-b", namespace).unwrap();
+        let first_slot = super::redis_cluster_slot(hash_tag_bytes(&first));
+        let second_slot = super::redis_cluster_slot(hash_tag_bytes(&second));
+
+        assert_eq!(first_slot, second_slot);
+        assert!((16_384 / 4..=((2 * 16_384 / 4) - 1)).contains(&usize::from(first_slot)));
+    }
+
     #[test]
     fn dump_restore_workers_route_to_matching_direct_shard_ports() {
         let target = parse_target_addr("127.0.0.1:6384+4").unwrap();
@@ -2126,7 +2355,7 @@ mod tests {
             .unwrap();
 
         for worker_id in 0..8 {
-            let suffixes = WorkerSuffixes::new(worker_id, 4);
+            let suffixes = WorkerSuffixes::new(worker_id, 4, TargetProtocol::Resp).unwrap();
             let lane = worker_id % 4;
             let addr = target.addr_for_lane(lane).unwrap();
             let dump_key = rewrite_key(
@@ -2151,7 +2380,7 @@ mod tests {
 
     #[test]
     fn shared_keyspace_scope_still_uses_shared_suffix_for_keyspace_cases() {
-        let suffixes = WorkerSuffixes::new(5, 4);
+        let suffixes = WorkerSuffixes::new(5, 4, TargetProtocol::Resp).unwrap();
         let case = all_non_destructive_cases()
             .find(|case| case.is_keyspace_wide())
             .unwrap();
@@ -2174,13 +2403,15 @@ mod tests {
             duration: Duration::from_secs(1),
             memory_budget_mib: 1,
             command_budget,
+            client_cpuset: String::new(),
+            client_core_ids: Vec::new(),
         }
     }
 
     #[test]
     fn precomposed_plan_is_deterministic() {
         let cases = &REDIS_COMMAND_CASES[..2];
-        let suffixes = WorkerSuffixes::new(0, 1);
+        let suffixes = WorkerSuffixes::new(0, 1, TargetProtocol::Resp).unwrap();
         let config = test_config(1, 4);
 
         let left =
@@ -2190,18 +2421,37 @@ mod tests {
 
         assert_eq!(left.operation_count(), 4);
         assert_eq!(left.encoded_bytes, right.encoded_bytes);
-        assert_eq!(left.commands.len(), right.commands.len());
-        for (left, right) in left.commands.iter().zip(right.commands.iter()) {
-            assert_eq!(left.case_index, right.case_index);
-            assert_eq!(left.responses, right.responses);
+        assert_eq!(left.batches.len(), right.batches.len());
+        for (left, right) in left.batches.iter().zip(right.batches.iter()) {
             assert_eq!(left.encoded, right.encoded);
+            assert_eq!(left.responses.len(), right.responses.len());
+            for (left, right) in left.responses.iter().zip(right.responses.iter()) {
+                assert_eq!(left.case_index, right.case_index);
+                assert_eq!(left.responses, right.responses);
+            }
         }
+    }
+
+    #[test]
+    fn precomposed_plan_caches_pipeline_batches() {
+        let cases = &REDIS_COMMAND_CASES[..2];
+        let suffixes = WorkerSuffixes::new(0, 1, TargetProtocol::Resp).unwrap();
+        let mut config = test_config(1, 4);
+        config.pipeline_depth = 2;
+
+        let plan =
+            build_worker_command_plan(TargetProtocol::Resp, cases, &suffixes, &config).unwrap();
+
+        assert_eq!(plan.operation_count(), 4);
+        assert_eq!(plan.batches.len(), 2);
+        assert!(plan.batches.iter().all(|batch| batch.responses.len() == 2));
+        assert!(plan.batches.iter().all(|batch| !batch.encoded.is_empty()));
     }
 
     #[test]
     fn precomposed_plan_respects_total_command_budget() {
         let cases = &REDIS_COMMAND_CASES[..2];
-        let suffixes = WorkerSuffixes::new(0, 1);
+        let suffixes = WorkerSuffixes::new(0, 1, TargetProtocol::Resp).unwrap();
         let config = test_config(2, 4);
 
         let plan =
@@ -2214,7 +2464,7 @@ mod tests {
     #[test]
     fn precomposed_plan_rejects_too_small_memory_budget() {
         let cases = &REDIS_COMMAND_CASES[..2];
-        let suffixes = WorkerSuffixes::new(0, 1);
+        let suffixes = WorkerSuffixes::new(0, 1, TargetProtocol::Resp).unwrap();
         let config = test_config(usize::MAX, 0);
 
         let error = build_worker_command_plan(TargetProtocol::Resp, cases, &suffixes, &config)
@@ -2222,6 +2472,21 @@ mod tests {
             .to_string();
 
         assert!(error.contains("memory budget is too small"));
+    }
+
+    #[test]
+    fn client_cpuset_parser_accepts_ranges_and_deduplicates() {
+        let available = core_affinity::get_core_ids().unwrap();
+        let first = available[0].id;
+        let raw = format!("{first},{first}");
+        let parsed = super::parse_client_cpuset(&raw).unwrap();
+        assert_eq!(parsed, vec![first]);
+    }
+
+    #[test]
+    fn client_cpuset_parser_rejects_inverted_ranges() {
+        let error = super::parse_client_cpuset("3-1").unwrap_err().to_string();
+        assert!(error.contains("invalid --client-cpuset range"));
     }
 
     #[test]

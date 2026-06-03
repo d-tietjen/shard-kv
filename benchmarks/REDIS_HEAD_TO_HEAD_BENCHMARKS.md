@@ -4,7 +4,7 @@ Updated: 2026-05-26
 
 This is the curated entry point for shardcache head-to-head benchmarks against
 Redis-compatible servers. It combines the publishable 1-vCPU and 16-vCPU TCP
-server rows with the current Adam command-matrix artifacts.
+server rows with the current server command-matrix artifacts.
 
 Raw per-case CSVs stay in `benchmarks/results/`. This document summarizes the
 rows we should cite in README, release notes, and 0.1.0 readiness work.
@@ -88,7 +88,7 @@ benchmark shape yet.
 
 The 16-shard opcode artifacts predate the later Redis 5 family runs. Stream,
 geo, pubsub, hyperloglog, and scripting rows in the sharded C16/P1 and C16/P16
-tables use isolated Adam family reruns because the first mixed-family gap-fill
+tables use isolated server family reruns because the first mixed-family gap-fill
 run was throttled by slow stateful/diagnostic cases and made Redis look
 implausibly low. SCNP-direct shard-port rows for these families are still not
 published because the direct-port attempt failed during stream setup (`XLEN`).
@@ -795,31 +795,31 @@ above: `DISCARD`, `EXEC`, `MULTI`, `UNWATCH`, `WATCH`, `ASKING`, `BGREWRITEAOF`,
 | [`benchmarks/results/redis-command-opcode-optimized-pass2-depth16-20260524T1600Z/report.md`](results/redis-command-opcode-optimized-pass2-depth16-20260524T1600Z/report.md) | 16-shard shardcache command matrix, ordered depth 16, optimized opcode pass |
 | [`benchmarks/results/redis-command-opcode-optimized-direct-depth1-20260524T152034Z/report.md`](results/redis-command-opcode-optimized-direct-depth1-20260524T152034Z/report.md) | 16-shard command matrix, depth 1, saved Redis/Valkey/Dragonfly reference rows |
 | [`benchmarks/results/redis-command-opcode-optimized-direct-depth16-ordered-20260524T152654Z/report.md`](results/redis-command-opcode-optimized-direct-depth16-ordered-20260524T152654Z/report.md) | 16-shard command matrix, ordered depth 16, saved Redis/Valkey/Dragonfly reference rows |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-stream.csv` | Adam isolated 16-shard RESP stream rows at C16/P1 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-stream.csv` | Adam isolated 16-shard RESP stream rows at C16/P16 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-geo.csv` | Adam isolated 16-shard RESP geo rows at C16/P1 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-geo.csv` | Adam isolated 16-shard RESP geo rows at C16/P16 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-pubsub-family.csv` | Adam isolated 16-shard RESP pubsub rows at C16/P1 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-pubsub-family.csv` | Adam isolated 16-shard RESP pubsub rows at C16/P16 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-hll-main.csv` | Adam isolated 16-shard RESP hyperloglog rows at C16/P1 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-hll-main.csv` | Adam isolated 16-shard RESP hyperloglog rows at C16/P16 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-pfselftest.csv` | Adam isolated 16-shard RESP PFSELFTEST row at C16/P1 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-pfselftest.csv` | Adam isolated 16-shard RESP PFSELFTEST row at C16/P16 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-scripting.csv` | Adam isolated 16-shard RESP scripting rows at C16/P1 |
-| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-scripting.csv` | Adam isolated 16-shard RESP scripting rows at C16/P16 |
-| [`benchmarks/results/adam-redis-family-1vcpu-c16p16-20260525T042537Z/report.md`](results/adam-redis-family-1vcpu-c16p16-20260525T042537Z/report.md) | 1-vCPU Redis family command matrix, C16/P16 |
-| [`benchmarks/results/adam-redis-data-1vcpu-c16p16-20260525T042128Z/report.md`](results/adam-redis-data-1vcpu-c16p16-20260525T042128Z/report.md) | 1-vCPU Redis data-command matrix, C16/P16 |
-| [`benchmarks/results/adam-redis-keyspace-1vcpu-c16p16-20260525T042907Z/report.md`](results/adam-redis-keyspace-1vcpu-c16p16-20260525T042907Z/report.md) | 1-vCPU Redis keyspace matrix, C16/P16 |
-| [`benchmarks/results/adam-monoio-transport-20260525T220653Z/`](results/adam-monoio-transport-20260525T220653Z/) | Adam Tokio vs monoio RESP transport hot-mix comparison, 1-vCPU and 16-vCPU server views |
-| [`benchmarks/results/adam-monoio-profile-20260525T222318Z/`](results/adam-monoio-profile-20260525T222318Z/) | Adam `perf record` comparison for 16-vCPU C16/P16 Tokio vs monoio hot RESP transport |
-| [`benchmarks/results/adam-monoio-writev-control-20260525T222741Z/`](results/adam-monoio-writev-control-20260525T222741Z/) | Adam monoio `SHARDCACHE_MONOIO_SAFE_WRITER=writev` control for 16-vCPU C16/P16 hot RESP transport |
-| [`benchmarks/results/adam-monoio-legacy-control-20260525T223157Z/`](results/adam-monoio-legacy-control-20260525T223157Z/) | Adam monoio `SHARDCACHE_MONOIO_DRIVER=legacy` control for 16-vCPU C16/P16 hot RESP transport |
-| [`benchmarks/results/adam-monoio-legacy-transport-20260525T223244Z/`](results/adam-monoio-legacy-transport-20260525T223244Z/) | Adam monoio legacy driver controls for the remaining hot RESP transport rows |
-| [`benchmarks/results/adam-monoio-auto-driver-20260525T223959Z/`](results/adam-monoio-auto-driver-20260525T223959Z/) | Adam monoio `SHARDCACHE_MONOIO_DRIVER=auto` proof rows showing 16-worker legacy and 1-worker io_uring selection |
-| [`benchmarks/results/adam-monoio-driver-sweep-20260525T224908Z/`](results/adam-monoio-driver-sweep-20260525T224908Z/) | Adam monoio driver sweep for 2, 4, and 8 workers on the C16/P16 hot RESP mix |
-| [`benchmarks/results/adam-monoio-driver-w4-repeat-20260525T225104Z/`](results/adam-monoio-driver-w4-repeat-20260525T225104Z/) | Longer Adam repeat for the 4-worker monoio driver crossover check |
-| [`benchmarks/results/adam-single-shard-input-profile-20260525/`](results/adam-single-shard-input-profile-20260525/) | Adam one-worker monoio C16/P16 hot input profile before the direct RESP no-parts fast path |
-| [`benchmarks/results/adam-single-shard-input-fastpath-20260525/`](results/adam-single-shard-input-fastpath-20260525/) | Adam one-worker monoio C16/P16 hot input profile after the direct RESP no-parts fast path |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-stream.csv` | Server isolated 16-shard RESP stream rows at C16/P1 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-stream.csv` | Server isolated 16-shard RESP stream rows at C16/P16 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-geo.csv` | Server isolated 16-shard RESP geo rows at C16/P1 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-geo.csv` | Server isolated 16-shard RESP geo rows at C16/P16 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-pubsub-family.csv` | Server isolated 16-shard RESP pubsub rows at C16/P1 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-pubsub-family.csv` | Server isolated 16-shard RESP pubsub rows at C16/P16 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-hll-main.csv` | Server isolated 16-shard RESP hyperloglog rows at C16/P1 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-hll-main.csv` | Server isolated 16-shard RESP hyperloglog rows at C16/P16 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-pfselftest.csv` | Server isolated 16-shard RESP PFSELFTEST row at C16/P1 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-pfselftest.csv` | Server isolated 16-shard RESP PFSELFTEST row at C16/P16 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p1-scripting.csv` | Server isolated 16-shard RESP scripting rows at C16/P1 |
+| `benchmarks/results/sharded-gapfill-20260525/resp-c16p16-scripting.csv` | Server isolated 16-shard RESP scripting rows at C16/P16 |
+| [`benchmarks/results/server-redis-family-1vcpu-c16p16-20260525T042537Z/report.md`](results/server-redis-family-1vcpu-c16p16-20260525T042537Z/report.md) | 1-vCPU Redis family command matrix, C16/P16 |
+| [`benchmarks/results/server-redis-data-1vcpu-c16p16-20260525T042128Z/report.md`](results/server-redis-data-1vcpu-c16p16-20260525T042128Z/report.md) | 1-vCPU Redis data-command matrix, C16/P16 |
+| [`benchmarks/results/server-redis-keyspace-1vcpu-c16p16-20260525T042907Z/report.md`](results/server-redis-keyspace-1vcpu-c16p16-20260525T042907Z/report.md) | 1-vCPU Redis keyspace matrix, C16/P16 |
+| [`benchmarks/results/server-monoio-transport-20260525T220653Z/`](results/server-monoio-transport-20260525T220653Z/) | Server Tokio vs monoio RESP transport hot-mix comparison, 1-vCPU and 16-vCPU server views |
+| [`benchmarks/results/server-monoio-profile-20260525T222318Z/`](results/server-monoio-profile-20260525T222318Z/) | Server `perf record` comparison for 16-vCPU C16/P16 Tokio vs monoio hot RESP transport |
+| [`benchmarks/results/server-monoio-writev-control-20260525T222741Z/`](results/server-monoio-writev-control-20260525T222741Z/) | Server monoio `SHARDCACHE_MONOIO_SAFE_WRITER=writev` control for 16-vCPU C16/P16 hot RESP transport |
+| [`benchmarks/results/server-monoio-legacy-control-20260525T223157Z/`](results/server-monoio-legacy-control-20260525T223157Z/) | Server monoio `SHARDCACHE_MONOIO_DRIVER=legacy` control for 16-vCPU C16/P16 hot RESP transport |
+| [`benchmarks/results/server-monoio-legacy-transport-20260525T223244Z/`](results/server-monoio-legacy-transport-20260525T223244Z/) | Server monoio legacy driver controls for the remaining hot RESP transport rows |
+| [`benchmarks/results/server-monoio-auto-driver-20260525T223959Z/`](results/server-monoio-auto-driver-20260525T223959Z/) | Server monoio `SHARDCACHE_MONOIO_DRIVER=auto` proof rows showing 16-worker legacy and 1-worker io_uring selection |
+| [`benchmarks/results/server-monoio-driver-sweep-20260525T224908Z/`](results/server-monoio-driver-sweep-20260525T224908Z/) | Server monoio driver sweep for 2, 4, and 8 workers on the C16/P16 hot RESP mix |
+| [`benchmarks/results/server-monoio-driver-w4-repeat-20260525T225104Z/`](results/server-monoio-driver-w4-repeat-20260525T225104Z/) | Longer server repeat for the 4-worker monoio driver crossover check |
+| [`benchmarks/results/server-single-shard-input-profile-20260525/`](results/server-single-shard-input-profile-20260525/) | Server one-worker monoio C16/P16 hot input profile before the direct RESP no-parts fast path |
+| [`benchmarks/results/server-single-shard-input-fastpath-20260525/`](results/server-single-shard-input-fastpath-20260525/) | Server one-worker monoio C16/P16 hot input profile after the direct RESP no-parts fast path |
 | [`benchmarks/results/redis5-new-commands-local-20260524Tbenchmark/report-head-to-head-common-c1.md`](results/redis5-new-commands-local-20260524Tbenchmark/report-head-to-head-common-c1.md) | Redis 5 common-case source retained for 1-client historical comparison |
 | [`benchmarks/results/redis5-new-commands-local-20260524Tbenchmark/report-head-to-head-common-c16-optimized.md`](results/redis5-new-commands-local-20260524Tbenchmark/report-head-to-head-common-c16-optimized.md) | Redis 5 common-case source retained for the SORT C16/P1 backfill |
 
@@ -839,9 +839,9 @@ is `9.60x` Redis and SCNP direct is `9.88x` Redis for the same workload.
 ## Monoio RESP Transport Spot Check
 
 Artifact:
-[`benchmarks/results/adam-monoio-transport-20260525T220653Z/`](results/adam-monoio-transport-20260525T220653Z/).
+[`benchmarks/results/server-monoio-transport-20260525T220653Z/`](results/server-monoio-transport-20260525T220653Z/).
 
-These rows isolate the server socket runtime on Adam using the hot RESP command
+These rows isolate the server socket runtime on the benchmark server using the hot RESP command
 mix (`PING`, `ECHO`, `GET`, `SET`, `PUBSUB`). Shardcache was built once with
 `redis-server,monoio`; the Tokio rows use that binary with
 `SHARDCACHE_USE_MONOIO` unset, and the monoio rows use the original io_uring
@@ -864,7 +864,7 @@ runs. Benchmark `SHARDCACHE_MONOIO_SAFE_WRITER=writev` before using monoio for
 large-value RESP claims.
 
 Follow-up profile artifact:
-[`benchmarks/results/adam-monoio-profile-20260525T222318Z/`](results/adam-monoio-profile-20260525T222318Z/).
+[`benchmarks/results/server-monoio-profile-20260525T222318Z/`](results/server-monoio-profile-20260525T222318Z/).
 This ran the 16-vCPU C16/P16 hot RESP mix under `perf record -e cycles -F 997 -g --call-graph fp`.
 Profiler overhead changed the ordering slightly (`monoio` 1,002,484 ops/sec,
 Tokio 995,773 ops/sec), so use the stack shape rather than the profiled
@@ -877,14 +877,14 @@ transport cycles in the normal task/syscall path: `tokio::runtime::task::raw::po
 both cases: `clear_page_rep`, `rep_movs_alternative`, and `nft_do_chain`.
 
 The `SHARDCACHE_MONOIO_SAFE_WRITER=writev` control artifact:
-[`benchmarks/results/adam-monoio-writev-control-20260525T222741Z/`](results/adam-monoio-writev-control-20260525T222741Z/).
+[`benchmarks/results/server-monoio-writev-control-20260525T222741Z/`](results/server-monoio-writev-control-20260525T222741Z/).
 It produced 959,772 ops/sec for the same 16-vCPU C16/P16 hot RESP mix, below
 the io_uring monoio row, so writev is not currently a small-response win.
 
 The `SHARDCACHE_MONOIO_DRIVER=legacy` control artifacts:
-[`benchmarks/results/adam-monoio-legacy-control-20260525T223157Z/`](results/adam-monoio-legacy-control-20260525T223157Z/)
+[`benchmarks/results/server-monoio-legacy-control-20260525T223157Z/`](results/server-monoio-legacy-control-20260525T223157Z/)
 and
-[`benchmarks/results/adam-monoio-legacy-transport-20260525T223244Z/`](results/adam-monoio-legacy-transport-20260525T223244Z/).
+[`benchmarks/results/server-monoio-legacy-transport-20260525T223244Z/`](results/server-monoio-legacy-transport-20260525T223244Z/).
 Legacy is worse for the one-worker io_uring-friendly shape, but better once the
 server fans out across 16 monoio workers:
 
@@ -899,16 +899,16 @@ Server monoio now defaults `SHARDCACHE_MONOIO_DRIVER=auto`: io_uring for one
 worker and legacy for multi-worker socket runs. Explicit
 `SHARDCACHE_MONOIO_DRIVER=legacy|io_uring` still overrides the auto choice.
 The auto proof artifact:
-[`benchmarks/results/adam-monoio-auto-driver-20260525T223959Z/`](results/adam-monoio-auto-driver-20260525T223959Z/).
+[`benchmarks/results/server-monoio-auto-driver-20260525T223959Z/`](results/server-monoio-auto-driver-20260525T223959Z/).
 It logged `Legacy driver (16 workers)` for the 16-vCPU C16/P16 row and
 `IoUring driver (1 workers)` for the 1-vCPU C16/P16 row. The 16-worker auto
 row produced 1,119,198 ops/sec, closing the earlier default monoio gap against
 the 1,118,281 ops/sec Tokio row for this hot mix.
 
 Additional driver sweep artifacts:
-[`benchmarks/results/adam-monoio-driver-sweep-20260525T224908Z/`](results/adam-monoio-driver-sweep-20260525T224908Z/)
+[`benchmarks/results/server-monoio-driver-sweep-20260525T224908Z/`](results/server-monoio-driver-sweep-20260525T224908Z/)
 and
-[`benchmarks/results/adam-monoio-driver-w4-repeat-20260525T225104Z/`](results/adam-monoio-driver-w4-repeat-20260525T225104Z/).
+[`benchmarks/results/server-monoio-driver-w4-repeat-20260525T225104Z/`](results/server-monoio-driver-w4-repeat-20260525T225104Z/).
 The C16/P16 hot RESP sweep shows io_uring is not an 8-shard win; legacy was
 737,181 ops/sec vs io_uring at 678,564 ops/sec. A longer 4-worker repeat also
 favored legacy at 477,492 ops/sec vs io_uring at 394,699 ops/sec, so the
@@ -918,9 +918,9 @@ server socket runs.
 ## Single-Worker RESP Input Spot Check
 
 Artifacts:
-[`benchmarks/results/adam-single-shard-input-profile-20260525/`](results/adam-single-shard-input-profile-20260525/)
+[`benchmarks/results/server-single-shard-input-profile-20260525/`](results/server-single-shard-input-profile-20260525/)
 and
-[`benchmarks/results/adam-single-shard-input-fastpath-20260525/`](results/adam-single-shard-input-fastpath-20260525/).
+[`benchmarks/results/server-single-shard-input-fastpath-20260525/`](results/server-single-shard-input-fastpath-20260525/).
 
 These rows isolate the one-worker monoio/io_uring input path under C16/P16 on
 the hot RESP case set (`PING`, `GET`, `SET`, `PUBLISH`). The optimized path
@@ -1050,7 +1050,7 @@ pipeline)`.
 
 ## 16-Shard Command Matrix
 
-These rows were run on Adam with 16 clients, 16 key shards, `SHARD_COUNT=16`,
+These rows were run on the benchmark server with 16 clients, 16 key shards, `SHARD_COUNT=16`,
 shared keyspace fixtures, and direct shard ports enabled at
 `127.0.0.1:6384+16`. Transaction cases are skipped on direct shard ports
 because transactions are connection-scoped.
@@ -1087,7 +1087,7 @@ runs:
 
 ## 1-vCPU Command Matrices
 
-These Redis-only command proof runs use Adam with a 1-vCPU shardcache server
+These Redis-only command proof runs use the benchmark server with a 1-vCPU shardcache server
 shape and C16/P16 load. They are useful for compatibility and command-family
 regression tracking.
 

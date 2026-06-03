@@ -16,21 +16,21 @@ Usage:
 
 Options:
   --config PATH              Benchmark config TOML (default: benchmarks/bench.toml)
-  --suite LIST               Suites: redis-core,redis-v6-v7,redis-v8,redis-v8-vector,redis-keyspace,redis-destructive,redis-modules,all
-  --targets LIST             Targets: redis,redis-stack,valkey,dragonfly,shardcache-resp,shardcache-scnp,shardcache-scnp-direct,shardcache,all
+  --suite LIST               Suites: redis-core,redis-getset-size-*,redis-getset-sizes,redis-v6-v7,redis-v8,redis-v8-vector,redis-keyspace,redis-destructive,redis-modules,all
+  --targets LIST             Targets: redis,redis-cluster,redis-stack,valkey,dragonfly,shardcache-resp,shardcache-scnp,shardcache-scnp-direct,shardcache,all
   --vcpus LIST               Comma-separated vCPU matrix, for example 1,2,4,8,16
   --clients N                Concurrent clients
   --pipeline-depth LIST      Comma-separated pipeline depths
   --warmup SECONDS           Warmup duration
   --duration SECONDS         Measurement duration
-  --key-shards N             Logical key lanes
+  --key-shards N|vcpus       Logical key lanes, or vcpus to match each vCPU step
   --fixture-scope MODE       per-client or shared-keyspace
   --memory-budget-mib N      Total precomposed command memory budget
   --command-budget N         Total precomposed command count budget; 0 means memory-bounded
   --out-dir PATH             Output directory or parent results directory
 
 Examples:
-  benchmarks/scripts/run-benchmark-suite.sh --targets redis,valkey,dragonfly,shardcache-resp,shardcache-scnp --suite redis-core --vcpus 1,2,4,8,16
+  benchmarks/scripts/run-benchmark-suite.sh --targets redis,redis-cluster,valkey,dragonfly,shardcache-resp,shardcache-scnp --suite redis-core --vcpus 1,2,4,8,16 --key-shards vcpus
   benchmarks/scripts/run-benchmark-suite.sh --targets redis-stack,shardcache-resp,shardcache-scnp --suite redis-modules --vcpus 1,2,4,8,16
   benchmarks/scripts/run-benchmark-suite.sh --targets all --suite all --vcpus 1,2,4,8,16 --memory-budget-mib 512
 USAGE
@@ -108,7 +108,7 @@ expand_targets_raw() {
     target="$(trim "$target")"
     case "$target" in
       all)
-        expanded+=(redis redis-stack valkey dragonfly shardcache-resp shardcache-scnp)
+        expanded+=(redis redis-cluster redis-stack valkey dragonfly shardcache-resp shardcache-scnp)
         ;;
       shardcache)
         expanded+=(shardcache-resp shardcache-scnp)
@@ -150,7 +150,7 @@ suite_value() {
 
 target_service() {
   case "$1" in
-    redis|redis-stack|valkey|dragonfly) printf '%s' "$1" ;;
+    redis|redis-cluster|redis-stack|valkey|dragonfly) printf '%s' "$1" ;;
     shardcache|shardcache-resp|shardcache-scnp|shardcache-scnp-direct) printf 'shardcache' ;;
     *)
       echo "unknown benchmark target: $1" >&2
@@ -162,6 +162,7 @@ target_service() {
 target_port() {
   case "$1" in
     redis|redis-stack) printf '6379' ;;
+    redis-cluster) printf '7000' ;;
     valkey) printf '6381' ;;
     dragonfly) printf '6382' ;;
     shardcache|shardcache-resp|shardcache-scnp) printf '6383' ;;
@@ -169,15 +170,43 @@ target_port() {
   esac
 }
 
+effective_key_shards() {
+  local vcpus="$1"
+  case "$key_shards" in
+    vcpu|vcpus|auto) printf '%s' "$vcpus" ;;
+    *) printf '%s' "$key_shards" ;;
+  esac
+}
+
 effective_shard_count() {
   local vcpus="$1"
+  local lanes
+  lanes="$(effective_key_shards "$vcpus")"
+  if [[ -z "$lanes" || "$lanes" == *[!0-9]* ]]; then
+    echo "--key-shards must be a positive integer or one of: vcpus, vcpu, auto" >&2
+    exit 2
+  fi
   if [[ -n "${user_shard_count:-}" ]]; then
     printf '%s' "$user_shard_count"
-  elif [[ "$key_shards" -gt "$vcpus" ]]; then
-    printf '%s' "$key_shards"
+  elif [[ "$lanes" -gt "$vcpus" ]]; then
+    printf '%s' "$lanes"
   else
     printf '%s' "$vcpus"
   fi
+}
+
+redis_cluster_nodes() {
+  local vcpus="$1"
+  local nodes
+  nodes="$(effective_shard_count "$vcpus")"
+  if [[ "$nodes" -lt 3 ]]; then
+    nodes=3
+  fi
+  if [[ "$nodes" -gt 16 ]]; then
+    echo "redis-cluster supports up to 16 mapped node ports in benchmarks/docker/compose.yml; got nodes=$nodes" >&2
+    exit 2
+  fi
+  printf '%s' "$nodes"
 }
 
 target_spec() {
@@ -189,6 +218,9 @@ target_spec() {
       ;;
     shardcache-scnp-direct)
       printf 'shardcache-scnp-direct=scnp:127.0.0.1:6501+%s' "$(effective_shard_count "$vcpus")"
+      ;;
+    redis-cluster)
+      printf 'redis-cluster=resp-cluster:127.0.0.1:7000+%s' "$(redis_cluster_nodes "$vcpus")"
       ;;
     shardcache|shardcache-resp)
       printf 'shardcache-resp=127.0.0.1:6383'
@@ -214,7 +246,32 @@ wait_for_port() {
 
 configure_started_target() {
   local target="$1"
+  local vcpus="${2:-1}"
   case "$target" in
+    redis-cluster)
+      local nodes
+      nodes="$(redis_cluster_nodes "$vcpus")"
+      for _ in {1..100}; do
+        local ok=1
+        for offset in $(seq 0 "$((nodes - 1))"); do
+          local port info
+          port="$((7000 + offset))"
+          info="$(docker exec bench-redis-cluster redis-cli -p "$port" CLUSTER INFO 2>/dev/null || true)"
+          if ! grep -q '^cluster_state:ok' <<<"$info" \
+            || ! grep -q '^cluster_slots_assigned:16384' <<<"$info" \
+            || ! grep -q "^cluster_known_nodes:$nodes" <<<"$info"; then
+            ok=0
+            break
+          fi
+        done
+        if [[ "$ok" == "1" ]]; then
+          return
+        fi
+        sleep 0.1
+      done
+      echo "redis-cluster did not reach a fully assigned healthy state on all nodes" >&2
+      exit 1
+      ;;
     redis-stack)
       for _ in {1..100}; do
         if docker exec bench-redis-stack redis-cli CONFIG SET save "" >/dev/null 2>&1; then
@@ -243,10 +300,42 @@ docker_cpuset_for_vcpus() {
   fi
 }
 
+host_cpu_count() {
+  if command -v nproc >/dev/null 2>&1; then
+    nproc --all
+  elif command -v getconf >/dev/null 2>&1; then
+    getconf _NPROCESSORS_ONLN
+  elif command -v sysctl >/dev/null 2>&1; then
+    sysctl -n hw.ncpu
+  else
+    printf '0'
+  fi
+}
+
+client_cpuset_for_vcpus() {
+  local vcpus="$1"
+  local total start
+  if [[ -n "${CLIENT_CPUSET_CPUS:-}" ]]; then
+    printf '%s' "$CLIENT_CPUSET_CPUS"
+  elif [[ -n "${BENCH_CLIENT_CPUSET:-}" ]]; then
+    printf '%s' "$BENCH_CLIENT_CPUSET"
+  elif [[ "$(uname -s)" == "Linux" && -z "${CPUSET_CPUS:-}" ]]; then
+    total="$(host_cpu_count)"
+    if [[ "$total" =~ ^[0-9]+$ && "$total" -gt "$vcpus" ]]; then
+      start="$vcpus"
+      if [[ "$start" == "$((total - 1))" ]]; then
+        printf '%s' "$start"
+      else
+        printf '%s-%s' "$start" "$((total - 1))"
+      fi
+    fi
+  fi
+}
+
 start_target() {
   local target="$1"
   local vcpus="$2"
-  local service cpuset override_file shard_count
+  local service cpuset override_file shard_count cluster_nodes cluster_slot_lanes
   service="$(target_service "$target")"
   export DRAGONFLY_THREADS="$vcpus"
   shard_count="$(effective_shard_count "$vcpus")"
@@ -254,6 +343,10 @@ start_target() {
     echo "shardcache-scnp-direct supports up to 16 mapped direct shard ports in benchmarks/docker/compose.yml; got shard_count=$shard_count" >&2
     exit 2
   fi
+  cluster_nodes="$(redis_cluster_nodes "$vcpus")"
+  cluster_slot_lanes="$(effective_key_shards "$vcpus")"
+  export REDIS_CLUSTER_NODES="$cluster_nodes"
+  export REDIS_CLUSTER_SLOT_LANES="$cluster_slot_lanes"
   export SHARD_COUNT="$shard_count"
   export SHARDCACHE_DIRECT_SHARD_BASE_PORT=6501
 
@@ -274,12 +367,12 @@ start_target() {
   docker compose -f "$compose_file" -f "$override_file" up -d --build "$service"
 
   wait_for_port "$(target_port "$target")" "$target"
-  configure_started_target "$target"
+  configure_started_target "$target" "$vcpus"
 }
 
 stop_targets() {
   docker compose -f "$compose_file" --profile servers down --remove-orphans >/dev/null 2>&1 || true
-  docker rm -f bench-redis bench-redis-stack bench-valkey bench-dragonfly bench-shardcache >/dev/null 2>&1 || true
+  docker rm -f bench-redis bench-redis-cluster bench-redis-stack bench-valkey bench-dragonfly bench-shardcache >/dev/null 2>&1 || true
 }
 
 append_csv() {
@@ -412,17 +505,20 @@ cat > "$out_dir/metadata.json" <<EOF
   "suites": "$suites_raw",
   "targets": "$targets_raw",
   "redis_module_target": "redis-stack",
+  "redis_cluster_target": "redis-cluster",
   "shardcache_protocol_targets": "shardcache-resp,shardcache-scnp",
   "vcpus": "$vcpus_raw",
   "clients": $clients,
   "pipeline_depths": "$pipeline_depths_raw",
   "warmup": $warmup,
   "duration": $duration,
-  "key_shards": $key_shards,
+  "key_shards": "$key_shards",
+  "redis_cluster_slot_lanes": "$key_shards",
   "fixture_scope": "$fixture_scope",
   "memory_budget_mib": $memory_budget_mib,
   "command_budget": $command_budget,
-  "cpu_pinning": "${CPUSET_CPUS:-first-n-linux-cpus}",
+  "server_cpu_pinning": "${CPUSET_CPUS:-first-n-linux-cpus}",
+  "client_cpu_pinning": "${CLIENT_CPUSET_CPUS:-${BENCH_CLIENT_CPUSET:-remaining-linux-cpus}}",
   "server_memory_limit": "${SERVER_MEMORY_LIMIT:-}"
 }
 EOF
@@ -436,9 +532,11 @@ for suite in "${suites[@]}"; do
   scenario="$(suite_value "$suite" title "$suite")"
   for vcpu in "${vcpus[@]}"; do
     vcpu="$(trim "$vcpu")"
+    lane_count="$(effective_key_shards "$vcpu")"
+    client_cpuset="$(client_cpuset_for_vcpus "$vcpu")"
     for pipeline_depth in "${pipeline_depths[@]}"; do
       pipeline_depth="$(trim "$pipeline_depth")"
-      plan_id="$suite-v${vcpu}-p${pipeline_depth}-c${clients}-k${key_shards}-m${memory_budget_mib}-b${command_budget}"
+      plan_id="$suite-v${vcpu}-p${pipeline_depth}-c${clients}-k${lane_count}-m${memory_budget_mib}-b${command_budget}"
 
       for target in "${targets[@]}"; do
         target="$(trim "$target")"
@@ -449,15 +547,23 @@ for suite in "${suites[@]}"; do
         target_csvs+=("$target_csv")
 
         echo "benchmark target=$target suite=$suite vcpus=$vcpu pipeline_depth=$pipeline_depth"
+        if [[ -n "$client_cpuset" ]]; then
+          echo "benchmark client_cpuset=$client_cpuset"
+        fi
         stop_targets
         start_target "$target" "$vcpu"
+
+        client_pin_args=()
+        if [[ -n "$client_cpuset" ]]; then
+          client_pin_args=(--client-cpuset "$client_cpuset")
+        fi
 
         "$ws_root/target/release/redis_command_matrix" \
           --targets "$(target_spec "$target" "$vcpu")" \
           --cases "$cases" \
           --fixture-scope "$suite_fixture_scope" \
           --clients "$clients" \
-          --key-shards "$key_shards" \
+          --key-shards "$lane_count" \
           --pipeline-depth "$pipeline_depth" \
           --warmup "$warmup" \
           --duration "$duration" \
@@ -469,7 +575,8 @@ for suite in "${suites[@]}"; do
           --scenario "$scenario" \
           --vcpus "$vcpu" \
           --plan-json "$plan_file" \
-          --csv "$tmp_csv"
+          --csv "$tmp_csv" \
+          "${client_pin_args[@]}"
 
         append_csv "$tmp_csv" "$target_csv"
       done

@@ -1,0 +1,7 @@
+id = "redis-getset-size-64k"
+title = "Redis GET/SET 64 KiB Value"
+driver = "redis_command_matrix"
+cases = "GET large 64KiB value,SET large 64KiB value"
+fixture_scope = "per-client"
+destructive = false
+requires_modules = false

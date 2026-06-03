@@ -1,10 +1,11 @@
 # Docker Server Benchmarks
 
 This guide explains how to reproduce shardcache's Redis-compatible server
-benchmarks locally. The Docker suite runs Redis, Redis Stack, Valkey,
-Dragonfly, shardcache over RESP, and shardcache over SCNP as isolated server
-targets, then saves portable CSV artifacts that can be compared later. The same
-Compose file also includes Memcached for cache-shaped GET/SET comparisons.
+benchmarks locally. The Docker suite runs Redis, Redis Cluster, Redis Stack,
+Valkey, Dragonfly, shardcache over RESP, and shardcache over SCNP as isolated
+server targets, then saves portable CSV artifacts that can be compared later.
+The same Compose file also includes Memcached for cache-shaped GET/SET
+comparisons.
 
 The important fairness rule is simple: every target uses the same benchmark
 config, same resolved command plan, same client settings, same vCPU allocation,
@@ -43,9 +44,10 @@ targets across the supported vCPU matrix:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis,valkey,dragonfly,shardcache-resp,shardcache-scnp \
+  --targets redis,redis-cluster,valkey,dragonfly,shardcache-resp,shardcache-scnp \
   --suite redis-core \
-  --vcpus 1,2,4,8,16
+  --vcpus 1,2,4,8,16 \
+  --key-shards vcpus
 ```
 
 The output directory is printed at the end. By default it is created under:
@@ -64,6 +66,7 @@ The raw target CSVs are also saved in that directory:
 
 ```text
 redis.csv
+redis-cluster.csv
 valkey.csv
 dragonfly.csv
 shardcache-resp.csv
@@ -88,9 +91,10 @@ Worst-case comparison shape, matching a strict request/response 1-vCPU run:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis,valkey,dragonfly,shardcache-resp,shardcache-scnp \
+  --targets redis,redis-cluster,valkey,dragonfly,shardcache-resp,shardcache-scnp \
   --suite redis-core \
   --vcpus 1 \
+  --key-shards 1 \
   --pipeline-depth 1 \
   --clients 1 \
   --warmup 2 \
@@ -101,9 +105,10 @@ Standard strict request/response matrix:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis,valkey,dragonfly,shardcache-resp,shardcache-scnp \
+  --targets redis,redis-cluster,valkey,dragonfly,shardcache-resp,shardcache-scnp \
   --suite redis-core \
   --vcpus 1,2,4,8,16 \
+  --key-shards vcpus \
   --pipeline-depth 1 \
   --clients 1 \
   --warmup 2 \
@@ -114,15 +119,61 @@ Throughput-oriented run with pipelining:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis,valkey,dragonfly,shardcache-resp,shardcache-scnp \
+  --targets redis,redis-cluster,valkey,dragonfly,shardcache-resp,shardcache-scnp \
   --suite redis-core \
   --vcpus 1,2,4,8,16 \
+  --key-shards vcpus \
   --pipeline-depth 16 \
   --clients 16 \
   --warmup 2 \
   --duration 10 \
   --memory-budget-mib 512
 ```
+
+Redis Cluster versus shardcache direct routing:
+
+```bash
+./benchmarks/scripts/run-benchmark-suite.sh \
+  --targets redis-cluster,shardcache-scnp-direct,shardcache-scnp,shardcache-resp \
+  --suite redis-core \
+  --vcpus 1,2,4,8,16 \
+  --key-shards vcpus \
+  --pipeline-depth 1,16 \
+  --clients 16 \
+  --warmup 2 \
+  --duration 10 \
+  --memory-budget-mib 512
+```
+
+`redis-cluster` starts a Redis Cluster with primary nodes mapped to
+`127.0.0.1:7000-7015`. The benchmark harness uses Redis hash tags per logical
+key lane and connects each worker directly to the node that owns that lane's
+slot range, so the comparison is direct routing against direct routing rather
+than Redis redirect handling. Redis Cluster requires at least three primaries,
+so the 1 and 2 vCPU runs start extra empty primaries but assign slots across
+only the active logical key lanes.
+
+Variable value-size direct-routing sweep:
+
+```bash
+./benchmarks/scripts/run-benchmark-suite.sh \
+  --targets redis-cluster,shardcache-scnp-direct,shardcache-resp \
+  --suite redis-getset-size-small,redis-getset-size-1k,redis-getset-size-4k,redis-getset-size-16k,redis-getset-size-64k,redis-getset-size-256k \
+  --vcpus 1,2,4,8,16 \
+  --key-shards vcpus \
+  --pipeline-depth 256 \
+  --clients 256 \
+  --warmup 2 \
+  --duration 10 \
+  --memory-budget-mib 2048
+```
+
+This records Redis Cluster RESP, shardcache's native direct-shard SCNP client,
+and shardcache's RESP compatibility path. The value-size suites are split by
+payload size on purpose. Use these isolated suites for final claims so small
+payload rows do not inherit the memory and batch behavior of larger precomposed
+command plans. A saved server 16-vCPU result bundle and summary live in
+[`REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md`](REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md).
 
 Full command coverage matrix:
 
@@ -240,13 +291,13 @@ The default user-facing config is `benchmarks/bench.toml`:
 
 ```toml
 suites = "redis-core"
-targets = "redis,valkey,dragonfly,shardcache-resp,shardcache-scnp"
+targets = "redis,redis-cluster,valkey,dragonfly,shardcache-resp,shardcache-scnp"
 vcpus = "1,2,4,8,16"
 clients = 1
 pipeline_depths = "1"
 warmup = 1
 duration = 5
-key_shards = 1
+key_shards = "vcpus"
 fixture_scope = "per-client"
 memory_budget_mib = 256
 command_budget = 0
@@ -275,7 +326,7 @@ Use a custom config file:
 | Setting | Meaning |
 | --- | --- |
 | `suites` | Comma-separated suites to run. Use `all` for every suite. |
-| `targets` | Comma-separated server targets. Use `all` for Redis, Redis Stack, Valkey, Dragonfly, `shardcache-resp`, and shared-port `shardcache-scnp`. Use `redis-stack` for Redis module benchmarks. The shorthand `shardcache` expands to both shardcache protocol targets. Use `shardcache-scnp-direct` only for routed direct-shard experiments. |
+| `targets` | Comma-separated server targets. Use `all` for Redis, Redis Cluster, Redis Stack, Valkey, Dragonfly, `shardcache-resp`, and shared-port `shardcache-scnp`. Use `redis-stack` for Redis module benchmarks. The shorthand `shardcache` expands to both shardcache protocol targets. Use `redis-cluster` and `shardcache-scnp-direct` for routed direct-shard experiments. |
 | `vcpus` | Comma-separated vCPU counts. Each target is run once per value. |
 | `clients` | Concurrent benchmark client connections per target. |
 | `pipeline_depths` | Comma-separated in-flight command counts per client. |
@@ -312,6 +363,7 @@ The Docker services are defined in `benchmarks/docker/compose.yml`.
 | Target | Image or build | Local port | Persistence |
 | --- | --- | ---: | --- |
 | `redis` | `${REDIS_IMAGE:-redis:7.4-alpine}` | 6379 | Disabled with `--save "" --appendonly no`. |
+| `redis-cluster` | `${REDIS_IMAGE:-redis:7.4-alpine}` | 7000-7015 | Starts a Redis Cluster inside one isolated container. The runner creates at least 3 Redis primaries and assigns slots across the active logical key lanes, so 1/2 vCPU runs keep the same command plan while satisfying Redis Cluster's minimum node count. |
 | `redis-stack` | `${REDIS_STACK_IMAGE:-redis/redis-stack-server:latest}` | 6379 | Redis Stack modules loaded by the image; AOF disabled through `REDIS_ARGS`, snapshots disabled by the runner after startup. |
 | `valkey` | `valkey/valkey:8.0-alpine` | 6381 | Disabled with `--save "" --appendonly no`. |
 | `dragonfly` | `docker.dragonflydb.io/dragonflydb/dragonfly:v1.27.0` | 6382 | Snapshots disabled. |
@@ -323,7 +375,8 @@ The Docker services are defined in `benchmarks/docker/compose.yml`.
 The runner starts exactly one target service at a time. It stops the service
 before moving to the next target. `redis` and `redis-stack` intentionally share
 the same local benchmark port because they are isolated alternatives, not
-concurrent services.
+concurrent services. `redis-cluster` uses ports `7000-7015` and is still
+treated as one target for CPU and memory limiting.
 
 `shardcache-resp` and `shardcache-scnp` use the same shardcache Docker image,
 same vCPU limit, same shard count, same command cases, and same logical
@@ -425,13 +478,13 @@ When comparing targets:
   performance wins or losses.
 - Do not compare module unsupported-error rows as throughput claims.
 
-### Adam Prime Sweep Reference
+### Server Prime Sweep Reference
 
-The 2026-06-01 Adam prime sweep used this runner on the Adam Ubuntu server:
+The 2026-06-01 server prime sweep used this runner on the benchmark server:
 
 ```bash
 SHARDCACHE_FEATURES=redis-server,redis-modules-all \
-RUN_ID=adam-prime-new-commands-20260601T012301Z \
+RUN_ID=server-prime-new-commands-20260601T012301Z \
 ./benchmarks/scripts/run-benchmark-suite.sh \
   --targets redis-stack,valkey,dragonfly,shardcache-resp,shardcache-scnp \
   --suite redis-v6-v7,redis-modules \
@@ -445,7 +498,7 @@ RUN_ID=adam-prime-new-commands-20260601T012301Z \
 ```
 
 The run completed 50 isolated target/suite/vCPU legs with no runner-level
-errors and wrote `benchmarks/results/adam-prime-new-commands-20260601T012301Z/`.
+errors and wrote `benchmarks/results/server-prime-new-commands-20260601T012301Z/`.
 Shardcache RESP and shardcache SCNP completed every Redis v6/v7 and module row
 with 0 unexpected errors. Redis 8 vector rows were run separately with the
 `redis-v8-vector` suite; see
