@@ -176,7 +176,7 @@ multiple vCPUs when the server routes through one shared port; use
 value-size suites are split by payload size on purpose. Use these isolated
 suites for final claims so small payload rows do not inherit the memory and
 batch behavior of larger precomposed command plans. A saved server 16-vCPU
-result bundle and summary live in
+direct/RESP result bundle plus a shared-port SCNP companion bundle live in
 [`REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md`](REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md).
 
 Full command coverage matrix:

@@ -1,0 +1,28 @@
+{
+  "schema_version": 3,
+  "label": "standardized server benchmark server-suite-20260603T043950Z",
+  "source_csv": "/home/dtietjen/shard-kv-bench-shared-scnp.kzgP5a/benchmarks/results/server-getset-size-shardcache-scnp-shared-pinned-20260603T043950Z/server-suite-20260603T043950Z/shardcache-scnp.csv",
+  "primary_csv": "/home/dtietjen/shard-kv-bench-shared-scnp.kzgP5a/benchmarks/results/server-getset-size-shardcache-scnp-shared-pinned-20260603T043950Z/server-suite-20260603T043950Z/shardcache-scnp.csv",
+  "reference_csvs": [
+  ],
+  "baseline": "shardcache-scnp",
+  "targets": [
+    {
+      "target": "shardcache-scnp",
+      "cases": 60,
+      "small_cases": 10,
+      "large_cases": 50,
+      "clients": 256,
+      "duration_s": 10,
+      "total_ops": 922547834,
+      "sum_ops_per_sec": 92254783.400,
+      "mean_avg_us": 216545.509,
+      "latency_percentile_cases": 60,
+      "mean_p99_us": 343592.003,
+      "errors": 0,
+      "baseline_ratio": 1.000000
+    }
+  ],
+  "comparisons": [
+  ]
+}
