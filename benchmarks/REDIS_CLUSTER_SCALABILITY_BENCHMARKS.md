@@ -109,4 +109,3 @@ The checked-in bundle includes:
 - `shardcache-resp.csv`: shardcache RESP compatibility rows.
 - `summary.json` and `report.md`: generated comparison summary.
 - `plans/`: per-target resolved plans used for each isolated size suite.
-- `tmp/`: generated Compose overrides and per-leg CSVs.

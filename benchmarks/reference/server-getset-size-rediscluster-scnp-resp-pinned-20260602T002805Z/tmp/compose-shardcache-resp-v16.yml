@@ -1,4 +1,0 @@
-services:
-  shardcache:
-    cpus: "16"
-    cpuset: "0-15"
