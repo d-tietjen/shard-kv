@@ -1,0 +1,1321 @@
+{
+  "schema_version": 1,
+  "run_id": "adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z",
+  "resolved_plan_id": "redis-getset-size-256k-v16-p256-c256-k16-m2048-b0",
+  "suite": "redis-getset-size-256k",
+  "scenario": "Redis GET/SET 256 KiB Value",
+  "cases_filter": "GET large 256KiB value,SET large 256KiB value",
+  "skip_cases": "",
+  "protocol": "resp",
+  "client_cpuset": "16-31",
+  "clients": 256,
+  "key_shards": 16,
+  "fixture_scope": "per-client",
+  "pipeline_depth": 256,
+  "memory_budget_mib": 2048,
+  "command_budget": 0,
+  "selected_cases": [
+    {
+      "family": "string",
+      "category": "string",
+      "command": "GET",
+      "case": "GET large 256KiB value",
+      "profile": "large",
+      "expected_error": false,
+      "keyspace_wide": false
+    },
+    {
+      "family": "string",
+      "category": "string",
+      "command": "SET",
+      "case": "SET large 256KiB value",
+      "profile": "large",
+      "expected_error": false,
+      "keyspace_wide": false
+    }
+  ],
+  "workers": [
+    {
+      "worker_id": 0,
+      "operations": 62,
+      "encoded_bytes": 8130215
+    },
+    {
+      "worker_id": 1,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 2,
+      "operations": 62,
+      "encoded_bytes": 8130215
+    },
+    {
+      "worker_id": 3,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 4,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 5,
+      "operations": 62,
+      "encoded_bytes": 8130215
+    },
+    {
+      "worker_id": 6,
+      "operations": 62,
+      "encoded_bytes": 8130215
+    },
+    {
+      "worker_id": 7,
+      "operations": 62,
+      "encoded_bytes": 8130215
+    },
+    {
+      "worker_id": 8,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 9,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 10,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 11,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 12,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 13,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 14,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 15,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 16,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 17,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 18,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 19,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 20,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 21,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 22,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 23,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 24,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 25,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 26,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 27,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 28,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 29,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 30,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 31,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 32,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 33,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 34,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 35,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 36,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 37,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 38,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 39,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 40,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 41,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 42,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 43,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 44,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 45,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 46,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 47,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 48,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 49,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 50,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 51,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 52,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 53,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 54,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 55,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 56,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 57,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 58,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 59,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 60,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 61,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 62,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 63,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 64,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 65,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 66,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 67,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 68,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 69,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 70,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 71,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 72,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 73,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 74,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 75,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 76,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 77,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 78,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 79,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 80,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 81,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 82,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 83,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 84,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 85,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 86,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 87,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 88,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 89,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 90,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 91,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 92,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 93,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 94,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 95,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 96,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 97,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 98,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 99,
+      "operations": 62,
+      "encoded_bytes": 8130277
+    },
+    {
+      "worker_id": 100,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 101,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 102,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 103,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 104,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 105,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 106,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 107,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 108,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 109,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 110,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 111,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 112,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 113,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 114,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 115,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 116,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 117,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 118,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 119,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 120,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 121,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 122,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 123,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 124,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 125,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 126,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 127,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 128,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 129,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 130,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 131,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 132,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 133,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 134,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 135,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 136,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 137,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 138,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 139,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 140,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 141,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 142,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 143,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 144,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 145,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 146,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 147,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 148,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 149,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 150,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 151,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 152,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 153,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 154,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 155,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 156,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 157,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 158,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 159,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 160,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 161,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 162,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 163,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 164,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 165,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 166,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 167,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 168,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 169,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 170,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 171,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 172,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 173,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 174,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 175,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 176,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 177,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 178,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 179,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 180,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 181,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 182,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 183,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 184,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 185,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 186,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 187,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 188,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 189,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 190,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 191,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 192,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 193,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 194,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 195,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 196,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 197,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 198,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 199,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 200,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 201,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 202,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 203,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 204,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 205,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 206,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 207,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 208,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 209,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 210,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 211,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 212,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 213,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 214,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 215,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 216,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 217,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 218,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 219,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 220,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 221,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 222,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 223,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 224,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 225,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 226,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 227,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 228,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 229,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 230,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 231,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 232,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 233,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 234,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 235,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 236,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 237,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 238,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 239,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 240,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 241,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 242,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 243,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 244,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 245,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 246,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 247,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    },
+    {
+      "worker_id": 248,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 249,
+      "operations": 62,
+      "encoded_bytes": 8130339
+    },
+    {
+      "worker_id": 250,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 251,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 252,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 253,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 254,
+      "operations": 62,
+      "encoded_bytes": 8130463
+    },
+    {
+      "worker_id": 255,
+      "operations": 62,
+      "encoded_bytes": 8130401
+    }
+  ],
+  "total_operations": 15872,
+  "total_encoded_bytes": 2081374658
+}

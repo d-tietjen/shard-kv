@@ -157,7 +157,7 @@ Variable value-size direct-routing sweep:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis-cluster,shardcache-scnp-direct \
+  --targets redis-cluster,shardcache-scnp-direct,shardcache-resp \
   --suite redis-getset-size-small,redis-getset-size-1k,redis-getset-size-4k,redis-getset-size-16k,redis-getset-size-64k,redis-getset-size-256k \
   --vcpus 1,2,4,8,16 \
   --key-shards vcpus \
@@ -168,10 +168,11 @@ Variable value-size direct-routing sweep:
   --memory-budget-mib 2048
 ```
 
-The value-size suites are split by payload size on purpose. Use these isolated
-suites for final claims so small payload rows do not inherit the memory and
-batch behavior of larger precomposed command plans. A saved Adam 16-vCPU result
-bundle and summary live in
+This records Redis Cluster RESP, shardcache's native direct-shard SCNP client,
+and shardcache's RESP compatibility path. The value-size suites are split by
+payload size on purpose. Use these isolated suites for final claims so small
+payload rows do not inherit the memory and batch behavior of larger precomposed
+command plans. A saved Adam 16-vCPU result bundle and summary live in
 [`REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md`](REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md).
 
 Full command coverage matrix:

@@ -1,0 +1,90 @@
+{
+  "schema_version": 3,
+  "label": "standardized server benchmark adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z",
+  "source_csv": "/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/redis-cluster.csv",
+  "primary_csv": "/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/redis-cluster.csv",
+  "reference_csvs": [
+    "/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-scnp-direct.csv",
+    "/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-resp.csv"
+  ],
+  "baseline": "redis-cluster",
+  "targets": [
+    {
+      "target": "redis-cluster",
+      "cases": 12,
+      "small_cases": 2,
+      "large_cases": 10,
+      "clients": 256,
+      "duration_s": 10,
+      "total_ops": 284366440,
+      "sum_ops_per_sec": 28436644.000,
+      "mean_avg_us": 141872.420,
+      "latency_percentile_cases": 12,
+      "mean_p99_us": 325986.986,
+      "errors": 0,
+      "baseline_ratio": 1.000000
+    },
+    {
+      "target": "shardcache-resp",
+      "cases": 12,
+      "small_cases": 2,
+      "large_cases": 10,
+      "clients": 256,
+      "duration_s": 10,
+      "total_ops": 444274060,
+      "sum_ops_per_sec": 44427406.000,
+      "mean_avg_us": 100701.300,
+      "latency_percentile_cases": 12,
+      "mean_p99_us": 288459.434,
+      "errors": 0,
+      "baseline_ratio": 1.562329
+    },
+    {
+      "target": "shardcache-scnp-direct",
+      "cases": 12,
+      "small_cases": 2,
+      "large_cases": 10,
+      "clients": 256,
+      "duration_s": 10,
+      "total_ops": 478934862,
+      "sum_ops_per_sec": 47893486.200,
+      "mean_avg_us": 92247.383,
+      "latency_percentile_cases": 12,
+      "mean_p99_us": 238838.100,
+      "errors": 0,
+      "baseline_ratio": 1.684217
+    }
+  ],
+  "comparisons": [
+    {
+      "target": "shardcache-resp",
+      "baseline": "redis-cluster",
+      "common_cases": 12,
+      "target_sum_ops_per_sec": 44427406.000,
+      "baseline_sum_ops_per_sec": 28436644.000,
+      "target_mean_avg_us": 100701.300,
+      "baseline_mean_avg_us": 141872.420,
+      "p99_common_cases": 12,
+      "target_mean_p99_us": 288459.434,
+      "baseline_mean_p99_us": 325986.986,
+      "target_errors": 0,
+      "baseline_errors": 0,
+      "baseline_ratio": 1.562329
+    },
+    {
+      "target": "shardcache-scnp-direct",
+      "baseline": "redis-cluster",
+      "common_cases": 12,
+      "target_sum_ops_per_sec": 47893486.200,
+      "baseline_sum_ops_per_sec": 28436644.000,
+      "target_mean_avg_us": 92247.383,
+      "baseline_mean_avg_us": 141872.420,
+      "p99_common_cases": 12,
+      "target_mean_p99_us": 238838.100,
+      "baseline_mean_p99_us": 325986.986,
+      "target_errors": 0,
+      "baseline_errors": 0,
+      "baseline_ratio": 1.684217
+    }
+  ]
+}

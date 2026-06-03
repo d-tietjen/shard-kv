@@ -7,11 +7,12 @@ resolved command plan.
 
 ## Reproduce The Value-Size Sweep
 
-Run one target at a time with Redis Cluster and shardcache SCNP direct routing:
+Run one target at a time with Redis Cluster, shardcache's native direct-shard
+client path, and shardcache RESP compatibility:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis-cluster,shardcache-scnp-direct \
+  --targets redis-cluster,shardcache-scnp-direct,shardcache-resp \
   --suite redis-getset-size-small,redis-getset-size-1k,redis-getset-size-4k,redis-getset-size-16k,redis-getset-size-64k,redis-getset-size-256k \
   --vcpus 1,2,4,8,16 \
   --key-shards vcpus \
@@ -32,20 +33,20 @@ The size suites are intentionally isolated. Do not use one mixed tiny-to-large
 suite for final claims, because a single cached command plan can make tiny rows
 inherit the batch and memory behavior of the largest payload.
 
-## Adam 16-vCPU Value-Size Sweep
+## Adam 16-vCPU Client And RESP Value-Size Sweep
 
 Run bundle:
-`benchmarks/reference/adam-getset-size-isolated-pinned-20260602T221920Z/`
+`benchmarks/reference/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/`
 
 Remote source:
-`/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-isolated-pinned-20260602T221920Z`
+`/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z`
 
 Run settings:
 
 | Setting | Value |
 | --- | --- |
 | Host | Adam, Ubuntu 24.04, 32 logical CPUs |
-| Targets | `redis-cluster`, `shardcache-scnp-direct` |
+| Targets | `redis-cluster`, `shardcache-scnp-direct`, `shardcache-resp` |
 | Server vCPU | 16 |
 | Server CPU set | Linux CPUs `0-15` |
 | Client CPU set | Linux CPUs `16-31` |
@@ -55,42 +56,47 @@ Run settings:
 | Warmup | 2 seconds |
 | Timed duration | 10 seconds |
 | Memory budget | 2048 MiB |
-| shardcache protocol | SCNP direct shard routing |
+| shardcache native path | `shardcache_client_rs` direct-shard SCNP client |
+| shardcache compatibility path | RESP |
 | Redis protocol | RESP, direct Redis Cluster node routing |
-| Git SHA | `1d68c75c408456f2aaba1ee8404e550a47c69b49` |
+| Git SHA | `a22d10a0b1a5ab7f161fa89e5e3b3cc1b1f24d59` |
 
 Raw results:
 
-| Size | Command | Redis Cluster ops/sec | Redis Cluster p99 ms | shardcache SCNP ops/sec | shardcache SCNP p99 ms |
-| --- | --- | ---: | ---: | ---: | ---: |
-| small | GET | 9,513,826.1 | 6.468 | 17,356,968.4 | 3.654 |
-| small | SET | 9,513,826.1 | 6.468 | 17,356,968.4 | 3.656 |
-| 1 KiB | GET | 3,283,024.9 | 15.876 | 4,185,756.6 | 16.720 |
-| 1 KiB | SET | 3,283,024.9 | 15.991 | 4,185,756.6 | 16.720 |
-| 4 KiB | GET | 1,010,362.7 | 58.262 | 1,508,316.6 | 39.944 |
-| 4 KiB | SET | 1,010,362.7 | 58.786 | 1,508,316.6 | 39.944 |
-| 16 KiB | GET | 201,067.2 | 255.721 | 363,960.8 | 156.238 |
-| 16 KiB | SET | 201,067.2 | 257.688 | 363,960.8 | 156.238 |
-| 64 KiB | GET | 45,580.3 | 881.328 | 90,017.6 | 592.445 |
-| 64 KiB | SET | 45,580.3 | 881.328 | 90,017.6 | 592.970 |
-| 256 KiB | GET | 11,318.1 | 861.405 | 18,476.0 | 665.846 |
-| 256 KiB | SET | 11,318.1 | 861.405 | 18,476.0 | 676.332 |
+| Size | Command | Redis Cluster RESP ops/sec | Redis Cluster p99 ms | shardcache native client ops/sec | shardcache native client p99 ms | shardcache RESP ops/sec | shardcache RESP p99 ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| small | GET | 9,596,423.7 | 6.177 | 17,504,611.9 | 3.537 | 15,979,452.1 | 5.489 |
+| small | SET | 9,596,423.7 | 6.177 | 17,504,611.9 | 3.537 | 15,979,452.1 | 5.489 |
+| 1 KiB | GET | 3,383,814.5 | 15.016 | 4,371,801.1 | 14.402 | 4,238,185.9 | 23.118 |
+| 1 KiB | SET | 3,383,814.5 | 15.131 | 4,371,801.1 | 14.410 | 4,238,185.9 | 23.118 |
+| 4 KiB | GET | 971,646.5 | 52.724 | 1,572,488.9 | 34.505 | 1,533,043.6 | 58.622 |
+| 4 KiB | SET | 971,646.5 | 53.150 | 1,572,488.9 | 34.505 | 1,533,043.6 | 58.655 |
+| 16 KiB | GET | 208,926.4 | 226.099 | 388,713.2 | 140.247 | 365,301.6 | 208.536 |
+| 16 KiB | SET | 208,926.4 | 228.065 | 388,713.2 | 140.509 | 365,301.6 | 208.536 |
+| 64 KiB | GET | 46,050.2 | 842.531 | 89,446.1 | 595.067 | 80,645.0 | 687.342 |
+| 64 KiB | SET | 46,050.2 | 842.531 | 89,446.1 | 595.591 | 80,645.0 | 688.390 |
+| 256 KiB | GET | 11,460.7 | 812.122 | 19,681.9 | 640.680 | 17,074.8 | 741.868 |
+| 256 KiB | SET | 11,460.7 | 812.122 | 19,681.9 | 649.069 | 17,074.8 | 752.353 |
 
-Shardcache SCNP direct routing had higher ops/sec than Redis Cluster for every
-tested value size. It also had lower p99 latency for every row except the 1 KiB
-GET/SET rows, where Redis Cluster p99 was slightly lower.
+Shardcache's native direct-shard client had higher ops/sec and lower p99
+latency than Redis Cluster for every tested value size. Shardcache RESP also
+had higher ops/sec than Redis Cluster for every tested value size; its p99 was
+lower for the small, 16 KiB, 64 KiB, and 256 KiB rows, and higher for the 1 KiB
+and 4 KiB rows.
 
 ## Takeaways
 
-- shardcache SCNP direct routing had higher throughput for every tested value
-  size, from the small string case through 256 KiB payloads.
-- shardcache had lower p99 latency for every row except the 1 KiB GET/SET rows,
-  where Redis Cluster p99 was about 4-5% lower while shardcache still delivered
-  1.27x higher throughput.
-- The largest throughput gap in this run was 64 KiB payloads, where shardcache
-  reached 1.97x Redis Cluster throughput and about 1.49x lower p99.
-- At 256 KiB, both targets are dominated by payload movement, but shardcache
-  still held a 1.63x throughput advantage and lower p99.
+- The native shardcache client path was the fastest target for every row. It
+  uses `shardcache_client_rs` with direct SCNP shard routing.
+- Shardcache RESP was also faster than Redis Cluster on ops/sec for every row,
+  which keeps the Redis-compatible path in the comparison instead of only
+  reporting the native protocol.
+- RESP compatibility had a p99 tradeoff at 1 KiB and 4 KiB, where Redis Cluster
+  had lower p99 despite lower throughput. At small, 16 KiB, 64 KiB, and 256 KiB
+  values, shardcache RESP had both higher throughput and lower p99.
+- At 64 KiB and 256 KiB, all targets are dominated by payload movement and
+  queueing. Those rows are useful as throughput/bandwidth saturation evidence,
+  not as low-latency request/response claims.
 
 ## Saved Artifacts
 
@@ -99,7 +105,8 @@ The checked-in bundle includes:
 - `metadata.json`: run settings and benchmark metadata.
 - `resolved-plan.json`: shared suite selection and plan identifiers.
 - `redis-cluster.csv`: Redis Cluster result rows.
-- `shardcache-scnp-direct.csv`: shardcache SCNP direct result rows.
+- `shardcache-scnp-direct.csv`: shardcache native direct-shard client rows.
+- `shardcache-resp.csv`: shardcache RESP compatibility rows.
 - `summary.json` and `report.md`: generated comparison summary.
 - `plans/`: per-target resolved plans used for each isolated size suite.
 - `tmp/`: generated Compose overrides and per-leg CSVs.
