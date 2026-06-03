@@ -1,18 +1,20 @@
 # Redis Cluster Scalability Benchmarks
 
-This document records shardcache direct-routing runs against Redis Cluster. The
-goal is to compare Redis Cluster slot routing with shardcache's direct shard
-routing under the same hardware budget, client settings, fixture policy, and
-resolved command plan.
+This document records Redis Cluster scaling runs against shardcache's routed
+and shared-port server paths. The goal is to compare Redis Cluster slot
+routing with shardcache direct shard routing, shardcache shared-port SCNP
+without client direct routing, and shardcache RESP compatibility under the same
+hardware budget, client settings, fixture policy, and resolved command plan.
 
 ## Reproduce The Value-Size Sweep
 
 Run one target at a time with Redis Cluster, shardcache's native direct-shard
-client path, and shardcache RESP compatibility:
+client path, shardcache shared-port SCNP without client direct routing, and
+shardcache RESP compatibility:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis-cluster,shardcache-scnp-direct,shardcache-resp \
+  --targets redis-cluster,shardcache-scnp-direct,shardcache-scnp,shardcache-resp \
   --suite redis-getset-size-small,redis-getset-size-1k,redis-getset-size-4k,redis-getset-size-16k,redis-getset-size-64k,redis-getset-size-256k \
   --vcpus 1,2,4,8,16 \
   --key-shards vcpus \
@@ -32,6 +34,11 @@ client workers use the remaining CPUs. Override with `BENCH_CLIENT_CPUSET` or
 The size suites are intentionally isolated. Do not use one mixed tiny-to-large
 suite for final claims, because a single cached command plan can make tiny rows
 inherit the batch and memory behavior of the largest payload.
+
+The `shardcache-scnp` target uses the same multi-vCPU shard count as
+`shardcache-scnp-direct`, but clients connect through the shared server port
+instead of per-shard direct ports. That row measures the cost of server-side
+routing when shardcache scales across vCPUs without client direct routing.
 
 ## Server 16-vCPU Client And RESP Value-Size Sweep
 
@@ -60,6 +67,10 @@ Run settings:
 | shardcache compatibility path | RESP |
 | Redis protocol | RESP, direct Redis Cluster node routing |
 | Git SHA | `a22d10a0b1a5ab7f161fa89e5e3b3cc1b1f24d59` |
+
+This saved bundle was captured before the shared-port SCNP target was added to
+the cluster value-size recipe. A fresh run of the command above also produces
+`shardcache-scnp.csv` for multi-vCPU shardcache without client direct routing.
 
 Raw results:
 
@@ -108,6 +119,9 @@ The checked-in bundle includes:
 - `shardcache-scnp-direct.csv`: shardcache native direct-shard client rows.
 - `shardcache-resp.csv`: shardcache RESP compatibility rows.
 - `summary.json` and `report.md`: generated comparison summary.
+
+A fresh run with the updated recipe also writes `shardcache-scnp.csv`; the
+checked-in saved bundle predates that target.
 
 The full per-leg command plan files and generated compatibility JSON are omitted
 from the checked-in reference bundle to keep the repository small. They are

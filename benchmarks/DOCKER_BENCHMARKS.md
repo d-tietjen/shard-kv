@@ -153,11 +153,11 @@ than Redis redirect handling. Redis Cluster requires at least three primaries,
 so the 1 and 2 vCPU runs start extra empty primaries but assign slots across
 only the active logical key lanes.
 
-Variable value-size direct-routing sweep:
+Variable value-size cluster-scaling sweep:
 
 ```bash
 ./benchmarks/scripts/run-benchmark-suite.sh \
-  --targets redis-cluster,shardcache-scnp-direct,shardcache-resp \
+  --targets redis-cluster,shardcache-scnp-direct,shardcache-scnp,shardcache-resp \
   --suite redis-getset-size-small,redis-getset-size-1k,redis-getset-size-4k,redis-getset-size-16k,redis-getset-size-64k,redis-getset-size-256k \
   --vcpus 1,2,4,8,16 \
   --key-shards vcpus \
@@ -169,10 +169,14 @@ Variable value-size direct-routing sweep:
 ```
 
 This records Redis Cluster RESP, shardcache's native direct-shard SCNP client,
-and shardcache's RESP compatibility path. The value-size suites are split by
-payload size on purpose. Use these isolated suites for final claims so small
-payload rows do not inherit the memory and batch behavior of larger precomposed
-command plans. A saved server 16-vCPU result bundle and summary live in
+shardcache shared-port SCNP without client direct routing, and shardcache's
+RESP compatibility path. Use `shardcache-scnp` to measure shardcache across
+multiple vCPUs when the server routes through one shared port; use
+`shardcache-scnp-direct` to measure client-routed shard ownership. The
+value-size suites are split by payload size on purpose. Use these isolated
+suites for final claims so small payload rows do not inherit the memory and
+batch behavior of larger precomposed command plans. A saved server 16-vCPU
+result bundle and summary live in
 [`REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md`](REDIS_CLUSTER_SCALABILITY_BENCHMARKS.md).
 
 Full command coverage matrix:
