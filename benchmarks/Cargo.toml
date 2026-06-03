@@ -41,7 +41,7 @@ redis-embedded-commands = [
 ]
 
 [dependencies]
-shardmap = { workspace = true, features = ["sharded"] }
+shardmap = { workspace = true, features = ["sharded", "codec"] }
 shardcache-client-rs = { workspace = true }
 bytes = "1"
 clap = { workspace = true }

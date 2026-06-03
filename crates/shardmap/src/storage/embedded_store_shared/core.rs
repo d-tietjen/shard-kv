@@ -135,4 +135,44 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             .semantic_query_cache_enabled
             .store(false, Ordering::Release);
     }
+
+    /// Returns a sorted snapshot of currently live point keys.
+    pub fn key_snapshot(&self) -> Vec<SharedBytes> {
+        let mut keys = Vec::new();
+        self.visit_string_keys(|key| {
+            keys.push(SharedBytes::copy_from_slice(key));
+            true
+        });
+        keys.sort();
+        keys
+    }
+
+    /// Visits currently live point keys without allocating a key snapshot.
+    ///
+    /// The visitor runs while each shard read lock is held. Keep callbacks
+    /// lightweight, and return `false` to stop early.
+    pub fn visit_string_keys(&self, mut visitor: impl FnMut(&[u8]) -> bool) {
+        let now_ms = ttl_now_millis();
+        for shard in &self.inner.shards {
+            let shard = shard.read();
+            if !shard.visit_string_keys(now_ms, &mut visitor) {
+                return;
+            }
+        }
+    }
+
+    /// Visits currently live point entries without cloning keys or values.
+    ///
+    /// The visitor receives `(key, value, expire_at_ms)` while each shard read
+    /// lock is held. Keep callbacks lightweight, and return `false` to stop
+    /// early.
+    pub fn visit_string_entries(&self, mut visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool) {
+        let now_ms = ttl_now_millis();
+        for shard in &self.inner.shards {
+            let shard = shard.read();
+            if !shard.visit_string_entries(now_ms, &mut visitor) {
+                return;
+            }
+        }
+    }
 }

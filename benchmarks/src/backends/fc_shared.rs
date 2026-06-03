@@ -9,13 +9,15 @@ use crate::backend::{Backend, BackendClass, BoxError, Worker};
 
 use super::BenchmarkCacheConfig;
 
+const MAX_FC_SHARED_SHARDS: usize = 256;
+
 pub fn new(
     id: &'static str,
     shard_count: usize,
     capacity_hint: usize,
     copy_reads: bool,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -33,7 +35,7 @@ pub fn new_copy_locked(
     shard_count: usize,
     capacity_hint: usize,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -51,7 +53,7 @@ pub fn new_copy_unlocked(
     shard_count: usize,
     capacity_hint: usize,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -70,7 +72,7 @@ pub fn new_prepared(
     capacity_hint: usize,
     copy_reads: bool,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -91,7 +93,7 @@ pub fn new_with_policy(
     copy_reads: bool,
     lock_policy: SharedEmbeddedLockPolicy,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -111,7 +113,7 @@ pub fn new_hot_shard(
     capacity_hint: usize,
     copy_reads: bool,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -131,7 +133,7 @@ pub fn new_hot_shard_with_policy(
     copy_reads: bool,
     lock_policy: SharedEmbeddedLockPolicy,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -200,8 +202,9 @@ fn new_scoped(
     shard_count: usize,
     capacity_hint: usize,
     options: SharedBackendOptions,
-) -> Arc<dyn Backend> {
-    match shard_count.next_power_of_two().max(1) {
+) -> Result<Arc<dyn Backend>, BoxError> {
+    let resolved_shards = shard_count.next_power_of_two().max(1);
+    let backend: Arc<dyn Backend> = match resolved_shards {
         1 => Arc::new(FcShared::<1>::new(id, capacity_hint, options)),
         2 => Arc::new(FcShared::<2>::new(id, capacity_hint, options)),
         4 => Arc::new(FcShared::<4>::new(id, capacity_hint, options)),
@@ -211,8 +214,14 @@ fn new_scoped(
         64 => Arc::new(FcShared::<64>::new(id, capacity_hint, options)),
         128 => Arc::new(FcShared::<128>::new(id, capacity_hint, options)),
         256 => Arc::new(FcShared::<256>::new(id, capacity_hint, options)),
-        shards => panic!("fc-shared benchmark supports up to 256 shards, got {shards}"),
-    }
+        shards => {
+            return Err(format!(
+                "{id} benchmark supports up to {MAX_FC_SHARED_SHARDS} shards; requested {shard_count}, resolved to {shards}"
+            )
+            .into());
+        }
+    };
+    Ok(backend)
 }
 
 pub struct FcShared<const SHARDS: usize> {
@@ -233,6 +242,12 @@ struct FcSharedState {
 
 impl<const SHARDS: usize> FcShared<SHARDS> {
     fn new(id: &'static str, capacity_hint: usize, options: SharedBackendOptions) -> Self {
+        const {
+            assert!(
+                SHARDS <= MAX_FC_SHARED_SHARDS,
+                "fc-shared benchmark shard table must not exceed MAX_FC_SHARED_SHARDS"
+            );
+        }
         Self {
             id,
             store: SharedEmbeddedStore::new(SharedEmbeddedConfig {

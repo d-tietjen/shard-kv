@@ -16,6 +16,14 @@ package_crate() {
   cargo package -p "$package" --locked "$@"
 }
 
+package_crate_with_local_shardmap_patch() {
+  local package="$1"
+  shift
+  cargo package -p "$package" --locked \
+    --config "patch.crates-io.shardmap.path=\"$root/crates/shardmap\"" \
+    "$@"
+}
+
 unpack_crate() {
   local package="$1"
   local version="$2"
@@ -88,11 +96,12 @@ mkdir -p "$unpacked"
 package_crate shardmap --all-features
 package_crate shardcache-client-rs
 
-# These crates depend on the workspace shardmap version. Package them without
-# Cargo's built-in verify step, then verify them below from the generated
-# archives with a local crates.io patch for the packaged shardmap archive.
-package_crate shardcache-redis --no-verify
-package_crate shardcache --no-verify
+# These crates depend on the workspace shardmap version. During a PR for a new
+# shardmap release, that exact version is not indexed on crates.io yet. Use a
+# temporary Cargo patch only while creating the dependent archives so CI can
+# still validate the packaged source before the publish-order handoff.
+package_crate_with_local_shardmap_patch shardcache-redis --no-verify
+package_crate_with_local_shardmap_patch shardcache --no-verify
 
 unpack_crate shardmap "$shardmap_version"
 unpack_crate shardcache "$shardcache_version"

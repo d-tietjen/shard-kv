@@ -1,9 +1,9 @@
 # shardmap
 
 `shardmap` is the embedded Rust map/cache crate for `shard-kv`. It gives
-applications a cloneable, sharded in-process handle with byte-oriented keys and
-values, TTL support, memory-limit eviction, lock helpers, prepared-key lookups,
-and native semantic-cache APIs.
+applications a cloneable, sharded in-process `ShardMap<K, V>` handle, plus a
+raw byte-oriented cache surface for TTLs, locks, prepared-key lookups, semantic
+cache APIs, and server/protocol internals.
 
 Use `shardmap` when you want an embedded Rust cache. Use the repository's
 `shardcache` server package when you need a TCP service.
@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.2.1"
+shardmap = "0.3.0"
 ```
 
 ## Quick Start
@@ -20,22 +20,26 @@ shardmap = "0.2.1"
 ```rust
 use shardmap::ShardMap;
 
-let cache = ShardMap::new();
+let users: ShardMap<String, String> = ShardMap::new();
 
-cache.insert_slice(b"user:42", b"ready");
-let value = cache.get_owned(b"user:42").unwrap();
+users.insert("user:42".to_owned(), "ready".to_owned());
+let value = users.get("user:42");
 
-assert_eq!(value.as_ref(), b"ready");
+assert_eq!(value.as_deref(), Some("ready"));
 ```
 
-`ShardMap` is a cheap cloneable handle. Clones share the same underlying
-sharded store and can be moved into worker threads.
+`ShardMap<K, V>` is a cheap cloneable handle. Clones share the same underlying
+sharded store and can be moved into worker threads. It stores Rust keys and
+values directly, so custom structs work naturally when `K: Hash + Eq`. Use
+`get` when you want an owned cloned value, or `get_ref` when a short borrowed
+guard is enough.
 
 ## Feature Overview
 
 | Area | What it gives you | Example |
 | --- | --- | --- |
-| Point-key map | Insert, get, mutate, remove, and entry-style access for byte keys. | [`basic_map.rs`](examples/basic_map.rs) |
+| Typed point-key map | Insert, get, borrow, remove, and route typed keys and values. | [`typed_map.rs`](examples/typed_map.rs) |
+| Raw byte cache | Insert, get, mutate, remove, and entry-style access for byte keys. | [`basic_map.rs`](examples/basic_map.rs) |
 | TTL cache | Relative TTL writes and memory-limit eviction. | [`ttl_and_locks.rs`](examples/ttl_and_locks.rs) |
 | Prepared keys | Route metadata for repeated hot-key lookups. | [`prepared_keys_threads.rs`](examples/prepared_keys_threads.rs) |
 | Entry API | Occupied/vacant mutation without a separate lookup. | [`entry_api.rs`](examples/entry_api.rs) |
@@ -54,16 +58,106 @@ Run any example with:
 cargo run -p shardmap --example basic_map
 ```
 
-## Point-Key Map Operations
+## Typed Map Operations
 
-Use the default `ShardMap` for a 64-stripe shared embedded map, or
-`ShardMapWithShards<N>` when you want to choose the stripe count at compile
-time.
+Use `ShardMap<K, V>` for the native typed embedded API. It stores Rust objects
+directly, similar to DashMap, and shards by hashing `K`. Keys must implement
+`Hash + Eq`; owned reads require `V: Clone`; snapshots require cloned keys or
+values as needed.
+
+```rust
+use shardmap::{ShardMap, ShardMapOptions};
+
+let users: ShardMap<String, String> = ShardMap::with_options(ShardMapOptions {
+    capacity_hint: Some(1024),
+    default_ttl_ms: None,
+});
+
+users.insert("user:42".to_owned(), "queued".to_owned());
+assert!(users.contains_key("user:42"));
+
+if let Some(value) = users.get_ref("user:42") {
+    assert_eq!(value.value(), "queued");
+}
+
+users.insert("user:42".to_owned(), "running".to_owned());
+assert_eq!(users.remove("user:42").as_deref(), Some("running"));
+assert!(!users.contains_key("user:42"));
+```
+
+`ShardMapWithShards<N, K, V>` selects the stripe count at compile time. The
+default is 64 stripes. `ShardMapOptions::default_ttl_ms` applies to plain
+`insert` and `try_insert` calls; `insert_with_ttl` and `try_insert_with_ttl`
+can override it for one write. Passing `None` to an explicit TTL write stores
+that value without a TTL.
+
+Custom structs need no codec when they are used with the native `ShardMap`.
 
 ```rust
 use shardmap::ShardMap;
 
-let cache = ShardMap::with_capacity(1024);
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct UserKey {
+    tenant: String,
+    id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct User {
+    name: String,
+    active: bool,
+}
+
+let map: ShardMap<UserKey, User> = ShardMap::new();
+let key = UserKey { tenant: "acme".to_owned(), id: 7 };
+map.insert(key.clone(), User { name: "Devon".to_owned(), active: true });
+
+assert!(map.contains_key(&key));
+```
+
+## Codec Facades
+
+Enable the `codec` feature when you want typed facades over the shared byte
+engine used by the raw cache and protocol/server paths. This is for advanced
+users who need multiple typed views of the same byte database or an
+application-owned serialization format.
+
+Each `CodecShardMap` facade must use a distinct non-empty namespace. Codec
+iterator and snapshot APIs filter by that namespace and strip it before
+decoding keys, so separate codecs over the same engine do not see each other's
+data. When a namespaced facade is created with
+`from_shared_engine_with_options`, `CacheOptions::default_ttl_ms` is applied
+only to writes made through that namespace.
+
+```rust,ignore
+use bytes::Bytes;
+use shardmap::{CodecShardMap, ShardCacheWithShards};
+
+let engine = ShardCacheWithShards::<8>::new();
+let strings: CodecShardMap<String, String, 8> =
+    CodecShardMap::from_shared_engine(Bytes::from_static(b"strings"), engine.clone()).unwrap();
+let numbers: CodecShardMap<u64, String, 8> =
+    CodecShardMap::from_shared_engine(Bytes::from_static(b"numbers"), engine).unwrap();
+
+strings.insert_ref("42", "string key");
+numbers.insert(42, "numeric key".to_owned());
+
+assert_eq!(strings.get("42").unwrap().as_deref(), Some("string key"));
+assert_eq!(numbers.get(&42).unwrap().as_deref(), Some("numeric key"));
+assert_eq!(strings.keys().unwrap(), vec!["42".to_owned()]);
+assert_eq!(numbers.keys().unwrap(), vec![42]);
+```
+
+## Raw Byte Cache Operations
+
+Use `ShardCache` when you want the lower-level byte-oriented cache surface:
+entry guards, mutable byte values, raw prepared keys, Redis-style locks, TTLs,
+and semantic-cache APIs.
+
+```rust
+use shardmap::ShardCache;
+
+let cache = ShardCache::with_capacity(1024);
 
 cache.insert_slice(b"job:1", b"queued");
 assert!(cache.contains_key(b"job:1"));
@@ -84,26 +178,28 @@ been released. Use `get`/`get_ref` when a short borrowed guard is enough.
 TTL values are relative milliseconds. A `None` TTL means the value does not
 expire because of time.
 
-```rust
-use shardmap::ShardMap;
+```rust,ignore
+use shardmap::ShardCache;
 
-let cache = ShardMap::new();
+let cache = ShardCache::new();
 cache.insert_slice_with_ttl(b"session:1", b"active", Some(30_000));
 
 assert!(cache.contains_key(b"session:1"));
 ```
 
 `CacheOptions` configures the shared-handle cache. Memory limits are enforced
-inside each stripe, using the selected eviction policy.
+inside each stripe, using the selected eviction policy. `default_ttl_ms`
+applies to plain cache writes, while explicit TTL writes override it.
 
 ```rust
-use shardmap::{CacheOptions, ShardMap};
+use shardmap::{CacheOptions, ShardCache};
 use shardmap::config::EvictionPolicy;
 
-let cache = ShardMap::with_options(CacheOptions {
+let cache = ShardCache::with_options(CacheOptions {
     capacity_hint: Some(32_768),
     total_memory_bytes: Some(256 * 1024 * 1024),
     eviction_policy: EvictionPolicy::Lru,
+    default_ttl_ms: Some(300_000),
     ..CacheOptions::default()
 });
 
@@ -118,10 +214,10 @@ feature for prefix-group cache workloads.
 
 For repeated hot lookups, prepare the key once and reuse the route metadata.
 
-```rust
-use shardmap::ShardMap;
+```rust,ignore
+use shardmap::ShardCache;
 
-let cache = ShardMap::new();
+let cache = ShardCache::new();
 cache.insert_slice(b"feature:alpha", b"enabled");
 
 let prepared = cache.prepare_key(b"feature:alpha");
@@ -140,9 +236,9 @@ present.
 
 ```rust
 use bytes::Bytes;
-use shardmap::ShardMap;
+use shardmap::ShardCache;
 
-let cache = ShardMap::new();
+let cache = ShardCache::new();
 let value = cache.entry(Bytes::from_static(b"job:42"))
     .or_insert(Bytes::from_static(b"queued"));
 
@@ -153,9 +249,9 @@ Use `route_key` when your application already partitions work by shard and
 wants to send a key to its owning worker.
 
 ```rust
-use shardmap::ShardMapWithShards;
+use shardmap::ShardCacheWithShards;
 
-let cache = ShardMapWithShards::<8>::new();
+let cache = ShardCacheWithShards::<8>::new();
 let route = cache.route_key(b"user:42");
 
 assert!(route.shard_id < cache.shard_count());
@@ -167,10 +263,10 @@ The lock helpers are useful for process-local coordination in embedded mode.
 They acquire only when the key is absent or expired, release only when the
 stored token matches, and renew by extending the TTL for the matching token.
 
-```rust
-use shardmap::ShardMap;
+```rust,ignore
+use shardmap::ShardCache;
 
-let cache = ShardMap::new();
+let cache = ShardCache::new();
 
 assert!(cache
     .try_acquire_lock(b"lock:job:1", b"worker-a", 5_000)
@@ -359,9 +455,9 @@ value. Lookups search live semantic entries and return the best match at or
 above the requested score.
 
 ```rust
-use shardmap::ShardMap;
+use shardmap::ShardCache;
 
-let cache = ShardMap::new();
+let cache = ShardCache::new();
 cache.insert_semantic_slice(b"prompt:cat", b"cached cat answer", &[1.0, 0.0])?;
 cache.insert_semantic_slice(b"prompt:dog", b"cached dog answer", &[0.0, 1.0])?;
 
@@ -385,9 +481,9 @@ cross-user authorization can opt into the governance API layer and pass a
 predicate that must approve the metadata before the cached value is released.
 
 ```rust
-use shardmap::ShardMap;
+use shardmap::ShardCache;
 
-let cache = ShardMap::new();
+let cache = ShardCache::new();
 cache.insert_semantic_slice_with_governance(
     b"prompt:cat",
     b"cached cat answer",
@@ -431,15 +527,20 @@ command parsing, RESP/SCNP protocol code, persistence, replication, and server
 transport modules. Those surfaces are feature-gated so embedded users do not
 compile server code by default.
 
-Most applications should start with `ShardMap`. Use lower-level modules only
-when you are building a custom server, embedding the protocol layer, or wiring
-storage into a specialized runtime.
+Most applications should start with `ShardMap<K, V>`. Use `ShardCache` when you
+need raw byte cache operations, semantic-cache APIs, lock helpers, or prepared
+key APIs. Use lower-level modules only when you are building a custom server,
+embedding the protocol layer, or wiring storage into a specialized runtime.
 
 ## API Shape
 
-- `ShardMap`: default embedded map/cache handle.
-- `ShardCache`: cache-flavored alias for `ShardMap`.
-- `ShardMapWithShards<N>`: embedded handle with an explicit stripe count.
+- `ShardMap<K, V>`: native typed embedded map handle for `K: Hash + Eq`.
+- `ShardMapOptions`: native typed map capacity and default TTL options.
+- `ShardMapWithShards<N, K, V>`: native typed embedded map with an explicit stripe count.
+- `CodecShardMap<K, V>`: feature-gated typed facade over the shared byte engine.
+- `ShardCache`: raw byte cache handle.
+- `ShardCacheWithShards<N>`: raw byte cache with an explicit stripe count.
+- `SharedCache`: lower-level raw byte shared-cache type.
 - `CacheOptions`: embedded capacity, memory, routing, and lock options.
 - `get_owned` and `get_prepared_owned`: return refcounted bytes after releasing the shard read lock.
 - `entry`, `get_mut`, `try_insert_slice`, and lock helpers: DashMap-style mutation and coordination APIs.
@@ -457,6 +558,7 @@ storage into a specialized runtime.
 | `redis-modules-all` | No | Aggregate Redis Modules compatibility facades, concrete command discovery metadata, and embedded APIs; individual `redis-module-*` flags can enable one module family at a time. |
 | `server` | No | TCP server internals used by the `shardcache` package. |
 | `redis-server` | No | Server internals plus Redis/Valkey compatibility. |
+| `codec` | No | `CodecShardMap` and codec traits for namespaced typed facades over one shared byte engine. |
 | `telemetry` | No | Embedded operational metrics. |
 | `monoio` | No | Linux-only server transport internals. |
 | `prefix-eviction` | No | Enables `EvictionPolicy::Prefix` for prefix-group memory-limit eviction. |

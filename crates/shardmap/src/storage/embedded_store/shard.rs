@@ -41,6 +41,24 @@ impl EmbeddedShard {
     }
 
     #[inline(always)]
+    pub(crate) fn visit_string_keys(
+        &self,
+        now_ms: u64,
+        visitor: &mut impl FnMut(&[u8]) -> bool,
+    ) -> bool {
+        self.map.visit_keys(now_ms, visitor)
+    }
+
+    #[inline(always)]
+    pub(crate) fn visit_string_entries(
+        &self,
+        now_ms: u64,
+        visitor: &mut impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
+    ) -> bool {
+        self.map.visit_entries(now_ms, visitor)
+    }
+
+    #[inline(always)]
     pub(crate) fn get_ref_hashed_shared_no_ttl(&self, hash: u64, key: &[u8]) -> Option<&[u8]> {
         self.map.get_ref_hashed_shared_no_ttl(hash, key)
     }

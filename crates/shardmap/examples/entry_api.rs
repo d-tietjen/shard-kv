@@ -1,8 +1,8 @@
 use bytes::Bytes;
-use shardmap::ShardMap;
+use shardmap::ShardCache;
 
 fn main() {
-    let cache = ShardMap::new();
+    let cache = ShardCache::new();
 
     let first = cache
         .entry(Bytes::from_static(b"job:42"))

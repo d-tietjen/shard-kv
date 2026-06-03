@@ -46,15 +46,15 @@ Embedded `shardmap`:
 
 ```toml
 [dependencies]
-shardmap = "0.2.1"
+shardmap = "0.3.0"
 ```
 
 ```rust
 use shardmap::ShardMap;
 
-let cache = ShardMap::new();
-cache.insert_slice(b"user:42", b"ready");
-assert_eq!(cache.get_owned(b"user:42").unwrap().as_ref(), b"ready");
+let cache: ShardMap<String, String> = ShardMap::new();
+cache.insert("user:42".to_owned(), "ready".to_owned());
+assert_eq!(cache.get("user:42").as_deref(), Some("ready"));
 ```
 
 `shardcache` server:

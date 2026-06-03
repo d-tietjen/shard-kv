@@ -1,10 +1,10 @@
 use std::thread;
 use std::time::Duration;
 
-use shardmap::{SemanticCacheError, ShardMap};
+use shardmap::{SemanticCacheError, ShardCache};
 
 fn main() -> Result<(), SemanticCacheError> {
-    let cache = ShardMap::new();
+    let cache = ShardCache::new();
 
     cache.insert_semantic_slice_with_ttl(
         b"prompt:temporary",

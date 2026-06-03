@@ -1,7 +1,7 @@
-use shardmap::ShardMapWithShards;
+use shardmap::ShardCacheWithShards;
 
 fn main() {
-    let cache = ShardMapWithShards::<8>::new();
+    let cache = ShardCacheWithShards::<8>::new();
 
     for key in [
         b"user:1".as_slice(),

@@ -7,8 +7,10 @@ use crate::backend::{Backend, BoxError, ReadMode};
 
 mod dashmap_bk;
 mod dashmap_ref;
+mod fc_codec;
 mod fc_embed;
 mod fc_shared;
+mod fc_typed;
 mod lru_bk;
 mod memcached;
 mod moka_bk;
@@ -19,6 +21,14 @@ mod scnp;
 /// All supported backend ids. Order matches the standard reporting order.
 pub const BACKEND_IDS: &[&str] = &[
     "fc-embed",
+    "fc-typed",
+    "fc-typed-ref",
+    "fc-codec",
+    "fc-codec-ref",
+    "fc-codec-ns",
+    "fc-codec-ns-ref",
+    "fc-codec-multi-ns",
+    "fc-codec-multi-ns-ref",
     "fc-shared",
     "fc-shared-copy-locked",
     "fc-shared-copy-unlocked",
@@ -124,39 +134,101 @@ pub fn make(
             vcpu_budget.max(worker_count).max(1).next_power_of_two(),
             cache_config,
         )) as Arc<dyn Backend>,
+        "fc-typed" => fc_typed::new(
+            "fc-typed",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            fc_typed::TypedReadMode::Owned,
+            cache_config,
+        )?,
+        "fc-typed-ref" => fc_typed::new(
+            "fc-typed-ref",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            fc_typed::TypedReadMode::Ref,
+            cache_config,
+        )?,
+        "fc-codec" => fc_codec::new(
+            "fc-codec",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            fc_codec::CodecReadMode::Owned,
+            fc_codec::CodecNamespaceMode::None,
+            cache_config,
+        )?,
+        "fc-codec-ref" => fc_codec::new(
+            "fc-codec-ref",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            fc_codec::CodecReadMode::Ref,
+            fc_codec::CodecNamespaceMode::None,
+            cache_config,
+        )?,
+        "fc-codec-ns" => fc_codec::new(
+            "fc-codec-ns",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            fc_codec::CodecReadMode::Owned,
+            fc_codec::CodecNamespaceMode::Single,
+            cache_config,
+        )?,
+        "fc-codec-ns-ref" => fc_codec::new(
+            "fc-codec-ns-ref",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            fc_codec::CodecReadMode::Ref,
+            fc_codec::CodecNamespaceMode::Single,
+            cache_config,
+        )?,
+        "fc-codec-multi-ns" => fc_codec::new(
+            "fc-codec-multi-ns",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            fc_codec::CodecReadMode::Owned,
+            fc_codec::CodecNamespaceMode::Multi,
+            cache_config,
+        )?,
+        "fc-codec-multi-ns-ref" => fc_codec::new(
+            "fc-codec-multi-ns-ref",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            fc_codec::CodecReadMode::Ref,
+            fc_codec::CodecNamespaceMode::Multi,
+            cache_config,
+        )?,
         "fc-shared" => fc_shared::new(
             "fc-shared",
             default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             true,
             cache_config,
-        ),
+        )?,
         "fc-shared-copy-locked" => fc_shared::new_copy_locked(
             "fc-shared-copy-locked",
             default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             cache_config,
-        ),
+        )?,
         "fc-shared-copy-unlocked" => fc_shared::new_copy_unlocked(
             "fc-shared-copy-unlocked",
             default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             cache_config,
-        ),
+        )?,
         "fc-shared-prepared" => fc_shared::new_prepared(
             "fc-shared-prepared",
             default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             true,
             cache_config,
-        ),
+        )?,
         "fc-shared-worker-stripes" => fc_shared::new(
             "fc-shared-worker-stripes",
             worker_stripes(vcpu_budget),
             key_count,
             true,
             cache_config,
-        ),
+        )?,
         // Backward-compatible aliases from when the recommended shared stripe
         // multiplier was encoded in the backend id. Keep output canonical.
         "fc-shared-x4" => fc_shared::new(
@@ -165,7 +237,7 @@ pub fn make(
             key_count,
             true,
             cache_config,
-        ),
+        )?,
         "fc-shared-fair" => fc_shared::new_with_policy(
             "fc-shared-fair",
             default_shared_stripes(vcpu_budget, worker_count),
@@ -173,7 +245,7 @@ pub fn make(
             true,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
-        ),
+        )?,
         "fc-shared-fair-worker-stripes" => fc_shared::new_with_policy(
             "fc-shared-fair-worker-stripes",
             worker_stripes(vcpu_budget),
@@ -181,7 +253,7 @@ pub fn make(
             true,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
-        ),
+        )?,
         "fc-shared-x4-fair" => fc_shared::new_with_policy(
             "fc-shared-fair",
             default_shared_stripes(vcpu_budget, worker_count),
@@ -189,35 +261,35 @@ pub fn make(
             true,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
-        ),
+        )?,
         "fc-shared-ref" => fc_shared::new(
             "fc-shared-ref",
             default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             cache_config,
-        ),
+        )?,
         "fc-shared-prepared-ref" => fc_shared::new_prepared(
             "fc-shared-prepared-ref",
             default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             cache_config,
-        ),
+        )?,
         "fc-shared-worker-stripes-ref" => fc_shared::new(
             "fc-shared-worker-stripes-ref",
             worker_stripes(vcpu_budget),
             key_count,
             false,
             cache_config,
-        ),
+        )?,
         "fc-shared-x4-ref" => fc_shared::new(
             "fc-shared-ref",
             default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             cache_config,
-        ),
+        )?,
         "fc-shared-fair-ref" => fc_shared::new_with_policy(
             "fc-shared-fair-ref",
             default_shared_stripes(vcpu_budget, worker_count),
@@ -225,7 +297,7 @@ pub fn make(
             false,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
-        ),
+        )?,
         "fc-shared-fair-worker-stripes-ref" => fc_shared::new_with_policy(
             "fc-shared-fair-worker-stripes-ref",
             worker_stripes(vcpu_budget),
@@ -233,7 +305,7 @@ pub fn make(
             false,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
-        ),
+        )?,
         "fc-shared-x4-fair-ref" => fc_shared::new_with_policy(
             "fc-shared-fair-ref",
             default_shared_stripes(vcpu_budget, worker_count),
@@ -241,21 +313,21 @@ pub fn make(
             false,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
-        ),
+        )?,
         "fc-shared-hot-ref" => fc_shared::new_hot_shard(
             "fc-shared-hot-ref",
             default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             cache_config,
-        ),
+        )?,
         "fc-shared-x4-hot-ref" => fc_shared::new_hot_shard(
             "fc-shared-hot-ref",
             default_shared_stripes(vcpu_budget, worker_count),
             key_count,
             false,
             cache_config,
-        ),
+        )?,
         "fc-shared-fair-hot-ref" => fc_shared::new_hot_shard_with_policy(
             "fc-shared-fair-hot-ref",
             default_shared_stripes(vcpu_budget, worker_count),
@@ -263,7 +335,7 @@ pub fn make(
             false,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
-        ),
+        )?,
         "fc-shared-x4-fair-hot-ref" => fc_shared::new_hot_shard_with_policy(
             "fc-shared-fair-hot-ref",
             default_shared_stripes(vcpu_budget, worker_count),
@@ -271,7 +343,7 @@ pub fn make(
             false,
             SharedEmbeddedLockPolicy::Fair,
             cache_config,
-        ),
+        )?,
         "dashmap" => Arc::new(dashmap_bk::DashMapBk::new(key_count)),
         "dashmap-worker-shards" => Arc::new(dashmap_bk::DashMapBk::with_shard_amount(
             key_count,
@@ -315,4 +387,37 @@ pub fn make(
         }
         other => return Err(format!("unknown backend id: {other}").into()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_embedded_shard_counts_are_reported_as_config_errors() {
+        for backend_id in ["fc-typed", "fc-codec", "fc-shared"] {
+            let error = match make(
+                backend_id,
+                128,
+                128,
+                None,
+                1024,
+                BenchmarkCacheConfig::default(),
+                0,
+            ) {
+                Ok(_) => panic!("{backend_id} unexpectedly accepted an oversized shard count"),
+                Err(error) => error,
+            };
+            let message = error.to_string();
+
+            assert!(
+                message.contains("supports up to 256 shards"),
+                "{backend_id} error did not explain the shard limit: {message}"
+            );
+            assert!(
+                message.contains("resolved to 512"),
+                "{backend_id} error did not include the resolved shard count: {message}"
+            );
+        }
+    }
 }
