@@ -1,15 +1,17 @@
 use super::{EmbeddedRouteMode, EmbeddedStore, PackedSessionWrite, ShardArcEmbeddedStore};
 use crate::config::EvictionPolicy;
-#[cfg(feature = "telemetry")]
-use crate::storage::CacheTelemetry;
 #[cfg(feature = "redis")]
 use crate::storage::RedisZSetStore;
 use crate::storage::hash_key;
+#[cfg(feature = "telemetry")]
+use crate::storage::{CacheTelemetry, CacheTelemetryClock};
 #[cfg(feature = "redis")]
 use crate::storage::{RedisObjectResult, RedisStringLookup};
 use std::collections::BTreeMap;
 #[cfg(feature = "telemetry")]
 use std::sync::Arc;
+#[cfg(feature = "telemetry")]
+use std::time::Duration;
 
 #[test]
 fn shard_arc_store_routes_and_serves_blob_reads() {
@@ -917,4 +919,30 @@ fn telemetry_latency_sampling_keeps_counters_exact() {
     assert_eq!(snapshot.bytes_written, 6);
     assert_eq!(snapshot.keys_total, 1);
     assert_eq!(snapshot.set_latency_ns.count, 1);
+}
+
+#[cfg(feature = "telemetry")]
+#[test]
+fn telemetry_full_latency_sampling_records_every_set_for_each_clock() {
+    for clock in [
+        CacheTelemetryClock::Instant,
+        CacheTelemetryClock::SharedMicroseconds,
+        CacheTelemetryClock::SharedMicrosecondsWithInterval(Duration::from_micros(10)),
+        CacheTelemetryClock::SharedMicrosecondsWithInterval(Duration::ZERO),
+    ] {
+        let metrics = CacheTelemetry::new_with_latency_sample_rate_and_clock(1, 1, clock);
+        let store = EmbeddedStore::with_route_mode_and_metrics(
+            1,
+            EmbeddedRouteMode::FullKey,
+            Some(Arc::clone(&metrics)),
+        );
+
+        store.set(b"k".to_vec(), b"v1".to_vec(), None);
+        store.set(b"k".to_vec(), b"v2".to_vec(), None);
+        store.set(b"k".to_vec(), b"v3".to_vec(), None);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.sets, 3);
+        assert_eq!(snapshot.set_latency_ns.count, 3);
+    }
 }

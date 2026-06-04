@@ -92,7 +92,7 @@ impl FlatMap {
 
     #[cfg(feature = "telemetry")]
     #[inline(always)]
-    pub(super) fn start_telemetry_latency_sample(&mut self) -> Option<Instant> {
+    pub(super) fn start_telemetry_latency_sample(&mut self) -> Option<LatencySampleStart> {
         self.telemetry
             .as_mut()
             .and_then(FlatMapTelemetry::start_latency_sample)
@@ -516,13 +516,13 @@ impl FlatMap {
         written_len: usize,
         key_delta: isize,
         memory_delta: isize,
-        start: Option<Instant>,
+        start: Option<LatencySampleStart>,
     ) {
         if let Some(telemetry) = &self.telemetry {
             telemetry.metrics.record_set(
                 telemetry.shard_id,
                 written_len,
-                start.map(|start| start.elapsed().as_nanos() as u64),
+                start.map(|start| telemetry.metrics.latency_elapsed_ns_since(start)),
             );
             if key_delta != 0 {
                 telemetry

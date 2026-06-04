@@ -3,12 +3,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "telemetry")]
-use shardmap::storage::{CacheTelemetry, EmbeddedRouteMode};
+use shardmap::storage::EmbeddedRouteMode;
 use shardmap::storage::{EmbeddedKeyRoute, EmbeddedStore, LocalEmbeddedStore, PreparedPointKey};
 
 use crate::backend::{Backend, BackendClass, BoxError, ReadMode, Worker};
 
-use super::BenchmarkCacheConfig;
+#[cfg(feature = "telemetry")]
+use super::cache_telemetry;
+use super::{BenchmarkCacheConfig, BenchmarkTelemetryMode};
 
 pub struct FcEmbed {
     id: &'static str,
@@ -34,19 +36,34 @@ impl FcEmbed {
         } else {
             "fc-embed"
         };
-        Self::new_inner(id, shard_count, cache_config, false)
+        Self::new_inner(id, shard_count, cache_config, BenchmarkTelemetryMode::Off)
     }
 
     #[cfg(feature = "telemetry")]
     pub fn new_telemetry(shard_count: usize, cache_config: BenchmarkCacheConfig) -> Self {
-        Self::new_inner("fc-embed-telemetry", shard_count, cache_config, true)
+        Self::new_inner(
+            "fc-embed-telemetry",
+            shard_count,
+            cache_config,
+            BenchmarkTelemetryMode::Default,
+        )
+    }
+
+    #[cfg(feature = "telemetry")]
+    pub fn new_telemetry_with_mode(
+        id: &'static str,
+        shard_count: usize,
+        cache_config: BenchmarkCacheConfig,
+        telemetry: BenchmarkTelemetryMode,
+    ) -> Self {
+        Self::new_inner(id, shard_count, cache_config, telemetry)
     }
 
     fn new_inner(
         id: &'static str,
         shard_count: usize,
         cache_config: BenchmarkCacheConfig,
-        telemetry: bool,
+        telemetry: BenchmarkTelemetryMode,
     ) -> Self {
         let store = embedded_store(shard_count, telemetry);
         store.configure_memory_policy(
@@ -181,14 +198,14 @@ impl Backend for FcEmbed {
     }
 }
 
-fn embedded_store(shard_count: usize, telemetry: bool) -> EmbeddedStore {
+fn embedded_store(shard_count: usize, telemetry: BenchmarkTelemetryMode) -> EmbeddedStore {
     #[cfg(feature = "telemetry")]
     {
-        if telemetry {
+        if let Some(metrics) = cache_telemetry(shard_count, telemetry) {
             return EmbeddedStore::with_route_mode_and_metrics(
                 shard_count,
                 EmbeddedRouteMode::FullKey,
-                Some(CacheTelemetry::new(shard_count)),
+                Some(metrics),
             );
         }
     }

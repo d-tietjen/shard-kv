@@ -122,7 +122,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "telemetry")]
-pub use telemetry::{CacheMetrics, CacheMetricsSnapshot, CacheTelemetry, CacheTelemetryHandle};
+pub(crate) use telemetry::LatencySampleStart;
+#[cfg(feature = "telemetry")]
+pub use telemetry::{
+    CacheMetrics, CacheMetricsSnapshot, CacheTelemetry, CacheTelemetryClock, CacheTelemetryHandle,
+};
 
 /// Owned byte buffer used for cache keys and values.
 pub type Bytes = Vec<u8>;

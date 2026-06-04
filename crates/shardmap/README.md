@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.3.1"
+shardmap = "0.3.2"
 ```
 
 ## Quick Start

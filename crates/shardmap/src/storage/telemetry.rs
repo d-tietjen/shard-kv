@@ -4,7 +4,10 @@
 //! storage ownership. Stores receive an optional shared telemetry handle; when
 //! the `telemetry` feature is disabled, all of this code is compiled out.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use fast_telemetry::{
     Counter, DynamicCounter, DynamicCounterSeries, DynamicGaugeI64, DynamicGaugeI64Series,
@@ -32,6 +35,141 @@ const LATENCY_NS_BUCKETS: &[u64] = &[
     50_000_000,
     100_000_000,
 ];
+
+const LATENCY_NS_PER_MICROSECOND: u64 = 1_000;
+const DEFAULT_SHARED_CLOCK_UPDATE_INTERVAL: Duration = Duration::from_micros(1);
+
+static SHARED_LATENCY_CLOCK: OnceLock<Arc<SharedLatencyClock>> = OnceLock::new();
+
+struct SharedLatencyClock {
+    started_at: Instant,
+    now_us: AtomicU64,
+}
+
+impl SharedLatencyClock {
+    fn start(update_interval: Duration) -> Arc<Self> {
+        let update_interval = normalize_shared_clock_interval(update_interval);
+        let clock = Arc::new(Self {
+            started_at: Instant::now(),
+            now_us: AtomicU64::new(0),
+        });
+        let updater = Arc::clone(&clock);
+        let _ = thread::Builder::new()
+            .name("shardmap-telemetry-clock".to_owned())
+            .spawn(move || {
+                loop {
+                    updater.refresh();
+                    thread::sleep(update_interval);
+                }
+            });
+        clock
+    }
+
+    #[inline(always)]
+    fn now_us(&self) -> u64 {
+        self.now_us.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn refresh(&self) {
+        self.now_us
+            .store(elapsed_micros(self.started_at), Ordering::Relaxed);
+    }
+}
+
+fn shared_latency_clock() -> Arc<SharedLatencyClock> {
+    Arc::clone(
+        SHARED_LATENCY_CLOCK
+            .get_or_init(|| SharedLatencyClock::start(DEFAULT_SHARED_CLOCK_UPDATE_INTERVAL)),
+    )
+}
+
+fn shared_latency_clock_with_interval(update_interval: Duration) -> Arc<SharedLatencyClock> {
+    let update_interval = normalize_shared_clock_interval(update_interval);
+    if update_interval == DEFAULT_SHARED_CLOCK_UPDATE_INTERVAL {
+        shared_latency_clock()
+    } else {
+        SharedLatencyClock::start(update_interval)
+    }
+}
+
+fn normalize_shared_clock_interval(update_interval: Duration) -> Duration {
+    update_interval.max(DEFAULT_SHARED_CLOCK_UPDATE_INTERVAL)
+}
+
+fn elapsed_micros(started_at: Instant) -> u64 {
+    let micros = started_at.elapsed().as_micros();
+    micros.min(u128::from(u64::MAX)) as u64
+}
+
+/// Clock source used for sampled cache latency histograms.
+///
+/// `Instant` takes a timestamp for each sampled operation. `SharedMicroseconds`
+/// reads a process-wide microsecond clock maintained by a background thread
+/// that updates every 1 microsecond. `SharedMicrosecondsWithInterval` uses the
+/// same low-overhead hot-path reads with a caller-selected update interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheTelemetryClock {
+    /// Use `Instant::now()` at operation start and elapsed time at record time.
+    Instant,
+    /// Use a shared process-wide clock updated every 1 microsecond.
+    SharedMicroseconds,
+    /// Use a shared clock with a custom update interval.
+    ///
+    /// Zero and sub-microsecond intervals are normalized to 1 microsecond.
+    SharedMicrosecondsWithInterval(Duration),
+}
+
+enum LatencyClock {
+    Instant,
+    SharedMicroseconds(Arc<SharedLatencyClock>),
+}
+
+pub(crate) enum LatencySampleStart {
+    Instant(Instant),
+    SharedMicroseconds(u64),
+}
+
+impl LatencyClock {
+    fn new(mode: CacheTelemetryClock) -> Self {
+        match mode {
+            CacheTelemetryClock::Instant => Self::Instant,
+            CacheTelemetryClock::SharedMicroseconds => {
+                Self::SharedMicroseconds(shared_latency_clock())
+            }
+            CacheTelemetryClock::SharedMicrosecondsWithInterval(update_interval) => {
+                Self::SharedMicroseconds(shared_latency_clock_with_interval(update_interval))
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn start(&self) -> LatencySampleStart {
+        match self {
+            Self::Instant => LatencySampleStart::Instant(Instant::now()),
+            Self::SharedMicroseconds(clock) => {
+                LatencySampleStart::SharedMicroseconds(clock.now_us())
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn elapsed_ns_since(&self, start: LatencySampleStart) -> u64 {
+        match (self, start) {
+            (Self::Instant, LatencySampleStart::Instant(start)) => {
+                start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+            }
+            (Self::SharedMicroseconds(clock), LatencySampleStart::SharedMicroseconds(start_us)) => {
+                clock
+                    .now_us()
+                    .saturating_sub(start_us)
+                    .saturating_mul(LATENCY_NS_PER_MICROSECOND)
+            }
+            (Self::Instant, LatencySampleStart::SharedMicroseconds(_))
+            | (Self::SharedMicroseconds(_), LatencySampleStart::Instant(_)) => 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HistogramSummary {
@@ -186,6 +324,7 @@ pub struct CacheTelemetry {
     shard_keys_total: Vec<DynamicGaugeI64Series>,
     shard_memory_bytes: Vec<DynamicGaugeI64Series>,
     shard_keys: Vec<DynamicGaugeI64Series>,
+    latency_clock: LatencyClock,
     latency_sample_mask: u64,
 }
 
@@ -224,6 +363,16 @@ impl CacheTelemetryHandle {
     #[inline(always)]
     pub fn latency_sample_mask(&self) -> u64 {
         self.get().latency_sample_mask
+    }
+
+    #[inline(always)]
+    pub(crate) fn start_latency_sample(&self) -> LatencySampleStart {
+        self.get().start_latency_sample()
+    }
+
+    #[inline(always)]
+    pub(crate) fn latency_elapsed_ns_since(&self, start: LatencySampleStart) -> u64 {
+        self.get().latency_elapsed_ns_since(start)
     }
 
     #[inline(always)]
@@ -302,6 +451,25 @@ impl CacheTelemetry {
     /// timestamp for every cache operation is expensive on the hot path.
     /// `latency_sample_rate = 1` records every operation.
     pub fn new_with_latency_sample_rate(shard_count: usize, latency_sample_rate: u64) -> Arc<Self> {
+        Self::new_with_latency_sample_rate_and_clock(
+            shard_count,
+            latency_sample_rate,
+            CacheTelemetryClock::SharedMicroseconds,
+        )
+    }
+
+    /// Create telemetry with an explicit latency sample rate and clock source.
+    ///
+    /// Use `CacheTelemetryClock::SharedMicroseconds` for low-overhead full-rate
+    /// latency sampling with the default 1 microsecond clock interval,
+    /// `CacheTelemetryClock::SharedMicrosecondsWithInterval` to trade timing
+    /// precision for fewer clock-thread wakeups, or `CacheTelemetryClock::Instant`
+    /// when each sample should be measured directly from `Instant::now()`.
+    pub fn new_with_latency_sample_rate_and_clock(
+        shard_count: usize,
+        latency_sample_rate: u64,
+        clock: CacheTelemetryClock,
+    ) -> Arc<Self> {
         let metric_shards = std::thread::available_parallelism()
             .map(|value| value.get())
             .unwrap_or_else(|_| shard_count.max(1));
@@ -342,6 +510,7 @@ impl CacheTelemetry {
             shard_keys_total,
             shard_memory_bytes,
             shard_keys,
+            latency_clock: LatencyClock::new(clock),
             latency_sample_mask: latency_sample_rate - 1,
         })
     }
@@ -349,6 +518,16 @@ impl CacheTelemetry {
     #[inline(always)]
     pub fn metrics(&self) -> &CacheMetrics {
         &self.metrics
+    }
+
+    #[inline(always)]
+    fn start_latency_sample(&self) -> LatencySampleStart {
+        self.latency_clock.start()
+    }
+
+    #[inline(always)]
+    fn latency_elapsed_ns_since(&self, start: LatencySampleStart) -> u64 {
+        self.latency_clock.elapsed_ns_since(start)
     }
 
     #[inline(always)]
@@ -543,4 +722,45 @@ fn label_value<'a>(labels: &'a fast_telemetry::DynamicLabelSet, name: &str) -> O
         .pairs()
         .iter()
         .find_map(|(key, value)| (key == name).then_some(value.as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_latency_clock_advances_in_microseconds() {
+        let clock = shared_latency_clock();
+        let start = clock.now_us();
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(1));
+            if clock.now_us() > start {
+                return;
+            }
+        }
+        panic!("shared latency clock did not advance");
+    }
+
+    #[test]
+    fn shared_latency_clock_interval_is_configurable_and_clamped() {
+        assert_eq!(
+            normalize_shared_clock_interval(Duration::ZERO),
+            DEFAULT_SHARED_CLOCK_UPDATE_INTERVAL
+        );
+        assert_eq!(
+            normalize_shared_clock_interval(Duration::from_nanos(1)),
+            DEFAULT_SHARED_CLOCK_UPDATE_INTERVAL
+        );
+        assert_eq!(
+            normalize_shared_clock_interval(Duration::from_micros(10)),
+            Duration::from_micros(10)
+        );
+
+        let custom = shared_latency_clock_with_interval(Duration::from_micros(10));
+        let clamped = shared_latency_clock_with_interval(Duration::ZERO);
+        let default = shared_latency_clock();
+
+        assert!(!Arc::ptr_eq(&custom, &default));
+        assert!(Arc::ptr_eq(&clamped, &default));
+    }
 }

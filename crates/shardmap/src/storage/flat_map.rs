@@ -4,17 +4,15 @@ use std::collections::HashMap;
 use std::collections::{BinaryHeap, VecDeque};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "telemetry")]
-use std::time::Instant;
 
 use crate::config::EvictionPolicy;
-#[cfg(feature = "telemetry")]
-use crate::storage::CacheTelemetryHandle;
 use crate::storage::stats::TierStatsSnapshot;
 use crate::storage::{
     Bytes, SemanticCacheError, SemanticEmbedding, SemanticIndex, SemanticIndexCandidate,
     SemanticIndexToken, SemanticMatch, StoredEntry, hash_key, hash_key_tag_from_hash,
 };
+#[cfg(feature = "telemetry")]
+use crate::storage::{CacheTelemetryHandle, LatencySampleStart};
 use bytes::Bytes as SharedBytes;
 
 #[derive(Debug)]
@@ -369,10 +367,10 @@ impl FlatMapTelemetry {
     }
 
     #[inline(always)]
-    fn start_latency_sample(&mut self) -> Option<std::time::Instant> {
+    fn start_latency_sample(&mut self) -> Option<LatencySampleStart> {
         let should_sample = self.latency_sample_counter & self.latency_sample_mask == 0;
         self.latency_sample_counter = self.latency_sample_counter.wrapping_add(1);
-        should_sample.then(std::time::Instant::now)
+        should_sample.then(|| self.metrics.start_latency_sample())
     }
 }
 
