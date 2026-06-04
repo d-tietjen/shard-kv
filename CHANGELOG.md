@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.1 - Unreleased
+
+### Changed
+
+- Reduced embedded telemetry hot-path overhead by sampling latency histograms
+  while keeping operation counters, byte counters, key gauges, and memory gauges
+  exact.
+- Added telemetry-enabled embedded benchmark backends so telemetry cost can be
+  measured head-to-head against the ordinary embedded backends.
+- Avoided unnecessary semantic shadow/generation work for point-key writes until
+  semantic data is actually active.
+- Bumped the workspace and publishable Rust crate surfaces to `0.3.1`.
+
+### Validation
+
+- Ran focused telemetry tests, point-key shared-store tests, `cargo fmt`, and
+  clippy for `shardmap` and the telemetry benchmark feature.
+- Ran Linux `perf` and max-out saturation telemetry comparisons on a 32-logical
+  CPU server to validate that telemetry is no longer a general bottleneck.
+
 ## 0.3.0 - Unreleased
 
 ### Added

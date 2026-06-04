@@ -13,7 +13,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 authors = ["Devon Tietjen <devon@eden.dev>"]
 homepage = "https://github.com/d-tietjen/shard-kv"
@@ -22,9 +22,9 @@ repository = "https://github.com/d-tietjen/shard-kv"
 rust-version = "1.90"
 
 [workspace.dependencies]
-shardcache = { path = "crates/shardcache", version = "0.3.0" }
-shardmap = { path = "crates/shardmap", version = "0.3.0", default-features = false }
-shardcache-client-rs = { path = "crates/shardcache-client-rs", version = "0.3.0" }
+shardcache = { path = "crates/shardcache", version = "0.3.1" }
+shardmap = { path = "crates/shardmap", version = "0.3.1", default-features = false }
+shardcache-client-rs = { path = "crates/shardcache-client-rs", version = "0.3.1" }
 fast-telemetry = "0.4"
 
 clap = { version = "4.5", features = ["derive"] }

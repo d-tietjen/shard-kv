@@ -432,9 +432,12 @@ impl FlatMap {
     #[inline(always)]
     pub fn get_ref_hashed(&mut self, hash: u64, key: &[u8], now_ms: u64) -> Option<&[u8]> {
         #[cfg(feature = "telemetry")]
-        let start = self.telemetry.as_ref().map(|_| Instant::now());
+        let start = self.start_telemetry_latency_sample();
         #[cfg(feature = "telemetry")]
-        let telemetry = self.telemetry.clone();
+        let telemetry = self
+            .telemetry
+            .as_ref()
+            .map(|telemetry| (telemetry.metrics.clone(), telemetry.shard_id));
 
         let value = match self.ttl_entries {
             0 => self.lookup_ref_hashed_lazy(hash, key),
@@ -446,12 +449,12 @@ impl FlatMap {
         };
 
         #[cfg(feature = "telemetry")]
-        if let (Some(telemetry), Some(start)) = (telemetry, start) {
-            telemetry.metrics.record_get(
-                telemetry.shard_id,
+        if let Some((metrics, shard_id)) = telemetry {
+            metrics.record_get(
+                shard_id,
                 value.is_some(),
                 value.map_or(0, |bytes| bytes.len()),
-                start.elapsed().as_nanos() as u64,
+                start.map(|start| start.elapsed().as_nanos() as u64),
             );
         }
 
@@ -462,9 +465,12 @@ impl FlatMap {
     #[inline(always)]
     pub fn get_ref_hashed_local(&mut self, hash: u64, key: &[u8], now_ms: u64) -> Option<&[u8]> {
         #[cfg(feature = "telemetry")]
-        let start = self.telemetry.as_ref().map(|_| Instant::now());
+        let start = self.start_telemetry_latency_sample();
         #[cfg(feature = "telemetry")]
-        let telemetry = self.telemetry.clone();
+        let telemetry = self
+            .telemetry
+            .as_ref()
+            .map(|telemetry| (telemetry.metrics.clone(), telemetry.shard_id));
 
         let value = match self.ttl_entries {
             0 => self.lookup_ref_hashed_lazy(hash, key),
@@ -476,12 +482,12 @@ impl FlatMap {
         };
 
         #[cfg(feature = "telemetry")]
-        if let (Some(telemetry), Some(start)) = (telemetry, start) {
-            telemetry.metrics.record_get(
-                telemetry.shard_id,
+        if let Some((metrics, shard_id)) = telemetry {
+            metrics.record_get(
+                shard_id,
                 value.is_some(),
                 value.map_or(0, |bytes| bytes.len()),
-                start.elapsed().as_nanos() as u64,
+                start.map(|start| start.elapsed().as_nanos() as u64),
             );
         }
 

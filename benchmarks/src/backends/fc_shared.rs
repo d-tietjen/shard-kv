@@ -1,6 +1,8 @@
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "telemetry")]
+use shardmap::storage::CacheTelemetry;
 use shardmap::storage::{
     PreparedPointKey, SharedEmbeddedConfig, SharedEmbeddedLockPolicy, SharedEmbeddedStore,
 };
@@ -83,6 +85,27 @@ pub fn new_prepared(
             cache_config,
         )
         .with_prepared_keys(),
+    )
+}
+
+#[cfg(feature = "telemetry")]
+pub fn new_telemetry(
+    id: &'static str,
+    shard_count: usize,
+    capacity_hint: usize,
+    copy_reads: bool,
+    cache_config: BenchmarkCacheConfig,
+) -> Result<Arc<dyn Backend>, BoxError> {
+    new_scoped(
+        id,
+        shard_count,
+        capacity_hint,
+        SharedBackendOptions::new(
+            shared_read_mode(copy_reads),
+            SharedKeyScope::All,
+            cache_config,
+        )
+        .with_telemetry(),
     )
 }
 
@@ -169,6 +192,7 @@ struct SharedBackendOptions {
     key_scope: SharedKeyScope,
     lock_policy: SharedEmbeddedLockPolicy,
     cache_config: BenchmarkCacheConfig,
+    telemetry: bool,
 }
 
 impl SharedBackendOptions {
@@ -183,6 +207,7 @@ impl SharedBackendOptions {
             key_scope,
             lock_policy: SharedEmbeddedConfig::default().lock_policy,
             cache_config,
+            telemetry: false,
         }
     }
 
@@ -193,6 +218,12 @@ impl SharedBackendOptions {
 
     fn with_lock_policy(mut self, lock_policy: SharedEmbeddedLockPolicy) -> Self {
         self.lock_policy = lock_policy;
+        self
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn with_telemetry(mut self) -> Self {
+        self.telemetry = true;
         self
     }
 }
@@ -250,19 +281,38 @@ impl<const SHARDS: usize> FcShared<SHARDS> {
         }
         Self {
             id,
-            store: SharedEmbeddedStore::new(SharedEmbeddedConfig {
-                total_memory_bytes: options.cache_config.total_memory_bytes(),
-                eviction_policy: options.cache_config.eviction_policy,
-                flat_map_capacity_hint: Some(options.cache_config.entry_capacity(capacity_hint)),
-                lock_policy: options.lock_policy,
-                ..SharedEmbeddedConfig::default()
-            }),
+            store: shared_store_with_options::<SHARDS>(
+                SharedEmbeddedConfig {
+                    total_memory_bytes: options.cache_config.total_memory_bytes(),
+                    eviction_policy: options.cache_config.eviction_policy,
+                    flat_map_capacity_hint: Some(
+                        options.cache_config.entry_capacity(capacity_hint),
+                    ),
+                    lock_policy: options.lock_policy,
+                    ..SharedEmbeddedConfig::default()
+                },
+                options.telemetry,
+            ),
             state: Arc::new(Mutex::new(FcSharedState::default())),
             read_mode: options.read_mode,
             prepare_keys: options.prepare_keys,
             key_scope: options.key_scope,
         }
     }
+}
+
+fn shared_store_with_options<const SHARDS: usize>(
+    config: SharedEmbeddedConfig,
+    telemetry: bool,
+) -> SharedEmbeddedStore<SHARDS> {
+    #[cfg(feature = "telemetry")]
+    {
+        if telemetry {
+            return SharedEmbeddedStore::with_metrics(config, Some(CacheTelemetry::new(SHARDS)));
+        }
+    }
+    let _ = telemetry;
+    SharedEmbeddedStore::new(config)
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -51,9 +51,7 @@ impl<'a> EmbeddedShardHandle<'a> {
 
     #[inline(always)]
     pub fn set_slice_hashed_no_ttl(&mut self, key_hash: u64, key: &[u8], value: &[u8]) {
-        self.shard
-            .map
-            .set_slice_hashed(key_hash, key, value, None, 0);
+        self.shard.map.set_slice_hashed_no_ttl(key_hash, key, value);
         self.shard.enforce_memory_limit(0);
     }
 }
@@ -112,7 +110,7 @@ impl OwnedEmbeddedShard {
 
     #[inline(always)]
     pub fn set_slice_hashed_no_ttl(&mut self, key_hash: u64, key: &[u8], value: &[u8]) {
-        self.map.set_slice_hashed(key_hash, key, value, None, 0);
+        self.map.set_slice_hashed_no_ttl(key_hash, key, value);
         self.enforce_memory_limit(0);
     }
 

@@ -40,7 +40,7 @@ impl FlatMap {
         }
 
         #[cfg(feature = "telemetry")]
-        let start = self.telemetry.as_ref().map(|_| Instant::now());
+        let start = self.start_telemetry_latency_sample();
         #[cfg(feature = "telemetry")]
         let written_len = value.len();
         #[cfg(feature = "telemetry")]

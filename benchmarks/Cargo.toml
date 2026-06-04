@@ -29,6 +29,9 @@ embedded-read-biased-lock = ["shardmap/embedded-read-biased-lock"]
 monoio = ["shardmap/monoio"]
 # Build benchmark binaries with prefix-aware memory-limit eviction available.
 prefix-eviction = ["shardmap/prefix-eviction"]
+# Build benchmark binaries with shardmap telemetry available. Telemetry cost
+# rows use explicit `*-telemetry` backends so ordinary rows remain inactive.
+telemetry = ["shardmap/telemetry"]
 # Build the benchmark-only server that exposes a caller-owned shardmap store
 # through the shardcache RESP/SCNP server path.
 embedded-server = ["shardmap/redis-server"]

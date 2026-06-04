@@ -33,6 +33,16 @@ impl EmbeddedShard {
         shard
     }
 
+    #[cfg(feature = "telemetry")]
+    #[inline(always)]
+    pub(crate) fn attach_metrics(
+        &mut self,
+        metrics: crate::storage::CacheTelemetryHandle,
+        shard_id: usize,
+    ) {
+        self.map.attach_metrics(metrics, shard_id);
+    }
+
     #[inline(always)]
     pub(crate) fn stored_bytes(&self) -> usize {
         self.map

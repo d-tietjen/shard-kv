@@ -119,7 +119,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 );
         }
         self.invalidate_semantic_shadow(route, key.as_ref(), 0);
-        self.bump_semantic_generation();
+        self.bump_semantic_generation_if_active();
     }
 
     pub(super) fn insert_point_shadow(
@@ -178,7 +178,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 );
             }
             self.invalidate_semantic_shadow(route, key.as_ref(), now_ms);
-            self.bump_semantic_generation();
+            self.bump_semantic_generation_if_active();
         }
     }
 
@@ -206,7 +206,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         );
         drop(guard);
         self.invalidate_semantic_shadow(route, key.as_ref(), 0);
-        self.bump_semantic_generation();
+        self.bump_semantic_generation_if_active();
         true
     }
 
@@ -223,7 +223,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             );
         }
         self.invalidate_semantic_shadow(route, key, 0);
-        self.bump_semantic_generation();
+        self.bump_semantic_generation_if_active();
     }
 
     /// Inserts a borrowed point-key value only when the key is absent or expired.
@@ -245,7 +245,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         guard.set_slice_hashed_no_ttl(self.inner.route_mode, route.key_hash, key, value);
         drop(guard);
         self.invalidate_semantic_shadow(route, key, 0);
-        self.bump_semantic_generation();
+        self.bump_semantic_generation_if_active();
         true
     }
 
@@ -267,7 +267,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 );
         }
         self.invalidate_semantic_shadow(prepared.route(), prepared.key(), 0);
-        self.bump_semantic_generation();
+        self.bump_semantic_generation_if_active();
     }
 
     /// Inserts or replaces a point-key value from borrowed bytes with an
@@ -306,7 +306,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 );
             }
             self.invalidate_semantic_shadow(route, key, now_ms);
-            self.bump_semantic_generation();
+            self.bump_semantic_generation_if_active();
         }
     }
 
@@ -352,7 +352,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             );
             drop(guard);
             self.invalidate_semantic_shadow(route, key, now_ms);
-            self.bump_semantic_generation();
+            self.bump_semantic_generation_if_active();
             true
         }
     }
@@ -399,7 +399,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                     );
             }
             self.invalidate_semantic_shadow(prepared.route(), prepared.key(), now_ms);
-            self.bump_semantic_generation();
+            self.bump_semantic_generation_if_active();
         }
     }
 
@@ -415,7 +415,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                     .remove_value_hashed(route.key_hash, key, 0);
             let semantic_removed = self.invalidate_semantic_shadow(route, key, 0);
             if removed.is_some() || semantic_removed.is_some() {
-                self.bump_semantic_generation();
+                self.bump_semantic_generation_if_active();
             }
             removed.or(semantic_removed)
         }
@@ -428,7 +428,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             );
             let semantic_removed = self.invalidate_semantic_shadow(route, key, ttl_now_millis());
             if removed.is_some() || semantic_removed.is_some() {
-                self.bump_semantic_generation();
+                self.bump_semantic_generation_if_active();
             }
             removed.or(semantic_removed)
         }
@@ -463,7 +463,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         guard.remove_value_hashed(route.key_hash, key, now_ms);
         drop(guard);
         self.invalidate_semantic_shadow(route, key, now_ms);
-        self.bump_semantic_generation();
+        self.bump_semantic_generation_if_active();
         true
     }
 
@@ -502,7 +502,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             );
             drop(guard);
             self.invalidate_semantic_shadow(route, key, now_ms);
-            self.bump_semantic_generation();
+            self.bump_semantic_generation_if_active();
             Ok(true)
         }
     }

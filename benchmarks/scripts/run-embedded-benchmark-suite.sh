@@ -33,6 +33,10 @@ Options:
 Examples:
   benchmarks/scripts/run-embedded-benchmark-suite.sh --suite embedded-core --vcpus 1,2,4,8,16
   benchmarks/scripts/run-embedded-benchmark-suite.sh --suite all --vcpus 1,2,4,8,16 --duration 10
+
+Environment:
+  BENCH_FEATURES              Extra shardcache-benchmarks features for cargo build,
+                              for example BENCH_FEATURES=telemetry
 USAGE
 }
 
@@ -302,7 +306,11 @@ fi
 mkdir -p "$out_dir"
 
 cd "$ws_root"
-cargo build --release -p shardcache-benchmarks --bin saturation
+if [[ -n "${BENCH_FEATURES:-}" ]]; then
+  cargo build --release -p shardcache-benchmarks --features "$BENCH_FEATURES" --bin saturation
+else
+  cargo build --release -p shardcache-benchmarks --bin saturation
+fi
 
 git_sha="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 git_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
@@ -327,6 +335,7 @@ cat > "$out_dir/metadata.json" <<EOF
   "large_value_key_floor": $large_value_key_floor,
   "key_pattern": "$key_pattern",
   "key_distribution": "$key_distribution",
+  "bench_features": "${BENCH_FEATURES:-}",
   "cpu_pinning": "${CPUSET_CPUS:-first-n-linux-cpus}"
 }
 EOF

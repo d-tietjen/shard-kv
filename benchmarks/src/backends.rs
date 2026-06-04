@@ -21,6 +21,7 @@ mod scnp;
 /// All supported backend ids. Order matches the standard reporting order.
 pub const BACKEND_IDS: &[&str] = &[
     "fc-embed",
+    "fc-embed-telemetry",
     "fc-typed",
     "fc-typed-ref",
     "fc-codec",
@@ -37,6 +38,7 @@ pub const BACKEND_IDS: &[&str] = &[
     "fc-shared-fair",
     "fc-shared-fair-worker-stripes",
     "fc-shared-ref",
+    "fc-shared-ref-telemetry",
     "fc-shared-prepared-ref",
     "fc-shared-worker-stripes-ref",
     "fc-shared-fair-ref",
@@ -134,6 +136,17 @@ pub fn make(
             vcpu_budget.max(worker_count).max(1).next_power_of_two(),
             cache_config,
         )) as Arc<dyn Backend>,
+        #[cfg(feature = "telemetry")]
+        "fc-embed-telemetry" => Arc::new(fc_embed::FcEmbed::new_telemetry(
+            vcpu_budget.max(worker_count).max(1).next_power_of_two(),
+            cache_config,
+        )) as Arc<dyn Backend>,
+        #[cfg(not(feature = "telemetry"))]
+        "fc-embed-telemetry" => {
+            return Err(
+                "backend `fc-embed-telemetry` requires benchmark feature `telemetry`".into(),
+            );
+        }
         "fc-typed" => fc_typed::new(
             "fc-typed",
             default_shared_stripes(vcpu_budget, worker_count),
@@ -269,6 +282,20 @@ pub fn make(
             false,
             cache_config,
         )?,
+        #[cfg(feature = "telemetry")]
+        "fc-shared-ref-telemetry" => fc_shared::new_telemetry(
+            "fc-shared-ref-telemetry",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            false,
+            cache_config,
+        )?,
+        #[cfg(not(feature = "telemetry"))]
+        "fc-shared-ref-telemetry" => {
+            return Err(
+                "backend `fc-shared-ref-telemetry` requires benchmark feature `telemetry`".into(),
+            );
+        }
         "fc-shared-prepared-ref" => fc_shared::new_prepared(
             "fc-shared-prepared-ref",
             default_shared_stripes(vcpu_budget, worker_count),

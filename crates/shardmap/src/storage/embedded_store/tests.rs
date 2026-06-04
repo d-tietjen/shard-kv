@@ -897,3 +897,24 @@ fn telemetry_snapshot_tracks_basic_ops() {
     assert_eq!(snapshot.misses, 1);
     assert_eq!(snapshot.keys_total, 1);
 }
+
+#[cfg(feature = "telemetry")]
+#[test]
+fn telemetry_latency_sampling_keeps_counters_exact() {
+    let metrics = CacheTelemetry::new_with_latency_sample_rate(1, u64::MAX);
+    let store = EmbeddedStore::with_route_mode_and_metrics(
+        1,
+        EmbeddedRouteMode::FullKey,
+        Some(Arc::clone(&metrics)),
+    );
+
+    store.set(b"k".to_vec(), b"v1".to_vec(), None);
+    store.set(b"k".to_vec(), b"v2".to_vec(), None);
+    store.set(b"k".to_vec(), b"v3".to_vec(), None);
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.sets, 3);
+    assert_eq!(snapshot.bytes_written, 6);
+    assert_eq!(snapshot.keys_total, 1);
+    assert_eq!(snapshot.set_latency_ns.count, 1);
+}

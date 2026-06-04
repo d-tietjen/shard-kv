@@ -2,6 +2,8 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "telemetry")]
+use shardmap::storage::{CacheTelemetry, EmbeddedRouteMode};
 use shardmap::storage::{EmbeddedKeyRoute, EmbeddedStore, LocalEmbeddedStore, PreparedPointKey};
 
 use crate::backend::{Backend, BackendClass, BoxError, ReadMode, Worker};
@@ -9,6 +11,7 @@ use crate::backend::{Backend, BackendClass, BoxError, ReadMode, Worker};
 use super::BenchmarkCacheConfig;
 
 pub struct FcEmbed {
+    id: &'static str,
     state: Arc<Mutex<FcEmbedState>>,
     ttl_enabled: AtomicBool,
     read_mode: ReadMode,
@@ -26,12 +29,32 @@ struct FcEmbedState {
 
 impl FcEmbed {
     pub fn new(shard_count: usize, cache_config: BenchmarkCacheConfig) -> Self {
-        let store = EmbeddedStore::new(shard_count);
+        let id = if cfg!(feature = "unsafe") {
+            "fc-embed-unsafe"
+        } else {
+            "fc-embed"
+        };
+        Self::new_inner(id, shard_count, cache_config, false)
+    }
+
+    #[cfg(feature = "telemetry")]
+    pub fn new_telemetry(shard_count: usize, cache_config: BenchmarkCacheConfig) -> Self {
+        Self::new_inner("fc-embed-telemetry", shard_count, cache_config, true)
+    }
+
+    fn new_inner(
+        id: &'static str,
+        shard_count: usize,
+        cache_config: BenchmarkCacheConfig,
+        telemetry: bool,
+    ) -> Self {
+        let store = embedded_store(shard_count, telemetry);
         store.configure_memory_policy(
             cache_config.per_shard_memory_bytes(shard_count),
             cache_config.eviction_policy,
         );
         Self {
+            id,
             state: Arc::new(Mutex::new(FcEmbedState {
                 store: Some(store),
                 locals: Vec::new(),
@@ -46,11 +69,7 @@ impl FcEmbed {
 
 impl Backend for FcEmbed {
     fn id(&self) -> &str {
-        if cfg!(feature = "unsafe") {
-            "fc-embed-unsafe"
-        } else {
-            "fc-embed"
-        }
+        self.id
     }
 
     fn class(&self) -> BackendClass {
@@ -160,6 +179,21 @@ impl Backend for FcEmbed {
         state.prepared_keys[worker_index] = prepared_keys;
         Ok(Some(indices))
     }
+}
+
+fn embedded_store(shard_count: usize, telemetry: bool) -> EmbeddedStore {
+    #[cfg(feature = "telemetry")]
+    {
+        if telemetry {
+            return EmbeddedStore::with_route_mode_and_metrics(
+                shard_count,
+                EmbeddedRouteMode::FullKey,
+                Some(CacheTelemetry::new(shard_count)),
+            );
+        }
+    }
+    let _ = telemetry;
+    EmbeddedStore::new(shard_count)
 }
 
 struct FcEmbedWorker {

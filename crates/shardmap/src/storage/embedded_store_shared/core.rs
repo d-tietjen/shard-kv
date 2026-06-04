@@ -12,6 +12,26 @@ impl<const SHARDS: usize> Clone for SharedEmbeddedStore<SHARDS> {
 impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     /// Creates a cloneable shared embedded store with `SHARDS` lock stripes.
     pub fn new(config: SharedEmbeddedConfig) -> Self {
+        Self::new_inner(
+            config,
+            #[cfg(feature = "telemetry")]
+            None,
+        )
+    }
+
+    /// Creates a cloneable shared embedded store with active telemetry.
+    #[cfg(feature = "telemetry")]
+    pub fn with_metrics(
+        config: SharedEmbeddedConfig,
+        metrics: Option<Arc<CacheTelemetry>>,
+    ) -> Self {
+        Self::new_inner(config, metrics)
+    }
+
+    fn new_inner(
+        config: SharedEmbeddedConfig,
+        #[cfg(feature = "telemetry")] metrics: Option<Arc<CacheTelemetry>>,
+    ) -> Self {
         const {
             assert!(
                 SHARDS > 0 && SHARDS.is_power_of_two(),
@@ -39,6 +59,10 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                         eviction_policy,
                         per_shard_capacity,
                     );
+                    #[cfg(feature = "telemetry")]
+                    if let Some(metrics) = &metrics {
+                        shard.attach_metrics(CacheTelemetryHandle::from_arc(metrics), shard_id);
+                    }
                     if shard_id == 0 {
                         shard.configure_semantic_memory_policy(config.total_memory_bytes, 0);
                     }
@@ -47,6 +71,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 shift: shift_for(SHARDS),
                 route_mode,
                 semantic_generation: AtomicU64::new(0),
+                semantic_data_active: AtomicBool::new(false),
                 semantic_query_cache_enabled: AtomicBool::new(true),
                 semantic_query_cache: FairRwLock::new(SemanticQueryCache::default()),
             }),
@@ -94,7 +119,9 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         &self,
         route: EmbeddedKeyRoute,
     ) -> Option<&SharedShardLock<EmbeddedShard>> {
-        (route.shard_id != self.semantic_shard_id()).then(|| self.stripe(self.semantic_shard_id()))
+        (route.shard_id != self.semantic_shard_id()
+            && self.inner.semantic_data_active.load(Ordering::Acquire))
+        .then(|| self.stripe(self.semantic_shard_id()))
     }
 
     #[inline(always)]
@@ -120,6 +147,20 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         self.inner
             .semantic_generation
             .fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[inline(always)]
+    pub(super) fn mark_semantic_data_active(&self) {
+        self.inner
+            .semantic_data_active
+            .store(true, Ordering::Release);
+    }
+
+    #[inline(always)]
+    pub(super) fn bump_semantic_generation_if_active(&self) {
+        if self.inner.semantic_data_active.load(Ordering::Acquire) {
+            self.bump_semantic_generation();
+        }
     }
 
     #[inline(always)]

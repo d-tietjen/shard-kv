@@ -179,7 +179,7 @@ impl FlatMap {
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
-        let start = self.telemetry.as_ref().map(|_| Instant::now());
+        let start = self.start_telemetry_latency_sample();
 
         let key = key.into();
         let mut replacement = Some(SharedBytes::from(value.into()));
@@ -265,7 +265,7 @@ impl FlatMap {
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
-        let start = self.telemetry.as_ref().map(|_| Instant::now());
+        let start = self.start_telemetry_latency_sample();
         #[cfg(feature = "telemetry")]
         let written_len = value.len();
         #[cfg(feature = "telemetry")]
@@ -435,7 +435,7 @@ impl FlatMap {
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
-        let start = self.telemetry.as_ref().map(|_| Instant::now());
+        let start = self.start_telemetry_latency_sample();
         let has_active_readers = self.has_active_readers();
         let should_touch_access = self.eviction_policy != EvictionPolicy::None;
         let access_tick = if should_touch_access {

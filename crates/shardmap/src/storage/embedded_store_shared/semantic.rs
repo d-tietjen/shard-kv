@@ -94,6 +94,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             self.disable_semantic_query_cache();
         }
         let route = self.route_key(key);
+        self.mark_semantic_data_active();
         self.insert_point_shadow(route, key, value, expire_at_ms, now_ms);
         let mut semantic_shard = self.stripe(self.semantic_shard_id()).write();
         if let Some(governance_metadata) = governance_metadata {

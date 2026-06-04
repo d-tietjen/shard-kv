@@ -352,6 +352,28 @@ pub struct FlatMap {
 struct FlatMapTelemetry {
     metrics: CacheTelemetryHandle,
     shard_id: usize,
+    latency_sample_counter: u64,
+    latency_sample_mask: u64,
+}
+
+#[cfg(feature = "telemetry")]
+impl FlatMapTelemetry {
+    fn new(metrics: CacheTelemetryHandle, shard_id: usize) -> Self {
+        let latency_sample_mask = metrics.latency_sample_mask();
+        Self {
+            metrics,
+            shard_id,
+            latency_sample_counter: 0,
+            latency_sample_mask,
+        }
+    }
+
+    #[inline(always)]
+    fn start_latency_sample(&mut self) -> Option<std::time::Instant> {
+        let should_sample = self.latency_sample_counter & self.latency_sample_mask == 0;
+        self.latency_sample_counter = self.latency_sample_counter.wrapping_add(1);
+        should_sample.then(std::time::Instant::now)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
