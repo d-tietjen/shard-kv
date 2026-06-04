@@ -14,7 +14,6 @@ benchmark outputs, and local verification caches outside version control.
 | `crates/shardcache-client-rs` | Published blocking Rust client for the native SCNP protocol and direct shard routing. |
 | `crates/shardcache-runtime` | Source-only Rust-native CPU/GPU transfer runtime used by model-serving integrations. |
 | `crates/shardcache-py` | Source-only PyO3 bindings used by benchmarks and integration adapters. |
-| `crates/shardcache-redis` | Published Redis/Valkey compatibility crate and source root. Core includes these files by path only while the extension API is being finished. |
 | `crates/shardcache-formal` | Formal-model support crate used with the verification workspace. |
 | `benchmarks` | Local benchmark harnesses, reproduction scripts, and curated benchmark writeups. Raw run outputs live under ignored `benchmarks/results/`. |
 | `integrations/lmcache_storage_backend` | Python LMCache storage backend package. |
@@ -33,7 +32,7 @@ Most production code lives under `crates/shardmap/src`:
 | --- | --- |
 | `cache.rs` and `embedded.rs` | Public embedded cache handles and convenience API surface. |
 | `storage/` | Sharded storage engines, object stores, record layout, stats, and embedded store implementations. |
-| `commands/` | Base cache command implementations for GET/SET/DEL/TTL-style behavior. Redis-only command families live in `crates/shardcache-redis/src/commands`. |
+| `commands/` | Base cache command implementations for GET/SET/DEL/TTL-style behavior. Redis-only command families live in `crates/shardmap/src/redis_compat/commands`. |
 | `protocol/` | RESP and native fast protocol codecs. |
 | `server/` | TCP listeners, direct shard routing, connection lifecycle, and request execution. |
 | `persistence/` | WAL, snapshots, recovery, and TCP WAL export. |
@@ -48,7 +47,7 @@ Most production code lives under `crates/shardmap/src`:
 | Change | Primary Location | Also Check |
 | --- | --- | --- |
 | Embedded key/value API | `crates/shardmap/src/cache.rs`, `embedded.rs`, `storage/` | Core README, rustdoc, storage tests |
-| Redis/Valkey command | `crates/shardcache-redis/src/commands/<family>/` | `crates/shardmap/src/commands/README.md`, compatibility tests, server dispatch |
+| Redis/Valkey command | `crates/shardmap/src/redis_compat/commands/<family>/` | `crates/shardmap/src/commands/README.md`, compatibility tests, server dispatch |
 | RESP or SCNP behavior | `crates/shardmap/src/protocol/`, `server/`, `crates/shardcache-client-rs` | Protocol tests and client README |
 | Server configuration | `crates/shardmap/src/config/`, `shardcache.toml.example` | Root README Docker/config sections |
 | Persistence or replication | `crates/shardmap/src/persistence/`, `replication/` | Recovery tests, benchmark caveats, config docs |
@@ -81,7 +80,6 @@ New contributors should be able to answer the first set of questions from:
 - `README.md`: project overview and links to the public docs.
 - `crates/shardmap/README.md`: published embedded crate guide.
 - `crates/shardcache/README.md`: published server crate guide.
-- `crates/shardcache-redis/README.md`: published Redis/Valkey compatibility crate guide.
 - `crates/shardcache-client-rs/README.md`: published native Rust client guide.
 - `docs/SHARDCACHE_DOCKER.md`: source-built server and Docker runbook.
 - `integrations/lmcache_storage_backend/README.md`: LMCache storage backend guide.

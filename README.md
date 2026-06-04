@@ -17,11 +17,11 @@ GET payloads. Treat those as hardware-specific proof rows, not universal
 numbers; the memory-ceiling report records the denominator for local
 hardware-scaled claims.
 
-This workspace contains four publishable Rust crate surfaces:
+This workspace contains three publishable Rust crate surfaces:
 
 - `shardmap`: the published embedded Rust map/cache crate.
-- `shardcache`: the Redis/Valkey-style server and Docker image.
-- `shardcache-redis`: the Redis/Valkey compatibility command source package.
+- `shardcache`: the Redis/Valkey-style server and Docker image, including
+  Redis-compatible command support behind feature flags.
 - `shardcache-client-rs`: the blocking Rust SCNP client.
 
 Python, C ABI, runtime, benchmark, and integration packages remain built from
@@ -170,7 +170,6 @@ optional metadata argument.
 
 - `crates/shardmap`: published embedded sharded map/cache crate plus shared internals.
 - `crates/shardcache`: published Redis/Valkey-compatible server package and binary.
-- `crates/shardcache-redis`: published Redis/Valkey compatibility source package.
 - `crates/shardcache-client-rs`: published blocking Rust client for SCNP.
 - `crates/shardcache-py`: source-only PyO3 bindings for Python integrations.
 - `integrations`: LMCache and model-serving integration adapters.

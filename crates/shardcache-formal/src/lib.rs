@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 
-#[path = "../../shardcache-redis/src/commands/formal/bounds.rs"]
+#[path = "../../shardmap/src/redis_compat/commands/formal/bounds.rs"]
 pub mod bounds;
-#[path = "../../shardcache-redis/src/commands/formal/range.rs"]
+#[path = "../../shardmap/src/redis_compat/commands/formal/range.rs"]
 pub mod range;
-#[path = "../../shardcache-redis/src/commands/formal/rank.rs"]
+#[path = "../../shardmap/src/redis_compat/commands/formal/rank.rs"]
 pub mod rank;
-#[path = "../../shardcache-redis/src/commands/formal/transactions.rs"]
+#[path = "../../shardmap/src/redis_compat/commands/formal/transactions.rs"]
 pub mod transactions;

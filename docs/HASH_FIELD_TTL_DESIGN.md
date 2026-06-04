@@ -142,7 +142,7 @@ field they overwrite (Redis: setting a field via HSET removes its TTL).
 
 ## Command-layer plumbing (per command)
 
-For each command: new file under `crates/shardcache-redis/src/commands/hash/`,
+For each command: new file under `crates/shardmap/src/redis_compat/commands/hash/`,
 `define_redis_command!`, parse + validate (`FIELDS numfields` arity, NX/XX/GT/LT
 mutual exclusivity for the EXPIRE family), call the new store API, build the
 per-field integer array reply.
@@ -181,8 +181,8 @@ optional and out of scope for the first PR.
   (HGET/HGETALL/HLEN/HKEYS/HVALS/HSCAN/HEXISTS/HRANDFIELD/HMGET) and that the
   hash collapses when the last field expires.
 - HGETEX option matrix (EX/PX/EXAT/PXAT/PERSIST and none) and HGETDEL.
-- Gate the commit on `cargo test -p shardmap -p shardcache-redis
-  -p shardcache-benchmarks --features redis-server --lib` returning exit 0.
+- Gate the commit on `cargo test -p shardmap -p shardcache-benchmarks
+  --features redis-server --lib` returning exit 0.
 
 ## Out of scope (tracked separately)
 

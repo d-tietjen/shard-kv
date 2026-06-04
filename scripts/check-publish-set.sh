@@ -6,7 +6,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
-publishable=" shardmap shardcache shardcache-redis shardcache-client-rs "
+publishable=" shardmap shardcache shardcache-client-rs "
 failed=0
 
 for manifest in crates/*/Cargo.toml; do
