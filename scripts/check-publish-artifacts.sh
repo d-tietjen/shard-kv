@@ -48,7 +48,6 @@ write_patch_table() {
 
 [patch.crates-io]
 shardmap = { path = "$unpacked/shardmap-$shardmap_version" }
-shardcache-redis = { path = "$unpacked/shardcache-redis-$redis_version" }
 shardcache-client-rs = { path = "$unpacked/shardcache-client-rs-$client_version" }
 EOF
 }
@@ -85,7 +84,6 @@ check_shardcache_binary() {
 
 shardmap_version="$(pkg_version shardmap)"
 shardcache_version="$(pkg_version shardcache)"
-redis_version="$(pkg_version shardcache-redis)"
 client_version="$(pkg_version shardcache-client-rs)"
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/shard-kv-publish-artifacts.XXXXXX")"
@@ -96,16 +94,14 @@ mkdir -p "$unpacked"
 package_crate shardmap --all-features
 package_crate shardcache-client-rs
 
-# These crates depend on the workspace shardmap version. During a PR for a new
+# This crate depends on the workspace shardmap version. During a PR for a new
 # shardmap release, that exact version is not indexed on crates.io yet. Use a
-# temporary Cargo patch only while creating the dependent archives so CI can
+# temporary Cargo patch only while creating the dependent archive so CI can
 # still validate the packaged source before the publish-order handoff.
-package_crate_with_local_shardmap_patch shardcache-redis --no-verify
 package_crate_with_local_shardmap_patch shardcache --no-verify
 
 unpack_crate shardmap "$shardmap_version"
 unpack_crate shardcache "$shardcache_version"
-unpack_crate shardcache-redis "$redis_version"
 unpack_crate shardcache-client-rs "$client_version"
 
 check_shardcache_binary
@@ -122,7 +118,6 @@ publish = false
 
 [dependencies]
 shardmap = "$shardmap_version"
-shardcache-redis = "$redis_version"
 shardcache-client-rs = "$client_version"
 EOF
 write_patch_table >>"$default_consumer/Cargo.toml"
@@ -139,7 +134,6 @@ publish = false
 
 [dependencies]
 shardmap = { version = "$shardmap_version", default-features = false, features = ["redis-server", "redis-functions", "redis-modules-all"] }
-shardcache-redis = { version = "$redis_version", default-features = false, features = ["redis-server", "redis-functions", "redis-modules-all"] }
 shardcache-client-rs = "$client_version"
 EOF
 write_patch_table >>"$redis_consumer/Cargo.toml"

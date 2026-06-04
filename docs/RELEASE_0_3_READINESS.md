@@ -10,19 +10,18 @@ This note tracks what must be true before tagging `v0.3.0`.
 - `shardcache-client-rs` is a crates.io crate for Rust clients of the native
   SCNP protocol.
 - `shardcache` is a crates.io crate for the RESP/SCNP server binary and
-  server-facing feature flags.
-- `shardcache-redis` is a crates.io crate for Redis/Valkey compatibility
-  command source and depends on `shardmap`.
+  server-facing feature flags, including Redis/Valkey compatibility behind the
+  `redis`, `redis-server`, and Redis module features.
 - `shardcache-formal`, `shardcache-py`, `shardcache-runtime`, benchmarks, and
   integrations are workspace support packages and are not part of the crates.io
   publish set for this release.
 
 ## Known Limits
 
-- `shardmap` packages a mirrored Redis compatibility source tree under
-  `src/redis_compat` so optional Redis features work from the crates.io
-  tarball. A later release should replace that bridge with a normal extension
-  dependency boundary.
+- `shardmap` packages the Redis compatibility source tree under
+  `src/redis_compat` so optional Redis features work from the crates.io tarball;
+  `shardcache` exposes that surface through its feature flags rather than a
+  separate Redis compatibility package.
 - Redis tier-1 compatibility now has explicit coverage for every command in the
   0.3.0 surface, including Redis 6, 7, and 8 additions tracked in the generated
   manifest.
@@ -148,10 +147,10 @@ not durable Redis-compatible storage.
 
 ## Publish Set
 
-The publishable crates are `shardmap`, `shardcache-client-rs`,
-`shardcache-redis`, and `shardcache`. Because `shardcache-redis` and
-`shardcache` depend on `shardmap = 0.3.0`, their crates.io dry-runs cannot
-resolve until `shardmap 0.3.0` is visible in the crates.io index.
+The publishable crates are `shardmap`, `shardcache-client-rs`, and
+`shardcache`. Because `shardcache` depends on `shardmap = 0.3.0`, its
+crates.io dry-run cannot resolve until `shardmap 0.3.0` is visible in the
+crates.io index.
 
 ```bash
 ./scripts/check-publish-artifacts.sh
@@ -162,14 +161,12 @@ cargo publish -p shardmap
 cargo publish -p shardcache-client-rs
 
 # After crates.io indexes shardmap 0.3.0:
-cargo publish -p shardcache-redis --dry-run
 cargo publish -p shardcache --dry-run
-cargo publish -p shardcache-redis
 cargo publish -p shardcache
 ```
 
-Publish `shardmap` before `shardcache-redis` and `shardcache`, because both
-depend on the new `shardmap` version. After `shardmap 0.3.0` is indexed,
-`shardcache-redis` and `shardcache` can be published in either order.
+Publish `shardmap` before `shardcache`, because `shardcache` depends on the new
+`shardmap` version. After `shardmap 0.3.0` is indexed,
+`shardcache` can be published.
 `shardcache-client-rs` can be published independently. All other workspace
 packages have `publish = false` for 0.3.0.

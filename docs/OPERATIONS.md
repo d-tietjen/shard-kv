@@ -12,18 +12,17 @@ For the container-specific runbook, see
 | --- | --- | --- |
 | Embedded crate | `shardmap = "0.3.2"` | In-process Rust cache use. |
 | Server crate | `shardcache = "0.3.2"` | Install or depend on the RESP/SCNP server package. |
-| Redis compatibility crate | `shardcache-redis = "0.3.2"` | Depend on Redis/Valkey command source and embedded compatibility APIs. |
 | Native client crate | `shardcache-client-rs = "0.3.2"` | SCNP client access from Rust applications. |
 | Server | `cargo run -p shardcache --features server --bin shardcache -- ...` | RESP/SCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo run -p shardcache --features redis-server --bin shardcache -- ...` | Redis/Valkey-compatible command and object behavior. |
 
-`shardmap`, `shardcache`, `shardcache-redis`, and `shardcache-client-rs` are
-the crates.io crates for 0.3.x. Python, C ABI, runtime, benchmark, and
+`shardmap`, `shardcache`, and `shardcache-client-rs` are the crates.io crates
+for 0.3.x. Python, C ABI, runtime, benchmark, and
 integration packages remain source-workspace packages.
 
 `redis-server` implies `server`, `redis`, `redis-functions`, and
-`redis-modules`. Embedded-only builds are expected not to compile the Redis
-compatibility source package; guard this with `./scripts/check-feature-matrix.sh`.
+`redis-modules`. Embedded-only builds stay separate from the Redis-compatible
+server feature set; guard this with `./scripts/check-feature-matrix.sh`.
 Redis Modules command families stay behind `redis-modules-all` or the
 individual `redis-module-*` features so production builds only compile module
 facades they deliberately expose.

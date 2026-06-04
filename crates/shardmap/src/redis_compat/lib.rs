@@ -1,8 +1,8 @@
-//! Redis/Valkey compatibility source package for `shardcache`.
+//! Redis/Valkey compatibility source for `shardcache`.
 //!
-//! This crate owns the Redis-only command and Redis object implementation
-//! source. `shardmap` currently includes those files by path behind its
-//! `redis` feature while the extension boundary is being finished.
+//! `shardmap` owns the Redis-only command and Redis object implementation
+//! source behind its `redis` feature. The public server-facing surface is the
+//! `shardcache` crate's Redis feature set.
 
-/// Version marker for the Redis compatibility source package.
-pub const COMPAT_PACKAGE: &str = "shardcache-redis";
+/// Version marker for the Redis compatibility source surface.
+pub const COMPAT_PACKAGE: &str = "shardcache";

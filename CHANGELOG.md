@@ -16,6 +16,9 @@
 ### Changed
 
 - Bumped the workspace and publishable Rust crate surfaces to `0.3.2`.
+- Removed the separate Redis compatibility package wrapper from the publish set;
+  Redis/Valkey compatibility is exposed through `shardcache` and `shardmap`
+  feature flags.
 
 ### Validation
 
@@ -73,9 +76,8 @@
   the typed `ShardMap<K, V>` and `codec` APIs are new public API surfaces.
 - Renamed the workspace to `shard-kv`, with `shardmap` as the embedded Rust
   crate and `shardcache` as the server crate/binary.
-- Moved Redis/Valkey compatibility source into `crates/shardcache-redis/src`.
-  The unpublished compatibility crate remains path-included by `shardmap`
-  behind the `redis` feature until the extension API is complete.
+- Moved Redis/Valkey compatibility source under `crates/shardmap/src/redis_compat`
+  behind the `redis` feature.
 - Simplified public feature defaults around the embedded sharded cache,
   `redis`, and `redis-server`.
 - Added transaction runtime coverage for `MULTI`, `EXEC`, `DISCARD`,

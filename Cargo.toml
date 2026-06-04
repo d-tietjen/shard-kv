@@ -7,7 +7,6 @@ members = [
     "crates/shardcache-py",
     "crates/shardcache-runtime",
     "crates/shardcache",
-    "crates/shardcache-redis",
     "crates/shardmap",
 ]
 resolver = "3"

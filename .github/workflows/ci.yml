@@ -41,7 +41,7 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           cargo clippy -p shardmap --all-targets --all-features -- -D warnings
           cargo clippy -p shardcache --all-targets --all-features -- -D warnings
-          cargo clippy -p shardcache-redis --all-targets --all-features -- -D warnings
+          cargo clippy -p shardcache --all-targets --no-default-features --features redis-server,redis-functions,redis-modules-all -- -D warnings
           cargo clippy -p shardcache-py --all-targets --all-features -- -D warnings
           cargo clippy -p shardcache-runtime --all-targets --features gpu-direct-api -- -D warnings
       - name: test
@@ -76,14 +76,12 @@ jobs:
         run: cargo check -p shardcache --features redis
       - name: redis server feature
         run: cargo check -p shardcache --features redis-server
-      - name: redis compatibility source crate
-        run: cargo check -p shardcache-redis --all-features
+      - name: redis compatibility feature surface
+        run: cargo check -p shardcache --no-default-features --features redis-server,redis-functions,redis-modules-all
       - name: rustdoc
         run: cargo doc -p shardmap --no-deps --all-features
       - name: rustdoc facade
         run: cargo doc -p shardcache --no-deps --all-features
-      - name: rustdoc redis compatibility crate
-        run: cargo doc -p shardcache-redis --no-deps --all-features
       - name: rustdoc shardcache client
         run: cargo doc -p shardcache-client-rs --no-deps
 

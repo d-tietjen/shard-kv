@@ -254,7 +254,7 @@ Write results to an explicit directory:
   --targets shardcache-resp,shardcache-scnp,redis \
   --suite redis-v6-v7 \
   --vcpus 1,2,4,8,16 \
-  --out-dir /tmp/shardcache-redis-v6-v7
+  --out-dir /tmp/shardcache-v6-v7
 ```
 
 ## Comparing Saved CSVs

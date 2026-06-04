@@ -1346,13 +1346,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "shardcache-redis"
-version = "0.3.2"
-dependencies = [
- "shardmap",
-]
-
-[[package]]
 name = "shardcache-runtime"
 version = "0.3.2"
 dependencies = [

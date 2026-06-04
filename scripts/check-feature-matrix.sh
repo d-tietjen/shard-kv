@@ -21,12 +21,6 @@ cargo check -p shardcache --no-default-features --features server,redis-modules-
 cargo check -p shardcache --no-default-features --features redis-server
 cargo check -p shardcache --features redis
 
-cargo check -p shardcache-redis --no-default-features --features redis
-cargo check -p shardcache-redis --no-default-features --features redis-functions
-cargo check -p shardcache-redis --no-default-features --features redis-modules
-cargo check -p shardcache-redis --no-default-features --features redis-modules-all
-cargo check -p shardcache-redis --all-features
-
 redis_module_features=(
   redis-module-search
   redis-module-bloom
@@ -50,10 +44,4 @@ redis_module_features=(
 for feature in "${redis_module_features[@]}"; do
   cargo check -p shardmap --no-default-features --features "$feature"
   cargo check -p shardcache --no-default-features --features "server,$feature"
-  cargo check -p shardcache-redis --no-default-features --features "$feature"
 done
-
-if cargo tree -p shardmap --no-default-features --features embedded | grep -q 'shardcache-redis'; then
-  echo "embedded-only shardmap unexpectedly depends on shardcache-redis" >&2
-  exit 1
-fi
