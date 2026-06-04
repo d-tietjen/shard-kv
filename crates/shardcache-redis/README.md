@@ -11,7 +11,7 @@ Use the published crate from crates.io:
 
 ```toml
 [dependencies]
-shardcache-redis = "0.3.1"
+shardcache-redis = "0.3.2"
 ```
 
 From a workspace checkout, use a path dependency:

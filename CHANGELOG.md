@@ -1,6 +1,32 @@
 # Changelog
 
-## 0.3.1 - Unreleased
+## 0.3.2 - Unreleased
+
+### Added
+
+- Added a shared microsecond telemetry clock for full-rate hot-path latency
+  sampling without calling `Instant::now()` for every request.
+- Added `CacheTelemetryClock` and
+  `CacheTelemetry::new_with_latency_sample_rate_and_clock` so callers can
+  choose per-request `Instant` timing, the default 1 microsecond shared clock,
+  or a custom shared-clock update interval.
+- Added telemetry benchmark backends for 100% latency sampling with
+  `Instant::now()` and with the shared clock.
+
+### Changed
+
+- Bumped the workspace and publishable Rust crate surfaces to `0.3.2`.
+
+### Validation
+
+- Ran focused telemetry tests, `cargo fmt`, `cargo clippy` for `shardmap`, and
+  the telemetry benchmark crate check.
+- Ran server-side saturation comparisons for embedded and shared-reference
+  backends at 100% telemetry sampling; the shared clock recovered most SET
+  throughput lost to per-request `Instant::now()` while keeping GET throughput
+  effectively flat.
+
+## 0.3.1 - 2026-06-04
 
 ### Changed
 

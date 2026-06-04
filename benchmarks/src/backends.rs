@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use shardmap::config::EvictionPolicy;
 use shardmap::storage::SharedEmbeddedLockPolicy;
+#[cfg(feature = "telemetry")]
+use shardmap::storage::{CacheTelemetry, CacheTelemetryClock};
 
 use crate::backend::{Backend, BoxError, ReadMode};
 
@@ -22,6 +24,8 @@ mod scnp;
 pub const BACKEND_IDS: &[&str] = &[
     "fc-embed",
     "fc-embed-telemetry",
+    "fc-embed-telemetry-instant-full",
+    "fc-embed-telemetry-shared-full",
     "fc-typed",
     "fc-typed-ref",
     "fc-codec",
@@ -39,6 +43,8 @@ pub const BACKEND_IDS: &[&str] = &[
     "fc-shared-fair-worker-stripes",
     "fc-shared-ref",
     "fc-shared-ref-telemetry",
+    "fc-shared-ref-telemetry-instant-full",
+    "fc-shared-ref-telemetry-shared-full",
     "fc-shared-prepared-ref",
     "fc-shared-worker-stripes-ref",
     "fc-shared-fair-ref",
@@ -62,6 +68,39 @@ pub const BACKEND_IDS: &[&str] = &[
 ];
 
 const SHARED_STRIPE_MULTIPLIER: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchmarkTelemetryMode {
+    Off,
+    Default,
+    InstantEveryRequest,
+    SharedEveryRequest,
+}
+
+#[cfg(feature = "telemetry")]
+fn cache_telemetry(
+    shard_count: usize,
+    mode: BenchmarkTelemetryMode,
+) -> Option<Arc<CacheTelemetry>> {
+    match mode {
+        BenchmarkTelemetryMode::Off => None,
+        BenchmarkTelemetryMode::Default => Some(CacheTelemetry::new(shard_count)),
+        BenchmarkTelemetryMode::InstantEveryRequest => {
+            Some(CacheTelemetry::new_with_latency_sample_rate_and_clock(
+                shard_count,
+                1,
+                CacheTelemetryClock::Instant,
+            ))
+        }
+        BenchmarkTelemetryMode::SharedEveryRequest => {
+            Some(CacheTelemetry::new_with_latency_sample_rate_and_clock(
+                shard_count,
+                1,
+                CacheTelemetryClock::SharedMicroseconds,
+            ))
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BenchmarkCacheConfig {
@@ -141,11 +180,25 @@ pub fn make(
             vcpu_budget.max(worker_count).max(1).next_power_of_two(),
             cache_config,
         )) as Arc<dyn Backend>,
+        #[cfg(feature = "telemetry")]
+        "fc-embed-telemetry-instant-full" => Arc::new(fc_embed::FcEmbed::new_telemetry_with_mode(
+            "fc-embed-telemetry-instant-full",
+            vcpu_budget.max(worker_count).max(1).next_power_of_two(),
+            cache_config,
+            BenchmarkTelemetryMode::InstantEveryRequest,
+        )) as Arc<dyn Backend>,
+        #[cfg(feature = "telemetry")]
+        "fc-embed-telemetry-shared-full" => Arc::new(fc_embed::FcEmbed::new_telemetry_with_mode(
+            "fc-embed-telemetry-shared-full",
+            vcpu_budget.max(worker_count).max(1).next_power_of_two(),
+            cache_config,
+            BenchmarkTelemetryMode::SharedEveryRequest,
+        )) as Arc<dyn Backend>,
         #[cfg(not(feature = "telemetry"))]
-        "fc-embed-telemetry" => {
-            return Err(
-                "backend `fc-embed-telemetry` requires benchmark feature `telemetry`".into(),
-            );
+        "fc-embed-telemetry"
+        | "fc-embed-telemetry-instant-full"
+        | "fc-embed-telemetry-shared-full" => {
+            return Err(format!("backend `{id}` requires benchmark feature `telemetry`").into());
         }
         "fc-typed" => fc_typed::new(
             "fc-typed",
@@ -290,11 +343,29 @@ pub fn make(
             false,
             cache_config,
         )?,
+        #[cfg(feature = "telemetry")]
+        "fc-shared-ref-telemetry-instant-full" => fc_shared::new_telemetry_with_mode(
+            "fc-shared-ref-telemetry-instant-full",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            false,
+            cache_config,
+            BenchmarkTelemetryMode::InstantEveryRequest,
+        )?,
+        #[cfg(feature = "telemetry")]
+        "fc-shared-ref-telemetry-shared-full" => fc_shared::new_telemetry_with_mode(
+            "fc-shared-ref-telemetry-shared-full",
+            default_shared_stripes(vcpu_budget, worker_count),
+            key_count,
+            false,
+            cache_config,
+            BenchmarkTelemetryMode::SharedEveryRequest,
+        )?,
         #[cfg(not(feature = "telemetry"))]
-        "fc-shared-ref-telemetry" => {
-            return Err(
-                "backend `fc-shared-ref-telemetry` requires benchmark feature `telemetry`".into(),
-            );
+        "fc-shared-ref-telemetry"
+        | "fc-shared-ref-telemetry-instant-full"
+        | "fc-shared-ref-telemetry-shared-full" => {
+            return Err(format!("backend `{id}` requires benchmark feature `telemetry`").into());
         }
         "fc-shared-prepared-ref" => fc_shared::new_prepared(
             "fc-shared-prepared-ref",

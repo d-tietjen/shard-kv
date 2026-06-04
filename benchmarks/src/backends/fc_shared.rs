@@ -1,15 +1,15 @@
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "telemetry")]
-use shardmap::storage::CacheTelemetry;
 use shardmap::storage::{
     PreparedPointKey, SharedEmbeddedConfig, SharedEmbeddedLockPolicy, SharedEmbeddedStore,
 };
 
 use crate::backend::{Backend, BackendClass, BoxError, Worker};
 
-use super::BenchmarkCacheConfig;
+#[cfg(feature = "telemetry")]
+use super::cache_telemetry;
+use super::{BenchmarkCacheConfig, BenchmarkTelemetryMode};
 
 const MAX_FC_SHARED_SHARDS: usize = 256;
 
@@ -105,7 +105,29 @@ pub fn new_telemetry(
             SharedKeyScope::All,
             cache_config,
         )
-        .with_telemetry(),
+        .with_telemetry(BenchmarkTelemetryMode::Default),
+    )
+}
+
+#[cfg(feature = "telemetry")]
+pub fn new_telemetry_with_mode(
+    id: &'static str,
+    shard_count: usize,
+    capacity_hint: usize,
+    copy_reads: bool,
+    cache_config: BenchmarkCacheConfig,
+    telemetry: BenchmarkTelemetryMode,
+) -> Result<Arc<dyn Backend>, BoxError> {
+    new_scoped(
+        id,
+        shard_count,
+        capacity_hint,
+        SharedBackendOptions::new(
+            shared_read_mode(copy_reads),
+            SharedKeyScope::All,
+            cache_config,
+        )
+        .with_telemetry(telemetry),
     )
 }
 
@@ -192,7 +214,7 @@ struct SharedBackendOptions {
     key_scope: SharedKeyScope,
     lock_policy: SharedEmbeddedLockPolicy,
     cache_config: BenchmarkCacheConfig,
-    telemetry: bool,
+    telemetry: BenchmarkTelemetryMode,
 }
 
 impl SharedBackendOptions {
@@ -207,7 +229,7 @@ impl SharedBackendOptions {
             key_scope,
             lock_policy: SharedEmbeddedConfig::default().lock_policy,
             cache_config,
-            telemetry: false,
+            telemetry: BenchmarkTelemetryMode::Off,
         }
     }
 
@@ -222,8 +244,8 @@ impl SharedBackendOptions {
     }
 
     #[cfg(feature = "telemetry")]
-    fn with_telemetry(mut self) -> Self {
-        self.telemetry = true;
+    fn with_telemetry(mut self, telemetry: BenchmarkTelemetryMode) -> Self {
+        self.telemetry = telemetry;
         self
     }
 }
@@ -303,12 +325,12 @@ impl<const SHARDS: usize> FcShared<SHARDS> {
 
 fn shared_store_with_options<const SHARDS: usize>(
     config: SharedEmbeddedConfig,
-    telemetry: bool,
+    telemetry: BenchmarkTelemetryMode,
 ) -> SharedEmbeddedStore<SHARDS> {
     #[cfg(feature = "telemetry")]
     {
-        if telemetry {
-            return SharedEmbeddedStore::with_metrics(config, Some(CacheTelemetry::new(SHARDS)));
+        if let Some(metrics) = cache_telemetry(SHARDS, telemetry) {
+            return SharedEmbeddedStore::with_metrics(config, Some(metrics));
         }
     }
     let _ = telemetry;

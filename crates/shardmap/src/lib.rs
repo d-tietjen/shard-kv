@@ -53,6 +53,6 @@ pub use error::{Result, ShardCacheError};
 #[cfg(feature = "embedded")]
 pub use native::{ShardMap, ShardMapHasher, ShardMapOptions, ShardMapRef, ShardMapWithShards};
 #[cfg(all(feature = "telemetry", feature = "embedded"))]
-pub use storage::{CacheMetrics, CacheMetricsSnapshot, CacheTelemetry};
+pub use storage::{CacheMetrics, CacheMetricsSnapshot, CacheTelemetry, CacheTelemetryClock};
 #[cfg(feature = "embedded")]
 pub use storage::{SemanticCacheError, SemanticMatch};

@@ -454,7 +454,7 @@ impl FlatMap {
                 shard_id,
                 value.is_some(),
                 value.map_or(0, |bytes| bytes.len()),
-                start.map(|start| start.elapsed().as_nanos() as u64),
+                start.map(|start| metrics.latency_elapsed_ns_since(start)),
             );
         }
 
@@ -487,7 +487,7 @@ impl FlatMap {
                 shard_id,
                 value.is_some(),
                 value.map_or(0, |bytes| bytes.len()),
-                start.map(|start| start.elapsed().as_nanos() as u64),
+                start.map(|start| metrics.latency_elapsed_ns_since(start)),
             );
         }
 
