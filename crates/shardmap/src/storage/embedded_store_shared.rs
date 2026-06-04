@@ -20,6 +20,8 @@ use crate::storage::embedded_store::{
     EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedSessionRoute, EmbeddedShard,
     assert_valid_shard_count, compute_key_route, compute_session_shard, shift_for,
 };
+#[cfg(feature = "telemetry")]
+use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
 use crate::storage::{
     FastHashMap, PreparedPointKey, SemanticCacheError, SemanticEmbedding, SemanticMatch, hash_key,
     hash_key_tag_from_hash, ttl_now_millis, validate_similarity_threshold,
@@ -205,6 +207,7 @@ struct SharedInner<const SHARDS: usize> {
     shift: u32,
     route_mode: EmbeddedRouteMode,
     semantic_generation: AtomicU64,
+    semantic_data_active: AtomicBool,
     semantic_query_cache_enabled: AtomicBool,
     semantic_query_cache: FairRwLock<SemanticQueryCache>,
 }

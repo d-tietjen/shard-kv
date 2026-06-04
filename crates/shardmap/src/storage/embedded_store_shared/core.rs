@@ -12,6 +12,26 @@ impl<const SHARDS: usize> Clone for SharedEmbeddedStore<SHARDS> {
 impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     /// Creates a cloneable shared embedded store with `SHARDS` lock stripes.
     pub fn new(config: SharedEmbeddedConfig) -> Self {
+        Self::new_inner(
+            config,
+            #[cfg(feature = "telemetry")]
+            None,
+        )
+    }
+
+    /// Creates a cloneable shared embedded store with active telemetry.
+    #[cfg(feature = "telemetry")]
+    pub fn with_metrics(
+        config: SharedEmbeddedConfig,
+        metrics: Option<Arc<CacheTelemetry>>,
+    ) -> Self {
+        Self::new_inner(config, metrics)
+    }
+
+    fn new_inner(
+        config: SharedEmbeddedConfig,
+        #[cfg(feature = "telemetry")] metrics: Option<Arc<CacheTelemetry>>,
+    ) -> Self {
         const {
             assert!(
                 SHARDS > 0 && SHARDS.is_power_of_two(),
@@ -39,6 +59,10 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                         eviction_policy,
                         per_shard_capacity,
                     );
+                    #[cfg(feature = "telemetry")]
+                    if let Some(metrics) = &metrics {
+                        shard.attach_metrics(CacheTelemetryHandle::from_arc(metrics), shard_id);
+                    }
                     if shard_id == 0 {
                         shard.configure_semantic_memory_policy(config.total_memory_bytes, 0);
                     }
@@ -47,6 +71,7 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
                 shift: shift_for(SHARDS),
                 route_mode,
                 semantic_generation: AtomicU64::new(0),
+                semantic_data_active: AtomicBool::new(false),
                 semantic_query_cache_enabled: AtomicBool::new(true),
                 semantic_query_cache: FairRwLock::new(SemanticQueryCache::default()),
             }),
@@ -94,7 +119,9 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         &self,
         route: EmbeddedKeyRoute,
     ) -> Option<&SharedShardLock<EmbeddedShard>> {
-        (route.shard_id != self.semantic_shard_id()).then(|| self.stripe(self.semantic_shard_id()))
+        (route.shard_id != self.semantic_shard_id()
+            && self.inner.semantic_data_active.load(Ordering::Acquire))
+        .then(|| self.stripe(self.semantic_shard_id()))
     }
 
     #[inline(always)]
@@ -123,6 +150,20 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     }
 
     #[inline(always)]
+    pub(super) fn mark_semantic_data_active(&self) {
+        self.inner
+            .semantic_data_active
+            .store(true, Ordering::Release);
+    }
+
+    #[inline(always)]
+    pub(super) fn bump_semantic_generation_if_active(&self) {
+        if self.inner.semantic_data_active.load(Ordering::Acquire) {
+            self.bump_semantic_generation();
+        }
+    }
+
+    #[inline(always)]
     pub fn semantic_query_cache_enabled(&self) -> bool {
         self.inner
             .semantic_query_cache_enabled
@@ -134,5 +175,45 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         self.inner
             .semantic_query_cache_enabled
             .store(false, Ordering::Release);
+    }
+
+    /// Returns a sorted snapshot of currently live point keys.
+    pub fn key_snapshot(&self) -> Vec<SharedBytes> {
+        let mut keys = Vec::new();
+        self.visit_string_keys(|key| {
+            keys.push(SharedBytes::copy_from_slice(key));
+            true
+        });
+        keys.sort();
+        keys
+    }
+
+    /// Visits currently live point keys without allocating a key snapshot.
+    ///
+    /// The visitor runs while each shard read lock is held. Keep callbacks
+    /// lightweight, and return `false` to stop early.
+    pub fn visit_string_keys(&self, mut visitor: impl FnMut(&[u8]) -> bool) {
+        let now_ms = ttl_now_millis();
+        for shard in &self.inner.shards {
+            let shard = shard.read();
+            if !shard.visit_string_keys(now_ms, &mut visitor) {
+                return;
+            }
+        }
+    }
+
+    /// Visits currently live point entries without cloning keys or values.
+    ///
+    /// The visitor receives `(key, value, expire_at_ms)` while each shard read
+    /// lock is held. Keep callbacks lightweight, and return `false` to stop
+    /// early.
+    pub fn visit_string_entries(&self, mut visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool) {
+        let now_ms = ttl_now_millis();
+        for shard in &self.inner.shards {
+            let shard = shard.read();
+            if !shard.visit_string_entries(now_ms, &mut visitor) {
+                return;
+            }
+        }
     }
 }

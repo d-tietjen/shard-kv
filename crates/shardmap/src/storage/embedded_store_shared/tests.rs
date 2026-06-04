@@ -118,6 +118,37 @@ fn prepared_point_keys_read_and_write_shared_values() {
     );
 }
 
+#[test]
+fn point_writes_do_not_activate_semantic_generation() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+
+    store.insert_slice(b"alpha", b"one");
+    store.insert_slice(b"alpha", b"two");
+
+    assert!(!store.inner.semantic_data_active.load(Ordering::Acquire));
+    assert_eq!(store.semantic_generation(), 0);
+}
+
+#[test]
+fn point_overwrite_invalidates_active_semantic_entry() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    let key = (0..1024usize)
+        .map(|index| format!("semantic-key-{index}"))
+        .find(|key| store.route_key(key.as_bytes()).shard_id != store.semantic_shard_id())
+        .expect("key outside semantic shard");
+    let embedding = [1.0, 0.0];
+
+    store
+        .insert_semantic_slice(key.as_bytes(), b"semantic", &embedding)
+        .unwrap();
+    assert!(store.semantic_search(&embedding, 0.99).unwrap().is_some());
+
+    store.insert_slice(key.as_bytes(), b"plain");
+
+    assert!(store.inner.semantic_data_active.load(Ordering::Acquire));
+    assert!(store.semantic_search(&embedding, 0.99).unwrap().is_none());
+}
+
 #[cfg(feature = "no-ttl")]
 #[test]
 #[should_panic(expected = "shardcache/no-ttl builds do not support shared-store TTL writes")]

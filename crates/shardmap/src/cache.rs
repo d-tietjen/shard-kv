@@ -1,6 +1,6 @@
-//! DashMap-like embedded sharded map facade.
+//! Raw byte-oriented embedded sharded cache facade.
 //!
-//! [`ShardMap`] is the ergonomic cloneable embedded API. It wraps
+//! [`SharedCache`] is the cloneable raw byte API. It wraps
 //! [`SharedEmbeddedStore`], so callers get
 //! a cheap handle they can move into many workers while still using the same
 //! sharded storage core as server and owner-local embedded modes.
@@ -15,17 +15,17 @@ use crate::storage::{
     SharedEmbeddedRefMut, SharedEmbeddedStore, SharedEmbeddedVacantEntry,
 };
 
-/// Default number of stripes for [`ShardMap`].
+/// Default number of stripes for [`crate::ShardMap`] and [`ShardCache`].
 ///
 /// This intentionally over-stripes the common embedded shared-handle case. In
 /// benchmarks, one stripe per worker leaves read-heavy shared access
 /// under-striped compared with DashMap-style maps.
 pub const DEFAULT_CACHE_SHARDS: usize = 64;
 
-/// Configuration for [`ShardMap`].
+/// Configuration for [`crate::ShardMap`] and [`SharedCache`].
 ///
 /// The shard count is a const generic on [`SharedCache`], keeping the hot path
-/// monomorphized while [`ShardMap`] gives users a simple default.
+/// monomorphized while [`crate::ShardMap`] gives users a simple default.
 #[derive(Debug, Clone)]
 pub struct CacheOptions {
     /// Total memory budget for all stripes. `None` disables memory-limit eviction.
@@ -36,6 +36,9 @@ pub struct CacheOptions {
     pub route_mode: EmbeddedRouteMode,
     /// Approximate total point-key capacity to reserve across all stripes.
     pub capacity_hint: Option<usize>,
+    /// Default relative TTL, in milliseconds, applied by write APIs that do not
+    /// pass an explicit TTL.
+    pub default_ttl_ms: Option<u64>,
     /// Lock policy used by each stripe.
     pub lock_policy: SharedEmbeddedLockPolicy,
 }
@@ -48,6 +51,7 @@ impl Default for CacheOptions {
             eviction_policy: shared.eviction_policy,
             route_mode: shared.route_mode,
             capacity_hint: shared.flat_map_capacity_hint,
+            default_ttl_ms: None,
             lock_policy: shared.lock_policy,
         }
     }
@@ -72,6 +76,7 @@ impl From<SharedEmbeddedConfig> for CacheOptions {
             eviction_policy: config.eviction_policy,
             route_mode: config.route_mode,
             capacity_hint: config.flat_map_capacity_hint,
+            default_ttl_ms: None,
             lock_policy: config.lock_policy,
         }
     }
@@ -90,26 +95,28 @@ pub type CacheSemanticMatch = SemanticMatch;
 /// Error returned by semantic cache APIs.
 pub type CacheSemanticError = SemanticCacheError;
 
-/// Cloneable DashMap-like embedded cache.
+/// Cloneable raw byte-oriented embedded cache.
 ///
-/// This is the recommended starting point for application code that wants a
-/// drop-in in-process cache or lock table. Use
+/// Use this lower-level surface when application code needs raw bytes, TTLs,
+/// mutable byte guards, prepared keys, lock helpers, or semantic-cache APIs.
+/// Use
 /// [`embedded::ShardedEngine`](crate::embedded::ShardedEngine) and
 /// [`embedded::LocalEmbeddedStore`](crate::embedded::LocalEmbeddedStore) when
 /// you want the owner-local sharded performance model.
 #[derive(Debug, Clone)]
 pub struct SharedCache<const SHARDS: usize> {
     inner: SharedEmbeddedStore<SHARDS>,
+    default_ttl_ms: Option<u64>,
 }
 
-/// Default cloneable DashMap-like embedded map.
-pub type ShardMap = SharedCache<DEFAULT_CACHE_SHARDS>;
+/// Default raw byte-oriented embedded map.
+pub type RawShardMap = SharedCache<DEFAULT_CACHE_SHARDS>;
 
 /// Cache-flavored alias for users thinking in TTL/LRU/cache terms.
-pub type ShardCache = ShardMap;
+pub type ShardCache = RawShardMap;
 
-/// Explicit-shard-count alias for map-shaped users.
-pub type ShardMapWithShards<const SHARDS: usize> = SharedCache<SHARDS>;
+/// Explicit-shard-count raw byte-oriented map alias.
+pub type RawShardMapWithShards<const SHARDS: usize> = SharedCache<SHARDS>;
 
 /// Explicit-shard-count cache-flavored alias.
 pub type ShardCacheWithShards<const SHARDS: usize> = SharedCache<SHARDS>;
@@ -139,15 +146,20 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
     /// Creates a cache with explicit options.
     #[inline(always)]
     pub fn with_options(options: CacheOptions) -> Self {
+        let default_ttl_ms = options.default_ttl_ms;
         Self {
             inner: SharedEmbeddedStore::new(options.into()),
+            default_ttl_ms,
         }
     }
 
     /// Wraps an existing shared embedded store.
     #[inline(always)]
     pub fn from_shared_store(inner: SharedEmbeddedStore<SHARDS>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            default_ttl_ms: None,
+        }
     }
 
     /// Returns the underlying shared embedded store.
@@ -172,6 +184,13 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
     #[inline(always)]
     pub fn route_mode(&self) -> EmbeddedRouteMode {
         self.inner.route_mode()
+    }
+
+    /// Returns the default TTL applied by write APIs that do not pass an
+    /// explicit TTL.
+    #[inline(always)]
+    pub const fn default_ttl_ms(&self) -> Option<u64> {
+        self.default_ttl_ms
     }
 
     /// Computes the route for a key.
@@ -231,6 +250,31 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
         self.contains_key(key)
     }
 
+    /// Returns a sorted snapshot of currently live point keys.
+    #[inline(always)]
+    pub fn key_snapshot(&self) -> Vec<SharedBytes> {
+        self.inner.key_snapshot()
+    }
+
+    /// Visits currently live point keys without allocating a key snapshot.
+    ///
+    /// The visitor runs while each shard read lock is held. Keep callbacks
+    /// lightweight, and return `false` to stop early.
+    #[inline(always)]
+    pub fn visit_keys(&self, visitor: impl FnMut(&[u8]) -> bool) {
+        self.inner.visit_string_keys(visitor);
+    }
+
+    /// Visits currently live point entries without cloning keys or values.
+    ///
+    /// The visitor receives `(key, value, expire_at_ms)` while each shard read
+    /// lock is held. Keep callbacks lightweight, and return `false` to stop
+    /// early.
+    #[inline(always)]
+    pub fn visit_entries(&self, visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool) {
+        self.inner.visit_string_entries(visitor);
+    }
+
     /// Inserts or replaces a point-key value without a TTL.
     #[inline(always)]
     pub fn insert<K, V>(&self, key: K, value: V)
@@ -238,13 +282,15 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
         K: Into<SharedBytes>,
         V: Into<SharedBytes>,
     {
-        self.inner.insert(key.into(), value.into());
+        self.inner
+            .insert_with_ttl(key.into(), value.into(), self.default_ttl_ms);
     }
 
     /// Inserts or replaces a point-key value from borrowed slices.
     #[inline(always)]
     pub fn insert_slice(&self, key: &[u8], value: &[u8]) {
-        self.inner.insert_slice(key, value);
+        self.inner
+            .insert_slice_with_ttl(key, value, self.default_ttl_ms);
     }
 
     /// Inserts or replaces a point-key value with an optional relative TTL.
@@ -271,7 +317,8 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
         value: &[u8],
         embedding: &[f32],
     ) -> Result<(), SemanticCacheError> {
-        self.inner.insert_semantic_slice(key, value, embedding)
+        self.inner
+            .insert_semantic_slice_with_ttl(key, value, embedding, self.default_ttl_ms)
     }
 
     /// Inserts or replaces a point-key value with embedding and governance metadata.
@@ -287,8 +334,13 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
         embedding: &[f32],
         governance_metadata: &[u8],
     ) -> Result<(), SemanticCacheError> {
-        self.inner
-            .insert_semantic_slice_with_governance(key, value, embedding, governance_metadata)
+        self.inner.insert_semantic_slice_with_ttl_and_governance(
+            key,
+            value,
+            embedding,
+            self.default_ttl_ms,
+            governance_metadata,
+        )
     }
 
     /// Inserts or replaces a point-key value with an embedding and optional TTL.
@@ -373,13 +425,31 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
         K: Into<SharedBytes>,
         V: Into<SharedBytes>,
     {
-        self.inner.insert_if_absent(key.into(), value.into())
+        let key = key.into();
+        let value = value.into();
+        self.inner
+            .insert_slice_if_absent_with_ttl(&key, &value, self.default_ttl_ms)
     }
 
     /// Inserts borrowed bytes only when the key is absent or expired.
     #[inline(always)]
     pub fn try_insert_slice(&self, key: &[u8], value: &[u8]) -> bool {
-        self.inner.insert_slice_if_absent(key, value)
+        self.inner
+            .insert_slice_if_absent_with_ttl(key, value, self.default_ttl_ms)
+    }
+
+    /// Inserts a point-key value with an optional TTL only when the key is
+    /// absent or expired.
+    #[inline(always)]
+    pub fn try_insert_with_ttl<K, V>(&self, key: K, value: V, ttl_ms: Option<u64>) -> bool
+    where
+        K: Into<SharedBytes>,
+        V: Into<SharedBytes>,
+    {
+        let key = key.into();
+        let value = value.into();
+        self.inner
+            .insert_slice_if_absent_with_ttl(&key, &value, ttl_ms)
     }
 
     /// Inserts borrowed bytes with an optional TTL only when the key is absent
@@ -483,6 +553,30 @@ mod tests {
         assert!(cache.try_insert_slice(b"alpha", b"one"));
         assert!(!cache.try_insert_slice(b"alpha", b"two"));
         assert_eq!(cache.get(b"alpha").unwrap().value(), b"one");
+    }
+
+    #[cfg(not(feature = "no-ttl"))]
+    #[test]
+    fn default_ttl_applies_to_plain_cache_writes_and_can_be_overridden() {
+        let cache = SharedCache::<4>::with_options(CacheOptions {
+            default_ttl_ms: Some(20),
+            ..CacheOptions::default()
+        });
+
+        assert_eq!(cache.default_ttl_ms(), Some(20));
+        cache.insert_slice(b"default", b"expires");
+        assert_eq!(cache.get(b"default").unwrap().value(), b"expires");
+
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(cache.get(b"default").is_none());
+
+        cache.insert_slice_with_ttl(b"durable", b"stays", None);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(cache.get(b"durable").unwrap().value(), b"stays");
+
+        cache.insert_slice_with_ttl(b"explicit", b"short", Some(10));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(cache.get(b"explicit").is_none());
     }
 
     #[test]

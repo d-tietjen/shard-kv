@@ -1,4 +1,4 @@
-use shardmap::{SemanticCacheError, ShardMap};
+use shardmap::{SemanticCacheError, ShardCache};
 
 struct User<'a> {
     tenant: &'a str,
@@ -19,7 +19,7 @@ fn can_use_cached_answer(user: &User<'_>, metadata: &[u8]) -> bool {
 }
 
 fn main() -> Result<(), SemanticCacheError> {
-    let cache = ShardMap::new();
+    let cache = ShardCache::new();
 
     cache.insert_semantic_slice(
         b"prompt:shipping",

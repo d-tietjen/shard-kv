@@ -1,8 +1,8 @@
 use shardmap::config::EvictionPolicy;
-use shardmap::{CacheOptions, ShardMapWithShards};
+use shardmap::{CacheOptions, ShardCacheWithShards};
 
 fn main() {
-    let cache = ShardMapWithShards::<8>::with_options(CacheOptions {
+    let cache = ShardCacheWithShards::<8>::with_options(CacheOptions {
         capacity_hint: Some(1_024),
         total_memory_bytes: Some(1024 * 1024),
         eviction_policy: EvictionPolicy::Lru,

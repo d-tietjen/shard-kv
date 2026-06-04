@@ -1,10 +1,10 @@
 use std::thread;
 use std::time::Duration;
 
-use shardmap::ShardMap;
+use shardmap::ShardCache;
 
 fn main() -> shardmap::Result<()> {
-    let cache = ShardMap::new();
+    let cache = ShardCache::new();
 
     cache.insert_slice_with_ttl(b"session:short", b"active", Some(10));
     assert!(cache.contains_key(b"session:short"));

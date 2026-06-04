@@ -33,11 +33,39 @@ impl EmbeddedShard {
         shard
     }
 
+    #[cfg(feature = "telemetry")]
+    #[inline(always)]
+    pub(crate) fn attach_metrics(
+        &mut self,
+        metrics: crate::storage::CacheTelemetryHandle,
+        shard_id: usize,
+    ) {
+        self.map.attach_metrics(metrics, shard_id);
+    }
+
     #[inline(always)]
     pub(crate) fn stored_bytes(&self) -> usize {
         self.map
             .stored_bytes()
             .saturating_add(self.session_slots.stored_bytes())
+    }
+
+    #[inline(always)]
+    pub(crate) fn visit_string_keys(
+        &self,
+        now_ms: u64,
+        visitor: &mut impl FnMut(&[u8]) -> bool,
+    ) -> bool {
+        self.map.visit_keys(now_ms, visitor)
+    }
+
+    #[inline(always)]
+    pub(crate) fn visit_string_entries(
+        &self,
+        now_ms: u64,
+        visitor: &mut impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
+    ) -> bool {
+        self.map.visit_entries(now_ms, visitor)
     }
 
     #[inline(always)]

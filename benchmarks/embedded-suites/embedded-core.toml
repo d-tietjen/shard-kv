@@ -1,7 +1,7 @@
 id = "embedded-core"
 title = "Embedded Core Cache Backends"
 driver = "saturation"
-backends = "fc-embed,fc-shared,dashmap,dashmap-worker-shards,dashmap-ref,moka,rwlock-hashmap,lru"
+backends = "fc-embed,fc-typed-ref,fc-typed,fc-codec-ref,fc-codec-ns-ref,fc-codec-multi-ns-ref,fc-shared,dashmap,dashmap-worker-shards,dashmap-ref,moka,rwlock-hashmap,lru"
 ttl_ms = ""
 eviction_policy = "none"
 capacity_resident_pct = ""

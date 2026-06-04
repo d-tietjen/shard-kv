@@ -186,6 +186,7 @@ pub struct CacheTelemetry {
     shard_keys_total: Vec<DynamicGaugeI64Series>,
     shard_memory_bytes: Vec<DynamicGaugeI64Series>,
     shard_keys: Vec<DynamicGaugeI64Series>,
+    latency_sample_mask: u64,
 }
 
 impl std::fmt::Debug for CacheTelemetry {
@@ -221,12 +222,23 @@ impl CacheTelemetryHandle {
     }
 
     #[inline(always)]
-    pub fn record_get(&self, shard_id: usize, hit: bool, value_len: usize, latency_ns: u64) {
+    pub fn latency_sample_mask(&self) -> u64 {
+        self.get().latency_sample_mask
+    }
+
+    #[inline(always)]
+    pub fn record_get(
+        &self,
+        shard_id: usize,
+        hit: bool,
+        value_len: usize,
+        latency_ns: Option<u64>,
+    ) {
         self.get().record_get(shard_id, hit, value_len, latency_ns);
     }
 
     #[inline(always)]
-    pub fn record_set(&self, shard_id: usize, value_len: usize, latency_ns: u64) {
+    pub fn record_set(&self, shard_id: usize, value_len: usize, latency_ns: Option<u64>) {
         self.get().record_set(shard_id, value_len, latency_ns);
     }
 
@@ -277,7 +289,19 @@ impl CacheTelemetryHandle {
 }
 
 impl CacheTelemetry {
+    const DEFAULT_LATENCY_SAMPLE_RATE: u64 = 1024;
+
     pub fn new(shard_count: usize) -> Arc<Self> {
+        Self::new_with_latency_sample_rate(shard_count, Self::DEFAULT_LATENCY_SAMPLE_RATE)
+    }
+
+    /// Creates telemetry with a configurable latency histogram sample rate.
+    ///
+    /// Counters, byte totals, key gauges, and memory gauges are still updated on
+    /// every operation. Latency histograms are sampled because taking a
+    /// timestamp for every cache operation is expensive on the hot path.
+    /// `latency_sample_rate = 1` records every operation.
+    pub fn new_with_latency_sample_rate(shard_count: usize, latency_sample_rate: u64) -> Arc<Self> {
         let metric_shards = std::thread::available_parallelism()
             .map(|value| value.get())
             .unwrap_or_else(|_| shard_count.max(1));
@@ -308,12 +332,17 @@ impl CacheTelemetry {
             shard_keys.push(metrics.shard_keys.series(&[("shard", shard.as_str())]));
         }
 
+        let latency_sample_rate = latency_sample_rate
+            .max(1)
+            .checked_next_power_of_two()
+            .unwrap_or(1 << 63);
         Arc::new(Self {
             metrics,
             shard_ops,
             shard_keys_total,
             shard_memory_bytes,
             shard_keys,
+            latency_sample_mask: latency_sample_rate - 1,
         })
     }
 
@@ -323,7 +352,13 @@ impl CacheTelemetry {
     }
 
     #[inline(always)]
-    pub fn record_get(&self, shard_id: usize, hit: bool, value_len: usize, latency_ns: u64) {
+    pub fn record_get(
+        &self,
+        shard_id: usize,
+        hit: bool,
+        value_len: usize,
+        latency_ns: Option<u64>,
+    ) {
         self.metrics.gets.inc();
         if let Some(series) = self.shard_ops.get(shard_id) {
             series.get.inc();
@@ -334,17 +369,21 @@ impl CacheTelemetry {
         } else {
             self.metrics.misses.inc();
         }
-        self.metrics.get_latency_ns.record(latency_ns);
+        if let Some(latency_ns) = latency_ns {
+            self.metrics.get_latency_ns.record(latency_ns);
+        }
     }
 
     #[inline(always)]
-    pub fn record_set(&self, shard_id: usize, value_len: usize, latency_ns: u64) {
+    pub fn record_set(&self, shard_id: usize, value_len: usize, latency_ns: Option<u64>) {
         self.metrics.sets.inc();
         if let Some(series) = self.shard_ops.get(shard_id) {
             series.set.inc();
         }
         self.metrics.bytes_written.add(value_len as isize);
-        self.metrics.set_latency_ns.record(latency_ns);
+        if let Some(latency_ns) = latency_ns {
+            self.metrics.set_latency_ns.record(latency_ns);
+        }
     }
 
     #[inline(always)]

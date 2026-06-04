@@ -20,7 +20,7 @@ use rand::{Rng, SeedableRng};
 use shardcache_benchmarks::cpu::{process_cpu_time, vcpu};
 use shardcache_benchmarks::csv::CsvWriter;
 use shardcache_benchmarks::histogram::LatencyHistogram;
-use shardmap::ShardMapWithShards;
+use shardmap::ShardCacheWithShards;
 
 type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
@@ -367,7 +367,7 @@ fn run_quality<const SHARDS: usize>(
         };
 
         for pair in pairs {
-            let cache = ShardMapWithShards::<SHARDS>::new();
+            let cache = ShardCacheWithShards::<SHARDS>::new();
             cache.insert_semantic_slice(
                 pair.pair_id.as_bytes(),
                 b"Answer: synthetic",
@@ -737,7 +737,7 @@ fn run_load<const SHARDS: usize>(
 #[allow(clippy::too_many_arguments)]
 fn measure_latency<const SHARDS: usize>(
     mode: &'static str,
-    cache: &ShardMapWithShards<SHARDS>,
+    cache: &ShardCacheWithShards<SHARDS>,
     queries: &[Vec<f32>],
     warmup: usize,
     min_score: f32,
@@ -784,8 +784,8 @@ fn build_latency_cache<const SHARDS: usize>(
     pairs: &[Pair],
     index_entries: usize,
     value_size: usize,
-) -> Result<ShardMapWithShards<SHARDS>, BoxError> {
-    let cache = ShardMapWithShards::<SHARDS>::with_capacity(index_entries);
+) -> Result<ShardCacheWithShards<SHARDS>, BoxError> {
+    let cache = ShardCacheWithShards::<SHARDS>::with_capacity(index_entries);
     let value = vec![b'x'; value_size];
     for index in 0..index_entries {
         let pair = &pairs[index % pairs.len()];

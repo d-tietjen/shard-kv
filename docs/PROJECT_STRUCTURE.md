@@ -90,7 +90,7 @@ New contributors should be able to answer the first set of questions from:
   commands.
 - `SECURITY.md`: vulnerability reporting.
 - `RELEASE.md`: release checklist.
-- `docs/RELEASE_0_2_READINESS.md`: current 0.2.1 proof, benchmark, and known
+- `docs/RELEASE_0_3_READINESS.md`: current 0.3.0 proof, benchmark, and known
   limitation checklist.
 - `docs/REDIS_COMPATIBILITY.md`: generated Redis command compatibility
   manifest based on the live command matrix registry, including supported

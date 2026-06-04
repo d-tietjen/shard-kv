@@ -1,6 +1,8 @@
 use std::hint::black_box;
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "telemetry")]
+use shardmap::storage::CacheTelemetry;
 use shardmap::storage::{
     PreparedPointKey, SharedEmbeddedConfig, SharedEmbeddedLockPolicy, SharedEmbeddedStore,
 };
@@ -9,13 +11,15 @@ use crate::backend::{Backend, BackendClass, BoxError, Worker};
 
 use super::BenchmarkCacheConfig;
 
+const MAX_FC_SHARED_SHARDS: usize = 256;
+
 pub fn new(
     id: &'static str,
     shard_count: usize,
     capacity_hint: usize,
     copy_reads: bool,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -33,7 +37,7 @@ pub fn new_copy_locked(
     shard_count: usize,
     capacity_hint: usize,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -51,7 +55,7 @@ pub fn new_copy_unlocked(
     shard_count: usize,
     capacity_hint: usize,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -70,7 +74,7 @@ pub fn new_prepared(
     capacity_hint: usize,
     copy_reads: bool,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -84,6 +88,27 @@ pub fn new_prepared(
     )
 }
 
+#[cfg(feature = "telemetry")]
+pub fn new_telemetry(
+    id: &'static str,
+    shard_count: usize,
+    capacity_hint: usize,
+    copy_reads: bool,
+    cache_config: BenchmarkCacheConfig,
+) -> Result<Arc<dyn Backend>, BoxError> {
+    new_scoped(
+        id,
+        shard_count,
+        capacity_hint,
+        SharedBackendOptions::new(
+            shared_read_mode(copy_reads),
+            SharedKeyScope::All,
+            cache_config,
+        )
+        .with_telemetry(),
+    )
+}
+
 pub fn new_with_policy(
     id: &'static str,
     shard_count: usize,
@@ -91,7 +116,7 @@ pub fn new_with_policy(
     copy_reads: bool,
     lock_policy: SharedEmbeddedLockPolicy,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -111,7 +136,7 @@ pub fn new_hot_shard(
     capacity_hint: usize,
     copy_reads: bool,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -131,7 +156,7 @@ pub fn new_hot_shard_with_policy(
     copy_reads: bool,
     lock_policy: SharedEmbeddedLockPolicy,
     cache_config: BenchmarkCacheConfig,
-) -> Arc<dyn Backend> {
+) -> Result<Arc<dyn Backend>, BoxError> {
     new_scoped(
         id,
         shard_count,
@@ -167,6 +192,7 @@ struct SharedBackendOptions {
     key_scope: SharedKeyScope,
     lock_policy: SharedEmbeddedLockPolicy,
     cache_config: BenchmarkCacheConfig,
+    telemetry: bool,
 }
 
 impl SharedBackendOptions {
@@ -181,6 +207,7 @@ impl SharedBackendOptions {
             key_scope,
             lock_policy: SharedEmbeddedConfig::default().lock_policy,
             cache_config,
+            telemetry: false,
         }
     }
 
@@ -193,6 +220,12 @@ impl SharedBackendOptions {
         self.lock_policy = lock_policy;
         self
     }
+
+    #[cfg(feature = "telemetry")]
+    fn with_telemetry(mut self) -> Self {
+        self.telemetry = true;
+        self
+    }
 }
 
 fn new_scoped(
@@ -200,8 +233,9 @@ fn new_scoped(
     shard_count: usize,
     capacity_hint: usize,
     options: SharedBackendOptions,
-) -> Arc<dyn Backend> {
-    match shard_count.next_power_of_two().max(1) {
+) -> Result<Arc<dyn Backend>, BoxError> {
+    let resolved_shards = shard_count.next_power_of_two().max(1);
+    let backend: Arc<dyn Backend> = match resolved_shards {
         1 => Arc::new(FcShared::<1>::new(id, capacity_hint, options)),
         2 => Arc::new(FcShared::<2>::new(id, capacity_hint, options)),
         4 => Arc::new(FcShared::<4>::new(id, capacity_hint, options)),
@@ -211,8 +245,14 @@ fn new_scoped(
         64 => Arc::new(FcShared::<64>::new(id, capacity_hint, options)),
         128 => Arc::new(FcShared::<128>::new(id, capacity_hint, options)),
         256 => Arc::new(FcShared::<256>::new(id, capacity_hint, options)),
-        shards => panic!("fc-shared benchmark supports up to 256 shards, got {shards}"),
-    }
+        shards => {
+            return Err(format!(
+                "{id} benchmark supports up to {MAX_FC_SHARED_SHARDS} shards; requested {shard_count}, resolved to {shards}"
+            )
+            .into());
+        }
+    };
+    Ok(backend)
 }
 
 pub struct FcShared<const SHARDS: usize> {
@@ -233,21 +273,46 @@ struct FcSharedState {
 
 impl<const SHARDS: usize> FcShared<SHARDS> {
     fn new(id: &'static str, capacity_hint: usize, options: SharedBackendOptions) -> Self {
+        const {
+            assert!(
+                SHARDS <= MAX_FC_SHARED_SHARDS,
+                "fc-shared benchmark shard table must not exceed MAX_FC_SHARED_SHARDS"
+            );
+        }
         Self {
             id,
-            store: SharedEmbeddedStore::new(SharedEmbeddedConfig {
-                total_memory_bytes: options.cache_config.total_memory_bytes(),
-                eviction_policy: options.cache_config.eviction_policy,
-                flat_map_capacity_hint: Some(options.cache_config.entry_capacity(capacity_hint)),
-                lock_policy: options.lock_policy,
-                ..SharedEmbeddedConfig::default()
-            }),
+            store: shared_store_with_options::<SHARDS>(
+                SharedEmbeddedConfig {
+                    total_memory_bytes: options.cache_config.total_memory_bytes(),
+                    eviction_policy: options.cache_config.eviction_policy,
+                    flat_map_capacity_hint: Some(
+                        options.cache_config.entry_capacity(capacity_hint),
+                    ),
+                    lock_policy: options.lock_policy,
+                    ..SharedEmbeddedConfig::default()
+                },
+                options.telemetry,
+            ),
             state: Arc::new(Mutex::new(FcSharedState::default())),
             read_mode: options.read_mode,
             prepare_keys: options.prepare_keys,
             key_scope: options.key_scope,
         }
     }
+}
+
+fn shared_store_with_options<const SHARDS: usize>(
+    config: SharedEmbeddedConfig,
+    telemetry: bool,
+) -> SharedEmbeddedStore<SHARDS> {
+    #[cfg(feature = "telemetry")]
+    {
+        if telemetry {
+            return SharedEmbeddedStore::with_metrics(config, Some(CacheTelemetry::new(SHARDS)));
+        }
+    }
+    let _ = telemetry;
+    SharedEmbeddedStore::new(config)
 }
 
 #[derive(Debug, Clone, Copy)]

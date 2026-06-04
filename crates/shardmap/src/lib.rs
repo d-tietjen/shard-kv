@@ -3,6 +3,8 @@
 
 #[cfg(feature = "embedded")]
 pub mod cache;
+#[cfg(feature = "codec")]
+pub mod codec;
 #[cfg(not(feature = "embedded"))]
 compile_error!(
     "shardmap currently requires the `embedded` feature; build with default features enabled or enable `embedded`/`sharded` explicitly"
@@ -16,6 +18,8 @@ pub mod config;
 pub mod cuda;
 #[cfg(feature = "embedded")]
 pub mod embedded;
+#[cfg(feature = "embedded")]
+pub mod native;
 #[cfg(feature = "embedded")]
 pub mod persistence;
 #[cfg(feature = "embedded")]
@@ -36,11 +40,18 @@ mod monoio_runtime;
 
 #[cfg(feature = "embedded")]
 pub use cache::{
-    CacheOptions, CacheSemanticError, CacheSemanticMatch, ShardCache, ShardCacheWithShards,
-    ShardMap, ShardMapWithShards, SharedCache,
+    CacheOptions, CacheSemanticError, CacheSemanticMatch, RawShardMap, RawShardMapWithShards,
+    ShardCache, ShardCacheWithShards, SharedCache,
+};
+#[cfg(feature = "codec")]
+pub use codec::{
+    CodecError, CodecKey, CodecKeyDecode, CodecShardMap, CodecShardMapRef, CodecShardMapWithShards,
+    CodecValue, CodecValueEncode, EncodedBytes,
 };
 #[cfg(feature = "embedded")]
 pub use error::{Result, ShardCacheError};
+#[cfg(feature = "embedded")]
+pub use native::{ShardMap, ShardMapHasher, ShardMapOptions, ShardMapRef, ShardMapWithShards};
 #[cfg(all(feature = "telemetry", feature = "embedded"))]
 pub use storage::{CacheMetrics, CacheMetricsSnapshot, CacheTelemetry};
 #[cfg(feature = "embedded")]

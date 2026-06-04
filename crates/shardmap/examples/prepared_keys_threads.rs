@@ -1,9 +1,9 @@
 use std::thread;
 
-use shardmap::ShardMap;
+use shardmap::ShardCache;
 
 fn main() {
-    let cache = ShardMap::new();
+    let cache = ShardCache::new();
     cache.insert_slice(b"counter:total", b"42");
 
     let prepared = cache.prepare_key(b"counter:total");

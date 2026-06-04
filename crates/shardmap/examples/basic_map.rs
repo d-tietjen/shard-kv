@@ -1,7 +1,7 @@
-use shardmap::ShardMap;
+use shardmap::ShardCache;
 
 fn main() {
-    let cache = ShardMap::with_capacity(128);
+    let cache = ShardCache::with_capacity(128);
 
     cache.insert_slice(b"job:1", b"queued");
     assert_eq!(cache.get_owned(b"job:1").unwrap().as_ref(), b"queued");

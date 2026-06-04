@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Guard the 0.2.x crates.io release shape.
+# Guard the crates.io release shape.
 
 set -euo pipefail
 

@@ -88,6 +88,7 @@ server = [
     "dep:tracing-subscriber",
 ]
 redis-server = ["server", "redis", "redis-functions", "redis-modules"]
+codec = ["embedded"]
 
 # Runtime and platform integrations.
 monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]

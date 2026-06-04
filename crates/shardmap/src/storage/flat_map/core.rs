@@ -86,8 +86,16 @@ impl FlatMap {
 
     #[cfg(feature = "telemetry")]
     pub fn attach_metrics(&mut self, metrics: CacheTelemetryHandle, shard_id: usize) {
-        self.telemetry = Some(FlatMapTelemetry { metrics, shard_id });
+        self.telemetry = Some(FlatMapTelemetry::new(metrics, shard_id));
         self.sync_metrics_state();
+    }
+
+    #[cfg(feature = "telemetry")]
+    #[inline(always)]
+    pub(super) fn start_telemetry_latency_sample(&mut self) -> Option<Instant> {
+        self.telemetry
+            .as_mut()
+            .and_then(FlatMapTelemetry::start_latency_sample)
     }
 
     pub fn configure_memory_policy(
@@ -510,21 +518,25 @@ impl FlatMap {
         memory_delta: isize,
         start: Option<Instant>,
     ) {
-        if let (Some(telemetry), Some(start)) = (&self.telemetry, start) {
+        if let Some(telemetry) = &self.telemetry {
             telemetry.metrics.record_set(
                 telemetry.shard_id,
                 written_len,
-                start.elapsed().as_nanos() as u64,
+                start.map(|start| start.elapsed().as_nanos() as u64),
             );
-            telemetry
-                .metrics
-                .adjust_keys_total(telemetry.shard_id, key_delta);
-            telemetry
-                .metrics
-                .adjust_memory_bytes(telemetry.shard_id, memory_delta);
-            telemetry
-                .metrics
-                .set_shard_keys(telemetry.shard_id, self.len());
+            if key_delta != 0 {
+                telemetry
+                    .metrics
+                    .adjust_keys_total(telemetry.shard_id, key_delta);
+                telemetry
+                    .metrics
+                    .set_shard_keys(telemetry.shard_id, self.len());
+            }
+            if memory_delta != 0 {
+                telemetry
+                    .metrics
+                    .adjust_memory_bytes(telemetry.shard_id, memory_delta);
+            }
         }
     }
 

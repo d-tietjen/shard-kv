@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache"
-version = "0.2.1"
+version = "0.3.1"
 dependencies = [
  "clap",
  "shardmap",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-benchmarks"
-version = "0.2.1"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "clap",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-c"
-version = "0.2.1"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "shardmap",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-client-rs"
-version = "0.2.1"
+version = "0.3.1"
 dependencies = [
  "libc",
  "thiserror",
@@ -1326,14 +1326,14 @@ dependencies = [
 
 [[package]]
 name = "shardcache-formal"
-version = "0.2.1"
+version = "0.3.1"
 dependencies = [
  "creusot-std",
 ]
 
 [[package]]
 name = "shardcache-py"
-version = "0.2.1"
+version = "0.3.1"
 dependencies = [
  "core_affinity",
  "dashmap",
@@ -1347,14 +1347,14 @@ dependencies = [
 
 [[package]]
 name = "shardcache-redis"
-version = "0.2.1"
+version = "0.3.1"
 dependencies = [
  "shardmap",
 ]
 
 [[package]]
 name = "shardcache-runtime"
-version = "0.2.1"
+version = "0.3.1"
 dependencies = [
  "cust",
  "serde",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "shardmap"
-version = "0.2.1"
+version = "0.3.1"
 dependencies = [
  "bytes",
  "bytes-handoff",

@@ -80,7 +80,7 @@ Suite manifests live under `benchmarks/embedded-suites/`.
 
 | Suite | Purpose |
 | --- | --- |
-| `embedded-core` | Main in-process cache comparison: shardcache embedded paths, DashMap, Moka, LRU, and `RwLock<HashMap>`. |
+| `embedded-core` | Main in-process cache comparison: shardcache typed/shared/owner-local embedded paths, DashMap, Moka, LRU, and `RwLock<HashMap>`. |
 | `embedded-ttl` | TTL-capable embedded backends with active TTL writes. |
 | `embedded-lru` | Capacity-bounded comparisons with LRU-style pressure. |
 | `embedded-copy` | Copy-out read path comparison for backends that materialize GET values. |
@@ -90,6 +90,11 @@ The default `embedded-core` backend list is:
 
 ```text
 fc-embed,
+fc-typed-ref,
+fc-typed,
+fc-codec-ref,
+fc-codec-ns-ref,
+fc-codec-multi-ns-ref,
 fc-shared,
 dashmap,
 dashmap-worker-shards,
@@ -104,7 +109,7 @@ Override the backend list for one run:
 ```bash
 ./benchmarks/scripts/run-embedded-benchmark-suite.sh \
   --suite embedded-core \
-  --backends fc-embed,fc-shared,dashmap,moka,rwlock-hashmap \
+  --backends fc-shared,fc-typed-ref,fc-codec-ref,fc-codec-ns-ref,fc-codec-multi-ns-ref,dashmap-ref \
   --vcpus 1,2,4,8,16
 ```
 
@@ -213,9 +218,16 @@ For fair comparisons, compare rows with the same:
 - key pattern and distribution
 - read mode
 
-`fc-embed` is the owner-local embedded path. `fc-shared` is the shared embedded
-handle path. DashMap, Moka, LRU, and `rwlock-hashmap` are competitor or baseline
-in-process maps.
+`fc-embed` is the owner-local embedded path. `fc-shared` is the raw
+`ShardCache`/shared byte-engine path where callers handle any decoding
+themselves. `fc-typed-ref` and `fc-typed` measure native
+`ShardMap<Vec<u8>, Vec<u8>>` through borrowed and owned typed reads.
+`fc-codec-ref` and `fc-codec` measure `CodecShardMap<Vec<u8>, Vec<u8>>` with no
+namespace prefix. `fc-codec-ns-ref` and `fc-codec-ns` add a single namespace
+prefix over a shared engine. `fc-codec-multi-ns-ref` and
+`fc-codec-multi-ns` split keys across multiple typed namespaces sharing one
+engine, which is useful for tenant/table-style overhead comparisons. DashMap,
+Moka, LRU, and `rwlock-hashmap` are competitor or baseline in-process maps.
 
 ## Troubleshooting
 

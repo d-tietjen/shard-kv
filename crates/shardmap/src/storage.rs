@@ -1,8 +1,8 @@
 //! Embedded storage APIs, routing helpers, batch payloads, and runtime stats.
 //!
-//! Most applications should start with [`crate::ShardMap`], which is a
-//! cloneable DashMap-like facade over [`SharedEmbeddedStore`]. This module
-//! exposes the lower-level storage surfaces behind that facade. Use
+//! Most applications should start with [`crate::ShardMap`] for typed embedded
+//! key/value access, or [`crate::ShardCache`] for the raw byte cache API. This
+//! module exposes the lower-level storage surfaces behind those facades. Use
 //! [`EmbeddedStore`] for the richer shared sharded engine used by server mode.
 //! Use [`LocalEmbeddedStore`] when work is pinned to owner-local worker threads
 //! and each worker can access its assigned shards through exclusive `&mut`
