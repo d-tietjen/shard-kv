@@ -63,15 +63,18 @@ impl EmbeddedStore {
     pub fn with_route_mode_and_parent_telemetry(
         shard_count: usize,
         route_mode: EmbeddedRouteMode,
-        parent: Option<Arc<CacheTelemetry>>,
+        parent: Option<Arc<TelemetryRuntime>>,
     ) -> Self {
-        let metrics = Some(CacheTelemetry::parent_or_new(shard_count, parent));
+        let metrics = Some(CacheTelemetry::new_with_runtime(shard_count, parent));
         Self::with_route_mode_and_metrics_shard_offset(shard_count, route_mode, metrics, 0)
     }
 
     /// Creates an embedded store with full-key routing and optional parent telemetry.
     #[cfg(feature = "parent-telemetry-runtime")]
-    pub fn with_parent_telemetry(shard_count: usize, parent: Option<Arc<CacheTelemetry>>) -> Self {
+    pub fn with_parent_telemetry(
+        shard_count: usize,
+        parent: Option<Arc<TelemetryRuntime>>,
+    ) -> Self {
         Self::with_route_mode_and_parent_telemetry(shard_count, EmbeddedRouteMode::FullKey, parent)
     }
 

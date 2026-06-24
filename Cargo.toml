@@ -24,7 +24,7 @@ rust-version = "1.90"
 shardcache = { path = "crates/shardcache", version = "0.4.0" }
 shardmap = { path = "crates/shardmap", version = "0.4.0", default-features = false }
 shardcache-client-rs = { path = "crates/shardcache-client-rs", version = "0.4.0" }
-fast-telemetry = "0.4"
+fast-telemetry = "0.6"
 
 clap = { version = "4.5", features = ["derive"] }
 core_affinity = "0.8"

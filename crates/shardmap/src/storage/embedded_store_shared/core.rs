@@ -35,9 +35,12 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     #[cfg(feature = "parent-telemetry-runtime")]
     pub fn with_parent_telemetry(
         config: SharedEmbeddedConfig,
-        parent: Option<Arc<CacheTelemetry>>,
+        parent: Option<Arc<TelemetryRuntime>>,
     ) -> Self {
-        Self::new_inner(config, Some(CacheTelemetry::parent_or_new(SHARDS, parent)))
+        Self::new_inner(
+            config,
+            Some(CacheTelemetry::new_with_runtime(SHARDS, parent)),
+        )
     }
 
     fn new_inner(

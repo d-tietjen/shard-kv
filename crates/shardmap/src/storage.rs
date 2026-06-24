@@ -126,6 +126,7 @@ pub(crate) use telemetry::LatencySampleStart;
 #[cfg(feature = "telemetry")]
 pub use telemetry::{
     CacheMetrics, CacheMetricsSnapshot, CacheTelemetry, CacheTelemetryClock, CacheTelemetryHandle,
+    TelemetryRuntime, TelemetryRuntimeConfig,
 };
 
 /// Owned byte buffer used for cache keys and values.

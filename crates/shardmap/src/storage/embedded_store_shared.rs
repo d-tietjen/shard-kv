@@ -21,7 +21,7 @@ use crate::storage::embedded_store::{
     assert_valid_shard_count, compute_key_route, compute_session_shard, shift_for,
 };
 #[cfg(feature = "telemetry")]
-use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
+use crate::storage::{CacheTelemetry, CacheTelemetryHandle, TelemetryRuntime};
 use crate::storage::{
     FastHashMap, PreparedPointKey, SemanticCacheError, SemanticEmbedding, SemanticMatch, hash_key,
     hash_key_tag_from_hash, ttl_now_millis, validate_similarity_threshold,

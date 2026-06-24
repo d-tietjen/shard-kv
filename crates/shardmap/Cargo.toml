@@ -114,7 +114,7 @@ core_affinity = { workspace = true }
 crc32fast = { workspace = true }
 crossbeam-channel = { workspace = true }
 crossbeam-utils = { workspace = true }
-fast-telemetry = { workspace = true, optional = true }
+fast-telemetry = { workspace = true, features = ["runtime"], optional = true }
 hashbrown = { workspace = true }
 indextreemap = { workspace = true }
 itoa = "1"

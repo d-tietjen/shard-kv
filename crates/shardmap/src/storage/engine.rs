@@ -16,6 +16,8 @@ use crate::config::ShardCacheConfig;
 use crate::persistence::{PersistenceRuntime, load_recovery_state};
 use crate::protocol::{CommandSpanFrame, FastRequest, FastResponse, Frame, RespCodec};
 use crate::replication::{ReplicationBatchBuilder, ReplicationMutation, ReplicationPrimary};
+#[cfg(feature = "parent-telemetry-runtime")]
+use crate::storage::TelemetryRuntime;
 use crate::storage::command::{BorrowedCommand, Command};
 use crate::storage::stats::{GlobalStatsSnapshot, ShardStatsSnapshot};
 use crate::storage::{
@@ -341,9 +343,9 @@ impl EngineHandle {
     #[cfg(feature = "parent-telemetry-runtime")]
     pub fn open_with_parent_telemetry(
         config: ShardCacheConfig,
-        parent: Option<Arc<CacheTelemetry>>,
+        parent: Option<Arc<TelemetryRuntime>>,
     ) -> Result<Self> {
-        let metrics = Some(CacheTelemetry::parent_or_new(config.shard_count, parent));
+        let metrics = Some(CacheTelemetry::new_with_runtime(config.shard_count, parent));
         Self::open_with_metrics(config, metrics)
     }
 

@@ -134,13 +134,14 @@ assert!(map.contains_key(&key));
 
 Embedded applications that already own telemetry can pass that owner to
 shardmap instead of creating a separate metrics owner. Today, enable
-`parent-telemetry-runtime`, then pass `Some(Arc<CacheTelemetry>)` to
+`parent-telemetry-runtime`, then pass `Some(Arc<TelemetryRuntime>)` to
 `EmbeddedStore::with_parent_telemetry`,
 `EmbeddedStore::with_route_mode_and_parent_telemetry`,
 `SharedEmbeddedStore::with_parent_telemetry`, or
 `EngineHandle::open_with_parent_telemetry`. Passing `None` keeps the same API
-shape but lets shardmap allocate and own the fast-telemetry-backed metrics for
-that store.
+shape but lets shardmap allocate and own a private fast-telemetry runtime for
+that store. Shardmap registers its `CacheTelemetry` metric group at
+construction time and records through direct metric handles on the hot path.
 
 ## Codec Facades
 
@@ -589,7 +590,7 @@ embedding the protocol layer, or wiring storage into a specialized runtime.
 | `redis-server` | No | Server internals plus Redis/Valkey compatibility. |
 | `codec` | No | `CodecShardMap` and codec traits for namespaced typed facades over one shared byte engine. |
 | `telemetry` | No | Embedded operational metrics. |
-| `parent-telemetry-runtime` | No | Embedded telemetry constructors that use a parent-provided metrics owner or create a shardmap-owned fallback. |
+| `parent-telemetry-runtime` | No | Embedded telemetry constructors that use a parent-provided fast-telemetry runtime or create a shardmap-owned fallback. |
 | `monoio` | No | Linux-only server transport internals. |
 | `prefix-eviction` | No | Enables `EvictionPolicy::Prefix` for prefix-group memory-limit eviction. |
 
