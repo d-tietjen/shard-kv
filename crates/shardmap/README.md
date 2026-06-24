@@ -132,8 +132,8 @@ assert!(map.contains_key(&key));
 
 ### Parent Telemetry Runtime
 
-Embedded applications that already own a fast-telemetry runtime can pass that
-owner to shardmap instead of creating a separate metrics owner. Enable
+Embedded applications that already own telemetry can pass that owner to
+shardmap instead of creating a separate metrics owner. Today, enable
 `parent-telemetry-runtime`, then pass `Some(Arc<CacheTelemetry>)` to
 `EmbeddedStore::with_parent_telemetry`,
 `EmbeddedStore::with_route_mode_and_parent_telemetry`,
@@ -141,6 +141,29 @@ owner to shardmap instead of creating a separate metrics owner. Enable
 `EngineHandle::open_with_parent_telemetry`. Passing `None` keeps the same API
 shape but lets shardmap allocate and own the fast-telemetry-backed metrics for
 that store.
+
+The ideal long-term shape is for fast-telemetry to expose a shared runtime or
+metric registry type, for example `Arc<fast_telemetry::Runtime>`. In that model
+the parent application owns exporters, scrape endpoints, and process-wide
+telemetry lifecycle. Shardmap would accept `Option<Arc<Runtime>>` at
+construction time, register its `shardmap` metric family under deployment or
+service labels, pre-resolve all counter/gauge/histogram handles, and keep those
+handles on the hot path. `Some(parent_runtime)` would record into the parent
+runtime; `None` would create a private runtime with the same metric family for
+standalone embedded use. Runtime or registry lookup must stay out of per-key
+operations.
+
+Because a shared runtime would be a public fast-telemetry type in shardmap's
+API, both crates must resolve the same fast-telemetry package version and enable
+the feature that defines that runtime type. Cargo unifies compatible versions
+and features for a package, so `fast-telemetry = "0.4"` in the parent and
+shardmap's workspace dependency are the same type. If the parent depends on an
+incompatible fast-telemetry version, such as `0.5` while shardmap exposes a
+`0.4` runtime, Rust treats those as different types and the API will not accept
+the parent runtime. Shardmap should therefore gate any future shared-runtime API
+behind a feature that enables the exact fast-telemetry runtime feature it needs,
+and should re-export the accepted runtime type so callers can use
+`shardmap::TelemetryRuntime` when they want to avoid version ambiguity.
 
 ## Codec Facades
 
@@ -589,6 +612,7 @@ embedding the protocol layer, or wiring storage into a specialized runtime.
 | `redis-server` | No | Server internals plus Redis/Valkey compatibility. |
 | `codec` | No | `CodecShardMap` and codec traits for namespaced typed facades over one shared byte engine. |
 | `telemetry` | No | Embedded operational metrics. |
+| `parent-telemetry-runtime` | No | Embedded telemetry constructors that use a parent-provided metrics owner or create a shardmap-owned fallback. |
 | `monoio` | No | Linux-only server transport internals. |
 | `prefix-eviction` | No | Enables `EvictionPolicy::Prefix` for prefix-group memory-limit eviction. |
 
