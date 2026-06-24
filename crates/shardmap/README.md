@@ -142,29 +142,6 @@ shardmap instead of creating a separate metrics owner. Today, enable
 shape but lets shardmap allocate and own the fast-telemetry-backed metrics for
 that store.
 
-The ideal long-term shape is for fast-telemetry to expose a shared runtime or
-metric registry type, for example `Arc<fast_telemetry::Runtime>`. In that model
-the parent application owns exporters, scrape endpoints, and process-wide
-telemetry lifecycle. Shardmap would accept `Option<Arc<Runtime>>` at
-construction time, register its `shardmap` metric family under deployment or
-service labels, pre-resolve all counter/gauge/histogram handles, and keep those
-handles on the hot path. `Some(parent_runtime)` would record into the parent
-runtime; `None` would create a private runtime with the same metric family for
-standalone embedded use. Runtime or registry lookup must stay out of per-key
-operations.
-
-Because a shared runtime would be a public fast-telemetry type in shardmap's
-API, both crates must resolve the same fast-telemetry package version and enable
-the feature that defines that runtime type. Cargo unifies compatible versions
-and features for a package, so `fast-telemetry = "0.4"` in the parent and
-shardmap's workspace dependency are the same type. If the parent depends on an
-incompatible fast-telemetry version, such as `0.5` while shardmap exposes a
-`0.4` runtime, Rust treats those as different types and the API will not accept
-the parent runtime. Shardmap should therefore gate any future shared-runtime API
-behind a feature that enables the exact fast-telemetry runtime feature it needs,
-and should re-export the accepted runtime type so callers can use
-`shardmap::TelemetryRuntime` when they want to avoid version ambiguity.
-
 ## Codec Facades
 
 Enable the `codec` feature when you want typed facades over the shared byte
