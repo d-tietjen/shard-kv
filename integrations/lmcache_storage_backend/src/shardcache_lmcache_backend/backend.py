@@ -179,9 +179,46 @@ class ShardCacheStorageBackend(StoragePluginInterface):
         self._eviction_policy = str(
             self._get_config_value("eviction_policy", "none") or "none"
         ).strip().lower()
+        self._resident_service = self._get_bool_config("resident_service", True)
         self._numa_policy = str(
             self._get_config_value("numa_policy", "off") or "off"
         ).strip().lower()
+        self._deployment_id = str(
+            self._get_config_value("deployment_id", "default") or ""
+        ).strip()
+        self._service_namespace = str(
+            self._get_config_value("service_namespace", "lmcache") or ""
+        ).strip()
+        self._store_namespaces_keys = self._client_architecture not in {
+            "scnp_tcp",
+            "tcp",
+            "scnp_tcp_python",
+            "tcp_python",
+        }
+        self._key_prefix = (
+            self._service_namespace.encode("utf-8") + b"\0"
+            if self._service_namespace and not self._store_namespaces_keys
+            else b""
+        )
+        self._migrate_local_cpu_on_miss = self._get_bool_config(
+            "migrate_local_cpu_on_miss", True
+        )
+        self._backfill_local_cpu_hits = self._get_bool_config("backfill_local_cpu_hits", True)
+        if self._resident_service:
+            if self._eviction_policy != "none":
+                logger.warning(
+                    "resident shardcache service %r ignores eviction_policy=%r",
+                    self._service_namespace or self._deployment_id,
+                    self._eviction_policy,
+                )
+                self._eviction_policy = "none"
+            if self._max_memory_bytes:
+                logger.warning(
+                    "resident shardcache service %r ignores max_memory_bytes=%s",
+                    self._service_namespace or self._deployment_id,
+                    self._max_memory_bytes,
+                )
+                self._max_memory_bytes = 0
         self._encoded_key_cache_limit = max(0, self._get_int_config("encoded_key_cache_limit", 65536))
         self._encoded_metadata_cache_limit = max(
             0, self._get_int_config("encoded_metadata_cache_limit", 4096)
@@ -208,6 +245,9 @@ class ShardCacheStorageBackend(StoragePluginInterface):
             prefer_session_tags=True,
             scnp_addr=self._scnp_addr,
             numa_policy=self._numa_policy,
+            deployment_id=self._deployment_id or None,
+            service_namespace=self._service_namespace,
+            resident_service=self._resident_service,
         )
 
         self._lock = threading.RLock()
@@ -236,10 +276,25 @@ class ShardCacheStorageBackend(StoragePluginInterface):
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         encoded_key = self._encode_key(key)
         exists = self._store.exists(encoded_key)
+        if not exists:
+            exists = self._local_cpu_contains(key)
         if exists and pin:
             with self._lock:
                 self._pinned.add(key)
         return exists
+
+    def batched_contains(self, keys: Sequence[CacheEngineKey], pin: bool = False) -> int:
+        hits = 0
+        pinned: list[CacheEngineKey] = []
+        for key in keys:
+            if self.contains(key, pin=False):
+                hits += 1
+                if pin:
+                    pinned.append(key)
+        if pinned:
+            with self._lock:
+                self._pinned.update(pinned)
+        return hits
 
     def exists_in_put_tasks(self, key: CacheEngineKey) -> bool:
         with self._lock:
@@ -426,18 +481,21 @@ class ShardCacheStorageBackend(StoragePluginInterface):
                 prepared = self._prepare_lmcache_batch([key])
                 if prepared is not None:
                     objs = self._store.batch_get_lmcache_memory_objs_prepared(prepared)
-                    return objs[0] if objs else None
+                    obj = objs[0] if objs else None
+                    return obj if obj is not None else self._get_local_cpu_resident(key)
                 if hasattr(self._store, "get_lmcache_memory_obj_from_engine_key"):
-                    return self._store.get_lmcache_memory_obj_from_engine_key(key)
+                    obj = self._store.get_lmcache_memory_obj_from_engine_key(key)
+                    return obj if obj is not None else self._get_local_cpu_resident(key)
                 encoded = self._encode_key(key)
                 objs = self._store.batch_get_lmcache_memory_objs([encoded])
-                return objs[0] if objs else None
+                obj = objs[0] if objs else None
+                return obj if obj is not None else self._get_local_cpu_resident(key)
             except Exception:
                 pass
 
         raw_value = self._get_raw_value(key)
         if raw_value is None:
-            return None
+            return self._get_local_cpu_resident(key)
         return self._restore_memory_obj(self._decode_record(raw_value))
 
     def get_non_blocking(
@@ -492,7 +550,7 @@ class ShardCacheStorageBackend(StoragePluginInterface):
                         time.perf_counter_ns() - total_started_ns,
                         item_count=len(keys),
                     )
-                    return result
+                    return self._fill_local_cpu_misses(keys, result)
                 if hasattr(self._store, "batch_get_lmcache_memory_objs_from_engine_keys"):
                     store_started_ns = time.perf_counter_ns()
                     result = self._store.batch_get_lmcache_memory_objs_from_engine_keys(keys)
@@ -506,7 +564,7 @@ class ShardCacheStorageBackend(StoragePluginInterface):
                         time.perf_counter_ns() - total_started_ns,
                         item_count=len(keys),
                     )
-                    return result
+                    return self._fill_local_cpu_misses(keys, result)
                 encoded_keys = [self._encode_key(key) for key in keys]
                 store_started_ns = time.perf_counter_ns()
                 result = self._store.batch_get_lmcache_memory_objs(encoded_keys)
@@ -520,7 +578,7 @@ class ShardCacheStorageBackend(StoragePluginInterface):
                     time.perf_counter_ns() - total_started_ns,
                     item_count=len(keys),
                 )
-                return result
+                return self._fill_local_cpu_misses(keys, result)
             except Exception:
                 pass
 
@@ -540,7 +598,7 @@ class ShardCacheStorageBackend(StoragePluginInterface):
             time.perf_counter_ns() - total_started_ns,
             item_count=len(keys),
         )
-        return result
+        return self._fill_local_cpu_misses(keys, result)
 
     def pin(self, key: CacheEngineKey) -> bool:
         if not self.contains(key, pin=False):
@@ -752,6 +810,11 @@ class ShardCacheStorageBackend(StoragePluginInterface):
             "max_memory_bytes": self._max_memory_bytes,
             "eviction_policy": self._eviction_policy,
             "numa_policy": self._numa_policy,
+            "deployment_id": self._deployment_id,
+            "service_namespace": self._service_namespace,
+            "resident_service": self._resident_service,
+            "migrate_local_cpu_on_miss": self._migrate_local_cpu_on_miss,
+            "backfill_local_cpu_hits": self._backfill_local_cpu_hits,
             "config_prefix": self._config_prefix,
         }
 
@@ -780,7 +843,7 @@ class ShardCacheStorageBackend(StoragePluginInterface):
     def _encode_key(self, key: CacheEngineKey) -> bytes:
         started_ns = time.perf_counter_ns() if self._enable_backend_stage_metrics else 0
         if self._encoded_key_cache_limit <= 0:
-            encoded = key.to_string().encode("utf-8")
+            encoded = self._namespace_bytes(key.to_string().encode("utf-8"))
             self._record_backend_stage(
                 "backend.encode_key.direct",
                 time.perf_counter_ns() - started_ns,
@@ -801,7 +864,7 @@ class ShardCacheStorageBackend(StoragePluginInterface):
                 )
                 return cached
 
-            encoded = key.to_string().encode("utf-8")
+            encoded = self._namespace_bytes(key.to_string().encode("utf-8"))
             self._encoded_key_cache[key] = encoded
             if len(self._encoded_key_cache) > self._encoded_key_cache_limit:
                 self._encoded_key_cache.popitem(last=False)
@@ -856,7 +919,12 @@ class ShardCacheStorageBackend(StoragePluginInterface):
         session_value = request_configs.get("lmcache.tag.session")
         if session_value is None:
             return None
-        return f"lmcache-session:{session_value}".encode("utf-8")
+        return self._namespace_bytes(f"lmcache-session:{session_value}".encode("utf-8"))
+
+    def _namespace_bytes(self, raw: bytes) -> bytes:
+        if not self._key_prefix:
+            return raw
+        return self._key_prefix + raw
 
     def _shared_session_prefix(self, keys: Sequence[CacheEngineKey]) -> Optional[bytes]:
         session_prefix: Optional[bytes] = None
@@ -944,6 +1012,99 @@ class ShardCacheStorageBackend(StoragePluginInterface):
             byte_count=sum(len(blob) for blob in metadata_blobs),
         )
         return prepared
+
+    def _local_cpu_contains(self, key: CacheEngineKey) -> bool:
+        if not self._migrate_local_cpu_on_miss or self.local_cpu_backend is None:
+            return False
+
+        for method_name in ("contains", "exists"):
+            method = getattr(self.local_cpu_backend, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                return bool(method(key))
+            except Exception as exc:
+                logger.debug("%s on local CPU backend failed for %s: %s", method_name, key, exc)
+
+        return self._get_local_cpu_resident(key) is not None
+
+    def _get_local_cpu_resident(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        if not self._migrate_local_cpu_on_miss or self.local_cpu_backend is None:
+            return None
+
+        obj = self._local_cpu_get_blocking(key)
+        if obj is None:
+            return None
+
+        if self._backfill_local_cpu_hits:
+            self._backfill_from_local_cpu(key, obj)
+        return obj
+
+    def _fill_local_cpu_misses(
+        self,
+        keys: Sequence[CacheEngineKey],
+        results: list[Optional[MemoryObj]],
+    ) -> list[Optional[MemoryObj]]:
+        if (
+            not self._migrate_local_cpu_on_miss
+            or self.local_cpu_backend is None
+            or not any(result is None for result in results)
+        ):
+            return results
+
+        filled = list(results)
+        backfill_keys: list[CacheEngineKey] = []
+        backfill_objs: list[MemoryObj] = []
+        for index, result in enumerate(filled):
+            if result is not None:
+                continue
+            obj = self._local_cpu_get_blocking(keys[index])
+            if obj is None:
+                continue
+            filled[index] = obj
+            if self._backfill_local_cpu_hits:
+                backfill_keys.append(keys[index])
+                backfill_objs.append(obj)
+
+        if backfill_keys:
+            self._backfill_many_from_local_cpu(backfill_keys, backfill_objs)
+        return filled
+
+    def _local_cpu_get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        for method_name in ("get_blocking", "get"):
+            method = getattr(self.local_cpu_backend, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                result = method(key)
+                if isinstance(result, Future):
+                    result = result.result()
+                return result
+            except Exception as exc:
+                logger.debug("%s on local CPU backend failed for %s: %s", method_name, key, exc)
+        return None
+
+    def _backfill_from_local_cpu(self, key: CacheEngineKey, obj: MemoryObj) -> None:
+        self._backfill_many_from_local_cpu([key], [obj])
+
+    def _backfill_many_from_local_cpu(
+        self,
+        keys: Sequence[CacheEngineKey],
+        objs: Sequence[MemoryObj],
+    ) -> None:
+        try:
+            self.batched_submit_put_task(keys, list(objs))
+            self._record_backend_stage(
+                "backend.local_cpu_miss_backfill",
+                0,
+                item_count=len(keys),
+                byte_count=sum(
+                    int(getattr(getattr(obj, "metadata", None), "phy_size", 0) or 0)
+                    for obj in objs
+                ),
+            )
+        except Exception as exc:
+            logger.warning("failed to backfill local CPU resident entries into shardcache: %s", exc)
 
     def _get_raw_value(self, key: CacheEngineKey) -> Any:
         encoded_key = self._encode_key(key)

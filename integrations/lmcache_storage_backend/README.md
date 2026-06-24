@@ -27,6 +27,9 @@ extra_config:
   storage_plugin.shardcache.module_path: shardcache_lmcache_backend.backend
   storage_plugin.shardcache.class_name: ShardCacheStorageBackend
   storage_plugin.shardcache.connection: embedded
+  storage_plugin.shardcache.deployment_id: default
+  storage_plugin.shardcache.service_namespace: lmcache
+  storage_plugin.shardcache.resident_service: true
   storage_plugin.shardcache.cores: 8
   storage_plugin.shardcache.numa_policy: off
   storage_plugin.shardcache.enable_metrics: false
@@ -83,10 +86,15 @@ All keys use the `storage_plugin.<name>.` prefix. With the examples above,
 | `cores` | host CPU count | Worker/core budget for the embedded store and plugin executor. |
 | `connection` | `embedded` | Normal deployment mode: `embedded` or `tcp`. |
 | `client_architecture` | derived from `connection` | Lower-level compatibility and benchmark knob. |
+| `deployment_id` | `default` | Process-resident embedded deployment name. Backends with the same ID, resident/cache mode, and store settings reuse one live shardcache map, preserving DashMap-style resident data across backend wrapper instances. Use an empty value or a unique ID for isolated stores. |
+| `service_namespace` | `lmcache` | Prefix applied to every stored key so this resident service cannot overwrite, or be overwritten by, another shardcache user sharing the same deployment. Use an empty value only for compatibility with older un-namespaced keys. |
+| `resident_service` | `true` | Use shardmap's resident-service default: no memory-pressure eviction for the embedded deployment backing this service. |
 | `scnp_addr` | `127.0.0.1:6500` | SCNP server address for TCP mode. |
 | `enable_metrics` | `false` | Enable shardcache store metrics. |
 | `enable_backend_stage_metrics` | `false` | Record plugin-stage timings. |
 | `zero_copy_reads` | `true` | Rebuild raw `BytesBufferMemoryObj` payloads without an extra copy when possible. |
+| `migrate_local_cpu_on_miss` | `true` | On shardcache misses, read through the provided LMCache local CPU/DashMap backend when available. |
+| `backfill_local_cpu_hits` | `true` | Store local CPU/DashMap hits back into shardcache so resident data migrates without an explicit drain step. |
 | `numa_policy` | `off` | Embedded NUMA mode: `off`, `worker_pinned`, or `caller_local`. `worker_pinned` pins owner workers to discovered NUMA CPUs. `caller_local` also routes keys/sessions to the calling thread's NUMA node, creating node-local cache copies. |
 | `wal_path` | unset | Embedded WAL path. Empty disables WAL persistence. |
 | `compress_wal` | `true` | Compress embedded WAL records when WAL is enabled. |
@@ -100,6 +108,26 @@ All keys use the `storage_plugin.<name>.` prefix. With the examples above,
 `client_architecture` accepts `local_embedded`, `scnp_tcp`, and
 `scnp_tcp_python`. The Python TCP adapter is retained for debugging and
 regression checks; the Rust SCNP adapter is the default TCP path.
+
+## Resident And LRU Deployment Isolation
+
+Embedded `deployment_id` reuse is safe for DashMap replacement only because the
+backing-engine registry separates resident services from cache-style services.
+`service_namespace` prevents key overwrites between services, but it does not
+make LRU/LFU a per-namespace setting. Memory budget and eviction policy belong
+to the backing shardmap engine.
+
+The embedded registry therefore uses these rules:
+
+- `resident_service=true` always uses a resident engine with
+  `eviction_policy=none` and no memory budget. Resident services with the same
+  `deployment_id` and store settings can share that engine through different
+  `service_namespace` views.
+- `resident_service=false` creates a cache-style engine keyed by
+  `max_memory_bytes` and `eviction_policy`. An LRU/LFU deployment with the same
+  `deployment_id` as a resident deployment does not share the resident engine.
+- A namespace view cannot switch an existing engine from resident mode to LRU
+  mode or back. Create a separate deployment policy instead.
 
 ## Minimal Embedded Backend
 
@@ -167,6 +195,26 @@ cap stays at 4 MiB for ordinary server runs.
 ## Notes
 
 - Uses `full_key` routing because LMCache keys are content-addressed.
+- Embedded mode reuses a process-resident shardcache store for each
+  `deployment_id`, which mirrors the important DashMap property that entries
+  remain live until removed rather than disappearing when one backend wrapper
+  is recreated.
+- Eviction policy is engine-wide, so embedded resident deployments and
+  cache-style LRU/LFU deployments are placed in separate backing-engine pools
+  even when they use the same `deployment_id`.
+- `service_namespace` isolates this service's keys from Redis-compatible or
+  other shardcache users that share a process or server. In embedded mode this
+  is implemented by shardcache's generic `Store` namespace view, so the rule is
+  not LMCache-specific.
+- `resident_service=true` selects shardmap's resident default by normalizing
+  the embedded deployment to `eviction_policy=none` and no memory budget.
+- For TCP deployments, key namespacing still prevents accidental overwrites,
+  but eviction policy is owned by the remote shardcache server. Run the DashMap
+  replacement against a no-eviction shardcache service or a dedicated
+  resident deployment when it must not be affected by Redis-like cache rules.
+- During migration from LMCache local CPU/DashMap storage, shardcache misses
+  fall through to the provided local backend and are backfilled into shardcache
+  by default.
 - `numa_policy=caller_local` is for dual-socket/GPU-local deployments where
   callers are already pinned near their target GPU; the same logical key can
   exist once per NUMA node to avoid cross-socket hot-path reads. Do not combine

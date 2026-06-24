@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.3.2"
+shardmap = "0.4.0"
 ```
 
 ## Quick Start
@@ -47,6 +47,7 @@ guard is enough.
 | Lock helpers | Process-local token locks built on `SET key token NX PX ttl` semantics. | [`ttl_and_locks.rs`](examples/ttl_and_locks.rs) |
 | Configuration | Capacity hints, memory budgets, eviction policy, routing, and lock policy. | [`configured_cache.rs`](examples/configured_cache.rs) |
 | Redis-compatible embedded API | Execute supported Redis commands directly in-process, including prepared commands and session state. | Enable the `redis` feature |
+| Parent telemetry runtime | Record shardmap metrics into a parent-owned fast-telemetry runtime, or fall back to shardmap-owned metrics. | Enable the `parent-telemetry-runtime` feature |
 | Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
 | Semantic TTL | Combine semantic reuse with freshness windows. | [`semantic_ttl.rs`](examples/semantic_ttl.rs) |
 | Governance metadata | Attach application-owned authorization context to semantic hits. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
@@ -91,6 +92,20 @@ default is 64 stripes. `ShardMapOptions::default_ttl_ms` applies to plain
 can override it for one write. Passing `None` to an explicit TTL write stores
 that value without a TTL.
 
+By default, shardmap behaves like a resident in-process map: entries remain
+until the owning process removes them or the caller explicitly uses a TTL.
+Memory-pressure eviction is opt-in through `CacheOptions` or server
+configuration; it is not part of the default `ShardMap::new()` path.
+
+### Resident And Cache Deployment Isolation
+
+Service namespaces isolate keys, not eviction policy. Memory-pressure eviction
+is configured on the embedded backing engine, so a resident deployment must not
+share an engine with an LRU/LFU cache-style deployment. The Python `Store`
+namespace view enforces this by refusing to change `resident_service` on an
+existing engine; deployment registries should likewise key backing engines by
+resident/cache mode and eviction settings.
+
 Custom structs need no codec when they are used with the native `ShardMap`.
 
 ```rust
@@ -114,6 +129,19 @@ map.insert(key.clone(), User { name: "Devon".to_owned(), active: true });
 
 assert!(map.contains_key(&key));
 ```
+
+### Parent Telemetry Runtime
+
+Embedded applications that already own telemetry can pass that owner to
+shardmap instead of creating a separate metrics owner. Today, enable
+`parent-telemetry-runtime`, then pass `Some(Arc<TelemetryRuntime>)` to
+`EmbeddedStore::with_parent_telemetry`,
+`EmbeddedStore::with_route_mode_and_parent_telemetry`,
+`SharedEmbeddedStore::with_parent_telemetry`, or
+`EngineHandle::open_with_parent_telemetry`. Passing `None` keeps the same API
+shape but lets shardmap allocate and own a private fast-telemetry runtime for
+that store. Shardmap registers its `CacheTelemetry` metric group at
+construction time and records through direct metric handles on the hot path.
 
 ## Codec Facades
 
@@ -187,9 +215,11 @@ cache.insert_slice_with_ttl(b"session:1", b"active", Some(30_000));
 assert!(cache.contains_key(b"session:1"));
 ```
 
-`CacheOptions` configures the shared-handle cache. Memory limits are enforced
-inside each stripe, using the selected eviction policy. `default_ttl_ms`
-applies to plain cache writes, while explicit TTL writes override it.
+`CacheOptions` configures the shared-handle cache. The default options are also
+resident: no default TTL, no memory budget, and `EvictionPolicy::None`. Memory
+limits are enforced inside each stripe only when you set a budget and select an
+eviction policy. `default_ttl_ms` applies to plain cache writes, while explicit
+TTL writes override it.
 
 ```rust
 use shardmap::{CacheOptions, ShardCache};
@@ -560,6 +590,7 @@ embedding the protocol layer, or wiring storage into a specialized runtime.
 | `redis-server` | No | Server internals plus Redis/Valkey compatibility. |
 | `codec` | No | `CodecShardMap` and codec traits for namespaced typed facades over one shared byte engine. |
 | `telemetry` | No | Embedded operational metrics. |
+| `parent-telemetry-runtime` | No | Embedded telemetry constructors that use a parent-provided fast-telemetry runtime or create a shardmap-owned fallback. |
 | `monoio` | No | Linux-only server transport internals. |
 | `prefix-eviction` | No | Enables `EvictionPolicy::Prefix` for prefix-group memory-limit eviction. |
 

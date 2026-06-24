@@ -2549,6 +2549,9 @@ struct PyStore {
     compress_wal: bool,
     max_memory_bytes: Option<usize>,
     eviction_policy: EvictionPolicy,
+    service_namespace: Option<String>,
+    key_prefix: Option<Vec<u8>>,
+    resident_service: bool,
 }
 
 #[pyclass(name = "DirectVllmRestoreHandle", unsendable)]
@@ -3162,10 +3165,40 @@ impl PyReadBatchChunkView {
 
 type VllmLayerRestoreSummary = (u32, usize, usize, usize, bool);
 
+impl PyStore {
+    fn key_prefix(&self) -> Option<&[u8]> {
+        self.key_prefix.as_deref()
+    }
+
+    fn namespaced_key(&self, key: Vec<u8>) -> Vec<u8> {
+        namespace_owned_key(self.key_prefix(), key)
+    }
+
+    fn namespaced_key_ref(&self, key: &[u8]) -> Vec<u8> {
+        namespace_key(self.key_prefix(), key)
+    }
+
+    fn namespaced_keys(&self, keys: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        namespace_owned_keys(self.key_prefix(), keys)
+    }
+
+    fn namespaced_items(&self, items: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<(Vec<u8>, Vec<u8>)> {
+        namespace_items(self.key_prefix(), items)
+    }
+
+    fn namespaced_pybacked_keys(&self, keys: &[PyBackedBytes]) -> Vec<Vec<u8>> {
+        namespace_pybacked_keys(self.key_prefix(), keys)
+    }
+
+    fn service_namespace_repr(&self) -> &str {
+        self.service_namespace.as_deref().unwrap_or("")
+    }
+}
+
 #[pymethods]
 impl PyStore {
     #[new]
-    #[pyo3(signature = (cores=1, wal_path=None, compress_wal=true, max_memory_bytes=None, eviction_policy="none", route_mode="full_key", enable_metrics=false, client_architecture="local_embedded", prefer_session_tags=false, numa_policy="off"))]
+    #[pyo3(signature = (cores=1, wal_path=None, compress_wal=true, max_memory_bytes=None, eviction_policy="none", route_mode="full_key", enable_metrics=false, client_architecture="local_embedded", prefer_session_tags=false, numa_policy="off", service_namespace="shardmap", resident_service=true))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         cores: usize,
@@ -3178,10 +3211,23 @@ impl PyStore {
         client_architecture: &str,
         prefer_session_tags: bool,
         numa_policy: &str,
+        service_namespace: &str,
+        resident_service: bool,
     ) -> PyResult<Self> {
         let route_mode = parse_route_mode(route_mode)?;
-        let eviction_policy = parse_eviction_policy(eviction_policy)?;
+        let requested_eviction_policy = parse_eviction_policy(eviction_policy)?;
+        let eviction_policy = if resident_service {
+            EvictionPolicy::None
+        } else {
+            requested_eviction_policy
+        };
+        let max_memory_bytes = if resident_service {
+            None
+        } else {
+            max_memory_bytes
+        };
         let numa_policy = parse_numa_policy(numa_policy)?;
+        let (service_namespace, key_prefix) = normalize_service_namespace(service_namespace);
         let inner = Arc::new(StoreCore::new(
             cores,
             wal_path.as_deref(),
@@ -3201,12 +3247,43 @@ impl PyStore {
             compress_wal,
             max_memory_bytes,
             eviction_policy,
+            service_namespace,
+            key_prefix,
+            resident_service,
+        })
+    }
+
+    #[pyo3(signature = (service_namespace="shardmap", resident_service=None))]
+    fn with_service_namespace(
+        &self,
+        service_namespace: &str,
+        resident_service: Option<bool>,
+    ) -> PyResult<Self> {
+        if let Some(resident_service) = resident_service
+            && resident_service != self.resident_service
+        {
+            return Err(PyValueError::new_err(
+                "with_service_namespace cannot change resident_service because eviction policy is engine-wide; create a separate Store deployment for resident and LRU/cache services",
+            ));
+        }
+
+        let (service_namespace, key_prefix) = normalize_service_namespace(service_namespace);
+        Ok(Self {
+            inner: Arc::clone(&self.inner),
+            wal_path: self.wal_path.clone(),
+            compress_wal: self.compress_wal,
+            max_memory_bytes: self.max_memory_bytes,
+            eviction_policy: self.eviction_policy,
+            service_namespace,
+            key_prefix,
+            resident_service: self.resident_service,
         })
     }
 
     #[pyo3(signature = (key, value, ttl=None))]
     fn set(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>, ttl: Option<u64>) {
         let ttl_ms = ttl.map(|seconds| seconds.saturating_mul(1_000));
+        let key = self.namespaced_key(key);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || inner.set(key, value, ttl_ms));
     }
@@ -3214,6 +3291,7 @@ impl PyStore {
     #[pyo3(signature = (items, ttl=None))]
     fn batch_set(&self, py: Python<'_>, items: Vec<(Vec<u8>, Vec<u8>)>, ttl: Option<u64>) {
         let ttl_ms = ttl.map(|seconds| seconds.saturating_mul(1_000));
+        let items = self.namespaced_items(items);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || inner.batch_set(items, ttl_ms));
     }
@@ -3224,6 +3302,8 @@ impl PyStore {
         session_prefix: Vec<u8>,
         items: Vec<(Vec<u8>, Vec<u8>)>,
     ) {
+        let session_prefix = self.namespaced_key(session_prefix);
+        let items = self.namespaced_items(items);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || inner.batch_set_session_owned_no_ttl(session_prefix, items));
     }
@@ -3234,6 +3314,8 @@ impl PyStore {
         session_prefix: Vec<u8>,
         items: Vec<(Vec<u8>, Vec<u8>)>,
     ) {
+        let session_prefix = self.namespaced_key(session_prefix);
+        let items = self.namespaced_items(items);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || {
             inner.batch_set_session_packed_items_no_ttl(session_prefix, items)
@@ -3255,13 +3337,13 @@ impl PyStore {
                 payloads.len()
             )));
         }
-        let session_prefix = session_prefix.as_ref().to_vec();
+        let session_prefix = self.namespaced_key_ref(session_prefix.as_ref());
         let items = block_hashes
             .into_iter()
             .zip(payloads)
             .map(|(block_hash, payload)| {
                 (
-                    encode_vllm_page_key(layer_index, block_hash.as_ref()),
+                    self.namespaced_key(encode_vllm_page_key(layer_index, block_hash.as_ref())),
                     payload.as_ref().to_vec(),
                 )
             })
@@ -3295,14 +3377,17 @@ impl PyStore {
                     .zip(payloads)
                     .map(|(block_hash, payload)| {
                         (
-                            encode_vllm_page_key(layer_index, block_hash.as_ref()),
+                            self.namespaced_key(encode_vllm_page_key(
+                                layer_index,
+                                block_hash.as_ref(),
+                            )),
                             payload.as_ref().to_vec(),
                         )
                     }),
             );
         }
         let item_count = items.len();
-        let _ = session_prefix.as_ref();
+        let _ = self.namespaced_key_ref(session_prefix.as_ref());
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || inner.batch_set(items, None));
         Ok(item_count)
@@ -3330,13 +3415,13 @@ impl PyStore {
             .zip(payloads)
             .map(|(block_hash, payload)| {
                 (
-                    encode_vllm_page_key(layer_index, block_hash.as_ref()),
+                    self.namespaced_key(encode_vllm_page_key(layer_index, block_hash.as_ref())),
                     payload,
                 )
             })
             .collect::<Vec<_>>();
         let item_count = items.len();
-        let _ = session_prefix.as_ref();
+        let _ = self.namespaced_key_ref(session_prefix.as_ref());
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || inner.batch_set(items, None));
         Ok(item_count)
@@ -3356,6 +3441,7 @@ impl PyStore {
     }
 
     fn get(&self, py: Python<'_>, key: Vec<u8>) -> Option<Vec<u8>> {
+        let key = self.namespaced_key(key);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || inner.get(&key))
     }
@@ -3366,7 +3452,10 @@ impl PyStore {
         py: Python<'_>,
         key: Vec<u8>,
     ) -> PyResult<Option<Py<PyReadView>>> {
-        let store = Arc::clone(&slf.borrow().inner);
+        let (store, key) = {
+            let this = slf.borrow();
+            (Arc::clone(&this.inner), this.namespaced_key(key))
+        };
         let inner = py.allow_threads(move || store.get_view(&key));
         if !inner.is_hit() {
             return Ok(None);
@@ -3382,6 +3471,7 @@ impl PyStore {
     }
 
     fn batch_get(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> Vec<Option<Vec<u8>>> {
+        let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || inner.batch_get(keys))
     }
@@ -3392,7 +3482,10 @@ impl PyStore {
         py: Python<'_>,
         keys: Vec<Vec<u8>>,
     ) -> PyResult<Py<PyReadBatch>> {
-        let store = Arc::clone(&slf.borrow().inner);
+        let (store, keys) = {
+            let this = slf.borrow();
+            (Arc::clone(&this.inner), this.namespaced_keys(keys))
+        };
         let inner = py.allow_threads(move || store.batch_get_view(&keys));
         Py::new(
             py,
@@ -3414,6 +3507,7 @@ impl PyStore {
         py: Python<'_>,
         keys: Vec<Vec<u8>>,
     ) -> PyResult<Vec<Option<PyObject>>> {
+        let keys = slf.borrow().namespaced_keys(keys);
         build_lmcache_memory_objs(slf, py, Arc::new(prepare_encoded_lmcache_keys(keys)))
     }
 
@@ -3424,7 +3518,8 @@ impl PyStore {
         py: Python<'_>,
         keys: Vec<PyObject>,
     ) -> PyResult<Vec<Option<PyObject>>> {
-        let prepared_keys = encode_lmcache_engine_keys(py, &keys)?;
+        let key_prefix = slf.borrow().key_prefix().map(<[u8]>::to_vec);
+        let prepared_keys = encode_lmcache_engine_keys(py, &keys, key_prefix.as_deref())?;
         build_lmcache_memory_objs(slf, py, Arc::new(prepared_keys))
     }
 
@@ -3436,6 +3531,7 @@ impl PyStore {
         py: Python<'_>,
         keys: Vec<Vec<u8>>,
     ) -> PyResult<Py<PyLmcacheRecordBatch>> {
+        let keys = slf.borrow().namespaced_keys(keys);
         build_lmcache_record_batch(slf, py, Arc::new(prepare_encoded_lmcache_keys(keys)))
     }
 
@@ -3446,7 +3542,8 @@ impl PyStore {
         py: Python<'_>,
         keys: Vec<PyObject>,
     ) -> PyResult<Py<PyLmcacheRecordBatch>> {
-        let prepared_keys = encode_lmcache_engine_keys(py, &keys)?;
+        let key_prefix = slf.borrow().key_prefix().map(<[u8]>::to_vec);
+        let prepared_keys = encode_lmcache_engine_keys(py, &keys, key_prefix.as_deref())?;
         build_lmcache_record_batch(slf, py, Arc::new(prepared_keys))
     }
 
@@ -3456,6 +3553,7 @@ impl PyStore {
         py: Python<'_>,
         keys: Vec<Vec<u8>>,
     ) -> PyPreparedLmcacheKeys {
+        let keys = self.namespaced_keys(keys);
         py.allow_threads(|| PyPreparedLmcacheKeys {
             inner: Arc::new(prepare_encoded_lmcache_keys(keys)),
         })
@@ -3467,9 +3565,10 @@ impl PyStore {
         keys: Vec<PyBackedBytes>,
         metadata_blobs: Vec<PyBackedBytes>,
     ) -> PyResult<PyPreparedLmcachePutBatch> {
+        let keys = self.namespaced_pybacked_keys(&keys);
         py.allow_threads(|| {
             Ok(PyPreparedLmcachePutBatch {
-                inner: Arc::new(prepare_lmcache_put_batch_from_pybacked_parts(
+                inner: Arc::new(prepare_lmcache_put_batch_from_encoded_parts(
                     &keys,
                     &metadata_blobs,
                 )?),
@@ -3483,7 +3582,7 @@ impl PyStore {
         py: Python<'_>,
         keys: Vec<PyObject>,
     ) -> PyResult<PyPreparedLmcacheKeys> {
-        let prepared = encode_lmcache_engine_keys(py, &keys)?;
+        let prepared = encode_lmcache_engine_keys(py, &keys, self.key_prefix())?;
         Ok(PyPreparedLmcacheKeys {
             inner: Arc::new(prepared),
         })
@@ -3499,7 +3598,7 @@ impl PyStore {
         objs: Vec<PyObject>,
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
-        let batch = encode_lmcache_put_batch(py, &keys, &objs)?;
+        let batch = encode_lmcache_put_batch(py, &keys, &objs, self.key_prefix())?;
         py.allow_threads(move || inner.batch_put_lmcache_encoded_batch(batch));
         Ok(())
     }
@@ -3512,7 +3611,8 @@ impl PyStore {
         objs: Vec<PyObject>,
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
-        let batch = encode_lmcache_put_batch_from_pybacked_keys(py, &keys, &objs)?;
+        let keys = self.namespaced_pybacked_keys(&keys);
+        let batch = encode_lmcache_put_batch_from_encoded_keys(py, &keys, &objs)?;
         py.allow_threads(move || inner.batch_put_lmcache_encoded_batch(batch));
         Ok(())
     }
@@ -3528,8 +3628,9 @@ impl PyStore {
         metadata_blobs: Vec<PyBackedBytes>,
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
+        let keys = self.namespaced_pybacked_keys(&keys);
         let batch =
-            encode_lmcache_put_batch_from_pybacked_parts(py, &keys, &payloads, &metadata_blobs)?;
+            encode_lmcache_put_batch_from_encoded_parts(py, &keys, &payloads, &metadata_blobs)?;
         py.allow_threads(move || inner.batch_put_lmcache_encoded_batch(batch));
         Ok(())
     }
@@ -3542,8 +3643,9 @@ impl PyStore {
         metadata_blobs: Vec<PyBackedBytes>,
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
+        let keys = self.namespaced_pybacked_keys(&keys);
         py.allow_threads(move || {
-            let batch = encode_lmcache_put_batch_from_pybacked_byte_parts(
+            let batch = encode_lmcache_put_batch_from_encoded_byte_parts(
                 &keys,
                 &payloads,
                 &metadata_blobs,
@@ -3634,6 +3736,8 @@ impl PyStore {
         session_prefix: Vec<u8>,
         keys: Vec<Vec<u8>>,
     ) -> PyPackedBatchResult {
+        let session_prefix = self.namespaced_key(session_prefix);
+        let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || PyPackedBatchResult {
             inner: inner.batch_get_session_packed(&session_prefix, &keys),
@@ -3642,6 +3746,7 @@ impl PyStore {
 
     /// Returns one packed result object for a generic batch.
     fn batch_get_packed(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> PyPackedBatchResult {
+        let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || PyPackedBatchResult {
             inner: inner.batch_get_packed(&keys),
@@ -3656,7 +3761,14 @@ impl PyStore {
         session_prefix: Vec<u8>,
         keys: Vec<Vec<u8>>,
     ) -> PyResult<Py<PySessionReadBatch>> {
-        let store = Arc::clone(&slf.borrow().inner);
+        let (store, session_prefix, keys) = {
+            let this = slf.borrow();
+            (
+                Arc::clone(&this.inner),
+                this.namespaced_key(session_prefix),
+                this.namespaced_keys(keys),
+            )
+        };
         let inner = py.allow_threads(move || store.batch_get_session_view(&session_prefix, &keys));
         Py::new(
             py,
@@ -3674,9 +3786,14 @@ impl PyStore {
         layer_index: u32,
         block_hashes: Vec<PyBackedBytes>,
     ) -> PyResult<Py<PyReadBatch>> {
-        let keys = encode_vllm_page_keys(layer_index, &block_hashes);
-        let store = Arc::clone(&slf.borrow().inner);
-        let _ = session_prefix.as_ref();
+        let (store, keys) = {
+            let this = slf.borrow();
+            (
+                Arc::clone(&this.inner),
+                this.namespaced_keys(encode_vllm_page_keys(layer_index, &block_hashes)),
+            )
+        };
+        let _ = slf.borrow().namespaced_key_ref(session_prefix.as_ref());
         let inner = py.allow_threads(move || store.batch_get_view(&keys));
         Py::new(
             py,
@@ -3701,9 +3818,17 @@ impl PyStore {
             return Ok((0, 0, 0, true));
         }
 
-        let keys = encode_vllm_page_keys(layer_index, &block_hashes[..target_count]);
-        let store = Arc::clone(&slf.borrow().inner);
-        let _ = session_prefix.as_ref();
+        let (store, keys) = {
+            let this = slf.borrow();
+            (
+                Arc::clone(&this.inner),
+                this.namespaced_keys(encode_vllm_page_keys(
+                    layer_index,
+                    &block_hashes[..target_count],
+                )),
+            )
+        };
+        let _ = slf.borrow().namespaced_key_ref(session_prefix.as_ref());
         let inner = py.allow_threads(move || store.batch_get_view(&keys));
         let batch = Py::new(
             py,
@@ -3773,8 +3898,11 @@ impl PyStore {
             }
         }
 
-        let store = Arc::clone(&slf.borrow().inner);
-        let _ = session_prefix.as_ref();
+        let (store, keys) = {
+            let this = slf.borrow();
+            (Arc::clone(&this.inner), this.namespaced_keys(keys))
+        };
+        let _ = slf.borrow().namespaced_key_ref(session_prefix.as_ref());
         let inner = py.allow_threads(move || store.batch_get_view(&keys));
         let batch = Py::new(
             py,
@@ -3832,6 +3960,8 @@ impl PyStore {
         session_prefix: Vec<u8>,
         keys: Vec<Vec<u8>>,
     ) -> (usize, bool) {
+        let session_prefix = self.namespaced_key(session_prefix);
+        let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || {
             let packed = inner.batch_get_session_packed(&session_prefix, &keys);
@@ -3855,8 +3985,9 @@ impl PyStore {
                 keys.push(encode_vllm_page_key(layer_index, block_hash.as_ref()));
             }
         }
+        let keys = self.namespaced_keys(keys);
         let layer_count = layer_indices.len();
-        let _ = session_prefix.as_ref();
+        let _ = self.namespaced_key_ref(session_prefix.as_ref());
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || {
             let packed = inner.batch_get_packed(&keys);
@@ -3915,7 +4046,12 @@ impl PyStore {
         let requested_pages = requested_pages
             .into_iter()
             .map(|(key, layer_index, page_index, len_bytes)| {
-                VllmRequestedPage::new(key.as_ref().to_vec(), layer_index, page_index, len_bytes)
+                VllmRequestedPage::new(
+                    self.namespaced_key_ref(key.as_ref()),
+                    layer_index,
+                    page_index,
+                    len_bytes,
+                )
             })
             .collect::<Vec<_>>();
         let block_allocations = block_allocations
@@ -3925,7 +4061,7 @@ impl PyStore {
             })
             .collect::<Vec<_>>();
         let spec = VllmConnectorLoadSpec::new(
-            session_prefix.as_ref().to_vec(),
+            self.namespaced_key_ref(session_prefix.as_ref()),
             requested_pages,
             block_allocations,
         )
@@ -3994,7 +4130,12 @@ impl PyStore {
         let requested_pages = requested_pages
             .into_iter()
             .map(|(key, layer_index, page_index, len_bytes)| {
-                VllmRequestedPage::new(key.as_ref().to_vec(), layer_index, page_index, len_bytes)
+                VllmRequestedPage::new(
+                    self.namespaced_key_ref(key.as_ref()),
+                    layer_index,
+                    page_index,
+                    len_bytes,
+                )
             })
             .collect::<Vec<_>>();
         let block_allocations = block_allocations
@@ -4004,7 +4145,7 @@ impl PyStore {
             })
             .collect::<Vec<_>>();
         let spec = VllmConnectorLoadSpec::new(
-            session_prefix.as_ref().to_vec(),
+            self.namespaced_key_ref(session_prefix.as_ref()),
             requested_pages,
             block_allocations,
         )
@@ -4034,6 +4175,7 @@ impl PyStore {
 
     /// Benchmark-oriented generic packed stats.
     fn batch_get_stats(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> (usize, bool) {
+        let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || {
             let packed = inner.batch_get_packed(&keys);
@@ -4042,11 +4184,13 @@ impl PyStore {
     }
 
     fn delete(&self, py: Python<'_>, key: Vec<u8>) -> bool {
+        let key = self.namespaced_key(key);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || inner.delete(&key))
     }
 
     fn exists(&self, py: Python<'_>, key: Vec<u8>) -> bool {
+        let key = self.namespaced_key(key);
         let inner = Arc::clone(&self.inner);
         py.allow_threads(move || inner.exists(&key))
     }
@@ -4153,13 +4297,15 @@ impl PyStore {
 
     fn __repr__(&self) -> String {
         format!(
-            "Store(cores={}, wal_path={:?}, compress_wal={}, max_memory_bytes={:?}, eviction_policy={:?}, route_mode={:?})",
+            "Store(cores={}, wal_path={:?}, compress_wal={}, max_memory_bytes={:?}, eviction_policy={:?}, route_mode={:?}, service_namespace={:?}, resident_service={})",
             self.inner.shard_count(),
             self.wal_path,
             self.compress_wal,
             self.max_memory_bytes,
             self.eviction_policy,
             self.inner.route_mode().as_str(),
+            self.service_namespace_repr(),
+            self.resident_service,
         )
     }
 }
@@ -4404,6 +4550,71 @@ fn parse_numa_policy(numa_policy: &str) -> PyResult<NumaRoutePolicy> {
             "unsupported numa_policy {other:?}; expected 'off', 'worker_pinned', or 'caller_local'"
         ))),
     }
+}
+
+fn normalize_service_namespace(service_namespace: &str) -> (Option<String>, Option<Vec<u8>>) {
+    let service_namespace = service_namespace.trim();
+    if service_namespace.is_empty() {
+        return (None, None);
+    }
+
+    let mut key_prefix = Vec::with_capacity(service_namespace.len() + 1);
+    key_prefix.extend_from_slice(service_namespace.as_bytes());
+    key_prefix.push(0);
+    (Some(service_namespace.to_string()), Some(key_prefix))
+}
+
+fn namespace_key(key_prefix: Option<&[u8]>, key: &[u8]) -> Vec<u8> {
+    match key_prefix {
+        Some(prefix) => {
+            let mut out = Vec::with_capacity(prefix.len() + key.len());
+            out.extend_from_slice(prefix);
+            out.extend_from_slice(key);
+            out
+        }
+        None => key.to_vec(),
+    }
+}
+
+fn namespace_owned_key(key_prefix: Option<&[u8]>, key: Vec<u8>) -> Vec<u8> {
+    match key_prefix {
+        Some(prefix) => {
+            let mut out = Vec::with_capacity(prefix.len() + key.len());
+            out.extend_from_slice(prefix);
+            out.extend_from_slice(&key);
+            out
+        }
+        None => key,
+    }
+}
+
+fn namespace_owned_keys(key_prefix: Option<&[u8]>, keys: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+    match key_prefix {
+        Some(prefix) => keys
+            .into_iter()
+            .map(|key| namespace_owned_key(Some(prefix), key))
+            .collect(),
+        None => keys,
+    }
+}
+
+fn namespace_items(
+    key_prefix: Option<&[u8]>,
+    items: Vec<(Vec<u8>, Vec<u8>)>,
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    match key_prefix {
+        Some(prefix) => items
+            .into_iter()
+            .map(|(key, value)| (namespace_owned_key(Some(prefix), key), value))
+            .collect(),
+        None => items,
+    }
+}
+
+fn namespace_pybacked_keys(key_prefix: Option<&[u8]>, keys: &[PyBackedBytes]) -> Vec<Vec<u8>> {
+    keys.iter()
+        .map(|key| namespace_key(key_prefix, key.as_ref()))
+        .collect()
 }
 
 fn slice_meta_from_chunk(slf: &Bound<'_, PyChunkReadView>) -> PyResult<EmbeddedReadSlice> {
@@ -4753,7 +4964,7 @@ fn decode_lmcache_record_v2_cached(
     })
 }
 
-fn encode_lmcache_engine_keys(py: Python<'_>, keys: &[PyObject]) -> PyResult<PreparedLmcacheKeys> {
+fn encode_lmcache_engine_key_bytes(py: Python<'_>, keys: &[PyObject]) -> PyResult<Vec<Vec<u8>>> {
     let mut encoded = Vec::with_capacity(keys.len());
     for key in keys {
         let key_string = key
@@ -4762,6 +4973,15 @@ fn encode_lmcache_engine_keys(py: Python<'_>, keys: &[PyObject]) -> PyResult<Pre
             .extract::<String>()?;
         encoded.push(key_string.into_bytes());
     }
+    Ok(encoded)
+}
+
+fn encode_lmcache_engine_keys(
+    py: Python<'_>,
+    keys: &[PyObject],
+    key_prefix: Option<&[u8]>,
+) -> PyResult<PreparedLmcacheKeys> {
+    let encoded = namespace_owned_keys(key_prefix, encode_lmcache_engine_key_bytes(py, keys)?);
     Ok(prepare_encoded_lmcache_keys(encoded))
 }
 
@@ -4769,15 +4989,9 @@ fn encode_lmcache_put_batch(
     py: Python<'_>,
     keys: &[PyObject],
     objs: &[PyObject],
+    key_prefix: Option<&[u8]>,
 ) -> PyResult<EncodedLmcachePutBatch> {
-    let mut encoded_keys = Vec::with_capacity(keys.len());
-    for key in keys {
-        let key_string = key
-            .bind(py)
-            .call_method0("to_string")?
-            .extract::<String>()?;
-        encoded_keys.push(key_string.into_bytes());
-    }
+    let encoded_keys = namespace_owned_keys(key_prefix, encode_lmcache_engine_key_bytes(py, keys)?);
     encode_lmcache_put_batch_from_encoded_keys(py, &encoded_keys, objs)
 }
 
@@ -4818,47 +5032,9 @@ fn encode_lmcache_put_batch_from_encoded_keys(
     })
 }
 
-fn encode_lmcache_put_batch_from_pybacked_keys(
+fn encode_lmcache_put_batch_from_encoded_parts(
     py: Python<'_>,
-    keys: &[PyBackedBytes],
-    objs: &[PyObject],
-) -> PyResult<EncodedLmcachePutBatch> {
-    if keys.len() != objs.len() {
-        return Err(PyValueError::new_err(format!(
-            "LMCache put batch length mismatch: {} keys vs {} objects",
-            keys.len(),
-            objs.len()
-        )));
-    }
-
-    let mut grouped = FastHashMap::<Vec<u8>, PackedSessionWrite>::default();
-    let mut generic_items = Vec::new();
-    for (key, obj) in keys.iter().zip(objs) {
-        let encoded_key = key.as_ref().to_vec();
-        let session_prefix = extract_lmcache_session_prefix(key.as_ref());
-        if let Some(session_prefix) = session_prefix {
-            let batch = grouped.entry(session_prefix.clone()).or_insert_with(|| {
-                PackedSessionWrite::with_capacity(session_prefix.clone(), 32, 0)
-            });
-            let offset = batch.value_buffer_len();
-            encode_lmcache_memory_obj_into(py, obj.bind(py), batch.value_buffer_mut())?;
-            let len = batch.value_buffer_len() - offset;
-            batch.push_prepacked_record(encoded_key, offset, len);
-        } else {
-            let value = encode_lmcache_memory_obj(py, obj.bind(py))?;
-            generic_items.push((encoded_key, value));
-        }
-    }
-
-    Ok(EncodedLmcachePutBatch {
-        packed_sessions: grouped.into_values().collect(),
-        generic_items,
-    })
-}
-
-fn encode_lmcache_put_batch_from_pybacked_parts(
-    py: Python<'_>,
-    keys: &[PyBackedBytes],
+    keys: &[Vec<u8>],
     payloads: &[PyObject],
     metadata_blobs: &[PyBackedBytes],
 ) -> PyResult<EncodedLmcachePutBatch> {
@@ -4874,8 +5050,8 @@ fn encode_lmcache_put_batch_from_pybacked_parts(
     let mut grouped = FastHashMap::<Vec<u8>, PackedSessionWrite>::default();
     let mut generic_items = Vec::new();
     for ((key, payload), metadata_blob) in keys.iter().zip(payloads).zip(metadata_blobs) {
-        let encoded_key = key.as_ref().to_vec();
-        let session_prefix = extract_lmcache_session_prefix(key.as_ref());
+        let encoded_key = key.clone();
+        let session_prefix = extract_lmcache_session_prefix(key);
         if let Some(session_prefix) = session_prefix {
             let batch = grouped.entry(session_prefix.clone()).or_insert_with(|| {
                 PackedSessionWrite::with_capacity(session_prefix.clone(), 32, 0)
@@ -4902,8 +5078,8 @@ fn encode_lmcache_put_batch_from_pybacked_parts(
     })
 }
 
-fn encode_lmcache_put_batch_from_pybacked_byte_parts(
-    keys: &[PyBackedBytes],
+fn encode_lmcache_put_batch_from_encoded_byte_parts(
+    keys: &[Vec<u8>],
     payloads: &[PyBackedBytes],
     metadata_blobs: &[PyBackedBytes],
 ) -> PyResult<EncodedLmcachePutBatch> {
@@ -4919,8 +5095,8 @@ fn encode_lmcache_put_batch_from_pybacked_byte_parts(
     let mut grouped = FastHashMap::<Vec<u8>, PackedSessionWrite>::default();
     let mut generic_items = Vec::new();
     for ((key, payload), metadata_blob) in keys.iter().zip(payloads).zip(metadata_blobs) {
-        let encoded_key = key.as_ref().to_vec();
-        let session_prefix = extract_lmcache_session_prefix(key.as_ref());
+        let encoded_key = key.clone();
+        let session_prefix = extract_lmcache_session_prefix(key);
         if let Some(session_prefix) = session_prefix {
             let batch = grouped.entry(session_prefix.clone()).or_insert_with(|| {
                 PackedSessionWrite::with_capacity(session_prefix.clone(), 32, 0)
@@ -4946,8 +5122,8 @@ fn encode_lmcache_put_batch_from_pybacked_byte_parts(
     })
 }
 
-fn prepare_lmcache_put_batch_from_pybacked_parts(
-    keys: &[PyBackedBytes],
+fn prepare_lmcache_put_batch_from_encoded_parts(
+    keys: &[Vec<u8>],
     metadata_blobs: &[PyBackedBytes],
 ) -> PyResult<PreparedLmcachePutBatch> {
     if keys.len() != metadata_blobs.len() {
@@ -4967,12 +5143,12 @@ fn prepare_lmcache_put_batch_from_pybacked_parts(
     };
 
     for (index, (key, metadata_blob)) in keys.iter().zip(metadata_blobs).enumerate() {
-        prepared.keys.push(key.as_ref().to_vec());
+        prepared.keys.push(key.clone());
         prepared
             .metadata_blobs
             .push(metadata_blob.as_ref().to_vec());
 
-        if let Some(session_prefix) = extract_lmcache_session_prefix(key.as_ref()) {
+        if let Some(session_prefix) = extract_lmcache_session_prefix(key) {
             let group_id = if let Some(existing) = session_group_ids.get(&session_prefix) {
                 *existing
             } else {
@@ -4993,6 +5169,14 @@ fn prepare_lmcache_put_batch_from_pybacked_parts(
     }
 
     Ok(prepared)
+}
+
+fn prepare_lmcache_put_batch_from_pybacked_parts(
+    keys: &[PyBackedBytes],
+    metadata_blobs: &[PyBackedBytes],
+) -> PyResult<PreparedLmcachePutBatch> {
+    let keys = namespace_pybacked_keys(None, keys);
+    prepare_lmcache_put_batch_from_encoded_parts(&keys, metadata_blobs)
 }
 
 fn encode_lmcache_put_batch_from_prepared_parts(
@@ -5531,7 +5715,13 @@ fn extract_lmcache_session_prefix(encoded_key: &[u8]) -> Option<Vec<u8>> {
     let session = key_str
         .split('@')
         .find_map(|part| part.strip_prefix("session%"))?;
-    Some(format!("lmcache-session:{session}").into_bytes())
+    let mut out = encoded_key
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|index| encoded_key[..=index].to_vec())
+        .unwrap_or_default();
+    out.extend_from_slice(format!("lmcache-session:{session}").as_bytes());
+    Some(out)
 }
 
 fn decode_lmcache_metadata_v2(raw: &[u8]) -> PyResult<DecodedLmcacheMetadata> {

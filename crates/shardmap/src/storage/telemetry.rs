@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use fast_telemetry::{
     Counter, DynamicCounter, DynamicCounterSeries, DynamicGaugeI64, DynamicGaugeI64Series,
-    ExportMetrics, Histogram,
+    ExportMetrics, Histogram, MetricScope, RegisteredMetrics, Runtime, RuntimeConfig,
 };
 use serde::Serialize;
 
@@ -38,8 +38,12 @@ const LATENCY_NS_BUCKETS: &[u64] = &[
 
 const LATENCY_NS_PER_MICROSECOND: u64 = 1_000;
 const DEFAULT_SHARED_CLOCK_UPDATE_INTERVAL: Duration = Duration::from_micros(1);
+const SHARDMAP_METRIC_SCOPE: &str = "shardmap";
 
 static SHARED_LATENCY_CLOCK: OnceLock<Arc<SharedLatencyClock>> = OnceLock::new();
+
+pub type TelemetryRuntime = Runtime;
+pub type TelemetryRuntimeConfig = RuntimeConfig;
 
 struct SharedLatencyClock {
     started_at: Instant,
@@ -319,7 +323,8 @@ struct ShardOperationSeries {
 /// holds pre-resolved dynamic series handles and aggregate totals so the store
 /// hot paths do not rebuild label sets on every update.
 pub struct CacheTelemetry {
-    metrics: CacheMetrics,
+    runtime: Arc<TelemetryRuntime>,
+    metrics: RegisteredMetrics<CacheMetrics>,
     shard_ops: Vec<ShardOperationSeries>,
     shard_keys_total: Vec<DynamicGaugeI64Series>,
     shard_memory_bytes: Vec<DynamicGaugeI64Series>,
@@ -444,6 +449,18 @@ impl CacheTelemetry {
         Self::new_with_latency_sample_rate(shard_count, Self::DEFAULT_LATENCY_SAMPLE_RATE)
     }
 
+    pub fn new_with_runtime(
+        shard_count: usize,
+        runtime: Option<Arc<TelemetryRuntime>>,
+    ) -> Arc<Self> {
+        Self::new_with_runtime_latency_sample_rate_and_clock(
+            shard_count,
+            runtime,
+            Self::DEFAULT_LATENCY_SAMPLE_RATE,
+            CacheTelemetryClock::SharedMicroseconds,
+        )
+    }
+
     /// Creates telemetry with a configurable latency histogram sample rate.
     ///
     /// Counters, byte totals, key gauges, and memory gauges are still updated on
@@ -451,10 +468,33 @@ impl CacheTelemetry {
     /// timestamp for every cache operation is expensive on the hot path.
     /// `latency_sample_rate = 1` records every operation.
     pub fn new_with_latency_sample_rate(shard_count: usize, latency_sample_rate: u64) -> Arc<Self> {
-        Self::new_with_latency_sample_rate_and_clock(
+        Self::new_with_runtime_latency_sample_rate(shard_count, None, latency_sample_rate)
+    }
+
+    pub fn new_with_runtime_latency_sample_rate(
+        shard_count: usize,
+        runtime: Option<Arc<TelemetryRuntime>>,
+        latency_sample_rate: u64,
+    ) -> Arc<Self> {
+        Self::build_with_runtime_latency_sample_rate_and_clock(
             shard_count,
+            runtime,
             latency_sample_rate,
             CacheTelemetryClock::SharedMicroseconds,
+        )
+    }
+
+    pub fn new_with_runtime_latency_sample_rate_and_clock(
+        shard_count: usize,
+        runtime: Option<Arc<TelemetryRuntime>>,
+        latency_sample_rate: u64,
+        clock: CacheTelemetryClock,
+    ) -> Arc<Self> {
+        Self::build_with_runtime_latency_sample_rate_and_clock(
+            shard_count,
+            runtime,
+            latency_sample_rate,
+            clock,
         )
     }
 
@@ -470,34 +510,65 @@ impl CacheTelemetry {
         latency_sample_rate: u64,
         clock: CacheTelemetryClock,
     ) -> Arc<Self> {
+        Self::build_with_runtime_latency_sample_rate_and_clock(
+            shard_count,
+            None,
+            latency_sample_rate,
+            clock,
+        )
+    }
+
+    fn build_with_runtime_latency_sample_rate_and_clock(
+        shard_count: usize,
+        runtime: Option<Arc<TelemetryRuntime>>,
+        latency_sample_rate: u64,
+        clock: CacheTelemetryClock,
+    ) -> Arc<Self> {
         let metric_shards = std::thread::available_parallelism()
             .map(|value| value.get())
             .unwrap_or_else(|_| shard_count.max(1));
-        let metrics = CacheMetrics::new(metric_shards);
+        let runtime = runtime.unwrap_or_else(|| TelemetryRuntime::new(RuntimeConfig::default()));
+        let metrics = runtime.register_metrics(
+            MetricScope::from(SHARDMAP_METRIC_SCOPE),
+            CacheMetrics::new(metric_shards),
+        );
         let mut shard_ops = Vec::with_capacity(shard_count);
         let mut shard_keys_total = Vec::with_capacity(shard_count);
         let mut shard_memory_bytes = Vec::with_capacity(shard_count);
         let mut shard_keys = Vec::with_capacity(shard_count);
+        let metric_handles = metrics.metrics();
 
         for shard_id in 0..shard_count {
             let shard = shard_id.to_string();
             shard_ops.push(ShardOperationSeries {
-                get: metrics
+                get: metric_handles
                     .shard_ops
                     .series(&[("op", "get"), ("shard", shard.as_str())]),
-                set: metrics
+                set: metric_handles
                     .shard_ops
                     .series(&[("op", "set"), ("shard", shard.as_str())]),
-                delete: metrics
+                delete: metric_handles
                     .shard_ops
                     .series(&[("op", "delete"), ("shard", shard.as_str())]),
-                batch_get: metrics
+                batch_get: metric_handles
                     .shard_ops
                     .series(&[("op", "batch_get"), ("shard", shard.as_str())]),
             });
-            shard_keys_total.push(metrics.keys_total.series(&[("shard", shard.as_str())]));
-            shard_memory_bytes.push(metrics.memory_bytes.series(&[("shard", shard.as_str())]));
-            shard_keys.push(metrics.shard_keys.series(&[("shard", shard.as_str())]));
+            shard_keys_total.push(
+                metric_handles
+                    .keys_total
+                    .series(&[("shard", shard.as_str())]),
+            );
+            shard_memory_bytes.push(
+                metric_handles
+                    .memory_bytes
+                    .series(&[("shard", shard.as_str())]),
+            );
+            shard_keys.push(
+                metric_handles
+                    .shard_keys
+                    .series(&[("shard", shard.as_str())]),
+            );
         }
 
         let latency_sample_rate = latency_sample_rate
@@ -505,6 +576,7 @@ impl CacheTelemetry {
             .checked_next_power_of_two()
             .unwrap_or(1 << 63);
         Arc::new(Self {
+            runtime,
             metrics,
             shard_ops,
             shard_keys_total,
@@ -516,8 +588,18 @@ impl CacheTelemetry {
     }
 
     #[inline(always)]
+    pub fn runtime(&self) -> &Arc<TelemetryRuntime> {
+        &self.runtime
+    }
+
+    #[inline(always)]
+    pub fn metric_scope(&self) -> &MetricScope {
+        self.metrics.scope()
+    }
+
+    #[inline(always)]
     pub fn metrics(&self) -> &CacheMetrics {
-        &self.metrics
+        self.metrics.metrics().as_ref()
     }
 
     #[inline(always)]

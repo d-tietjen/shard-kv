@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 use crate::config::PersistenceConfig;
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
-use crate::storage::{MutationRecord, StoredEntry, WalStatsSnapshot};
+use crate::storage::{MutationBytes, MutationRecord, StoredEntry, WalStatsSnapshot};
 use crate::{Result, ShardCacheError};
 
 use recovery::{PersistenceDataDir, RecoveryLoader};
@@ -35,7 +35,7 @@ use stats::WalStats;
 ///
 /// This matches the byte owner used by `bytes-handoff`, so retry and fanout
 /// paths can pass the encoded frame through without rebuilding it.
-pub(super) type WalFrameBytes = bytes::Bytes;
+pub type WalFrameBytes = bytes::Bytes;
 
 #[derive(Debug, Clone)]
 pub struct RecoveryState {
@@ -272,6 +272,14 @@ impl Drop for PersistenceRuntime {
 
 pub fn load_recovery_state(config: &PersistenceConfig) -> Result<RecoveryState> {
     RecoveryLoader::new(config).load()
+}
+
+pub fn decode_wal_records(bytes: impl Into<MutationBytes>) -> Result<Vec<MutationRecord>> {
+    wal::WalRecordCodec::decode_records(bytes.into())
+}
+
+pub fn encode_wal_record_frame(record: &MutationRecord, compress: bool) -> Vec<u8> {
+    wal::WalRecordCodec::encode_frame(record, compress)
 }
 
 pub fn data_dir_path(path: &Path) -> PathBuf {

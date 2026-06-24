@@ -16,7 +16,7 @@ use crate::storage::{
     StoredEntry, hash_key, hash_key_tag_from_hash, now_millis, validate_similarity_threshold,
 };
 #[cfg(feature = "telemetry")]
-use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
+use crate::storage::{CacheTelemetry, CacheTelemetryHandle, TelemetryRuntime};
 #[cfg(feature = "redis")]
 use crate::storage::{
     RedisObjectArrayItem, RedisObjectBucket, RedisObjectError, RedisObjectReadOutcome,

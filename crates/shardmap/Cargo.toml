@@ -93,7 +93,8 @@ codec = ["embedded"]
 # Runtime and platform integrations.
 monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
 cuda = ["sharded"]
-telemetry = ["embedded"]
+telemetry = ["embedded", "dep:fast-telemetry"]
+parent-telemetry-runtime = ["telemetry"]
 prefix-eviction = []
 
 # Internal/benchmark knobs. These are intentionally not part of the small public
@@ -113,7 +114,7 @@ core_affinity = { workspace = true }
 crc32fast = { workspace = true }
 crossbeam-channel = { workspace = true }
 crossbeam-utils = { workspace = true }
-fast-telemetry = { workspace = true }
+fast-telemetry = { workspace = true, features = ["runtime"], optional = true }
 hashbrown = { workspace = true }
 indextreemap = { workspace = true }
 itoa = "1"
