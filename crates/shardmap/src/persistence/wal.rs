@@ -244,7 +244,7 @@ impl WalRecordCodec {
         bytes
     }
 
-    fn decode_records(bytes: MutationBytes) -> Result<Vec<MutationRecord>> {
+    pub(super) fn decode_records(bytes: MutationBytes) -> Result<Vec<MutationRecord>> {
         match WalRecordFormat::detect(&bytes) {
             WalRecordFormat::Framed => Self::decode_framed_records(&bytes),
             WalRecordFormat::Legacy => Self::decode_legacy_records(&bytes),
