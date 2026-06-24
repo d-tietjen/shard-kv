@@ -338,6 +338,15 @@ impl EngineHandle {
         })
     }
 
+    #[cfg(feature = "parent-telemetry-runtime")]
+    pub fn open_with_parent_telemetry(
+        config: ShardCacheConfig,
+        parent: Option<Arc<CacheTelemetry>>,
+    ) -> Result<Self> {
+        let metrics = Some(CacheTelemetry::parent_or_new(config.shard_count, parent));
+        Self::open_with_metrics(config, metrics)
+    }
+
     pub fn config(&self) -> &ShardCacheConfig {
         &self.inner.config
     }

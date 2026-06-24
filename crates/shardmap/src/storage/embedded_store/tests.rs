@@ -900,6 +900,41 @@ fn telemetry_snapshot_tracks_basic_ops() {
     assert_eq!(snapshot.keys_total, 1);
 }
 
+#[cfg(feature = "parent-telemetry-runtime")]
+#[test]
+fn parent_telemetry_runtime_is_reused_when_supplied() {
+    let parent = CacheTelemetry::new(2);
+    let store = EmbeddedStore::with_route_mode_and_parent_telemetry(
+        2,
+        EmbeddedRouteMode::FullKey,
+        Some(Arc::clone(&parent)),
+    );
+
+    let attached = store.metrics().expect("metrics should be attached");
+    assert!(Arc::ptr_eq(&attached, &parent));
+
+    store.set(b"k".to_vec(), b"value".to_vec(), None);
+
+    let snapshot = parent.snapshot();
+    assert_eq!(snapshot.sets, 1);
+    assert_eq!(snapshot.keys_total, 1);
+}
+
+#[cfg(feature = "parent-telemetry-runtime")]
+#[test]
+fn parent_telemetry_runtime_none_creates_owned_metrics() {
+    let store = EmbeddedStore::with_parent_telemetry(1, None);
+    let metrics = store
+        .metrics()
+        .expect("metrics should be owned by shardmap");
+
+    store.set(b"k".to_vec(), b"value".to_vec(), None);
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.sets, 1);
+    assert_eq!(snapshot.keys_total, 1);
+}
+
 #[cfg(feature = "telemetry")]
 #[test]
 fn telemetry_latency_sampling_keeps_counters_exact() {

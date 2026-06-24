@@ -28,6 +28,18 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         Self::new_inner(config, metrics)
     }
 
+    /// Creates a shared embedded store that records into parent telemetry when present.
+    ///
+    /// `Some(parent)` attaches the store to an embedding application's telemetry
+    /// owner. `None` creates a shardmap-owned telemetry owner for this store.
+    #[cfg(feature = "parent-telemetry-runtime")]
+    pub fn with_parent_telemetry(
+        config: SharedEmbeddedConfig,
+        parent: Option<Arc<CacheTelemetry>>,
+    ) -> Self {
+        Self::new_inner(config, Some(CacheTelemetry::parent_or_new(SHARDS, parent)))
+    }
+
     fn new_inner(
         config: SharedEmbeddedConfig,
         #[cfg(feature = "telemetry")] metrics: Option<Arc<CacheTelemetry>>,

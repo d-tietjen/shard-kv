@@ -444,6 +444,16 @@ impl CacheTelemetry {
         Self::new_with_latency_sample_rate(shard_count, Self::DEFAULT_LATENCY_SAMPLE_RATE)
     }
 
+    /// Uses a parent-owned telemetry runtime when supplied, otherwise creates one.
+    ///
+    /// This is the embedding-friendly path for applications that already own a
+    /// `fast-telemetry` metrics runtime. Pass `Some(parent)` to have shardmap
+    /// record into that runtime; pass `None` to let shardmap allocate and own
+    /// the same fast-telemetry-backed metrics for this store.
+    pub fn parent_or_new(shard_count: usize, parent: Option<Arc<Self>>) -> Arc<Self> {
+        parent.unwrap_or_else(|| Self::new(shard_count))
+    }
+
     /// Creates telemetry with a configurable latency histogram sample rate.
     ///
     /// Counters, byte totals, key gauges, and memory gauges are still updated on

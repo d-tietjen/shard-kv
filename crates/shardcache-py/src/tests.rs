@@ -9,6 +9,98 @@ use shardmap_crate::storage::EmbeddedRouteMode;
 
 use crate::NumaRoutePolicy;
 
+#[test]
+fn service_namespace_prefixes_store_keys() {
+    let (namespace, prefix) = super::normalize_service_namespace(" lmcache ");
+    assert_eq!(namespace.as_deref(), Some("lmcache"));
+
+    let prefix = prefix.expect("namespace should create a key prefix");
+    assert_eq!(
+        super::namespace_key(Some(prefix.as_slice()), b"token:1"),
+        b"lmcache\0token:1"
+    );
+    assert_eq!(
+        super::namespace_owned_key(Some(prefix.as_slice()), b"token:2".to_vec()),
+        b"lmcache\0token:2"
+    );
+
+    let (namespace, prefix) = super::normalize_service_namespace(" ");
+    assert!(namespace.is_none());
+    assert!(prefix.is_none());
+}
+
+#[test]
+fn lmcache_session_prefix_inherits_service_namespace() {
+    assert_eq!(
+        super::extract_lmcache_session_prefix(b"model@session%abc@block").as_deref(),
+        Some(b"lmcache-session:abc".as_slice())
+    );
+    assert_eq!(
+        super::extract_lmcache_session_prefix(b"lmcache\0model@session%abc@block").as_deref(),
+        Some(b"lmcache\0lmcache-session:abc".as_slice())
+    );
+}
+
+#[test]
+fn py_store_defaults_to_resident_namespaced_service() {
+    let store = super::PyStore::new(
+        1,
+        None,
+        true,
+        Some(1024),
+        "lru",
+        "full_key",
+        false,
+        "local_embedded",
+        false,
+        "off",
+        "svc-a",
+        true,
+    )
+    .expect("resident store should build");
+
+    assert_eq!(store.max_memory_bytes, None);
+    assert_eq!(store.eviction_policy, EvictionPolicy::None);
+    assert_eq!(store.service_namespace.as_deref(), Some("svc-a"));
+    assert_eq!(store.key_prefix.as_deref(), Some(b"svc-a\0".as_slice()));
+
+    let view = store
+        .with_service_namespace("svc-b", Some(true))
+        .expect("resident namespace view should build");
+    assert!(std::sync::Arc::ptr_eq(&store.inner, &view.inner));
+    assert_eq!(view.service_namespace.as_deref(), Some("svc-b"));
+    assert_eq!(view.key_prefix.as_deref(), Some(b"svc-b\0".as_slice()));
+}
+
+#[test]
+fn py_store_namespace_view_cannot_change_engine_eviction_mode() {
+    let store = super::PyStore::new(
+        1,
+        None,
+        true,
+        Some(1024),
+        "lru",
+        "full_key",
+        false,
+        "local_embedded",
+        false,
+        "off",
+        "resident",
+        true,
+    )
+    .expect("resident store should build");
+
+    pyo3::prepare_freethreaded_python();
+    let err = match store.with_service_namespace("cache", Some(false)) {
+        Ok(_) => panic!("namespace view cannot change engine residency"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("eviction policy is engine-wide"),
+        "unexpected error: {err}"
+    );
+}
+
 #[cfg(feature = "prefix-eviction")]
 #[test]
 fn parses_prefix_eviction_policy_when_feature_is_enabled() {

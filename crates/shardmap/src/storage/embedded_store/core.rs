@@ -54,6 +54,27 @@ impl EmbeddedStore {
         Self::with_route_mode_and_metrics_shard_offset(shard_count, route_mode, metrics, 0)
     }
 
+    /// Creates an embedded store that records into parent telemetry when present.
+    ///
+    /// `Some(parent)` attaches this store to a telemetry owner created by the
+    /// embedding application. `None` creates a shardmap-owned telemetry owner
+    /// with the same fast-telemetry-backed metrics.
+    #[cfg(feature = "parent-telemetry-runtime")]
+    pub fn with_route_mode_and_parent_telemetry(
+        shard_count: usize,
+        route_mode: EmbeddedRouteMode,
+        parent: Option<Arc<CacheTelemetry>>,
+    ) -> Self {
+        let metrics = Some(CacheTelemetry::parent_or_new(shard_count, parent));
+        Self::with_route_mode_and_metrics_shard_offset(shard_count, route_mode, metrics, 0)
+    }
+
+    /// Creates an embedded store with full-key routing and optional parent telemetry.
+    #[cfg(feature = "parent-telemetry-runtime")]
+    pub fn with_parent_telemetry(shard_count: usize, parent: Option<Arc<CacheTelemetry>>) -> Self {
+        Self::with_route_mode_and_parent_telemetry(shard_count, EmbeddedRouteMode::FullKey, parent)
+    }
+
     #[cfg(feature = "telemetry")]
     pub fn with_route_mode_and_metrics_shard_offset(
         shard_count: usize,

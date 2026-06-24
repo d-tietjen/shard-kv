@@ -31,7 +31,7 @@ this repository for now.
 
 | Surface | Doc | Use When |
 | --- | --- | --- |
-| Embedded Rust map/cache | [`crates/shardmap/README.md`](crates/shardmap/README.md) | You want an in-process, DashMap-like cache with sharding, TTL, and memory-limit eviction. |
+| Embedded Rust map/cache | [`crates/shardmap/README.md`](crates/shardmap/README.md) | You want an in-process, DashMap-like cache with sharding, resident-by-default storage, and optional TTL or memory-limit eviction. |
 | Embedded C ABI | [`crates/shardcache-c/README.md`](crates/shardcache-c/README.md) | You want to embed shardcache from C, C++, Python, Go, Java, Node, .NET, or any FFI-capable runtime. |
 | Native Rust client | [`crates/shardcache-client-rs/README.md`](crates/shardcache-client-rs/README.md) | You want a blocking Rust client for shardcache over SCNP, including optional Redis command helpers. |
 | LMCache storage backend | [`integrations/lmcache_storage_backend/README.md`](integrations/lmcache_storage_backend/README.md) | You want LMCache to store KV-cache payloads in embedded shardcache or a shardcache TCP server. |
@@ -46,7 +46,7 @@ Embedded `shardmap`:
 
 ```toml
 [dependencies]
-shardmap = "0.3.2"
+shardmap = "0.4.0"
 ```
 
 ```rust
