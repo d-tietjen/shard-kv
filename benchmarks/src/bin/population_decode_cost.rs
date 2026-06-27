@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes as SharedBytes;
 use clap::Parser;
+use shardcache_client_rs::ShardCacheDirectRouter;
 use shardmap::persistence::{decode_wal_records, encode_wal_record_frame};
 use shardmap::replication::{
     BorrowedReplicationMutation, ReplicationMutation, decode_mutation_batch, encode_mutation_batch,
@@ -40,6 +41,12 @@ struct Args {
 fn main() -> Result<(), BoxError> {
     let args = Args::parse();
     let corpus = Corpus::build(args.records, args.value_size, args.shards);
+    let router = ShardCacheDirectRouter::new(("127.0.0.1", 6500), args.shards)?;
+    let client_routes = corpus
+        .records
+        .iter()
+        .map(|record| router.route_key(record.key.as_ref()))
+        .collect::<Vec<_>>();
     let wal_segment = corpus.wal_segment(false);
     let mutation_payload = encode_mutation_batch(&corpus.replication);
 
@@ -54,6 +61,34 @@ fn main() -> Result<(), BoxError> {
     println!("| path | ns/record | records/s | best ms | checksum |");
     println!("| --- | ---: | ---: | ---: | ---: |");
 
+    run_case(
+        "wal_encode_uncompressed",
+        args.records,
+        args.warmup_iterations,
+        args.iterations,
+        || {
+            corpus.records.iter().fold(0_u64, |checksum, record| {
+                let frame = black_box(encode_wal_record_frame(record, false));
+                checksum
+                    .wrapping_add(frame.len() as u64)
+                    .wrapping_add(frame.first().copied().unwrap_or_default() as u64)
+            })
+        },
+    );
+    run_case(
+        "wal_encode_compressed",
+        args.records,
+        args.warmup_iterations,
+        args.iterations,
+        || {
+            corpus.records.iter().fold(0_u64, |checksum, record| {
+                let frame = black_box(encode_wal_record_frame(record, true));
+                checksum
+                    .wrapping_add(frame.len() as u64)
+                    .wrapping_add(frame.first().copied().unwrap_or_default() as u64)
+            })
+        },
+    );
     run_case(
         "wal_decode_owned",
         args.records,
@@ -89,6 +124,28 @@ fn main() -> Result<(), BoxError> {
             })
             .expect("FCRP borrowed visit should succeed");
             checksum
+        },
+    );
+    run_case(
+        "client_route_key",
+        args.records,
+        args.warmup_iterations,
+        args.iterations,
+        || {
+            corpus.records.iter().fold(0_u64, |checksum, record| {
+                checksum.wrapping_add(checksum_route(router.route_key(record.key.as_ref())))
+            })
+        },
+    );
+    run_case(
+        "client_cached_route_scan",
+        args.records,
+        args.warmup_iterations,
+        args.iterations,
+        || {
+            client_routes.iter().fold(0_u64, |checksum, route| {
+                checksum.wrapping_add(checksum_route(*route))
+            })
         },
     );
     run_case(
@@ -225,6 +282,13 @@ fn checksum_borrowed_mutation(mutation: BorrowedReplicationMutation<'_>) -> u64 
         .sequence
         .wrapping_add(mutation.key.len() as u64)
         .wrapping_add(mutation.value.len() as u64)
+}
+
+fn checksum_route(route: shardcache_client_rs::ShardCacheRoute) -> u64 {
+    route
+        .key_hash
+        .wrapping_add(route.key_tag)
+        .wrapping_add(route.shard_id as u64)
 }
 
 fn shard_id(key_hash: u64, shards: usize) -> usize {
