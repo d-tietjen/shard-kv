@@ -91,6 +91,10 @@ name = "memory_write_cost"
 path = "src/bin/memory_write_cost.rs"
 
 [[bin]]
+name = "large_value_copy_cost"
+path = "src/bin/large_value_copy_cost.rs"
+
+[[bin]]
 name = "redis_command_matrix"
 path = "src/bin/redis_command_matrix.rs"
 
