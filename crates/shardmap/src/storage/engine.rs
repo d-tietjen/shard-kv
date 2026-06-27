@@ -712,7 +712,7 @@ impl ShardState {
                 expire_at_ms,
             };
             if let Some(wal) = &self.wal {
-                wal.append(record.clone())?;
+                wal.append_record(&record)?;
             }
             self.emit_replication(ReplicationMutation::from_record_with_key_hash(
                 &record, key_hash,
@@ -762,7 +762,7 @@ impl ShardState {
                 expire_at_ms: None,
             };
             if let Some(wal) = &self.wal {
-                wal.append(record.clone())?;
+                wal.append_record(&record)?;
             }
             self.emit_replication(ReplicationMutation::from_record_with_key_hash(
                 &record, key_hash,
@@ -803,7 +803,7 @@ impl ShardState {
                 expire_at_ms: expiration.expire_at_ms(),
             };
             if let Some(wal) = &self.wal {
-                wal.append(record.clone())?;
+                wal.append_record(&record)?;
             }
             self.emit_replication(ReplicationMutation::from_record_with_key_hash(
                 &record, key_hash,

@@ -18,9 +18,7 @@ use crate::commands::setex::{self, SetEx};
 use crate::commands::ttl::{self, Ttl};
 use crate::connection::ScnpConnection;
 use crate::error::{Result, ShardCacheClientError};
-#[cfg(feature = "redis")]
-use crate::routing::ShardCacheRoute;
-use crate::routing::{ShardCacheDirectRouter, ShardCacheRouteMode};
+use crate::routing::{ShardCacheDirectRouter, ShardCacheRoute, ShardCacheRouteMode};
 
 #[cfg(feature = "redis")]
 #[derive(Debug, Clone, Copy)]
@@ -371,52 +369,125 @@ impl ShardCacheDirectClient {
         Ok(Self { router, conns })
     }
 
+    /// Computes reusable routed metadata for `key`.
+    pub fn route_key(&self, key: &[u8]) -> ShardCacheRoute {
+        self.router.route_key(key)
+    }
+
     /// Reads `key` from its owning shard into `out`, returning `true` on hit.
     pub fn get_into(&mut self, key: &[u8], out: &mut Vec<u8>) -> Result<bool> {
         let route = self.router.route_key(key);
-        self.conns[route.shard_id].execute(Get::routed(route, key, out))
+        self.get_routed_into(route, key, out)
+    }
+
+    /// Reads `key` using caller-supplied routed metadata.
+    pub fn get_routed_into(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<bool> {
+        self.conn_for_route(route)?
+            .execute(Get::routed(route, key, out))
     }
 
     /// Sets `key` on its owning shard.
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let route = self.router.route_key(key);
-        self.conns[route.shard_id].execute(Set::routed(route, key, value))
+        self.set_routed(route, key, value)
+    }
+
+    /// Sets `key` using caller-supplied routed metadata.
+    pub fn set_routed(&mut self, route: ShardCacheRoute, key: &[u8], value: &[u8]) -> Result<()> {
+        self.conn_for_route(route)?
+            .execute(Set::routed(route, key, value))
     }
 
     /// Sets `key` on its owning shard with a millisecond TTL.
     pub fn set_ex(&mut self, key: &[u8], value: &[u8], ttl_ms: u64) -> Result<()> {
         let route = self.router.route_key(key);
-        self.conns[route.shard_id].execute(SetEx::routed(route, key, value, ttl_ms))
+        self.set_ex_routed(route, key, value, ttl_ms)
+    }
+
+    /// Sets `key` with a millisecond TTL using caller-supplied routed metadata.
+    pub fn set_ex_routed(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        value: &[u8],
+        ttl_ms: u64,
+    ) -> Result<()> {
+        self.conn_for_route(route)?
+            .execute(SetEx::routed(route, key, value, ttl_ms))
     }
 
     /// Reads `key` from its owning shard into `out` and sets a millisecond TTL.
     pub fn get_ex_into(&mut self, key: &[u8], ttl_ms: u64, out: &mut Vec<u8>) -> Result<bool> {
         let route = self.router.route_key(key);
-        self.conns[route.shard_id].execute(GetEx::routed(route, key, ttl_ms, out))
+        self.get_ex_routed_into(route, key, ttl_ms, out)
+    }
+
+    /// Reads `key` and sets a millisecond TTL using caller-supplied routed metadata.
+    pub fn get_ex_routed_into(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        ttl_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Result<bool> {
+        self.conn_for_route(route)?
+            .execute(GetEx::routed(route, key, ttl_ms, out))
     }
 
     /// Deletes `key` from its owning shard.
     pub fn del(&mut self, key: &[u8]) -> Result<bool> {
         let route = self.router.route_key(key);
-        self.conns[route.shard_id].execute(Del::routed(route, key))
+        self.del_routed(route, key)
+    }
+
+    /// Deletes `key` using caller-supplied routed metadata.
+    pub fn del_routed(&mut self, route: ShardCacheRoute, key: &[u8]) -> Result<bool> {
+        self.conn_for_route(route)?.execute(Del::routed(route, key))
     }
 
     /// Returns whether `key` exists on its owning shard.
     pub fn exists(&mut self, key: &[u8]) -> Result<bool> {
         let route = self.router.route_key(key);
-        self.conns[route.shard_id].execute(Exists::routed(route, key))
+        self.exists_routed(route, key)
+    }
+
+    /// Returns whether `key` exists using caller-supplied routed metadata.
+    pub fn exists_routed(&mut self, route: ShardCacheRoute, key: &[u8]) -> Result<bool> {
+        self.conn_for_route(route)?
+            .execute(Exists::routed(route, key))
     }
 
     /// Returns Redis-compatible TTL seconds for `key` on its owning shard.
     pub fn ttl(&mut self, key: &[u8]) -> Result<i64> {
         let route = self.router.route_key(key);
-        self.conns[route.shard_id].execute(Ttl::routed(route, key))
+        self.ttl_routed(route, key)
+    }
+
+    /// Returns Redis-compatible TTL seconds using caller-supplied routed metadata.
+    pub fn ttl_routed(&mut self, route: ShardCacheRoute, key: &[u8]) -> Result<i64> {
+        self.conn_for_route(route)?.execute(Ttl::routed(route, key))
     }
 
     /// Sets a millisecond TTL on `key` on its owning shard.
     pub fn expire(&mut self, key: &[u8], ttl_ms: u64) -> Result<bool> {
         let route = self.router.route_key(key);
-        self.conns[route.shard_id].execute(Expire::routed(route, key, ttl_ms))
+        self.expire_routed(route, key, ttl_ms)
+    }
+
+    /// Sets a millisecond TTL using caller-supplied routed metadata.
+    pub fn expire_routed(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        ttl_ms: u64,
+    ) -> Result<bool> {
+        self.conn_for_route(route)?
+            .execute(Expire::routed(route, key, ttl_ms))
     }
 
     /// Returns the first-party Redis command namespace for direct shard routing.
@@ -480,6 +551,16 @@ impl ShardCacheDirectClient {
             out,
         ))
     }
+
+    fn conn_for_route(&mut self, route: ShardCacheRoute) -> Result<&mut ScnpConnection> {
+        let shard_count = self.conns.len();
+        self.conns.get_mut(route.shard_id).ok_or_else(|| {
+            ShardCacheClientError::Config(format!(
+                "precomputed route shard {} out of range for {shard_count} direct shard connections",
+                route.shard_id
+            ))
+        })
+    }
 }
 
 /// Blocking SCNP client pinned to one shard-owned port.
@@ -498,51 +579,126 @@ impl ShardCacheDirectShardClient {
         self.shard_id
     }
 
+    /// Computes reusable routed metadata for `key`.
+    pub fn route_key(&self, key: &[u8]) -> Result<ShardCacheRoute> {
+        self.checked_route(key)
+    }
+
     /// Reads `key` into `out`, returning `true` on hit.
     pub fn get_into(&mut self, key: &[u8], out: &mut Vec<u8>) -> Result<bool> {
         let route = self.checked_route(key)?;
+        self.get_routed_into(route, key, out)
+    }
+
+    /// Reads `key` using caller-supplied routed metadata.
+    pub fn get_routed_into(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        out: &mut Vec<u8>,
+    ) -> Result<bool> {
+        self.ensure_route_is_local(route)?;
         self.conn.execute(Get::routed(route, key, out))
     }
 
     /// Sets `key` to `value`.
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.set_routed(route, key, value)
+    }
+
+    /// Sets `key` using caller-supplied routed metadata.
+    pub fn set_routed(&mut self, route: ShardCacheRoute, key: &[u8], value: &[u8]) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         self.conn.execute(Set::routed(route, key, value))
     }
 
     /// Sets `key` to `value` with a millisecond TTL.
     pub fn set_ex(&mut self, key: &[u8], value: &[u8], ttl_ms: u64) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.set_ex_routed(route, key, value, ttl_ms)
+    }
+
+    /// Sets `key` with a millisecond TTL using caller-supplied routed metadata.
+    pub fn set_ex_routed(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        value: &[u8],
+        ttl_ms: u64,
+    ) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         self.conn.execute(SetEx::routed(route, key, value, ttl_ms))
     }
 
     /// Reads `key` into `out` and sets a millisecond TTL, returning `true` on hit.
     pub fn get_ex_into(&mut self, key: &[u8], ttl_ms: u64, out: &mut Vec<u8>) -> Result<bool> {
         let route = self.checked_route(key)?;
+        self.get_ex_routed_into(route, key, ttl_ms, out)
+    }
+
+    /// Reads `key` and sets a millisecond TTL using caller-supplied routed metadata.
+    pub fn get_ex_routed_into(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        ttl_ms: u64,
+        out: &mut Vec<u8>,
+    ) -> Result<bool> {
+        self.ensure_route_is_local(route)?;
         self.conn.execute(GetEx::routed(route, key, ttl_ms, out))
     }
 
     /// Deletes `key`, returning `true` when an entry was removed.
     pub fn del(&mut self, key: &[u8]) -> Result<bool> {
         let route = self.checked_route(key)?;
+        self.del_routed(route, key)
+    }
+
+    /// Deletes `key` using caller-supplied routed metadata.
+    pub fn del_routed(&mut self, route: ShardCacheRoute, key: &[u8]) -> Result<bool> {
+        self.ensure_route_is_local(route)?;
         self.conn.execute(Del::routed(route, key))
     }
 
     /// Returns whether `key` exists.
     pub fn exists(&mut self, key: &[u8]) -> Result<bool> {
         let route = self.checked_route(key)?;
+        self.exists_routed(route, key)
+    }
+
+    /// Returns whether `key` exists using caller-supplied routed metadata.
+    pub fn exists_routed(&mut self, route: ShardCacheRoute, key: &[u8]) -> Result<bool> {
+        self.ensure_route_is_local(route)?;
         self.conn.execute(Exists::routed(route, key))
     }
 
     /// Returns Redis-compatible TTL seconds for `key`.
     pub fn ttl(&mut self, key: &[u8]) -> Result<i64> {
         let route = self.checked_route(key)?;
+        self.ttl_routed(route, key)
+    }
+
+    /// Returns Redis-compatible TTL seconds using caller-supplied routed metadata.
+    pub fn ttl_routed(&mut self, route: ShardCacheRoute, key: &[u8]) -> Result<i64> {
+        self.ensure_route_is_local(route)?;
         self.conn.execute(Ttl::routed(route, key))
     }
 
     /// Sets a millisecond TTL on `key`, returning `true` when the TTL changed.
     pub fn expire(&mut self, key: &[u8], ttl_ms: u64) -> Result<bool> {
         let route = self.checked_route(key)?;
+        self.expire_routed(route, key, ttl_ms)
+    }
+
+    /// Sets a millisecond TTL using caller-supplied routed metadata.
+    pub fn expire_routed(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        ttl_ms: u64,
+    ) -> Result<bool> {
+        self.ensure_route_is_local(route)?;
         self.conn.execute(Expire::routed(route, key, ttl_ms))
     }
 
@@ -597,48 +753,121 @@ impl ShardCacheDirectShardClient {
     /// Writes a routed GET request without flushing or reading its response.
     pub fn begin_pipeline_get(&mut self, key: &[u8]) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.begin_pipeline_get_routed(route, key)
+    }
+
+    /// Writes a GET request with caller-supplied routed metadata.
+    pub fn begin_pipeline_get_routed(&mut self, route: ShardCacheRoute, key: &[u8]) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         get::write_request(&mut self.conn, Some(route), key)
     }
 
     /// Writes a routed SET request without flushing or reading its response.
     pub fn begin_pipeline_set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.begin_pipeline_set_routed(route, key, value)
+    }
+
+    /// Writes a SET request with caller-supplied routed metadata.
+    pub fn begin_pipeline_set_routed(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         set::write_request(&mut self.conn, Some(route), key, value)
     }
 
     /// Writes a routed SETEX request without flushing or reading its response.
     pub fn begin_pipeline_set_ex(&mut self, key: &[u8], value: &[u8], ttl_ms: u64) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.begin_pipeline_set_ex_routed(route, key, value, ttl_ms)
+    }
+
+    /// Writes a SETEX request with caller-supplied routed metadata.
+    pub fn begin_pipeline_set_ex_routed(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        value: &[u8],
+        ttl_ms: u64,
+    ) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         setex::write_request(&mut self.conn, Some(route), key, value, ttl_ms)
     }
 
     /// Writes a routed GETEX request without flushing or reading its response.
     pub fn begin_pipeline_get_ex(&mut self, key: &[u8], ttl_ms: u64) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.begin_pipeline_get_ex_routed(route, key, ttl_ms)
+    }
+
+    /// Writes a GETEX request with caller-supplied routed metadata.
+    pub fn begin_pipeline_get_ex_routed(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        ttl_ms: u64,
+    ) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         getex::write_request(&mut self.conn, Some(route), key, ttl_ms)
     }
 
     /// Writes a routed DEL request without flushing or reading its response.
     pub fn begin_pipeline_del(&mut self, key: &[u8]) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.begin_pipeline_del_routed(route, key)
+    }
+
+    /// Writes a DEL request with caller-supplied routed metadata.
+    pub fn begin_pipeline_del_routed(&mut self, route: ShardCacheRoute, key: &[u8]) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         del::write_request(&mut self.conn, Some(route), key)
     }
 
     /// Writes a routed EXISTS request without flushing or reading its response.
     pub fn begin_pipeline_exists(&mut self, key: &[u8]) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.begin_pipeline_exists_routed(route, key)
+    }
+
+    /// Writes an EXISTS request with caller-supplied routed metadata.
+    pub fn begin_pipeline_exists_routed(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+    ) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         exists::write_request(&mut self.conn, Some(route), key)
     }
 
     /// Writes a routed TTL request without flushing or reading its response.
     pub fn begin_pipeline_ttl(&mut self, key: &[u8]) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.begin_pipeline_ttl_routed(route, key)
+    }
+
+    /// Writes a TTL request with caller-supplied routed metadata.
+    pub fn begin_pipeline_ttl_routed(&mut self, route: ShardCacheRoute, key: &[u8]) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         ttl::write_request(&mut self.conn, Some(route), key)
     }
 
     /// Writes a routed EXPIRE request without flushing or reading its response.
     pub fn begin_pipeline_expire(&mut self, key: &[u8], ttl_ms: u64) -> Result<()> {
         let route = self.checked_route(key)?;
+        self.begin_pipeline_expire_routed(route, key, ttl_ms)
+    }
+
+    /// Writes an EXPIRE request with caller-supplied routed metadata.
+    pub fn begin_pipeline_expire_routed(
+        &mut self,
+        route: ShardCacheRoute,
+        key: &[u8],
+        ttl_ms: u64,
+    ) -> Result<()> {
+        self.ensure_route_is_local(route)?;
         expire::write_request(&mut self.conn, Some(route), key, ttl_ms)
     }
 
@@ -734,6 +963,16 @@ impl ShardCacheDirectShardClient {
             )));
         }
         Ok(route)
+    }
+
+    fn ensure_route_is_local(&self, route: ShardCacheRoute) -> Result<()> {
+        if route.shard_id != self.shard_id {
+            return Err(ShardCacheClientError::Config(format!(
+                "precomputed route targets shard {}, but client is connected to shard {}",
+                route.shard_id, self.shard_id
+            )));
+        }
+        Ok(())
     }
 }
 

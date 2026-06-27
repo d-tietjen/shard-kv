@@ -1,8 +1,10 @@
 //! Native shardcache protocol (SCNP v2) benchmark clients.
 
+use std::sync::{Arc, Mutex};
+
 use shardcache_client_rs::{
     ShardCacheClient, ShardCacheDirectClient, ShardCacheDirectRouter, ShardCacheDirectShardClient,
-    ShardCacheRouteMode,
+    ShardCacheRoute, ShardCacheRouteMode,
 };
 
 use crate::backend::{Backend, BackendClass, BoxError, Worker};
@@ -11,6 +13,7 @@ pub struct ScnpBackend {
     id: &'static str,
     addr: String,
     mode: ScnpMode,
+    prepared: Arc<Mutex<Vec<Option<Arc<Vec<PreparedScnpKey>>>>>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -29,6 +32,7 @@ impl ScnpBackend {
             id: "fc-server-scnp",
             addr: addr.to_string(),
             mode: ScnpMode::Generic,
+            prepared: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -44,8 +48,14 @@ impl ScnpBackend {
             id: "fc-server-scnp-direct",
             addr: addr.to_string(),
             mode: ScnpMode::DirectShards { router, route_mode },
+            prepared: Arc::new(Mutex::new(Vec::new())),
         })
     }
+}
+
+struct PreparedScnpKey {
+    key: Vec<u8>,
+    route: ShardCacheRoute,
 }
 
 impl Backend for ScnpBackend {
@@ -98,8 +108,16 @@ impl Backend for ScnpBackend {
             })),
             ScnpMode::DirectShards { router, .. } => {
                 let shard_id = worker_index % router.shard_count();
+                let prepared = self
+                    .prepared
+                    .lock()
+                    .map_err(|_| "SCNP prepared-key cache lock poisoned")?
+                    .get(worker_index)
+                    .and_then(Clone::clone)
+                    .unwrap_or_else(empty_prepared_scnp_keys);
                 Ok(Box::new(ScnpWorker::DirectShard {
                     client: router.connect_shard(shard_id)?,
+                    prepared,
                 }))
             }
         }
@@ -115,34 +133,52 @@ impl Backend for ScnpBackend {
             return Ok(None);
         };
         let shard_id = worker_index % router.shard_count();
-        let indices = keys
-            .iter()
-            .enumerate()
-            .filter_map(|(index, key)| {
-                (router.route_key(key).shard_id == shard_id).then_some(index)
-            })
-            .collect::<Vec<_>>();
+        let mut indices = Vec::new();
+        let mut prepared = Vec::new();
+        for (index, key) in keys.iter().enumerate() {
+            let route = router.route_key(key);
+            if route.shard_id == shard_id {
+                indices.push(index);
+                prepared.push(PreparedScnpKey {
+                    key: key.clone(),
+                    route,
+                });
+            }
+        }
+        let mut slots = self
+            .prepared
+            .lock()
+            .map_err(|_| "SCNP prepared-key cache lock poisoned")?;
+        if slots.len() <= worker_index {
+            slots.resize_with(worker_index + 1, || None);
+        }
+        slots[worker_index] = Some(Arc::new(prepared));
         Ok(Some(indices))
     }
 }
 
 enum ScnpWorker {
-    Generic { client: ShardCacheClient },
-    DirectShard { client: ShardCacheDirectShardClient },
+    Generic {
+        client: ShardCacheClient,
+    },
+    DirectShard {
+        client: ShardCacheDirectShardClient,
+        prepared: Arc<Vec<PreparedScnpKey>>,
+    },
 }
 
 impl Worker for ScnpWorker {
     fn get(&mut self, key: &[u8], scratch: &mut Vec<u8>) -> Result<bool, BoxError> {
         Ok(match self {
             Self::Generic { client } => client.get_into(key, scratch)?,
-            Self::DirectShard { client } => client.get_into(key, scratch)?,
+            Self::DirectShard { client, .. } => client.get_into(key, scratch)?,
         })
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), BoxError> {
         match self {
             Self::Generic { client } => client.set(key, value)?,
-            Self::DirectShard { client } => client.set(key, value)?,
+            Self::DirectShard { client, .. } => client.set(key, value)?,
         }
         Ok(())
     }
@@ -150,7 +186,7 @@ impl Worker for ScnpWorker {
     fn begin_pipeline_get(&mut self, key: &[u8]) -> Result<(), BoxError> {
         match self {
             Self::Generic { client } => client.begin_pipeline_get(key)?,
-            Self::DirectShard { client } => client.begin_pipeline_get(key)?,
+            Self::DirectShard { client, .. } => client.begin_pipeline_get(key)?,
         }
         Ok(())
     }
@@ -158,15 +194,41 @@ impl Worker for ScnpWorker {
     fn begin_pipeline_set(&mut self, key: &[u8], value: &[u8]) -> Result<(), BoxError> {
         match self {
             Self::Generic { client } => client.begin_pipeline_set(key, value)?,
-            Self::DirectShard { client } => client.begin_pipeline_set(key, value)?,
+            Self::DirectShard { client, .. } => client.begin_pipeline_set(key, value)?,
         }
+        Ok(())
+    }
+
+    fn begin_pipeline_get_index(&mut self, local_index: usize) -> Result<(), BoxError> {
+        let Self::DirectShard { client, prepared } = self else {
+            return Err("generic SCNP worker does not support indexed pipelined GET".into());
+        };
+        let prepared = prepared
+            .get(local_index)
+            .ok_or("SCNP prepared key index out of range")?;
+        client.begin_pipeline_get_routed(prepared.route, &prepared.key)?;
+        Ok(())
+    }
+
+    fn begin_pipeline_set_index(
+        &mut self,
+        local_index: usize,
+        value: &[u8],
+    ) -> Result<(), BoxError> {
+        let Self::DirectShard { client, prepared } = self else {
+            return Err("generic SCNP worker does not support indexed pipelined SET".into());
+        };
+        let prepared = prepared
+            .get(local_index)
+            .ok_or("SCNP prepared key index out of range")?;
+        client.begin_pipeline_set_routed(prepared.route, &prepared.key, value)?;
         Ok(())
     }
 
     fn flush_pipeline(&mut self) -> Result<(), BoxError> {
         match self {
             Self::Generic { client } => client.flush_pipeline()?,
-            Self::DirectShard { client } => client.flush_pipeline()?,
+            Self::DirectShard { client, .. } => client.flush_pipeline()?,
         }
         Ok(())
     }
@@ -174,15 +236,47 @@ impl Worker for ScnpWorker {
     fn finish_pipeline_get(&mut self, scratch: &mut Vec<u8>) -> Result<bool, BoxError> {
         Ok(match self {
             Self::Generic { client } => client.finish_pipeline_get_into(scratch)?,
-            Self::DirectShard { client } => client.finish_pipeline_get_into(scratch)?,
+            Self::DirectShard { client, .. } => client.finish_pipeline_get_into(scratch)?,
         })
     }
 
     fn finish_pipeline_set(&mut self) -> Result<(), BoxError> {
         match self {
             Self::Generic { client } => client.finish_pipeline_set()?,
-            Self::DirectShard { client } => client.finish_pipeline_set()?,
+            Self::DirectShard { client, .. } => client.finish_pipeline_set()?,
         }
         Ok(())
     }
+
+    fn supports_indexed_keys(&self) -> bool {
+        match self {
+            Self::DirectShard { prepared, .. } => !prepared.is_empty(),
+            Self::Generic { .. } => false,
+        }
+    }
+
+    fn get_index(&mut self, local_index: usize, scratch: &mut Vec<u8>) -> Result<bool, BoxError> {
+        let Self::DirectShard { client, prepared } = self else {
+            return Err("generic SCNP worker does not support indexed GET".into());
+        };
+        let prepared = prepared
+            .get(local_index)
+            .ok_or("SCNP prepared key index out of range")?;
+        Ok(client.get_routed_into(prepared.route, &prepared.key, scratch)?)
+    }
+
+    fn set_index(&mut self, local_index: usize, value: &[u8]) -> Result<(), BoxError> {
+        let Self::DirectShard { client, prepared } = self else {
+            return Err("generic SCNP worker does not support indexed SET".into());
+        };
+        let prepared = prepared
+            .get(local_index)
+            .ok_or("SCNP prepared key index out of range")?;
+        client.set_routed(prepared.route, &prepared.key, value)?;
+        Ok(())
+    }
+}
+
+fn empty_prepared_scnp_keys() -> Arc<Vec<PreparedScnpKey>> {
+    Arc::new(Vec::new())
 }
