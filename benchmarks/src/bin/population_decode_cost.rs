@@ -10,12 +10,17 @@ use std::time::{Duration, Instant};
 use bytes::Bytes as SharedBytes;
 use clap::Parser;
 use shardcache_client_rs::ShardCacheDirectRouter;
+use shardmap::config::ShardCacheConfig;
 use shardmap::persistence::{decode_wal_records, encode_wal_record_frame};
+use shardmap::protocol::{FastCommand, FastRequest, FastResponse};
 use shardmap::replication::{
     BorrowedReplicationMutation, ReplicationMutation, decode_mutation_batch, encode_mutation_batch,
     visit_mutation_batch_payload,
 };
-use shardmap::storage::{EmbeddedStore, MutationOp, MutationRecord, StoredEntry, hash_key};
+use shardmap::storage::{
+    EmbeddedStore, EngineHandle, MutationOp, MutationRecord, StoredEntry, hash_key,
+};
+use tokio::runtime::Builder;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -49,6 +54,9 @@ fn main() -> Result<(), BoxError> {
         .collect::<Vec<_>>();
     let wal_segment = corpus.wal_segment(false);
     let mutation_payload = encode_mutation_batch(&corpus.replication);
+    let runtime = Builder::new_current_thread().enable_all().build()?;
+    let engine = open_request_path_engine(args.shards)?;
+    populate_engine(&runtime, &engine, &corpus);
 
     println!(
         "records={} value_size={} shards={} wal_bytes={} fcrp_payload_bytes={}",
@@ -149,6 +157,34 @@ fn main() -> Result<(), BoxError> {
         },
     );
     run_case(
+        "engine_fast_exists_no_hash",
+        args.records,
+        args.warmup_iterations,
+        args.iterations,
+        || engine_fast_exists(&runtime, &engine, &corpus, false),
+    );
+    run_case(
+        "engine_fast_exists_prehashed",
+        args.records,
+        args.warmup_iterations,
+        args.iterations,
+        || engine_fast_exists(&runtime, &engine, &corpus, true),
+    );
+    run_case(
+        "engine_fast_expire_no_hash",
+        args.records,
+        args.warmup_iterations,
+        args.iterations,
+        || engine_fast_expire(&runtime, &engine, &corpus, false),
+    );
+    run_case(
+        "engine_fast_expire_prehashed",
+        args.records,
+        args.warmup_iterations,
+        args.iterations,
+        || engine_fast_expire(&runtime, &engine, &corpus, true),
+    );
+    run_case(
         "restore_entries",
         args.records,
         args.warmup_iterations,
@@ -173,11 +209,13 @@ fn main() -> Result<(), BoxError> {
         },
     );
 
+    runtime.block_on(engine.shutdown())?;
     Ok(())
 }
 
 struct Corpus {
     records: Vec<MutationRecord>,
+    key_hashes: Vec<u64>,
     replication: Vec<ReplicationMutation>,
     entries: Vec<StoredEntry>,
 }
@@ -185,6 +223,7 @@ struct Corpus {
 impl Corpus {
     fn build(records: usize, value_size: usize, shards: usize) -> Self {
         let mut mutation_records = Vec::with_capacity(records);
+        let mut key_hashes = Vec::with_capacity(records);
         let mut replication = Vec::with_capacity(records);
         let mut entries = Vec::with_capacity(records);
         for index in 0..records {
@@ -206,6 +245,7 @@ impl Corpus {
             replication.push(ReplicationMutation::from_record_with_key_hash(
                 &record, key_hash,
             ));
+            key_hashes.push(key_hash);
             entries.push(StoredEntry {
                 key: key.to_vec(),
                 value: value.to_vec(),
@@ -215,6 +255,7 @@ impl Corpus {
         }
         Self {
             records: mutation_records,
+            key_hashes,
             replication,
             entries,
         }
@@ -289,6 +330,98 @@ fn checksum_route(route: shardcache_client_rs::ShardCacheRoute) -> u64 {
         .key_hash
         .wrapping_add(route.key_tag)
         .wrapping_add(route.shard_id as u64)
+}
+
+fn open_request_path_engine(shards: usize) -> Result<EngineHandle, BoxError> {
+    let mut config = ShardCacheConfig::default();
+    config.shard_count = shards.next_power_of_two().max(1);
+    config.persistence.enabled = false;
+    config.replication.enabled = false;
+    EngineHandle::open(config).map_err(Into::into)
+}
+
+fn populate_engine(runtime: &tokio::runtime::Runtime, engine: &EngineHandle, corpus: &Corpus) {
+    runtime.block_on(async {
+        for (index, record) in corpus.records.iter().enumerate() {
+            let response = engine
+                .execute_fast(FastRequest {
+                    key_hash: Some(corpus.key_hashes[index]),
+                    route_shard: None,
+                    key_tag: None,
+                    command: FastCommand::Set {
+                        key: record.key.as_ref(),
+                        value: record.value.as_ref(),
+                    },
+                })
+                .await
+                .expect("engine SET should succeed");
+            debug_assert_eq!(response, FastResponse::Ok);
+        }
+    });
+}
+
+fn engine_fast_exists(
+    runtime: &tokio::runtime::Runtime,
+    engine: &EngineHandle,
+    corpus: &Corpus,
+    prehashed: bool,
+) -> u64 {
+    runtime.block_on(async {
+        let mut checksum = 0_u64;
+        for (index, record) in corpus.records.iter().enumerate() {
+            let response = engine
+                .execute_fast(FastRequest {
+                    key_hash: prehashed.then_some(corpus.key_hashes[index]),
+                    route_shard: None,
+                    key_tag: None,
+                    command: FastCommand::Exists {
+                        key: record.key.as_ref(),
+                    },
+                })
+                .await
+                .expect("engine EXISTS should succeed");
+            checksum = checksum.wrapping_add(checksum_fast_response(response));
+        }
+        checksum
+    })
+}
+
+fn engine_fast_expire(
+    runtime: &tokio::runtime::Runtime,
+    engine: &EngineHandle,
+    corpus: &Corpus,
+    prehashed: bool,
+) -> u64 {
+    runtime.block_on(async {
+        let mut checksum = 0_u64;
+        for (index, record) in corpus.records.iter().enumerate() {
+            let response = engine
+                .execute_fast(FastRequest {
+                    key_hash: prehashed.then_some(corpus.key_hashes[index]),
+                    route_shard: None,
+                    key_tag: None,
+                    command: FastCommand::Expire {
+                        key: record.key.as_ref(),
+                        ttl_ms: 60_000,
+                    },
+                })
+                .await
+                .expect("engine EXPIRE should succeed");
+            checksum = checksum.wrapping_add(checksum_fast_response(response));
+        }
+        checksum
+    })
+}
+
+fn checksum_fast_response(response: FastResponse) -> u64 {
+    match response {
+        FastResponse::Ok | FastResponse::Null => 0,
+        FastResponse::Error(value) | FastResponse::Value(value) => value.len() as u64,
+        FastResponse::Integer(value) => value as u64,
+        FastResponse::Boolean(value) => value as u64,
+        FastResponse::Array(values) => values.len() as u64,
+        FastResponse::Float(value) => value.to_bits(),
+    }
 }
 
 fn shard_id(key_hash: u64, shards: usize) -> usize {
