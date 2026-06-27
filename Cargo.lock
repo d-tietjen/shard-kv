@@ -1399,6 +1399,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xxhash-rust",
+ "zerocopy",
  "zstd",
 ]
 

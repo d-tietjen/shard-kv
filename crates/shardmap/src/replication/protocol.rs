@@ -3,6 +3,8 @@ use std::ptr;
 
 use crate::config::ReplicationCompression;
 use bytes::Bytes as SharedBytes;
+use zerocopy::FromBytes;
+use zerocopy::byteorder::{LE, U32, U64};
 
 use crate::storage::{MutationOp, MutationRecord, StoredEntry, hash_key, hash_key_tag_from_hash};
 use crate::{Result, ShardCacheError};
@@ -17,6 +19,24 @@ const FLAG_COMPRESSED: u8 = 0x01;
 // `expire_at_ms` of u64::MAX would map to year ~584,942,417, so it is safe to
 // reserve.
 const EXPIRE_NONE: u64 = u64::MAX;
+
+#[derive(Clone, Copy, FromBytes)]
+#[repr(C)]
+struct FrameHeaderBytes {
+    magic: [u8; 4],
+    version: u8,
+    kind: u8,
+    flags: u8,
+    _reserved: u8,
+    payload_len: [u8; 4],
+    uncompressed_len: [u8; 4],
+}
+
+struct DecodedFrameHeader {
+    kind: FrameKind,
+    flags: u8,
+    uncompressed_len: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -325,32 +345,12 @@ pub fn decode_frame(bytes: &[u8]) -> Result<ReplicationFrame> {
 }
 
 pub fn decode_frame_payload(bytes: &[u8]) -> Result<ReplicationFramePayload<'_>> {
-    if bytes.len() < HEADER_LEN {
-        return Err(ShardCacheError::Protocol("FCRP frame is truncated".into()));
-    }
-    if &bytes[..4] != FCRP_MAGIC {
-        return Err(ShardCacheError::Protocol("FCRP magic mismatch".into()));
-    }
-    if bytes[4] != FCRP_VERSION {
-        return Err(ShardCacheError::Protocol(format!(
-            "unsupported FCRP version: {}",
-            bytes[4]
-        )));
-    }
-    let kind = FrameKind::from_u8(bytes[5])?;
-    let flags = bytes[6];
-    let payload_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    let uncompressed_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    if HEADER_LEN + payload_len != bytes.len() {
-        return Err(ShardCacheError::Protocol(
-            "FCRP frame length mismatch".into(),
-        ));
-    }
+    let header = decode_frame_header(bytes)?;
     let raw = &bytes[HEADER_LEN..];
-    let compressed = flags & FLAG_COMPRESSED != 0;
+    let compressed = header.flags & FLAG_COMPRESSED != 0;
     let payload = if compressed {
         Cow::Owned(
-            zstd::bulk::decompress(raw, uncompressed_len).map_err(|error| {
+            zstd::bulk::decompress(raw, header.uncompressed_len).map_err(|error| {
                 ShardCacheError::Protocol(format!("FCRP zstd decompression failed: {error}"))
             })?,
         )
@@ -358,42 +358,20 @@ pub fn decode_frame_payload(bytes: &[u8]) -> Result<ReplicationFramePayload<'_>>
         Cow::Borrowed(raw)
     };
     Ok(ReplicationFramePayload {
-        kind,
+        kind: header.kind,
         compressed,
         payload,
     })
 }
 
 pub fn decode_frame_payload_bytes(bytes: SharedBytes) -> Result<ReplicationFrameBytesPayload> {
-    if bytes.len() < HEADER_LEN {
-        return Err(ShardCacheError::Protocol("FCRP frame is truncated".into()));
-    }
-    if &bytes[..4] != FCRP_MAGIC {
-        return Err(ShardCacheError::Protocol("FCRP magic mismatch".into()));
-    }
-    if bytes[4] != FCRP_VERSION {
-        return Err(ShardCacheError::Protocol(format!(
-            "unsupported FCRP version: {}",
-            bytes[4]
-        )));
-    }
-
-    let kind = FrameKind::from_u8(bytes[5])?;
-    let flags = bytes[6];
-    let payload_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
-    let uncompressed_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    if HEADER_LEN + payload_len != bytes.len() {
-        return Err(ShardCacheError::Protocol(
-            "FCRP frame length mismatch".into(),
-        ));
-    }
-
-    let compressed = flags & FLAG_COMPRESSED != 0;
+    let header = decode_frame_header(bytes.as_ref())?;
+    let compressed = header.flags & FLAG_COMPRESSED != 0;
     let payload = match compressed {
         true => {
             let raw = &bytes[HEADER_LEN..];
             SharedBytes::from(
-                zstd::bulk::decompress(raw, uncompressed_len).map_err(|error| {
+                zstd::bulk::decompress(raw, header.uncompressed_len).map_err(|error| {
                     ShardCacheError::Protocol(format!("FCRP zstd decompression failed: {error}"))
                 })?,
             )
@@ -401,9 +379,36 @@ pub fn decode_frame_payload_bytes(bytes: SharedBytes) -> Result<ReplicationFrame
         false => bytes.slice(HEADER_LEN..),
     };
     Ok(ReplicationFrameBytesPayload {
-        kind,
+        kind: header.kind,
         compressed,
         payload,
+    })
+}
+
+fn decode_frame_header(bytes: &[u8]) -> Result<DecodedFrameHeader> {
+    let (header, _) = FrameHeaderBytes::read_from_prefix(bytes)
+        .map_err(|_| ShardCacheError::Protocol("FCRP frame is truncated".into()))?;
+    if header.magic != *FCRP_MAGIC {
+        return Err(ShardCacheError::Protocol("FCRP magic mismatch".into()));
+    }
+    if header.version != FCRP_VERSION {
+        return Err(ShardCacheError::Protocol(format!(
+            "unsupported FCRP version: {}",
+            header.version
+        )));
+    }
+    let kind = FrameKind::from_u8(header.kind)?;
+    let payload_len = u32::from_le_bytes(header.payload_len) as usize;
+    let uncompressed_len = u32::from_le_bytes(header.uncompressed_len) as usize;
+    if HEADER_LEN + payload_len != bytes.len() {
+        return Err(ShardCacheError::Protocol(
+            "FCRP frame length mismatch".into(),
+        ));
+    }
+    Ok(DecodedFrameHeader {
+        kind,
+        flags: header.flags,
+        uncompressed_len,
     })
 }
 
@@ -842,13 +847,17 @@ impl<'a> Cursor<'a> {
     }
 
     fn u32(&mut self) -> Result<u32> {
-        let bytes = self.bytes(4)?;
-        Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        let (value, _) = U32::<LE>::read_from_prefix(&self.bytes[self.pos..])
+            .map_err(|_| ShardCacheError::Protocol("FCRP payload is truncated".into()))?;
+        self.pos += 4;
+        Ok(value.get())
     }
 
     fn u64(&mut self) -> Result<u64> {
-        let bytes = self.bytes(8)?;
-        Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+        let (value, _) = U64::<LE>::read_from_prefix(&self.bytes[self.pos..])
+            .map_err(|_| ShardCacheError::Protocol("FCRP payload is truncated".into()))?;
+        self.pos += 8;
+        Ok(value.get())
     }
 
     fn bytes(&mut self, len: usize) -> Result<&'a [u8]> {

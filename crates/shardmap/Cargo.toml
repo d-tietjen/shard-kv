@@ -134,6 +134,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
 xxhash-rust = { workspace = true }
+zerocopy = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
