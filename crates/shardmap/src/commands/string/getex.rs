@@ -174,10 +174,12 @@ impl EngineCommandDispatch for GetEx {
         request: FastRequest<'a>,
     ) -> EngineFastFuture<'a> {
         Box::pin(async move {
+            let key_hash = request.key_hash;
             match request.command {
                 FastCommand::GetEx { key, ttl_ms } => {
                     GetEx::execute_engine_response(
                         ctx,
+                        key_hash,
                         key,
                         ExpirationChange::ExpireAt(relative_expire_at_ms(ttl_ms)),
                     )
@@ -195,7 +197,7 @@ impl GetEx {
         key: &[u8],
         expiration: ExpirationChange,
     ) -> Result<Frame> {
-        match Self::load_and_update(ctx, key, expiration).await? {
+        match Self::load_and_update(ctx, None, key, expiration).await? {
             Some(value) => Ok(Frame::BlobString(value)),
             None => Ok(Frame::Null),
         }
@@ -203,10 +205,11 @@ impl GetEx {
 
     async fn execute_engine_response(
         ctx: EngineCommandContext<'_>,
+        key_hash: Option<u64>,
         key: &[u8],
         expiration: ExpirationChange,
     ) -> Result<FastResponse> {
-        match Self::load_and_update(ctx, key, expiration).await? {
+        match Self::load_and_update(ctx, key_hash, key, expiration).await? {
             Some(value) => Ok(FastResponse::Value(value)),
             None => Ok(FastResponse::Null),
         }
@@ -214,10 +217,11 @@ impl GetEx {
 
     async fn load_and_update(
         ctx: EngineCommandContext<'_>,
+        key_hash: Option<u64>,
         key: &[u8],
         expiration: ExpirationChange,
     ) -> Result<Option<Vec<u8>>> {
-        let key_hash = hash_key(key);
+        let key_hash = key_hash.unwrap_or_else(|| hash_key(key));
         let shard = ctx.route_key_hash(key_hash);
         match ctx
             .request(

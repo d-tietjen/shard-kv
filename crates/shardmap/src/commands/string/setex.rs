@@ -146,9 +146,10 @@ impl EngineCommandDispatch for SetEx {
         request: FastRequest<'a>,
     ) -> EngineFastFuture<'a> {
         Box::pin(async move {
+            let key_hash = request.key_hash;
             match request.command {
                 FastCommand::SetEx { key, value, ttl_ms } => {
-                    SetEx::store_value(ctx, key, ttl_ms, value).await?;
+                    SetEx::store_value(ctx, key_hash, key, ttl_ms, value).await?;
                     Ok(FastResponse::Ok)
                 }
                 _ => Ok(FastResponse::Error(b"ERR unsupported command".to_vec())),
@@ -164,17 +165,18 @@ impl SetEx {
         ttl_ms: u64,
         value: &[u8],
     ) -> Result<Frame> {
-        Self::store_value(ctx, key, ttl_ms, value).await?;
+        Self::store_value(ctx, None, key, ttl_ms, value).await?;
         Ok(Frame::SimpleString("OK".into()))
     }
 
     pub(crate) async fn store_value(
         ctx: EngineCommandContext<'_>,
+        key_hash: Option<u64>,
         key: &[u8],
         ttl_ms: u64,
         value: &[u8],
     ) -> Result<()> {
-        let key_hash = hash_key(key);
+        let key_hash = key_hash.unwrap_or_else(|| hash_key(key));
         let shard = ctx.route_key_hash(key_hash);
         let expire_at_ms = Some(now_millis().saturating_add(ttl_ms));
         match ctx

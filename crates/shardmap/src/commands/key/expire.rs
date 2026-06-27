@@ -168,12 +168,16 @@ impl EngineCommandDispatch for Expire {
         request: FastRequest<'a>,
     ) -> EngineFastFuture<'a> {
         Box::pin(async move {
+            let key_hash = request.key_hash;
             match request.command {
-                FastCommand::Expire { key, ttl_ms } => {
-                    Expire::execute_engine_integer(ctx, key, relative_expire_at_ms(ttl_ms))
-                        .await
-                        .map(FastResponse::Integer)
-                }
+                FastCommand::Expire { key, ttl_ms } => Expire::execute_engine_integer(
+                    ctx,
+                    key_hash,
+                    key,
+                    relative_expire_at_ms(ttl_ms),
+                )
+                .await
+                .map(FastResponse::Integer),
                 _ => Ok(FastResponse::Error(b"ERR unsupported command".to_vec())),
             }
         })
@@ -183,10 +187,11 @@ impl EngineCommandDispatch for Expire {
 impl Expire {
     pub(crate) async fn execute_engine_integer(
         ctx: EngineCommandContext<'_>,
+        key_hash: Option<u64>,
         key: &[u8],
         expire_at_ms: u64,
     ) -> Result<i64> {
-        let key_hash = hash_key(key);
+        let key_hash = key_hash.unwrap_or_else(|| hash_key(key));
         let shard = ctx.route_key_hash(key_hash);
         match ctx
             .request(
@@ -211,7 +216,7 @@ impl Expire {
         key: &[u8],
         expire_at_ms: u64,
     ) -> Result<Frame> {
-        Self::execute_engine_integer(ctx, key, expire_at_ms)
+        Self::execute_engine_integer(ctx, None, key, expire_at_ms)
             .await
             .map(Frame::Integer)
     }
