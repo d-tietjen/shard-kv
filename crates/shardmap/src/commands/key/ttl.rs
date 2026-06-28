@@ -124,8 +124,9 @@ impl EngineCommandDispatch for Ttl {
         request: FastRequest<'a>,
     ) -> EngineFastFuture<'a> {
         Box::pin(async move {
+            let key_hash = request.key_hash;
             match request.command {
-                FastCommand::Ttl { key } => Ttl::execute_engine_integer(ctx, key, false)
+                FastCommand::Ttl { key } => Ttl::execute_engine_integer(ctx, key_hash, key, false)
                     .await
                     .map(FastResponse::Integer),
                 _ => Ok(FastResponse::Error(b"ERR unsupported command".to_vec())),
@@ -137,10 +138,13 @@ impl EngineCommandDispatch for Ttl {
 impl Ttl {
     pub(crate) async fn execute_engine_integer(
         ctx: EngineCommandContext<'_>,
+        key_hash: Option<u64>,
         key: &[u8],
         millis: bool,
     ) -> Result<i64> {
-        let shard = ctx.route_key(key);
+        let shard = key_hash
+            .map(|hash| ctx.route_key_hash(hash))
+            .unwrap_or_else(|| ctx.route_key(key));
         match ctx
             .request(
                 shard,
@@ -159,7 +163,7 @@ impl Ttl {
     }
 
     async fn execute_engine_frame(ctx: EngineCommandContext<'_>, key: &[u8]) -> Result<Frame> {
-        Self::execute_engine_integer(ctx, key, false)
+        Self::execute_engine_integer(ctx, None, key, false)
             .await
             .map(Frame::Integer)
     }

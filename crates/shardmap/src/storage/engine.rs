@@ -369,6 +369,22 @@ impl EngineHandle {
             .await
     }
 
+    /// Executes a RESP command whose argument spans are backed by an owned
+    /// input buffer, encoding the response into `out`.
+    ///
+    /// The `frame` ranges must come from [`RespCodec::decode_command_spans`]
+    /// over the same bytes held by `owner`. Large `SET` values can then be
+    /// stored as slices of `owner` instead of being copied into a new value
+    /// allocation.
+    pub async fn execute_resp_owned_into(
+        &self,
+        frame: CommandSpanFrame,
+        owner: SharedBytes,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        self.execute_resp_spanned_into(frame, owner, out).await
+    }
+
     pub(crate) async fn execute_resp_borrowed_into<'a>(
         &'a self,
         command: BorrowedCommand<'a>,
@@ -712,7 +728,7 @@ impl ShardState {
                 expire_at_ms,
             };
             if let Some(wal) = &self.wal {
-                wal.append(record.clone())?;
+                wal.append_record(&record)?;
             }
             self.emit_replication(ReplicationMutation::from_record_with_key_hash(
                 &record, key_hash,
@@ -762,7 +778,7 @@ impl ShardState {
                 expire_at_ms: None,
             };
             if let Some(wal) = &self.wal {
-                wal.append(record.clone())?;
+                wal.append_record(&record)?;
             }
             self.emit_replication(ReplicationMutation::from_record_with_key_hash(
                 &record, key_hash,
@@ -803,7 +819,7 @@ impl ShardState {
                 expire_at_ms: expiration.expire_at_ms(),
             };
             if let Some(wal) = &self.wal {
-                wal.append(record.clone())?;
+                wal.append_record(&record)?;
             }
             self.emit_replication(ReplicationMutation::from_record_with_key_hash(
                 &record, key_hash,

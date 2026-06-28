@@ -74,6 +74,18 @@ pub trait Worker: Send {
         Err("backend worker does not support pipelined SET".into())
     }
 
+    fn begin_pipeline_get_index(&mut self, _local_index: usize) -> Result<(), BoxError> {
+        Err("backend worker does not support indexed pipelined GET".into())
+    }
+
+    fn begin_pipeline_set_index(
+        &mut self,
+        _local_index: usize,
+        _value: &[u8],
+    ) -> Result<(), BoxError> {
+        Err("backend worker does not support indexed pipelined SET".into())
+    }
+
     fn flush_pipeline(&mut self) -> Result<(), BoxError> {
         Err("backend worker does not support pipelined flush".into())
     }

@@ -537,13 +537,20 @@ fn run_one(
 
                     for _ in 0..pipeline_depth {
                         let (op, local_idx) = stream.next_op();
-                        let idx = key_indices
-                            .as_ref()
-                            .map_or(local_idx, |indices| indices[local_idx]);
-                        let key = keys[idx].as_slice();
-                        let res = match op {
-                            Op::Get => worker.begin_pipeline_get(key),
-                            Op::Set => worker.begin_pipeline_set(key, value),
+                        let res = if indexed_keys {
+                            match op {
+                                Op::Get => worker.begin_pipeline_get_index(local_idx),
+                                Op::Set => worker.begin_pipeline_set_index(local_idx, value),
+                            }
+                        } else {
+                            let idx = key_indices
+                                .as_ref()
+                                .map_or(local_idx, |indices| indices[local_idx]);
+                            let key = keys[idx].as_slice();
+                            match op {
+                                Op::Get => worker.begin_pipeline_get(key),
+                                Op::Set => worker.begin_pipeline_set(key, value),
+                            }
                         };
                         match res {
                             Ok(()) => pipeline_ops.push(op),

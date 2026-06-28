@@ -139,8 +139,9 @@ impl EngineCommandDispatch for Exists {
         request: FastRequest<'a>,
     ) -> EngineFastFuture<'a> {
         Box::pin(async move {
+            let key_hash = request.key_hash;
             match request.command {
-                FastCommand::Exists { key } => Exists::execute_engine_integer(ctx, key)
+                FastCommand::Exists { key } => Exists::execute_engine_integer(ctx, key_hash, key)
                     .await
                     .map(FastResponse::Integer),
                 _ => Ok(FastResponse::Error(b"ERR unsupported command".to_vec())),
@@ -153,13 +154,19 @@ impl Exists {
     async fn execute_engine_frame(ctx: EngineCommandContext<'_>, keys: &[&[u8]]) -> Result<Frame> {
         let mut total = 0i64;
         for key in keys {
-            total += Self::execute_engine_integer(ctx, key).await?;
+            total += Self::execute_engine_integer(ctx, None, key).await?;
         }
         Ok(Frame::Integer(total))
     }
 
-    async fn execute_engine_integer(ctx: EngineCommandContext<'_>, key: &[u8]) -> Result<i64> {
-        let shard = ctx.route_key(key);
+    async fn execute_engine_integer(
+        ctx: EngineCommandContext<'_>,
+        key_hash: Option<u64>,
+        key: &[u8],
+    ) -> Result<i64> {
+        let shard = key_hash
+            .map(|hash| ctx.route_key_hash(hash))
+            .unwrap_or_else(|| ctx.route_key(key));
         match ctx
             .request(shard, ShardOperation::Exists(key.to_vec()))
             .await?

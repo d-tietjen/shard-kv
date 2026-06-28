@@ -45,7 +45,8 @@ pub struct RecoveryState {
 
 #[derive(Debug, Clone)]
 pub struct WalAppender {
-    sender: Sender<MutationRecord>,
+    sender: Sender<WalFrameBytes>,
+    compress: bool,
 }
 
 pub struct PersistenceRuntime {
@@ -258,8 +259,19 @@ impl PersistenceRuntime {
 
 impl WalAppender {
     pub fn append(&self, record: MutationRecord) -> Result<()> {
+        self.append_record(&record)
+    }
+
+    pub fn append_record(&self, record: &MutationRecord) -> Result<()> {
+        self.append_frame(WalFrameBytes::from(encode_wal_record_frame(
+            record,
+            self.compress,
+        )))
+    }
+
+    fn append_frame(&self, frame: WalFrameBytes) -> Result<()> {
         self.sender
-            .send(record)
+            .send(frame)
             .map_err(|_| ShardCacheError::ChannelClosed("wal appender"))
     }
 }

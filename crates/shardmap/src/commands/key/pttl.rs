@@ -66,7 +66,7 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedPttl<'a> {
         'a: 'b,
     {
         Box::pin(async move {
-            Ttl::execute_engine_integer(ctx, self.key, true)
+            Ttl::execute_engine_integer(ctx, None, self.key, true)
                 .await
                 .map(Frame::Integer)
         })

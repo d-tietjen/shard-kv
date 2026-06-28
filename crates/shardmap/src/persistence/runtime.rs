@@ -8,14 +8,13 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounde
 use crate::config::PersistenceConfig;
 #[cfg(feature = "telemetry")]
 use crate::storage::CacheTelemetryHandle;
-use crate::storage::MutationRecord;
 use crate::{Result, ShardCacheError};
 
 use super::{WalAppender, WalFrameBytes, stats::WalStats, tcp_export, wal};
 
 struct WalChannels {
     appenders: Vec<WalAppender>,
-    receivers: Vec<Receiver<MutationRecord>>,
+    receivers: Vec<Receiver<WalFrameBytes>>,
 }
 
 pub(super) struct PersistenceStartup {
@@ -60,7 +59,7 @@ enum TcpExportQueueResult {
 }
 
 struct WalWriter {
-    receivers: Vec<Receiver<MutationRecord>>,
+    receivers: Vec<Receiver<WalFrameBytes>>,
     stop_rx: Receiver<()>,
     config: PersistenceConfig,
     stats: Arc<WalStats>,
@@ -82,12 +81,15 @@ enum WalFlushKind {
 }
 
 impl WalChannels {
-    fn new(shard_count: usize, capacity: usize) -> Self {
+    fn new(shard_count: usize, capacity: usize, compress: bool) -> Self {
         let mut appenders = Vec::with_capacity(shard_count);
         let mut receivers = Vec::with_capacity(shard_count);
         for _ in 0..shard_count {
-            let (tx, rx) = bounded::<MutationRecord>(capacity);
-            appenders.push(WalAppender { sender: tx });
+            let (tx, rx) = bounded::<WalFrameBytes>(capacity);
+            appenders.push(WalAppender {
+                sender: tx,
+                compress,
+            });
             receivers.push(rx);
         }
         Self {
@@ -101,7 +103,11 @@ impl PersistenceStartup {
     pub(super) fn new(shard_count: usize, config: &PersistenceConfig) -> Result<Self> {
         fs::create_dir_all(&config.data_dir)?;
         let stats = Arc::new(WalStats::enabled());
-        let channels = WalChannels::new(shard_count, config.wal_channel_capacity);
+        let channels = WalChannels::new(
+            shard_count,
+            config.wal_channel_capacity,
+            config.compress_wal,
+        );
         let (stop_tx, stop_rx) = bounded::<()>(1);
         let tcp_export = TcpExportRuntime::start(config, Arc::clone(&stats))?;
         Ok(Self {
@@ -291,7 +297,7 @@ impl<'a> TcpExportQueueState<'a> {
 impl WalWriter {
     #[cfg(feature = "telemetry")]
     fn spawn(
-        receivers: Vec<Receiver<MutationRecord>>,
+        receivers: Vec<Receiver<WalFrameBytes>>,
         stop_rx: Receiver<()>,
         config: PersistenceConfig,
         stats: Arc<WalStats>,
@@ -312,7 +318,7 @@ impl WalWriter {
 
     #[cfg(not(feature = "telemetry"))]
     fn spawn(
-        receivers: Vec<Receiver<MutationRecord>>,
+        receivers: Vec<Receiver<WalFrameBytes>>,
         stop_rx: Receiver<()>,
         config: PersistenceConfig,
         stats: Arc<WalStats>,
@@ -378,8 +384,8 @@ impl WalWriter {
     fn poll_next_receiver(&mut self, writer: &mut wal::SegmentWriter) -> bool {
         let index = self.next_receiver_index();
         match self.receivers[index].recv_timeout(Duration::from_millis(2)) {
-            Ok(record) => {
-                self.append_record(writer, &record);
+            Ok(frame) => {
+                self.append_frame(writer, frame);
                 true
             }
             Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => false,
@@ -392,24 +398,20 @@ impl WalWriter {
         index
     }
 
-    fn append_record(&mut self, writer: &mut wal::SegmentWriter, record: &MutationRecord) {
-        let encoded = wal::WalRecordCodec::encode_frame(record, self.config.compress_wal);
-        match writer.append_encoded(&encoded, self.config.segment_size_bytes) {
-            Ok(()) => self.record_append_success(writer, encoded),
+    fn append_frame(&mut self, writer: &mut wal::SegmentWriter, frame: WalFrameBytes) {
+        match writer.append_encoded(frame.as_ref(), self.config.segment_size_bytes) {
+            Ok(()) => self.record_append_success(writer, frame),
             Err(error) => tracing::error!("failed to append WAL record: {error}"),
         }
     }
 
-    fn record_append_success(&mut self, writer: &mut wal::SegmentWriter, encoded: Vec<u8>) {
+    fn record_append_success(&mut self, writer: &mut wal::SegmentWriter, frame: WalFrameBytes) {
         let bytes = writer.last_entry_size();
         let rotations = writer.take_rotation_count();
         self.record_append_metrics(bytes);
         self.stats.record_append(bytes, rotations);
-        self.tcp_export.enqueue(
-            WalFrameBytes::from(encoded),
-            &self.config,
-            self.stats.as_ref(),
-        );
+        self.tcp_export
+            .enqueue(frame, &self.config, self.stats.as_ref());
     }
 
     #[cfg(feature = "telemetry")]
@@ -499,8 +501,8 @@ impl WalWriter {
 
     fn drain_remaining(&mut self, writer: &mut wal::SegmentWriter) {
         for receiver in self.receivers.clone() {
-            while let Ok(record) = receiver.try_recv() {
-                self.append_record(writer, &record);
+            while let Ok(frame) = receiver.try_recv() {
+                self.append_frame(writer, frame);
             }
         }
     }

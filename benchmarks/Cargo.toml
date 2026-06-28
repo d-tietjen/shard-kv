@@ -83,8 +83,16 @@ name = "wal_tcp_export_cost"
 path = "src/bin/wal_tcp_export_cost.rs"
 
 [[bin]]
+name = "population_decode_cost"
+path = "src/bin/population_decode_cost.rs"
+
+[[bin]]
 name = "memory_write_cost"
 path = "src/bin/memory_write_cost.rs"
+
+[[bin]]
+name = "large_value_copy_cost"
+path = "src/bin/large_value_copy_cost.rs"
 
 [[bin]]
 name = "redis_command_matrix"

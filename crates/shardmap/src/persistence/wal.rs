@@ -3,6 +3,8 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+use zerocopy::FromBytes;
+use zerocopy::byteorder::{LE, U32};
 
 use crate::storage::{MutationBytes, MutationOp, MutationRecord};
 use crate::{Result, ShardCacheError};
@@ -14,6 +16,25 @@ const WAL_FLAG_COMPRESSED: u8 = 0x01;
 const WAL_FRAME_HEADER_LEN: usize = 4 + 1 + 4;
 const WAL_CRC_LEN: usize = 4;
 const LEGACY_RECORD_HEADER_TAIL_LEN: usize = 4 + 4 + 8 + 8;
+const LEGACY_RECORD_HEADER_LEN: usize = 1 + LEGACY_RECORD_HEADER_TAIL_LEN;
+
+#[derive(Clone, Copy, FromBytes)]
+#[repr(C)]
+struct WalFrameHeaderBytes {
+    magic: [u8; 4],
+    flags: u8,
+    payload_len: [u8; 4],
+}
+
+#[derive(Clone, Copy, FromBytes)]
+#[repr(C)]
+struct LegacyRecordHeaderBytes {
+    op_byte: u8,
+    key_len: [u8; 4],
+    value_len: [u8; 4],
+    timestamp_ms: [u8; 8],
+    expire_raw: [u8; 8],
+}
 
 /// Filesystem repository for WAL segment discovery, replay, and pruning.
 #[derive(Debug, Clone)]
@@ -366,27 +387,16 @@ impl<'a> WalFrameCursor<'a> {
 
     fn read_header(&mut self) -> Option<WalFrameHeader> {
         let start = self.cursor;
-        match self.bytes.len().saturating_sub(self.cursor) < WAL_FRAME_HEADER_LEN {
-            true => None,
-            false => match &self.bytes[self.cursor..self.cursor + WAL_FRAME_MAGIC.len()]
-                == WAL_FRAME_MAGIC
-            {
-                true => {
-                    self.cursor += WAL_FRAME_MAGIC.len();
-                    let flags = self.bytes[self.cursor];
-                    self.cursor += 1;
-                    let payload_len =
-                        WalBytes::read_u32_at(self.bytes.as_ref(), self.cursor) as usize;
-                    self.cursor += 4;
-                    Some(WalFrameHeader {
-                        start,
-                        flags,
-                        payload_len,
-                    })
-                }
-                false => None,
-            },
+        let (header, _) = WalFrameHeaderBytes::read_from_prefix(&self.bytes[self.cursor..]).ok()?;
+        if header.magic != *WAL_FRAME_MAGIC {
+            return None;
         }
+        self.cursor += WAL_FRAME_HEADER_LEN;
+        Some(WalFrameHeader {
+            start,
+            flags: header.flags,
+            payload_len: u32::from_le_bytes(header.payload_len) as usize,
+        })
     }
 
     fn read_payload(&mut self, header: WalFrameHeader) -> Result<Option<MutationBytes>> {
@@ -448,29 +458,15 @@ impl<'a> LegacyRecordCursor<'a> {
 
     fn read_header(&mut self) -> Option<LegacyRecordHeader> {
         let bytes = self.owner.as_ref();
-        match bytes.get(self.cursor).copied() {
-            Some(op_byte)
-                if bytes.len().saturating_sub(self.cursor + 1) >= LEGACY_RECORD_HEADER_TAIL_LEN =>
-            {
-                self.cursor += 1;
-                let key_len = WalBytes::read_u32_at(bytes, self.cursor) as usize;
-                self.cursor += 4;
-                let value_len = WalBytes::read_u32_at(bytes, self.cursor) as usize;
-                self.cursor += 4;
-                let timestamp_ms = WalBytes::read_u64_at(bytes, self.cursor);
-                self.cursor += 8;
-                let expire_raw = WalBytes::read_i64_at(bytes, self.cursor);
-                self.cursor += 8;
-                Some(LegacyRecordHeader {
-                    op_byte,
-                    key_len,
-                    value_len,
-                    timestamp_ms,
-                    expire_raw,
-                })
-            }
-            Some(_) | None => None,
-        }
+        let (header, _) = LegacyRecordHeaderBytes::read_from_prefix(&bytes[self.cursor..]).ok()?;
+        self.cursor += LEGACY_RECORD_HEADER_LEN;
+        Some(LegacyRecordHeader {
+            op_byte: header.op_byte,
+            key_len: u32::from_le_bytes(header.key_len) as usize,
+            value_len: u32::from_le_bytes(header.value_len) as usize,
+            timestamp_ms: u64::from_le_bytes(header.timestamp_ms),
+            expire_raw: i64::from_le_bytes(header.expire_raw),
+        })
     }
 
     fn read_body(
@@ -581,21 +577,9 @@ impl WalSegmentName {
 
 impl WalBytes {
     fn read_u32_at(bytes: &[u8], cursor: usize) -> u32 {
-        let mut value = [0; 4];
-        value.copy_from_slice(&bytes[cursor..cursor + 4]);
-        u32::from_le_bytes(value)
-    }
-
-    fn read_u64_at(bytes: &[u8], cursor: usize) -> u64 {
-        let mut value = [0; 8];
-        value.copy_from_slice(&bytes[cursor..cursor + 8]);
-        u64::from_le_bytes(value)
-    }
-
-    fn read_i64_at(bytes: &[u8], cursor: usize) -> i64 {
-        let mut value = [0; 8];
-        value.copy_from_slice(&bytes[cursor..cursor + 8]);
-        i64::from_le_bytes(value)
+        let (value, _) =
+            U32::<LE>::read_from_prefix(&bytes[cursor..]).expect("caller validated u32 bytes");
+        value.get()
     }
 }
 

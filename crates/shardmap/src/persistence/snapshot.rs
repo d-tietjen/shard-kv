@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+use zerocopy::FromBytes;
+use zerocopy::byteorder::{LE, U32, U64};
 
 use crate::storage::{Bytes, StoredEntry, hash_key};
 use crate::{Result, ShardCacheError};
@@ -257,17 +259,17 @@ impl SnapshotCodec {
     }
 
     fn read_u32(raw: &[u8], cursor: &mut usize, field: &str) -> Result<u32> {
-        let bytes = Self::read_exact(raw, cursor, 4, field)?;
-        let mut value = [0; 4];
-        value.copy_from_slice(bytes);
-        Ok(u32::from_le_bytes(value))
+        let (value, _) = U32::<LE>::read_from_prefix(&raw[*cursor..])
+            .map_err(|_| ShardCacheError::Persistence(format!("{field} is truncated")))?;
+        *cursor += 4;
+        Ok(value.get())
     }
 
     fn read_u64(raw: &[u8], cursor: &mut usize, field: &str) -> Result<u64> {
-        let bytes = Self::read_exact(raw, cursor, 8, field)?;
-        let mut value = [0; 8];
-        value.copy_from_slice(bytes);
-        Ok(u64::from_le_bytes(value))
+        let (value, _) = U64::<LE>::read_from_prefix(&raw[*cursor..])
+            .map_err(|_| ShardCacheError::Persistence(format!("{field} is truncated")))?;
+        *cursor += 8;
+        Ok(value.get())
     }
 
     fn read_exact<'a>(
