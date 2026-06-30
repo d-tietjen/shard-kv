@@ -902,6 +902,29 @@ fn telemetry_snapshot_tracks_basic_ops() {
     assert_eq!(snapshot.keys_total, 1);
 }
 
+#[cfg(feature = "telemetry")]
+#[test]
+fn telemetry_prometheus_export_uses_grouped_counters() {
+    let metrics = CacheTelemetry::new(1);
+    let store = EmbeddedStore::with_route_mode_and_metrics(
+        1,
+        EmbeddedRouteMode::SessionPrefix,
+        Some(Arc::clone(&metrics)),
+    );
+
+    store.set(b"s:1:c:0".to_vec(), b"value".to_vec(), None);
+    assert_eq!(store.get(b"s:1:c:0"), Some(b"value".to_vec()));
+    assert_eq!(store.get(b"s:1:c:9"), None);
+
+    let output = metrics.export_prometheus();
+    assert!(output.contains("shardmap_gets 2\n"), "{output}");
+    assert!(output.contains("shardmap_sets 1\n"), "{output}");
+    assert!(output.contains("shardmap_hits 1\n"), "{output}");
+    assert!(output.contains("shardmap_misses 1\n"), "{output}");
+    assert!(output.contains("shardmap_bytes_read 5\n"), "{output}");
+    assert!(output.contains("shardmap_bytes_written 5\n"), "{output}");
+}
+
 #[cfg(feature = "parent-telemetry-runtime")]
 #[test]
 fn parent_telemetry_runtime_is_reused_when_supplied() {

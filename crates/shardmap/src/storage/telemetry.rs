@@ -10,9 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fast_telemetry::{
-    Counter, CounterSet, DynamicCounter, DynamicCounterSeries, DynamicGaugeI64,
-    DynamicGaugeI64Series, ExportMetrics, Histogram, MetricScope, RegisteredMetrics, Runtime,
-    RuntimeConfig,
+    CounterSet, DynamicCounter, DynamicCounterSeries, DynamicGaugeI64, DynamicGaugeI64Series,
+    ExportMetrics, Histogram, MetricKind, MetricLabels, MetricMeta, MetricScope, MetricVisitor,
+    PrometheusExport, RegisteredMetrics, Runtime, RuntimeConfig,
 };
 use serde::Serialize;
 
@@ -52,6 +52,70 @@ const AGG_BYTES_WRITTEN: usize = 7;
 const AGG_EXPIRATIONS: usize = 8;
 const AGG_WAL_WRITES: usize = 9;
 const AGG_WAL_BYTES: usize = 10;
+
+struct AggregateCounterMetric {
+    index: usize,
+    name: &'static str,
+    help: &'static str,
+}
+
+const AGGREGATE_COUNTER_METRICS: &[AggregateCounterMetric] = &[
+    AggregateCounterMetric {
+        index: AGG_GETS,
+        name: "shardmap_gets",
+        help: "Total point lookups served by the flat store",
+    },
+    AggregateCounterMetric {
+        index: AGG_SETS,
+        name: "shardmap_sets",
+        help: "Total write operations applied to the flat store",
+    },
+    AggregateCounterMetric {
+        index: AGG_DELETES,
+        name: "shardmap_deletes",
+        help: "Total delete operations applied to the flat store",
+    },
+    AggregateCounterMetric {
+        index: AGG_BATCH_GETS,
+        name: "shardmap_batch_gets",
+        help: "Total batch retrieval operations served by the embedded adapter",
+    },
+    AggregateCounterMetric {
+        index: AGG_HITS,
+        name: "shardmap_hits",
+        help: "Total successful key lookups",
+    },
+    AggregateCounterMetric {
+        index: AGG_MISSES,
+        name: "shardmap_misses",
+        help: "Total failed key lookups",
+    },
+    AggregateCounterMetric {
+        index: AGG_BYTES_READ,
+        name: "shardmap_bytes_read",
+        help: "Total payload bytes returned to readers",
+    },
+    AggregateCounterMetric {
+        index: AGG_BYTES_WRITTEN,
+        name: "shardmap_bytes_written",
+        help: "Total payload bytes accepted on writes",
+    },
+    AggregateCounterMetric {
+        index: AGG_EXPIRATIONS,
+        name: "shardmap_expirations",
+        help: "Total expirations processed by lazy lookup or maintenance sweeps",
+    },
+    AggregateCounterMetric {
+        index: AGG_WAL_WRITES,
+        name: "shardmap_wal_writes",
+        help: "Total WAL entries appended",
+    },
+    AggregateCounterMetric {
+        index: AGG_WAL_BYTES,
+        name: "shardmap_wal_bytes",
+        help: "Total encoded WAL bytes written",
+    },
+];
 
 static SHARED_LATENCY_CLOCK: OnceLock<Arc<SharedLatencyClock>> = OnceLock::new();
 
@@ -233,66 +297,19 @@ pub struct CacheMetricsSnapshot {
 
 /// Exported operational metrics for shardcache.
 ///
-/// The struct is intentionally flat so `fast-telemetry` can derive Prometheus
-/// and DogStatsD exporters directly from it.
-#[derive(ExportMetrics)]
-#[metric_prefix = "shardmap"]
+/// Aggregate counters are stored in one `CounterSet` so a cache operation can
+/// update related totals against the same thread-local shard row. The remaining
+/// metric primitives stay directly accessible for latency histograms and
+/// runtime-labelled per-shard series.
 pub struct CacheMetrics {
-    #[help = "Total point lookups served by the flat store"]
-    pub gets: Counter,
-
-    #[help = "Total write operations applied to the flat store"]
-    pub sets: Counter,
-
-    #[help = "Total delete operations applied to the flat store"]
-    pub deletes: Counter,
-
-    #[help = "Total batch retrieval operations served by the embedded adapter"]
-    pub batch_gets: Counter,
-
-    #[help = "Total successful key lookups"]
-    pub hits: Counter,
-
-    #[help = "Total failed key lookups"]
-    pub misses: Counter,
-
-    #[help = "Total payload bytes returned to readers"]
-    pub bytes_read: Counter,
-
-    #[help = "Total payload bytes accepted on writes"]
-    pub bytes_written: Counter,
-
-    #[help = "Flat store get latency in nanoseconds"]
+    aggregate_counters: CounterSet,
     pub get_latency_ns: Histogram,
-
-    #[help = "Flat store set latency in nanoseconds"]
     pub set_latency_ns: Histogram,
-
-    #[help = "Batch retrieval latency in nanoseconds"]
     pub batch_get_latency_ns: Histogram,
-
-    #[help = "Current total key count across all shards"]
     pub keys_total: DynamicGaugeI64,
-
-    #[help = "Current total resident key and value bytes across all shards"]
     pub memory_bytes: DynamicGaugeI64,
-
-    #[help = "Total expirations processed by lazy lookup or maintenance sweeps"]
-    pub expirations: Counter,
-
-    #[help = "Total WAL entries appended"]
-    pub wal_writes: Counter,
-
-    #[help = "Total encoded WAL bytes written"]
-    pub wal_bytes: Counter,
-
-    #[help = "WAL flush latency in nanoseconds"]
     pub wal_flush_latency_ns: Histogram,
-
-    #[help = "Per-shard operation counts"]
     pub shard_ops: DynamicCounter,
-
-    #[help = "Per-shard key counts"]
     pub shard_keys: DynamicGaugeI64,
 }
 
@@ -300,26 +317,144 @@ impl CacheMetrics {
     pub fn new(metric_shards: usize) -> Self {
         let metric_shards = metric_shards.max(1);
         Self {
-            gets: Counter::new(metric_shards),
-            sets: Counter::new(metric_shards),
-            deletes: Counter::new(metric_shards),
-            batch_gets: Counter::new(metric_shards),
-            hits: Counter::new(metric_shards),
-            misses: Counter::new(metric_shards),
-            bytes_read: Counter::new(metric_shards),
-            bytes_written: Counter::new(metric_shards),
+            aggregate_counters: CounterSet::new(metric_shards, AGGREGATE_COUNTER_COUNT),
             get_latency_ns: Histogram::new(LATENCY_NS_BUCKETS, metric_shards),
             set_latency_ns: Histogram::new(LATENCY_NS_BUCKETS, metric_shards),
             batch_get_latency_ns: Histogram::new(LATENCY_NS_BUCKETS, metric_shards),
             keys_total: DynamicGaugeI64::with_max_series(metric_shards, metric_shards.max(1) * 8),
             memory_bytes: DynamicGaugeI64::with_max_series(metric_shards, metric_shards.max(1) * 8),
-            expirations: Counter::new(metric_shards),
-            wal_writes: Counter::new(metric_shards),
-            wal_bytes: Counter::new(metric_shards),
             wal_flush_latency_ns: Histogram::new(LATENCY_NS_BUCKETS, metric_shards),
             shard_ops: DynamicCounter::with_max_series(metric_shards, metric_shards.max(1) * 32),
             shard_keys: DynamicGaugeI64::with_max_series(metric_shards, metric_shards.max(1) * 8),
         }
+    }
+
+    #[inline(always)]
+    fn aggregate_counter(&self, index: usize) -> u64 {
+        self.aggregate_counters.sum(index).max(0) as u64
+    }
+
+    pub fn export_prometheus(&self, output: &mut String) {
+        for metric in AGGREGATE_COUNTER_METRICS {
+            write_prometheus_counter(
+                output,
+                metric.name,
+                metric.help,
+                self.aggregate_counter(metric.index),
+            );
+        }
+        self.get_latency_ns.export_prometheus(
+            output,
+            "shardmap_get_latency_ns",
+            "Flat store get latency in nanoseconds",
+        );
+        self.set_latency_ns.export_prometheus(
+            output,
+            "shardmap_set_latency_ns",
+            "Flat store set latency in nanoseconds",
+        );
+        self.batch_get_latency_ns.export_prometheus(
+            output,
+            "shardmap_batch_get_latency_ns",
+            "Batch retrieval latency in nanoseconds",
+        );
+        self.keys_total.export_prometheus(
+            output,
+            "shardmap_keys_total",
+            "Current total key count across all shards",
+        );
+        self.memory_bytes.export_prometheus(
+            output,
+            "shardmap_memory_bytes",
+            "Current total resident key and value bytes across all shards",
+        );
+        self.wal_flush_latency_ns.export_prometheus(
+            output,
+            "shardmap_wal_flush_latency_ns",
+            "WAL flush latency in nanoseconds",
+        );
+        self.shard_ops.export_prometheus(
+            output,
+            "shardmap_shard_ops",
+            "Per-shard operation counts",
+        );
+        self.shard_keys
+            .export_prometheus(output, "shardmap_shard_keys", "Per-shard key counts");
+    }
+}
+
+impl ExportMetrics for CacheMetrics {
+    fn visit_metrics<V: MetricVisitor + ?Sized>(&self, visitor: &mut V) {
+        for metric in AGGREGATE_COUNTER_METRICS {
+            visitor.counter(
+                metric_meta(metric.name, metric.help, MetricKind::Counter),
+                MetricLabels::none(),
+                self.aggregate_counter(metric.index) as i64,
+            );
+        }
+
+        visitor.histogram(
+            metric_meta(
+                "shardmap_get_latency_ns",
+                "Flat store get latency in nanoseconds",
+                MetricKind::Histogram,
+            ),
+            MetricLabels::none(),
+            &self.get_latency_ns,
+        );
+        visitor.histogram(
+            metric_meta(
+                "shardmap_set_latency_ns",
+                "Flat store set latency in nanoseconds",
+                MetricKind::Histogram,
+            ),
+            MetricLabels::none(),
+            &self.set_latency_ns,
+        );
+        visitor.histogram(
+            metric_meta(
+                "shardmap_batch_get_latency_ns",
+                "Batch retrieval latency in nanoseconds",
+                MetricKind::Histogram,
+            ),
+            MetricLabels::none(),
+            &self.batch_get_latency_ns,
+        );
+
+        visit_dynamic_gauge_i64(
+            visitor,
+            &self.keys_total,
+            "shardmap_keys_total",
+            "Current total key count across all shards",
+        );
+        visit_dynamic_gauge_i64(
+            visitor,
+            &self.memory_bytes,
+            "shardmap_memory_bytes",
+            "Current total resident key and value bytes across all shards",
+        );
+
+        visitor.histogram(
+            metric_meta(
+                "shardmap_wal_flush_latency_ns",
+                "WAL flush latency in nanoseconds",
+                MetricKind::Histogram,
+            ),
+            MetricLabels::none(),
+            &self.wal_flush_latency_ns,
+        );
+        visit_dynamic_counter(
+            visitor,
+            &self.shard_ops,
+            "shardmap_shard_ops",
+            "Per-shard operation counts",
+        );
+        visit_dynamic_gauge_i64(
+            visitor,
+            &self.shard_keys,
+            "shardmap_shard_keys",
+            "Per-shard key counts",
+        );
     }
 }
 
@@ -333,12 +468,11 @@ struct ShardOperationSeries {
 /// Runtime helper around the exported metrics struct.
 ///
 /// `CacheMetrics` owns only exporter-visible metric primitives. This wrapper
-/// holds pre-resolved dynamic series handles and aggregate totals so the store
-/// hot paths do not rebuild label sets on every update.
+/// holds pre-resolved dynamic series handles so the store hot paths do not
+/// rebuild label sets on every update.
 pub struct CacheTelemetry {
     runtime: Arc<TelemetryRuntime>,
     metrics: RegisteredMetrics<CacheMetrics>,
-    aggregate_counters: CounterSet,
     shard_ops: Vec<ShardOperationSeries>,
     shard_keys_total: Vec<DynamicGaugeI64Series>,
     shard_memory_bytes: Vec<DynamicGaugeI64Series>,
@@ -592,7 +726,6 @@ impl CacheTelemetry {
         Arc::new(Self {
             runtime,
             metrics,
-            aggregate_counters: CounterSet::new(metric_shards, AGGREGATE_COUNTER_COUNT),
             shard_ops,
             shard_keys_total,
             shard_memory_bytes,
@@ -619,7 +752,7 @@ impl CacheTelemetry {
 
     #[inline(always)]
     fn aggregate_counter(&self, index: usize) -> u64 {
-        self.aggregate_counters.sum(index).max(0) as u64
+        self.metrics.aggregate_counter(index)
     }
 
     #[inline(always)]
@@ -641,24 +774,18 @@ impl CacheTelemetry {
         latency_ns: Option<u64>,
     ) {
         if hit {
-            self.aggregate_counters.add_index_values(&[
+            self.metrics.aggregate_counters.add_index_values(&[
                 (AGG_GETS, 1),
                 (AGG_HITS, 1),
                 (AGG_BYTES_READ, value_len as isize),
             ]);
         } else {
-            self.aggregate_counters
+            self.metrics
+                .aggregate_counters
                 .add_index_values(&[(AGG_GETS, 1), (AGG_MISSES, 1)]);
         }
-        self.metrics.gets.inc();
         if let Some(series) = self.shard_ops.get(shard_id) {
             series.get.inc();
-        }
-        if hit {
-            self.metrics.hits.inc();
-            self.metrics.bytes_read.add(value_len as isize);
-        } else {
-            self.metrics.misses.inc();
         }
         if let Some(latency_ns) = latency_ns {
             self.metrics.get_latency_ns.record(latency_ns);
@@ -667,13 +794,12 @@ impl CacheTelemetry {
 
     #[inline(always)]
     pub fn record_set(&self, shard_id: usize, value_len: usize, latency_ns: Option<u64>) {
-        self.aggregate_counters
+        self.metrics
+            .aggregate_counters
             .add_index_values(&[(AGG_SETS, 1), (AGG_BYTES_WRITTEN, value_len as isize)]);
-        self.metrics.sets.inc();
         if let Some(series) = self.shard_ops.get(shard_id) {
             series.set.inc();
         }
-        self.metrics.bytes_written.add(value_len as isize);
         if let Some(latency_ns) = latency_ns {
             self.metrics.set_latency_ns.record(latency_ns);
         }
@@ -681,8 +807,7 @@ impl CacheTelemetry {
 
     #[inline(always)]
     pub fn record_delete(&self, shard_id: usize) {
-        self.aggregate_counters.inc(AGG_DELETES);
-        self.metrics.deletes.inc();
+        self.metrics.aggregate_counters.inc(AGG_DELETES);
         if let Some(series) = self.shard_ops.get(shard_id) {
             series.delete.inc();
         }
@@ -690,8 +815,7 @@ impl CacheTelemetry {
 
     #[inline(always)]
     pub fn record_batch_get(&self, latency_ns: u64) {
-        self.aggregate_counters.inc(AGG_BATCH_GETS);
-        self.metrics.batch_gets.inc();
+        self.metrics.aggregate_counters.inc(AGG_BATCH_GETS);
         self.metrics.batch_get_latency_ns.record(latency_ns);
     }
 
@@ -705,17 +829,17 @@ impl CacheTelemetry {
     #[inline(always)]
     pub fn record_expiration(&self, count: usize) {
         if count > 0 {
-            self.aggregate_counters.add(AGG_EXPIRATIONS, count as isize);
-            self.metrics.expirations.add(count as isize);
+            self.metrics
+                .aggregate_counters
+                .add(AGG_EXPIRATIONS, count as isize);
         }
     }
 
     #[inline(always)]
     pub fn record_wal_append(&self, bytes: usize) {
-        self.aggregate_counters
+        self.metrics
+            .aggregate_counters
             .add_index_values(&[(AGG_WAL_WRITES, 1), (AGG_WAL_BYTES, bytes as isize)]);
-        self.metrics.wal_writes.inc();
-        self.metrics.wal_bytes.add(bytes as isize);
     }
 
     #[inline(always)]
@@ -843,9 +967,90 @@ fn label_value<'a>(labels: &'a fast_telemetry::DynamicLabelSet, name: &str) -> O
         .find_map(|(key, value)| (key == name).then_some(value.as_str()))
 }
 
+fn metric_meta(name: &'static str, help: &'static str, kind: MetricKind) -> MetricMeta<'static> {
+    MetricMeta {
+        name,
+        help,
+        kind,
+        unit: None,
+    }
+}
+
+fn visit_dynamic_counter<V: MetricVisitor + ?Sized>(
+    visitor: &mut V,
+    counter: &DynamicCounter,
+    name: &'static str,
+    help: &'static str,
+) {
+    let meta = metric_meta(name, help, MetricKind::Counter);
+    let overflow = counter.overflow_count();
+    if overflow > 0 {
+        visitor.dynamic_overflow(meta, overflow);
+    }
+    counter.visit_series(|labels, current| {
+        visitor.counter(meta, MetricLabels::dynamic_pairs(labels), current as i64);
+    });
+}
+
+fn visit_dynamic_gauge_i64<V: MetricVisitor + ?Sized>(
+    visitor: &mut V,
+    gauge: &DynamicGaugeI64,
+    name: &'static str,
+    help: &'static str,
+) {
+    let meta = metric_meta(name, help, MetricKind::Gauge);
+    let overflow = gauge.overflow_count();
+    if overflow > 0 {
+        visitor.dynamic_overflow(meta, overflow);
+    }
+    gauge.visit_series(|labels, current| {
+        visitor.gauge_i64(meta, MetricLabels::dynamic_pairs(labels), current);
+    });
+}
+
+fn write_prometheus_counter(output: &mut String, name: &str, help: &str, value: u64) {
+    output.push_str("# HELP ");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(help);
+    output.push_str("\n# TYPE ");
+    output.push_str(name);
+    output.push_str(" counter\n");
+    output.push_str(name);
+    output.push(' ');
+    output.push_str(&value.to_string());
+    output.push('\n');
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct CounterVisitor {
+        counters: BTreeMap<String, i64>,
+    }
+
+    impl MetricVisitor for CounterVisitor {
+        fn counter(&mut self, meta: MetricMeta<'_>, labels: MetricLabels<'_>, value: i64) {
+            if labels.iter().next().is_none() {
+                self.counters.insert(meta.name.to_owned(), value);
+            }
+        }
+
+        fn gauge_i64(&mut self, _meta: MetricMeta<'_>, _labels: MetricLabels<'_>, _value: i64) {}
+
+        fn gauge_f64(&mut self, _meta: MetricMeta<'_>, _labels: MetricLabels<'_>, _value: f64) {}
+
+        fn histogram(
+            &mut self,
+            _meta: MetricMeta<'_>,
+            _labels: MetricLabels<'_>,
+            _histogram: &dyn fast_telemetry::HistogramSnapshot,
+        ) {
+        }
+    }
 
     #[test]
     fn shared_latency_clock_advances_in_microseconds() {
@@ -881,5 +1086,26 @@ mod tests {
 
         assert!(!Arc::ptr_eq(&custom, &default));
         assert!(Arc::ptr_eq(&clamped, &default));
+    }
+
+    #[test]
+    fn runtime_visitor_reads_grouped_aggregate_counters() {
+        let metrics = CacheTelemetry::new_with_latency_sample_rate(1, 1);
+
+        metrics.record_set(0, 5, None);
+        metrics.record_get(0, true, 5, None);
+        metrics.record_get(0, false, 0, None);
+
+        let mut visitor = CounterVisitor::default();
+        metrics
+            .runtime()
+            .visit_metrics_for_scope(metrics.metric_scope(), &mut visitor);
+
+        assert_eq!(visitor.counters.get("shardmap_gets"), Some(&2));
+        assert_eq!(visitor.counters.get("shardmap_sets"), Some(&1));
+        assert_eq!(visitor.counters.get("shardmap_hits"), Some(&1));
+        assert_eq!(visitor.counters.get("shardmap_misses"), Some(&1));
+        assert_eq!(visitor.counters.get("shardmap_bytes_read"), Some(&5));
+        assert_eq!(visitor.counters.get("shardmap_bytes_written"), Some(&5));
     }
 }
