@@ -10,8 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fast_telemetry::{
-    Counter, DynamicCounter, DynamicCounterSeries, DynamicGaugeI64, DynamicGaugeI64Series,
-    ExportMetrics, Histogram, MetricScope, RegisteredMetrics, Runtime, RuntimeConfig,
+    Counter, CounterSet, DynamicCounter, DynamicCounterSeries, DynamicGaugeI64,
+    DynamicGaugeI64Series, ExportMetrics, Histogram, MetricScope, RegisteredMetrics, Runtime,
+    RuntimeConfig,
 };
 use serde::Serialize;
 
@@ -39,6 +40,18 @@ const LATENCY_NS_BUCKETS: &[u64] = &[
 const LATENCY_NS_PER_MICROSECOND: u64 = 1_000;
 const DEFAULT_SHARED_CLOCK_UPDATE_INTERVAL: Duration = Duration::from_micros(1);
 const SHARDMAP_METRIC_SCOPE: &str = "shardmap";
+const AGGREGATE_COUNTER_COUNT: usize = 11;
+const AGG_GETS: usize = 0;
+const AGG_SETS: usize = 1;
+const AGG_DELETES: usize = 2;
+const AGG_BATCH_GETS: usize = 3;
+const AGG_HITS: usize = 4;
+const AGG_MISSES: usize = 5;
+const AGG_BYTES_READ: usize = 6;
+const AGG_BYTES_WRITTEN: usize = 7;
+const AGG_EXPIRATIONS: usize = 8;
+const AGG_WAL_WRITES: usize = 9;
+const AGG_WAL_BYTES: usize = 10;
 
 static SHARED_LATENCY_CLOCK: OnceLock<Arc<SharedLatencyClock>> = OnceLock::new();
 
@@ -325,6 +338,7 @@ struct ShardOperationSeries {
 pub struct CacheTelemetry {
     runtime: Arc<TelemetryRuntime>,
     metrics: RegisteredMetrics<CacheMetrics>,
+    aggregate_counters: CounterSet,
     shard_ops: Vec<ShardOperationSeries>,
     shard_keys_total: Vec<DynamicGaugeI64Series>,
     shard_memory_bytes: Vec<DynamicGaugeI64Series>,
@@ -578,6 +592,7 @@ impl CacheTelemetry {
         Arc::new(Self {
             runtime,
             metrics,
+            aggregate_counters: CounterSet::new(metric_shards, AGGREGATE_COUNTER_COUNT),
             shard_ops,
             shard_keys_total,
             shard_memory_bytes,
@@ -603,6 +618,11 @@ impl CacheTelemetry {
     }
 
     #[inline(always)]
+    fn aggregate_counter(&self, index: usize) -> u64 {
+        self.aggregate_counters.sum(index).max(0) as u64
+    }
+
+    #[inline(always)]
     fn start_latency_sample(&self) -> LatencySampleStart {
         self.latency_clock.start()
     }
@@ -620,6 +640,16 @@ impl CacheTelemetry {
         value_len: usize,
         latency_ns: Option<u64>,
     ) {
+        if hit {
+            self.aggregate_counters.add_index_values(&[
+                (AGG_GETS, 1),
+                (AGG_HITS, 1),
+                (AGG_BYTES_READ, value_len as isize),
+            ]);
+        } else {
+            self.aggregate_counters
+                .add_index_values(&[(AGG_GETS, 1), (AGG_MISSES, 1)]);
+        }
         self.metrics.gets.inc();
         if let Some(series) = self.shard_ops.get(shard_id) {
             series.get.inc();
@@ -637,6 +667,8 @@ impl CacheTelemetry {
 
     #[inline(always)]
     pub fn record_set(&self, shard_id: usize, value_len: usize, latency_ns: Option<u64>) {
+        self.aggregate_counters
+            .add_index_values(&[(AGG_SETS, 1), (AGG_BYTES_WRITTEN, value_len as isize)]);
         self.metrics.sets.inc();
         if let Some(series) = self.shard_ops.get(shard_id) {
             series.set.inc();
@@ -649,6 +681,7 @@ impl CacheTelemetry {
 
     #[inline(always)]
     pub fn record_delete(&self, shard_id: usize) {
+        self.aggregate_counters.inc(AGG_DELETES);
         self.metrics.deletes.inc();
         if let Some(series) = self.shard_ops.get(shard_id) {
             series.delete.inc();
@@ -657,6 +690,7 @@ impl CacheTelemetry {
 
     #[inline(always)]
     pub fn record_batch_get(&self, latency_ns: u64) {
+        self.aggregate_counters.inc(AGG_BATCH_GETS);
         self.metrics.batch_gets.inc();
         self.metrics.batch_get_latency_ns.record(latency_ns);
     }
@@ -671,12 +705,15 @@ impl CacheTelemetry {
     #[inline(always)]
     pub fn record_expiration(&self, count: usize) {
         if count > 0 {
+            self.aggregate_counters.add(AGG_EXPIRATIONS, count as isize);
             self.metrics.expirations.add(count as isize);
         }
     }
 
     #[inline(always)]
     pub fn record_wal_append(&self, bytes: usize) {
+        self.aggregate_counters
+            .add_index_values(&[(AGG_WAL_WRITES, 1), (AGG_WAL_BYTES, bytes as isize)]);
         self.metrics.wal_writes.inc();
         self.metrics.wal_bytes.add(bytes as isize);
     }
@@ -720,14 +757,14 @@ impl CacheTelemetry {
     }
 
     pub fn snapshot(&self) -> CacheMetricsSnapshot {
-        let gets = self.metrics.gets.sum().max(0) as u64;
-        let hits = self.metrics.hits.sum().max(0) as u64;
-        let misses = self.metrics.misses.sum().max(0) as u64;
+        let gets = self.aggregate_counter(AGG_GETS);
+        let hits = self.aggregate_counter(AGG_HITS);
+        let misses = self.aggregate_counter(AGG_MISSES);
         CacheMetricsSnapshot {
             gets,
-            sets: self.metrics.sets.sum().max(0) as u64,
-            deletes: self.metrics.deletes.sum().max(0) as u64,
-            batch_gets: self.metrics.batch_gets.sum().max(0) as u64,
+            sets: self.aggregate_counter(AGG_SETS),
+            deletes: self.aggregate_counter(AGG_DELETES),
+            batch_gets: self.aggregate_counter(AGG_BATCH_GETS),
             hits,
             misses,
             miss_rate: if gets == 0 {
@@ -735,8 +772,8 @@ impl CacheTelemetry {
             } else {
                 misses as f64 / gets as f64
             },
-            bytes_read: self.metrics.bytes_read.sum().max(0) as u64,
-            bytes_written: self.metrics.bytes_written.sum().max(0) as u64,
+            bytes_read: self.aggregate_counter(AGG_BYTES_READ),
+            bytes_written: self.aggregate_counter(AGG_BYTES_WRITTEN),
             get_latency_ns: HistogramSummary {
                 count: self.metrics.get_latency_ns.count(),
                 sum: self.metrics.get_latency_ns.sum(),
@@ -763,9 +800,9 @@ impl CacheTelemetry {
                 .into_iter()
                 .map(|(_, value)| value)
                 .sum(),
-            expirations: self.metrics.expirations.sum().max(0) as u64,
-            wal_writes: self.metrics.wal_writes.sum().max(0) as u64,
-            wal_bytes: self.metrics.wal_bytes.sum().max(0) as u64,
+            expirations: self.aggregate_counter(AGG_EXPIRATIONS),
+            wal_writes: self.aggregate_counter(AGG_WAL_WRITES),
+            wal_bytes: self.aggregate_counter(AGG_WAL_BYTES),
             wal_flush_latency_ns: HistogramSummary {
                 count: self.metrics.wal_flush_latency_ns.count(),
                 sum: self.metrics.wal_flush_latency_ns.sum(),

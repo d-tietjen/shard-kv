@@ -378,9 +378,9 @@ dependencies = [
 
 [[package]]
 name = "fast-telemetry"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ab8eb5923844824af765d3e18e8e8030adbeb1b1f8ee87528d16592317aa17d"
+checksum = "9b93dbb54b63cc759f2696414e2d77648a55f1ee2109323e849a14038271e359"
 dependencies = [
  "crossbeam-utils",
  "fast-telemetry-macros",
@@ -392,9 +392,9 @@ dependencies = [
 
 [[package]]
 name = "fast-telemetry-macros"
-version = "0.6.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e8356d5706f0c167e5f525b52c706d0c5852b44872d2bce731ad0c92668f7a5"
+checksum = "5e5fddff928459a923869bbca0f19ebf9d0dbf2f9e35f13be4a49a2ea427140d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1277,7 +1277,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "clap",
  "shardmap",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-benchmarks"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytes",
  "clap",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-c"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytes",
  "shardmap",
@@ -1317,7 +1317,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-client-rs"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "libc",
  "thiserror",
@@ -1326,14 +1326,14 @@ dependencies = [
 
 [[package]]
 name = "shardcache-formal"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "creusot-std",
 ]
 
 [[package]]
 name = "shardcache-py"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "core_affinity",
  "dashmap",
@@ -1347,7 +1347,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-runtime"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "cust",
  "serde",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "shardmap"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "bytes",
  "bytes-handoff",
