@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.1 - Unreleased
+
+### Added
+
+- Added a parent-runtime telemetry integration path backed by
+  `fast-telemetry` 0.7.1 so embedded shardmap deployments can register metrics
+  into an application-owned runtime instead of always creating a shardmap-owned
+  runtime.
+- Added grouped aggregate telemetry counters for shardmap cache operations and
+  WAL append counters using `fast-telemetry::CounterSet`.
+- Added a grouped-counter benchmark writeup in
+  `benchmarks/SHARDMAP_TELEMETRY_GROUPED_COUNTERS.md` documenting direct
+  telemetry update cost before and after making grouped counters authoritative.
+
+### Changed
+
+- Bumped the workspace and publishable crate surfaces to `0.4.1`.
+- Bumped `fast-telemetry` to `0.7.1`.
+- Made grouped telemetry counters authoritative: snapshots, Prometheus export,
+  and runtime visitor export now read from the grouped counter set instead of
+  mirroring hot-path updates into legacy individual counters.
+
+### Validation
+
+- Ran focused telemetry tests for snapshots, Prometheus export, runtime visitor
+  export, latency sampling exactness, and parent-runtime reuse.
+- Ran `cargo check --workspace --all-targets`.
+- Benchmarked direct telemetry counter update cost against the mirrored
+  grouped-counter implementation; the main hot paths improved by roughly
+  30-62% in the single-thread direct-cost run, with an end-to-end saturation
+  sanity check documented as too noisy to use as the primary signal.
+
 ## 0.3.2 - Unreleased
 
 ### Added
