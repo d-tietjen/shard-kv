@@ -8,7 +8,7 @@ server ports. This crate is intentionally small and synchronous: one client owns
 one or more TCP connections and is meant to be used directly from worker
 threads.
 
-This is one of the three publishable crates in the 0.3.x release line alongside
+This is one of the three publishable crates in the 0.5.x release line alongside
 `shardmap` and `shardcache`.
 
 ## Install

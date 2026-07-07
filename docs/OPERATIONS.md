@@ -1,7 +1,7 @@
 # Operations
 
 This page is the short operational contract for running `shardcache` in
-0.3.x-style deployments.
+0.5.x-style deployments.
 
 For the container-specific runbook, see
 [`SHARDCACHE_DOCKER.md`](SHARDCACHE_DOCKER.md).
@@ -10,14 +10,14 @@ For the container-specific runbook, see
 
 | Build | Command | Use When |
 | --- | --- | --- |
-| Embedded crate | `shardmap = "0.3.2"` | In-process Rust cache use. |
-| Server crate | `shardcache = "0.3.2"` | Install or depend on the RESP/SCNP server package. |
-| Native client crate | `shardcache-client-rs = "0.3.2"` | SCNP client access from Rust applications. |
+| Embedded crate | `shardmap = "0.5.0"` | In-process Rust cache use. |
+| Server crate | `shardcache = "0.5.0"` | Install or depend on the RESP/SCNP server package. |
+| Native client crate | `shardcache-client-rs = "0.5.0"` | SCNP client access from Rust applications. |
 | Server | `cargo run -p shardcache --features server --bin shardcache -- ...` | RESP/SCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo run -p shardcache --features redis-server --bin shardcache -- ...` | Redis/Valkey-compatible command and object behavior. |
 
 `shardmap`, `shardcache`, and `shardcache-client-rs` are the crates.io crates
-for 0.3.x. Python, C ABI, runtime, benchmark, and
+for 0.5.x. Python, C ABI, runtime, benchmark, and
 integration packages remain source-workspace packages.
 
 `redis-server` implies `server`, `redis`, `redis-functions`, and

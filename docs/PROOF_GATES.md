@@ -29,7 +29,7 @@ before tagging or publishing.
 ./scripts/check-publish-artifacts.sh
 ```
 
-`check-feature-matrix.sh` compiles the public 0.3.x feature contract for
+`check-feature-matrix.sh` compiles the current public feature contract for
 `shardcache` and `shardmap`, including the Redis-compatible server and module
 feature flags.
 
