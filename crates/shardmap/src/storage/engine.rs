@@ -21,8 +21,8 @@ use crate::storage::TelemetryRuntime;
 use crate::storage::command::{BorrowedCommand, Command};
 use crate::storage::stats::{GlobalStatsSnapshot, ShardStatsSnapshot};
 use crate::storage::{
-    Bytes, FlatMap, MutationOp, MutationRecord, StoredEntry, hash_key, now_millis, shift_for,
-    stripe_index,
+    Bytes, FlatMap, MutationOp, MutationRecord, ObjectOverflowRuntime, StoredEntry, hash_key,
+    now_millis, shift_for, stripe_index,
 };
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
@@ -162,7 +162,7 @@ enum ShardMessage {
         reply: oneshot::Sender<Result<ShardReply>>,
     },
     Snapshot {
-        reply: oneshot::Sender<Vec<StoredEntry>>,
+        reply: oneshot::Sender<Result<Vec<StoredEntry>>>,
     },
     Stats {
         reply: oneshot::Sender<ShardStatsSnapshot>,
@@ -233,6 +233,7 @@ impl EngineHandle {
             let persistence =
                 PersistenceRuntime::start(config.shard_count, config.persistence.clone())?;
             let replication = start_replication_primary(&config)?;
+            let object_overflow = ObjectOverflowRuntime::from_config(&config.object_overflow)?;
             let shift = shift_for(config.shard_count);
             let recovered = RecoveredShardEntries::partition(&recovery.entries, shift);
 
@@ -244,17 +245,19 @@ impl EngineHandle {
                 let shard_config = config.clone();
                 let wal = persistence.appender(shard_id);
                 let replication = replication.clone();
+                let object_overflow = object_overflow.clone();
                 let join = thread::Builder::new()
                     .name(format!("shardcache-shard-{shard_id}"))
                     .spawn(move || {
-                        ShardWorker::run(
+                        ShardWorker::run(ShardWorkerStart {
                             shard_id,
-                            rx,
-                            shard_config,
-                            shard_entries,
+                            receiver: rx,
+                            config: shard_config,
+                            recovered_entries: shard_entries,
                             wal,
                             replication,
-                        )
+                            object_overflow,
+                        })
                     })
                     .map_err(|error| {
                         ShardCacheError::Config(format!(
@@ -294,6 +297,7 @@ impl EngineHandle {
             metrics.clone(),
         )?;
         let replication = start_replication_primary(&config)?;
+        let object_overflow = ObjectOverflowRuntime::from_config(&config.object_overflow)?;
         let shift = shift_for(config.shard_count);
         let recovered = RecoveredShardEntries::partition(&recovery.entries, shift);
 
@@ -305,19 +309,21 @@ impl EngineHandle {
             let shard_config = config.clone();
             let wal = persistence.appender(shard_id);
             let replication = replication.clone();
+            let object_overflow = object_overflow.clone();
             let shard_metrics = metrics.clone();
             let join = thread::Builder::new()
                 .name(format!("shardcache-shard-{shard_id}"))
                 .spawn(move || {
-                    ShardWorker::run(
+                    ShardWorker::run(ShardWorkerStart {
                         shard_id,
-                        rx,
-                        shard_config,
-                        shard_entries,
+                        receiver: rx,
+                        config: shard_config,
+                        recovered_entries: shard_entries,
                         wal,
                         replication,
-                        shard_metrics,
-                    )
+                        object_overflow,
+                        metrics: shard_metrics,
+                    })
                 })
                 .map_err(|error| {
                     ShardCacheError::Config(format!("failed to start shard {shard_id}: {error}"))
@@ -423,7 +429,7 @@ impl EngineHandle {
                 .map_err(|_| ShardCacheError::ChannelClosed("snapshot request"))?;
             entries.extend(
                 rx.await
-                    .map_err(|_| ShardCacheError::ChannelClosed("snapshot response"))?,
+                    .map_err(|_| ShardCacheError::ChannelClosed("snapshot response"))??,
             );
         }
         self.inner.persistence.snapshot(&entries, now_ms)
@@ -536,6 +542,18 @@ impl RecoveredShardEntries {
 
 struct ShardWorker;
 
+struct ShardWorkerStart {
+    shard_id: usize,
+    receiver: Receiver<ShardMessage>,
+    config: ShardCacheConfig,
+    recovered_entries: Vec<StoredEntry>,
+    wal: Option<crate::persistence::WalAppender>,
+    replication: Option<Arc<ReplicationPrimary>>,
+    object_overflow: Option<ObjectOverflowRuntime>,
+    #[cfg(feature = "telemetry")]
+    metrics: Option<Arc<CacheTelemetry>>,
+}
+
 fn start_replication_primary(config: &ShardCacheConfig) -> Result<Option<Arc<ReplicationPrimary>>> {
     if !config.replication.enabled {
         return Ok(None);
@@ -550,15 +568,18 @@ fn start_replication_primary(config: &ShardCacheConfig) -> Result<Option<Arc<Rep
 }
 
 impl ShardWorker {
-    fn run(
-        shard_id: usize,
-        receiver: Receiver<ShardMessage>,
-        config: ShardCacheConfig,
-        recovered_entries: Vec<StoredEntry>,
-        wal: Option<crate::persistence::WalAppender>,
-        replication: Option<Arc<ReplicationPrimary>>,
-        #[cfg(feature = "telemetry")] metrics: Option<Arc<CacheTelemetry>>,
-    ) {
+    fn run(start: ShardWorkerStart) {
+        let ShardWorkerStart {
+            shard_id,
+            receiver,
+            config,
+            recovered_entries,
+            wal,
+            replication,
+            object_overflow,
+            #[cfg(feature = "telemetry")]
+            metrics,
+        } = start;
         Self::pin_current_thread(shard_id);
 
         #[allow(unused_mut)]
@@ -568,6 +589,7 @@ impl ShardWorker {
             config.eviction_policy,
             now_millis(),
         );
+        map.configure_object_overflow(object_overflow, shard_id, now_millis());
         #[cfg(feature = "telemetry")]
         if let Some(metrics) = &metrics {
             map.attach_metrics(CacheTelemetryHandle::from_arc(metrics), shard_id);
@@ -595,7 +617,7 @@ impl ShardWorker {
                     state.flush_replication_due();
                 }
                 Ok(ShardMessage::Snapshot { reply }) => {
-                    let _ = reply.send(state.map.snapshot_entries(now_millis()));
+                    let _ = reply.send(state.map.try_snapshot_entries(now_millis()));
                     state.flush_replication_due();
                 }
                 Ok(ShardMessage::Stats { reply }) => {
@@ -876,6 +898,7 @@ impl ShardState {
             hot,
             warm,
             cold,
+            object_overflow: self.map.object_overflow_stats().into(),
         }
     }
 }

@@ -62,6 +62,8 @@ redis-modules-all = [
 redis-server = ["server", "redis", "redis-functions", "redis-modules", "shardmap/redis-server"]
 monoio = ["server", "shardmap/monoio"]
 prefix-eviction = ["shardmap/prefix-eviction"]
+object-overflow = ["shardmap/object-overflow"]
+object-overflow-s3 = ["object-overflow", "shardmap/object-overflow-s3"]
 
 [dependencies]
 shardmap = { workspace = true, default-features = false }

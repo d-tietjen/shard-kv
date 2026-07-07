@@ -5,11 +5,13 @@ use std::collections::{BinaryHeap, VecDeque};
 use std::mem;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::config::EvictionPolicy;
-use crate::storage::stats::TierStatsSnapshot;
+use crate::ShardCacheError;
+use crate::config::{EvictionPolicy, ObjectOverflowFailurePolicy};
+use crate::storage::stats::{ObjectOverflowStatsSnapshot, TierStatsSnapshot};
 use crate::storage::{
-    Bytes, SemanticCacheError, SemanticEmbedding, SemanticIndex, SemanticIndexCandidate,
-    SemanticIndexToken, SemanticMatch, StoredEntry, hash_key, hash_key_tag_from_hash,
+    Bytes, FastHashMap, ObjectOverflowRuntime, ObjectValueRef, SemanticCacheError,
+    SemanticEmbedding, SemanticIndex, SemanticIndexCandidate, SemanticIndexToken, SemanticMatch,
+    StoredEntry, hash_key, hash_key_tag_from_hash,
 };
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetryHandle, LatencySampleStart};
@@ -28,6 +30,34 @@ struct FlatEntry {
     semantic_index_token: Option<SemanticIndexToken>,
     semantic_governance: Option<SharedBytes>,
     access: EntryAccessMeta,
+}
+
+#[derive(Debug)]
+struct RemoteEntry {
+    hash: u64,
+    key_len: usize,
+    key: Box<[u8]>,
+    object: ObjectValueRef,
+    expire_at_ms: Option<u64>,
+}
+
+impl RemoteEntry {
+    #[inline(always)]
+    fn matches(&self, hash: u64, key: &[u8]) -> bool {
+        self.hash == hash && self.key_len == key.len() && bytes_equal_hot(self.key.as_ref(), key)
+    }
+
+    #[inline(always)]
+    fn is_expired(&self, now_ms: u64) -> bool {
+        self.expire_at_ms.is_some_and(|deadline| deadline <= now_ms)
+    }
+
+    #[inline(always)]
+    fn stored_bytes(&self) -> usize {
+        self.key_len
+            .saturating_add(self.object.object_key.len())
+            .saturating_add(std::mem::size_of::<ObjectValueRef>())
+    }
 }
 
 impl FlatEntry {
@@ -323,6 +353,7 @@ const MAX_REUSABLE_VALUE_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Debug, Default)]
 pub struct FlatMap {
     entries: HashTable<FlatEntry>,
+    remote_entries: FastHashMap<Bytes, RemoteEntry>,
     semantic_index: SemanticIndex,
     #[cfg(feature = "experimental-no-ttl-point-hot-path")]
     fast_points: FastPointMap,
@@ -332,8 +363,13 @@ pub struct FlatMap {
     reusable_values: Vec<SharedBytes>,
     reusable_value_bytes: usize,
     stored_bytes: usize,
+    remote_value_bytes: usize,
     memory_limit_bytes: Option<usize>,
     eviction_policy: EvictionPolicy,
+    object_overflow: Option<ObjectOverflowRuntime>,
+    object_overflow_shard_id: usize,
+    object_overflow_sequence: u64,
+    object_overflow_stats: ObjectOverflowStats,
     /// Monotonic counter for entry access timestamps. Metadata touches require
     /// `&mut FlatMap`, so this stays shard-local and non-atomic.
     access_clock: u64,
@@ -343,6 +379,103 @@ pub struct FlatMap {
     evictions: u64,
     #[cfg(feature = "telemetry")]
     telemetry: Option<FlatMapTelemetry>,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct ObjectOverflowStats {
+    pub enabled: bool,
+    pub backend: String,
+    pub degraded: bool,
+    pub queue_capacity: usize,
+    pub queue_depth: usize,
+    pub pending_jobs: usize,
+    pub active_workers: usize,
+    pub worker_threads: usize,
+    pub remote_entries: usize,
+    pub remote_value_bytes: usize,
+    pub remote_stored_bytes: usize,
+    pub offload_attempts: u64,
+    pub offload_successes: u64,
+    pub offload_failures: u64,
+    pub offload_hot_skips: u64,
+    pub fault_attempts: u64,
+    pub fault_successes: u64,
+    pub fault_failures: u64,
+    pub checksum_failures: u64,
+    pub remote_delete_attempts: u64,
+    pub remote_delete_failures: u64,
+    pub encode_ops: u64,
+    pub compress_ops: u64,
+    pub upload_ops: u64,
+    pub download_ops: u64,
+    pub decode_ops: u64,
+    pub delete_ops: u64,
+    pub retries: u64,
+    pub timeouts: u64,
+    pub auth_config_failures: u64,
+    pub unavailable_failures: u64,
+    pub integrity_failures: u64,
+    pub not_found_failures: u64,
+    pub delete_failures: u64,
+    pub cleanup_scans: u64,
+    pub cleanup_deletes: u64,
+    pub object_bytes_raw: u64,
+    pub object_bytes_stored: u64,
+    pub encode_latency_us: u64,
+    pub upload_latency_us: u64,
+    pub download_latency_us: u64,
+    pub decode_latency_us: u64,
+    pub delete_latency_us: u64,
+}
+
+impl From<ObjectOverflowStats> for ObjectOverflowStatsSnapshot {
+    fn from(value: ObjectOverflowStats) -> Self {
+        Self {
+            enabled: value.enabled,
+            backend: value.backend,
+            degraded: value.degraded,
+            queue_capacity: value.queue_capacity,
+            queue_depth: value.queue_depth,
+            pending_jobs: value.pending_jobs,
+            active_workers: value.active_workers,
+            worker_threads: value.worker_threads,
+            remote_entries: value.remote_entries,
+            remote_value_bytes: value.remote_value_bytes,
+            remote_stored_bytes: value.remote_stored_bytes,
+            offload_attempts: value.offload_attempts,
+            offload_successes: value.offload_successes,
+            offload_failures: value.offload_failures,
+            offload_hot_skips: value.offload_hot_skips,
+            fault_attempts: value.fault_attempts,
+            fault_successes: value.fault_successes,
+            fault_failures: value.fault_failures,
+            checksum_failures: value.checksum_failures,
+            remote_delete_attempts: value.remote_delete_attempts,
+            remote_delete_failures: value.remote_delete_failures,
+            encode_ops: value.encode_ops,
+            compress_ops: value.compress_ops,
+            upload_ops: value.upload_ops,
+            download_ops: value.download_ops,
+            decode_ops: value.decode_ops,
+            delete_ops: value.delete_ops,
+            retries: value.retries,
+            timeouts: value.timeouts,
+            auth_config_failures: value.auth_config_failures,
+            unavailable_failures: value.unavailable_failures,
+            integrity_failures: value.integrity_failures,
+            not_found_failures: value.not_found_failures,
+            delete_failures: value.delete_failures,
+            cleanup_scans: value.cleanup_scans,
+            cleanup_deletes: value.cleanup_deletes,
+            object_bytes_raw: value.object_bytes_raw,
+            object_bytes_stored: value.object_bytes_stored,
+            encode_latency_us: value.encode_latency_us,
+            upload_latency_us: value.upload_latency_us,
+            download_latency_us: value.download_latency_us,
+            decode_latency_us: value.decode_latency_us,
+            delete_latency_us: value.delete_latency_us,
+        }
+    }
 }
 
 #[cfg(feature = "telemetry")]
@@ -380,6 +513,14 @@ enum DeleteReason {
     Expired,
     Evicted,
 }
+
+enum ObjectOffloadAttempt {
+    Offloaded,
+    NotEligible,
+    HotRetainResident,
+    FailedRetainResident,
+    FailedEvictResident,
+}
 #[cfg(feature = "experimental-no-ttl-point-hot-path")]
 mod fast_point;
 
@@ -400,7 +541,71 @@ mod tests {
     #[cfg(feature = "embedded")]
     use super::hash_key_tag_from_hash;
     use super::{REUSABLE_VALUE_MIN_BYTES, hash_key};
-    use crate::config::EvictionPolicy;
+    use crate::config::{
+        EvictionPolicy, ObjectOverflowBackend, ObjectOverflowCompression,
+        ObjectOverflowFailurePolicy,
+    };
+    use crate::storage::object_overflow::tests::InMemoryObjectOverflowStore;
+    use crate::storage::{ObjectOverflowRuntime, ObjectOverflowRuntimeOptions};
+    use std::sync::Arc;
+
+    fn in_memory_overflow(min_value_bytes: usize) -> ObjectOverflowRuntime {
+        in_memory_overflow_with_store(min_value_bytes).0
+    }
+
+    fn in_memory_overflow_with_cold_gate(
+        min_value_bytes: usize,
+        offload_min_idle_ticks: u64,
+        offload_max_frequency: u32,
+    ) -> ObjectOverflowRuntime {
+        in_memory_overflow_with_store_and_cold_gate(
+            min_value_bytes,
+            offload_min_idle_ticks,
+            offload_max_frequency,
+        )
+        .0
+    }
+
+    fn in_memory_overflow_with_store(
+        min_value_bytes: usize,
+    ) -> (ObjectOverflowRuntime, Arc<InMemoryObjectOverflowStore>) {
+        in_memory_overflow_with_store_and_cold_gate(min_value_bytes, 0, u32::MAX)
+    }
+
+    fn in_memory_overflow_with_store_and_cold_gate(
+        min_value_bytes: usize,
+        offload_min_idle_ticks: u64,
+        offload_max_frequency: u32,
+    ) -> (ObjectOverflowRuntime, Arc<InMemoryObjectOverflowStore>) {
+        let store = Arc::new(InMemoryObjectOverflowStore::default());
+        let runtime = ObjectOverflowRuntime::new(
+            store.clone(),
+            ObjectOverflowRuntimeOptions {
+                backend: ObjectOverflowBackend::File,
+                min_value_bytes,
+                compression: ObjectOverflowCompression::Zstd,
+                zstd_level: 3,
+                failure_policy: ObjectOverflowFailurePolicy::RetainResident,
+                max_retries: 0,
+                retry_backoff: std::time::Duration::from_millis(1),
+                operation_timeout: std::time::Duration::from_millis(100),
+                worker_threads: 1,
+                queue_capacity: 16,
+                degraded_failure_threshold: 8,
+                degraded_cooldown: std::time::Duration::from_millis(100),
+                fetch_on_get: true,
+                delete_on_overwrite: true,
+                prefix: "test-overflow".to_string(),
+                node_id: "test-node".to_string(),
+                generation_id: "test-generation".to_string(),
+                cleanup_on_start: false,
+                cleanup_grace: std::time::Duration::from_secs(60),
+                offload_min_idle_ticks,
+                offload_max_frequency,
+            },
+        );
+        (runtime, store)
+    }
 
     #[test]
     fn stores_reads_and_updates_values() {
@@ -602,5 +807,149 @@ mod tests {
         assert_eq!(map.get(b"hot:1", 0), Some(b"4".to_vec()));
         assert_eq!(map.get(b"cold:0", 0), Some(b"1".to_vec()));
         assert_eq!(map.get(b"cold:1", 0), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn object_overflow_offloads_and_faults_owned_get() {
+        let mut map = FlatMap::new();
+        map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+        map.configure_object_overflow(Some(in_memory_overflow(4)), 2, 0);
+
+        map.set(b"alpha".to_vec(), b"0123456789".to_vec(), None, 0);
+
+        assert_eq!(map.get_ref(b"alpha", 0), None);
+        assert!(map.exists(b"alpha", 0));
+        assert_eq!(map.remote_value_bytes(), 10);
+
+        assert_eq!(map.get(b"alpha", 0), Some(b"0123456789".to_vec()));
+        let stats = map.object_overflow_stats();
+        assert_eq!(stats.offload_successes, 2);
+        assert_eq!(stats.fault_successes, 1);
+    }
+
+    #[test]
+    fn object_overflow_snapshot_materializes_remote_entries() {
+        let mut map = FlatMap::new();
+        map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+        map.configure_object_overflow(Some(in_memory_overflow(4)), 7, 0);
+
+        map.set(b"alpha".to_vec(), b"remote-value".to_vec(), None, 0);
+
+        let snapshot = map.snapshot_entries(0);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].key, b"alpha".to_vec());
+        assert_eq!(snapshot[0].value, b"remote-value".to_vec());
+    }
+
+    #[test]
+    fn object_overflow_retains_recent_hot_values() {
+        let mut map = FlatMap::new();
+        map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+        map.configure_object_overflow(
+            Some(in_memory_overflow_with_cold_gate(4, 1_024, u32::MAX)),
+            2,
+            0,
+        );
+
+        map.set(b"alpha".to_vec(), b"0123456789".to_vec(), None, 0);
+
+        assert!(map.get_ref(b"alpha", 0).is_some());
+        assert_eq!(map.remote_value_bytes(), 0);
+        let stats = map.object_overflow_stats();
+        assert_eq!(stats.offload_attempts, 0);
+        assert_eq!(stats.offload_successes, 0);
+        assert!(stats.offload_hot_skips >= 1);
+    }
+
+    #[test]
+    fn object_overflow_offloads_only_idle_cold_values() {
+        let mut map = FlatMap::new();
+        map.configure_memory_policy(Some(4096), EvictionPolicy::Lru, 0);
+        map.configure_object_overflow(
+            Some(in_memory_overflow_with_cold_gate(4, 2, u32::MAX)),
+            2,
+            0,
+        );
+
+        map.set(b"cold".to_vec(), b"cold-value".to_vec(), None, 0);
+        map.set(b"middle".to_vec(), b"middle-value".to_vec(), None, 0);
+        map.set(b"hot".to_vec(), b"hot-value".to_vec(), None, 0);
+        assert_eq!(map.get(b"hot", 0), Some(b"hot-value".to_vec()));
+
+        map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+
+        assert_eq!(map.get_ref(b"cold", 0), None);
+        assert_eq!(map.get_ref(b"hot", 0), Some(b"hot-value".as_slice()));
+        let stats = map.object_overflow_stats();
+        assert!(stats.offload_successes >= 1);
+        assert!(stats.offload_hot_skips >= 1);
+    }
+
+    #[test]
+    fn object_overflow_keys_include_node_and_generation() {
+        let runtime = in_memory_overflow(4);
+        let key = runtime.object_key(7, 0xabcd, 3);
+        assert!(key.starts_with("test-overflow/test-node/test-generation/shard-7/"));
+        assert!(key.ends_with("000000000000abcd-0000000000000003.bin"));
+    }
+
+    #[test]
+    fn object_overflow_try_snapshot_errors_on_remote_fetch_failure() {
+        let mut map = FlatMap::new();
+        let (overflow, store) = in_memory_overflow_with_store(4);
+        map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+        map.configure_object_overflow(Some(overflow), 7, 0);
+
+        map.set(b"alpha".to_vec(), b"remote-value".to_vec(), None, 0);
+        let object_key = map
+            .remote_entries
+            .get(b"alpha".as_slice())
+            .expect("remote entry")
+            .object
+            .object_key
+            .clone();
+        store.remove(&object_key);
+
+        assert!(map.try_snapshot_entries(0).is_err());
+        assert!(map.snapshot_entries(0).is_empty());
+    }
+
+    #[test]
+    fn object_overflow_maintenance_removes_expired_remote_entries() {
+        let mut map = FlatMap::new();
+        map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+        map.configure_object_overflow(Some(in_memory_overflow(4)), 3, 0);
+
+        map.set(b"alpha".to_vec(), b"0123456789".to_vec(), Some(10), 0);
+        assert_eq!(map.len(), 1);
+
+        assert_eq!(map.process_maintenance(11), 1);
+        assert_eq!(map.len(), 0);
+        let stats = map.object_overflow_stats();
+        assert_eq!(stats.remote_delete_attempts, 1);
+        assert_eq!(stats.remote_delete_failures, 0);
+    }
+
+    #[test]
+    fn object_overflow_rejects_corrupted_remote_payload() {
+        let mut map = FlatMap::new();
+        let (overflow, store) = in_memory_overflow_with_store(4);
+        map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+        map.configure_object_overflow(Some(overflow), 5, 0);
+
+        map.set(b"alpha".to_vec(), b"0123456789".to_vec(), None, 0);
+        let object_key = map
+            .remote_entries
+            .get(b"alpha".as_slice())
+            .expect("remote entry")
+            .object
+            .object_key
+            .clone();
+        store.overwrite(&object_key, b"not-a-valid-payload");
+
+        assert_eq!(map.get(b"alpha", 0), None);
+        let stats = map.object_overflow_stats();
+        assert_eq!(stats.fault_failures, 1);
+        assert_eq!(stats.checksum_failures, 1);
     }
 }

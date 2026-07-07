@@ -46,6 +46,44 @@ write_timeout_ms = 250
 reconnect_backoff_ms = 100
 backpressure_on_full = false
 
+[object_overflow]
+enabled = false
+backend = "file" # "file" or "s3" with the object-overflow-s3 feature.
+# Local/test adapter path for the object-overflow feature. S3-compatible
+# RustFS deployments should set this to the service endpoint.
+endpoint = "./var/object-overflow"
+bucket = "shardcache"
+prefix = "overflow"
+node_id = "node-a"
+region = "us-east-1"
+force_path_style = true
+allow_http = false
+tls_verify = true
+# server_side_encryption = "AES256"
+# access_key_env = "RUSTFS_ACCESS_KEY"
+# secret_key_env = "RUSTFS_SECRET_KEY"
+min_value_bytes = 4096
+# Values must be idle for this many access-clock ticks before overflow can
+# offload them. This keeps recently written/read hot values resident.
+offload_min_idle_ticks = 1024
+# Optional historic heat cap. Use 4294967295 to disable the frequency gate.
+offload_max_frequency = 4294967295
+compression = "zstd"
+zstd_level = 3
+failure_policy = "retain_resident"
+max_retries = 2
+retry_backoff_ms = 10
+operation_timeout_ms = 500
+worker_threads = 2
+queue_capacity = 1024
+degraded_failure_threshold = 8
+degraded_cooldown_ms = 5000
+cleanup_on_start = false
+cleanup_interval_seconds = 0
+cleanup_grace_seconds = 86400
+fetch_on_get = true
+delete_on_overwrite = true
+
 [replication]
 enabled = false
 role = "primary"

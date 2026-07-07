@@ -25,6 +25,9 @@ impl DirectServer {
                 config.per_shard_memory_limit_bytes(),
                 config.eviction_policy,
             );
+            store.configure_object_overflow(ObjectOverflowRuntime::from_config(
+                &config.object_overflow,
+            )?);
             #[cfg(feature = "redis")]
             store.configure_vector_memory_policy(
                 config.total_memory_limit_bytes(),

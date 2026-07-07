@@ -773,6 +773,9 @@ impl ShardCacheServer {
                 store.shard_count(),
                 store.route_mode()
             );
+            store.configure_object_overflow(ObjectOverflowRuntime::from_config(
+                &self.config.object_overflow,
+            )?);
             return Ok(Arc::clone(store));
         }
 
@@ -782,6 +785,9 @@ impl ShardCacheServer {
             self.config.per_shard_memory_limit_bytes(),
             self.config.eviction_policy,
         );
+        store.configure_object_overflow(ObjectOverflowRuntime::from_config(
+            &self.config.object_overflow,
+        )?);
         #[cfg(feature = "redis")]
         store.configure_vector_memory_policy(
             self.config.total_memory_limit_bytes(),

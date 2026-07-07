@@ -500,6 +500,7 @@ impl EmbeddedStore {
                     hot,
                     warm,
                     cold,
+                    object_overflow: shard.map.object_overflow_stats().into(),
                 }
             })
             .collect()

@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.5.0 - Unreleased
+
+### Added
+
+- Added feature-gated object overflow for in-memory primary storage. Cold
+  values can now be offloaded behind an `ObjectOverflowStore` boundary while
+  logical key metadata remains resident.
+- Added the `object-overflow` feature, `[object_overflow]` configuration,
+  shard-level object-overflow stats, and a filesystem-backed local adapter for
+  tests and local deployments.
+- Added owned-read fault-in for offloaded values, remote cleanup on delete,
+  overwrite, and TTL expiry, plus snapshot materialization for remote entries.
+- Added self-describing object-overflow payload encoding with configurable
+  `none`, `lz4`, or `zstd` compression, CRC32 integrity checks, retry knobs,
+  and explicit retain-or-evict failure policy.
+- Added bounded object-overflow worker execution, generation-scoped object
+  names, generation markers, conservative file-backend orphan cleanup,
+  fail-loud snapshot materialization, degraded-state health, and expanded
+  object-overflow counters.
+- Added the `object-overflow-s3` feature with a RustFS/S3-compatible adapter
+  backed by `object_store`, including path-style requests, HTTP/TLS controls,
+  env-sourced credentials, and server-side encryption configuration.
+- Added filesystem-backed object-overflow integration tests that exercise real
+  file creation, snapshot materialization, missing-payload failure, remote
+  delete, and stale-generation cleanup.
+- Added an ignored/env-gated S3/RustFS-compatible object-overflow smoke test
+  for live endpoint validation.
+- Added explicit cold-only object-overflow gating with configurable idle ticks,
+  optional access-frequency limits, and hot-skip accounting so recent hot values
+  stay resident under memory pressure.
+- Added the `object_overflow_fs_cost` benchmark binary for resident set/get,
+  cold filesystem offload, and filesystem fault-in performance measurements.
+
+### Changed
+
+- Bumped the workspace and publishable crate surfaces to `0.5.0`.
+
+### Validation
+
+- Ran focused object-overflow tests for offload/fault-in, snapshot
+  materialization, TTL cleanup, and corrupted remote payload rejection.
+- Ran filesystem-backed object-overflow integration tests and a release-mode
+  filesystem object-overflow benchmark sample.
+- Ran `cargo check` for default shardmap, embedded-only shardmap, and
+  shardcache with `object-overflow`.
+- Ran clippy for the object-overflow feature release.
+
 ## 0.4.1 - Unreleased
 
 ### Added
