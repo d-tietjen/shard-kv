@@ -1,6 +1,8 @@
+#[cfg(feature = "object-overflow")]
+use super::ObjectOverflowBackend;
 use super::{
-    EvictionPolicy, ObjectOverflowBackend, ObjectOverflowConfig, PersistenceConfig,
-    ReplicationConfig, ReplicationRole, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
+    EvictionPolicy, ObjectOverflowConfig, PersistenceConfig, ReplicationConfig, ReplicationRole,
+    ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
 };
 use crate::{Result, ShardCacheError};
 
@@ -39,6 +41,7 @@ struct WalTcpExportValidation<'a> {
 
 struct ObjectOverflowValidation<'a> {
     config: &'a ObjectOverflowConfig,
+    #[cfg(feature = "object-overflow")]
     root: &'a ShardCacheConfig,
 }
 
@@ -145,7 +148,13 @@ impl ConfigValidationRule {
 
 impl<'a> ObjectOverflowValidation<'a> {
     fn new(config: &'a ObjectOverflowConfig, root: &'a ShardCacheConfig) -> Self {
-        Self { config, root }
+        #[cfg(not(feature = "object-overflow"))]
+        let _ = root;
+        Self {
+            config,
+            #[cfg(feature = "object-overflow")]
+            root,
+        }
     }
 
     fn validate(&self) -> Result<()> {
@@ -154,9 +163,9 @@ impl<'a> ObjectOverflowValidation<'a> {
             true => {
                 #[cfg(not(feature = "object-overflow"))]
                 {
-                    return Err(ShardCacheError::Config(
+                    Err(ShardCacheError::Config(
                         "object_overflow.enabled requires the object-overflow feature".into(),
-                    ));
+                    ))
                 }
                 #[cfg(feature = "object-overflow")]
                 {

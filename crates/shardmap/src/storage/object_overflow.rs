@@ -1,13 +1,20 @@
+#[cfg(feature = "object-overflow")]
 use std::fs;
+#[cfg(feature = "object-overflow")]
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "object-overflow")]
+use std::sync::Mutex;
+#[cfg(feature = "object-overflow")]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes as SharedBytes;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
 use lz4_flex::{compress_prepend_size, decompress_size_prepended};
+#[cfg(feature = "object-overflow")]
 use serde::{Deserialize, Serialize};
 
 use crate::config::{
@@ -91,6 +98,7 @@ pub struct ObjectOverflowRuntime {
     generation_id: String,
     consecutive_failures: Arc<AtomicUsize>,
     degraded_until_ms: Arc<AtomicU64>,
+    #[cfg(feature = "object-overflow")]
     cleanup_task: Arc<ObjectOverflowCleanupTask>,
 }
 
@@ -142,6 +150,7 @@ impl ObjectOverflowRuntime {
             generation_id: options.generation_id,
             consecutive_failures: Arc::new(AtomicUsize::new(0)),
             degraded_until_ms: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "object-overflow")]
             cleanup_task: Arc::new(ObjectOverflowCleanupTask::default()),
         }
     }
@@ -303,6 +312,7 @@ impl ObjectOverflowRuntime {
         }
     }
 
+    #[cfg(feature = "object-overflow")]
     fn write_generation_marker(&self) -> Result<()> {
         let marker = GenerationMarker {
             node_id: self.node_id.clone(),
@@ -317,6 +327,7 @@ impl ObjectOverflowRuntime {
             .put_raw(&key, SharedBytes::from(body), self.operation_timeout)
     }
 
+    #[cfg(feature = "object-overflow")]
     fn cleanup_stale_generations(&self, cleanup_grace_seconds: u64) -> Result<()> {
         cleanup_stale_generations_with(
             &self.workers,
@@ -328,6 +339,7 @@ impl ObjectOverflowRuntime {
         )
     }
 
+    #[cfg(feature = "object-overflow")]
     fn start_cleanup_task(&self, interval: Duration, cleanup_grace_seconds: u64) {
         let mut handle = self
             .cleanup_task
@@ -366,6 +378,7 @@ impl ObjectOverflowRuntime {
         }));
     }
 
+    #[cfg(feature = "object-overflow")]
     fn generation_marker_key(&self, generation_id: &str) -> String {
         format!(
             "{}/{}/{generation_id}/_generation.json",
@@ -375,6 +388,7 @@ impl ObjectOverflowRuntime {
     }
 }
 
+#[cfg(feature = "object-overflow")]
 fn cleanup_stale_generations_with(
     workers: &ObjectOverflowWorkerPool,
     prefix: &str,
@@ -423,6 +437,7 @@ fn cleanup_stale_generations_with(
     Ok(())
 }
 
+#[cfg(feature = "object-overflow")]
 fn generation_id_from_marker_key(key: &str) -> Option<&str> {
     let marker_suffix = "/_generation.json";
     let key = key.strip_suffix(marker_suffix)?;
@@ -509,12 +524,14 @@ struct ObjectOverflowWorkerPool {
     workers: Vec<thread::JoinHandle<()>>,
 }
 
+#[cfg(feature = "object-overflow")]
 #[derive(Default)]
 struct ObjectOverflowCleanupTask {
     shutdown: Arc<AtomicBool>,
     handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
+#[cfg(feature = "object-overflow")]
 impl Drop for ObjectOverflowCleanupTask {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
@@ -537,6 +554,7 @@ enum ObjectOverflowWorkerJob {
         zstd_level: i32,
         reply: Sender<Result<ObjectValueRef>>,
     },
+    #[cfg(feature = "object-overflow")]
     PutRaw {
         object_key: String,
         value: SharedBytes,
@@ -546,6 +564,7 @@ enum ObjectOverflowWorkerJob {
         object: ObjectValueRef,
         reply: Sender<Result<SharedBytes>>,
     },
+    #[cfg(feature = "object-overflow")]
     GetRaw {
         object_key: String,
         reply: Sender<Result<SharedBytes>>,
@@ -554,6 +573,7 @@ enum ObjectOverflowWorkerJob {
         object_key: String,
         reply: Sender<Result<()>>,
     },
+    #[cfg(feature = "object-overflow")]
     List {
         prefix: String,
         reply: Sender<Result<Vec<String>>>,
@@ -648,6 +668,7 @@ impl ObjectOverflowWorkerPool {
         self.recv(receiver, timeout, "put")
     }
 
+    #[cfg(feature = "object-overflow")]
     fn put_raw(&self, object_key: &str, value: SharedBytes, timeout: Duration) -> Result<()> {
         let (reply, receiver) = bounded(1);
         self.enqueue(
@@ -667,6 +688,7 @@ impl ObjectOverflowWorkerPool {
         self.recv(receiver, timeout, "get")
     }
 
+    #[cfg(feature = "object-overflow")]
     fn get_raw(&self, object_key: &str, timeout: Duration) -> Result<SharedBytes> {
         let (reply, receiver) = bounded(1);
         self.enqueue(
@@ -691,6 +713,7 @@ impl ObjectOverflowWorkerPool {
         self.recv(receiver, timeout, "delete")
     }
 
+    #[cfg(feature = "object-overflow")]
     fn list_keys(&self, prefix: &str, timeout: Duration) -> Result<Vec<String>> {
         let (reply, receiver) = bounded(1);
         self.enqueue(
@@ -798,6 +821,7 @@ impl ObjectOverflowWorker {
                 let result = self.put_encoded(&object_key, &raw, compression, zstd_level);
                 let _ = reply.send(result);
             }
+            #[cfg(feature = "object-overflow")]
             ObjectOverflowWorkerJob::PutRaw {
                 object_key,
                 value,
@@ -810,6 +834,7 @@ impl ObjectOverflowWorker {
                 let result = self.get_decoded(&object);
                 let _ = reply.send(result);
             }
+            #[cfg(feature = "object-overflow")]
             ObjectOverflowWorkerJob::GetRaw { object_key, reply } => {
                 let result = self.with_retries(|| self.store.get_value(&object_key));
                 let _ = reply.send(result);
@@ -826,6 +851,7 @@ impl ObjectOverflowWorker {
                 }
                 let _ = reply.send(result);
             }
+            #[cfg(feature = "object-overflow")]
             ObjectOverflowWorkerJob::List { prefix, reply } => {
                 let result = self.with_retries(|| self.store.list_keys(&prefix));
                 let _ = reply.send(result);
@@ -991,6 +1017,7 @@ fn new_generation_id() -> String {
     )
 }
 
+#[cfg(feature = "object-overflow")]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GenerationMarker {
     node_id: String,
