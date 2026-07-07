@@ -39,12 +39,14 @@ release policy explicitly call for it.
 ```bash
 cargo publish -p shardmap --dry-run
 cargo publish -p shardcache-client-rs --dry-run
+cargo publish -p shardcache --dry-run
 cargo publish -p shardmap
 cargo publish -p shardcache-client-rs
+cargo publish -p shardcache
 ```
 
-`shardmap` and `shardcache-client-rs` are the crates.io crates for this
-release. `shardcache`, `shardcache-redis`, `shardcache-runtime`,
-`shardcache-py`, and `shardcache-formal` are workspace support packages with
-`publish = false`. Only publish after the dry runs succeed and the final
-changelog or performance claims have been checked against source artifacts.
+`shardmap`, `shardcache-client-rs`, and `shardcache` are the crates.io crates
+for this release. `shardcache-runtime`, `shardcache-py`, `shardcache-c`, and
+`shardcache-formal` are workspace support packages with `publish = false`.
+Only publish after the dry runs succeed and the final changelog or performance
+claims have been checked against source artifacts.
