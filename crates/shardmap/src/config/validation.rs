@@ -1,6 +1,6 @@
 use super::{
-    EvictionPolicy, PersistenceConfig, ReplicationConfig, ReplicationRole, ShardCacheConfig,
-    WalTcpExportConfig, WalTcpExportMode,
+    EvictionPolicy, ObjectOverflowBackend, ObjectOverflowConfig, PersistenceConfig,
+    ReplicationConfig, ReplicationRole, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
 };
 use crate::{Result, ShardCacheError};
 
@@ -24,6 +24,7 @@ enum ConfigValidationRule {
     MemoryLimit,
     TierCapacities,
     Persistence,
+    ObjectOverflow,
     Replication,
     Cuda,
 }
@@ -34,6 +35,11 @@ struct PersistenceValidation<'a> {
 
 struct WalTcpExportValidation<'a> {
     config: &'a WalTcpExportConfig,
+}
+
+struct ObjectOverflowValidation<'a> {
+    config: &'a ObjectOverflowConfig,
+    root: &'a ShardCacheConfig,
 }
 
 struct ReplicationValidation<'a> {
@@ -63,6 +69,7 @@ impl ConfigValidationRule {
             Self::MemoryLimit,
             Self::TierCapacities,
             Self::Persistence,
+            Self::ObjectOverflow,
             Self::Replication,
             Self::Cuda,
         ]
@@ -92,6 +99,9 @@ impl ConfigValidationRule {
                 "tier capacities must be > 0",
             ),
             Self::Persistence => PersistenceValidation::new(&config.persistence).validate(),
+            Self::ObjectOverflow => {
+                ObjectOverflowValidation::new(&config.object_overflow, config).validate()
+            }
             Self::Replication => ReplicationValidation::new(&config.replication).validate(),
             Self::Cuda => Self::validate_cuda(config),
         }
@@ -128,6 +138,117 @@ impl ConfigValidationRule {
                     config.cuda.pinned_host_bytes > 0 || config.cuda.prefer_direct_host_dma,
                     "cuda.pinned_host_bytes must be > 0 when direct host dma is disabled",
                 )
+            }
+        }
+    }
+}
+
+impl<'a> ObjectOverflowValidation<'a> {
+    fn new(config: &'a ObjectOverflowConfig, root: &'a ShardCacheConfig) -> Self {
+        Self { config, root }
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self.config.enabled {
+            false => Ok(()),
+            true => {
+                #[cfg(not(feature = "object-overflow"))]
+                {
+                    return Err(ShardCacheError::Config(
+                        "object_overflow.enabled requires the object-overflow feature".into(),
+                    ));
+                }
+                #[cfg(feature = "object-overflow")]
+                {
+                    ConfigCheck::require(
+                        self.root.max_memory_bytes > 0
+                            && self.root.eviction_policy != EvictionPolicy::None,
+                        "object_overflow.enabled requires max_memory_bytes and an eviction policy",
+                    )?;
+                    ConfigCheck::require(
+                        !self.config.endpoint.trim().is_empty(),
+                        "object_overflow.endpoint must be set when object overflow is enabled",
+                    )?;
+                    ConfigCheck::require(
+                        !self.config.bucket.trim().is_empty(),
+                        "object_overflow.bucket must be set when object overflow is enabled",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.min_value_bytes > 0,
+                        "object_overflow.min_value_bytes must be > 0",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.offload_max_frequency > 0,
+                        "object_overflow.offload_max_frequency must be > 0",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.zstd_level >= -7 && self.config.zstd_level <= 22,
+                        "object_overflow.zstd_level must be between -7 and 22",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.retry_backoff_ms > 0,
+                        "object_overflow.retry_backoff_ms must be > 0",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.operation_timeout_ms > 0,
+                        "object_overflow.operation_timeout_ms must be > 0",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.worker_threads > 0,
+                        "object_overflow.worker_threads must be > 0",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.queue_capacity > 0,
+                        "object_overflow.queue_capacity must be > 0",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.degraded_failure_threshold > 0,
+                        "object_overflow.degraded_failure_threshold must be > 0",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.degraded_cooldown_ms > 0,
+                        "object_overflow.degraded_cooldown_ms must be > 0",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.cleanup_grace_seconds > 0,
+                        "object_overflow.cleanup_grace_seconds must be > 0",
+                    )?;
+                    if self.config.cleanup_on_start || self.config.cleanup_interval_seconds > 0 {
+                        ConfigCheck::optional_token(
+                            self.config.node_id.as_deref(),
+                            "object_overflow.node_id is required when object overflow cleanup is enabled",
+                        )?;
+                    }
+                    ConfigCheck::optional_token(
+                        self.config.node_id.as_deref(),
+                        "object_overflow.node_id must not be empty",
+                    )?;
+                    ConfigCheck::optional_token(
+                        Some(self.config.region.as_str()),
+                        "object_overflow.region must not be empty",
+                    )?;
+                    ConfigCheck::optional_token(
+                        self.config.server_side_encryption.as_deref(),
+                        "object_overflow.server_side_encryption must not be empty",
+                    )?;
+                    match self.config.backend {
+                        ObjectOverflowBackend::File => {}
+                        ObjectOverflowBackend::S3 => {
+                            #[cfg(not(feature = "object-overflow-s3"))]
+                            return Err(ShardCacheError::Config(
+                                "object_overflow.backend = \"s3\" requires the object-overflow-s3 feature".into(),
+                            ));
+                        }
+                    }
+                    ConfigCheck::optional_token(
+                        self.config.access_key_env.as_deref(),
+                        "object_overflow.access_key_env must not be empty",
+                    )?;
+                    ConfigCheck::optional_token(
+                        self.config.secret_key_env.as_deref(),
+                        "object_overflow.secret_key_env must not be empty",
+                    )
+                }
             }
         }
     }

@@ -12,8 +12,9 @@ use std::time::Instant;
 
 use crate::config::EvictionPolicy;
 use crate::storage::{
-    Bytes, PackedBatch, PreparedPointKey, SemanticCacheError, SemanticEmbedding, SemanticMatch,
-    StoredEntry, hash_key, hash_key_tag_from_hash, now_millis, validate_similarity_threshold,
+    Bytes, ObjectOverflowRuntime, PackedBatch, PreparedPointKey, SemanticCacheError,
+    SemanticEmbedding, SemanticMatch, StoredEntry, hash_key, hash_key_tag_from_hash, now_millis,
+    validate_similarity_threshold,
 };
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetry, CacheTelemetryHandle, TelemetryRuntime};

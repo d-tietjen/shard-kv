@@ -44,6 +44,8 @@ pub struct ShardCacheConfig {
     pub cuda: CudaConfig,
     /// WAL and snapshot configuration.
     pub persistence: PersistenceConfig,
+    /// Object-storage overflow configuration for cold values.
+    pub object_overflow: ObjectOverflowConfig,
     /// Native mutation-stream replication configuration.
     pub replication: ReplicationConfig,
     /// Redis transaction execution mode.
@@ -135,6 +137,118 @@ pub struct PersistenceConfig {
     pub wal_channel_capacity: usize,
     /// Optional live WAL export over TCP.
     pub tcp_export: WalTcpExportConfig,
+}
+
+/// Object storage overflow settings.
+///
+/// When enabled, memory-pressure eviction can move cold byte-string values out
+/// of resident memory while keeping key metadata in the shard. The existing
+/// local WAL/snapshot path remains the authoritative durability source.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ObjectOverflowConfig {
+    /// Enable object-storage overflow.
+    pub enabled: bool,
+    /// Object overflow backend.
+    pub backend: ObjectOverflowBackend,
+    /// Object store endpoint. V1 accepts a filesystem path or `file://` URL for
+    /// the built-in adapter used by tests and local deployments. The S3 backend
+    /// treats this as an S3-compatible endpoint for RustFS/MinIO-compatible
+    /// deployments.
+    pub endpoint: String,
+    /// Object bucket or namespace.
+    pub bucket: String,
+    /// Object key prefix under the bucket.
+    pub prefix: String,
+    /// Required stable writer identity when cleanup is enabled. Writers sharing
+    /// a prefix must use distinct node IDs.
+    pub node_id: Option<String>,
+    /// S3 region for RustFS/S3-compatible stores.
+    pub region: String,
+    /// Use path-style requests for S3-compatible stores.
+    pub force_path_style: bool,
+    /// Permit HTTP endpoints for local RustFS/S3-compatible stores.
+    pub allow_http: bool,
+    /// Verify TLS certificates for HTTPS S3-compatible stores.
+    pub tls_verify: bool,
+    /// Optional server-side encryption algorithm or key reference.
+    pub server_side_encryption: Option<String>,
+    /// Environment variable that contains the access key for rust-fs/S3 stores.
+    pub access_key_env: Option<String>,
+    /// Environment variable that contains the secret key for rust-fs/S3 stores.
+    pub secret_key_env: Option<String>,
+    /// Minimum value size eligible for offload.
+    pub min_value_bytes: usize,
+    /// Minimum access-clock idle ticks before a resident value can be offloaded.
+    pub offload_min_idle_ticks: u64,
+    /// Maximum recorded access frequency eligible for offload.
+    pub offload_max_frequency: u32,
+    /// Compression codec for offloaded values.
+    pub compression: ObjectOverflowCompression,
+    /// zstd compression level when `compression = "zstd"`.
+    pub zstd_level: i32,
+    /// Failure behavior when object offload cannot store a value.
+    pub failure_policy: ObjectOverflowFailurePolicy,
+    /// Maximum object-store retries after the first attempt.
+    pub max_retries: usize,
+    /// Delay between retry attempts.
+    pub retry_backoff_ms: u64,
+    /// Operation timeout budget for object-store adapters that support it.
+    pub operation_timeout_ms: u64,
+    /// Number of bounded object-overflow worker threads.
+    pub worker_threads: usize,
+    /// Maximum queued object-overflow jobs before offload backpressure applies.
+    pub queue_capacity: usize,
+    /// Consecutive failures before pausing new offloads.
+    pub degraded_failure_threshold: usize,
+    /// Cooldown for the degraded state after repeated failures.
+    pub degraded_cooldown_ms: u64,
+    /// Remove stale generation objects during startup.
+    pub cleanup_on_start: bool,
+    /// Background cleanup interval. `0` disables periodic cleanup.
+    pub cleanup_interval_seconds: u64,
+    /// Minimum stale generation age before cleanup may delete objects.
+    pub cleanup_grace_seconds: u64,
+    /// Fetch cold values on owned GET.
+    pub fetch_on_get: bool,
+    /// Delete remote payloads when a key is overwritten or removed.
+    pub delete_on_overwrite: bool,
+}
+
+/// Object-overflow backend.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectOverflowBackend {
+    /// Local filesystem-backed object store.
+    #[default]
+    File,
+    /// RustFS/S3-compatible object store.
+    S3,
+}
+
+/// Compression codec for object-overflow payloads.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectOverflowCompression {
+    /// Store payloads without compression.
+    None,
+    /// Compress payloads with lz4 size-prepended compression.
+    Lz4,
+    /// Compress payloads with zstd.
+    #[default]
+    Zstd,
+}
+
+/// Failure policy for object-overflow offload writes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ObjectOverflowFailurePolicy {
+    /// Keep the resident value if offload fails. Memory may temporarily exceed
+    /// the configured target, but data remains resident.
+    #[default]
+    RetainResident,
+    /// Fall back to normal cache eviction if offload fails.
+    EvictResident,
 }
 
 /// Optional live WAL export settings.
@@ -300,6 +414,7 @@ impl Default for ShardCacheConfig {
             tiers: TierConfig::from_geometry(CacheGeometry::detect_current_host(), shard_count),
             cuda: CudaConfig::default(),
             persistence: PersistenceConfig::default(),
+            object_overflow: ObjectOverflowConfig::default(),
             replication: ReplicationConfig::default(),
             transaction_mode: TransactionMode::default(),
             server_endpoint_mode: ServerEndpointMode::default(),
@@ -349,6 +464,44 @@ impl Default for PersistenceConfig {
             compress_wal: true,
             wal_channel_capacity: 16_384,
             tcp_export: WalTcpExportConfig::default(),
+        }
+    }
+}
+
+impl Default for ObjectOverflowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: ObjectOverflowBackend::default(),
+            endpoint: String::new(),
+            bucket: String::new(),
+            prefix: "shardcache/overflow".to_string(),
+            node_id: None,
+            region: "us-east-1".to_string(),
+            force_path_style: true,
+            allow_http: false,
+            tls_verify: true,
+            server_side_encryption: None,
+            access_key_env: None,
+            secret_key_env: None,
+            min_value_bytes: 4 * 1024,
+            offload_min_idle_ticks: 1024,
+            offload_max_frequency: u32::MAX,
+            compression: ObjectOverflowCompression::default(),
+            zstd_level: 3,
+            failure_policy: ObjectOverflowFailurePolicy::default(),
+            max_retries: 2,
+            retry_backoff_ms: 10,
+            operation_timeout_ms: 500,
+            worker_threads: 2,
+            queue_capacity: 1024,
+            degraded_failure_threshold: 8,
+            degraded_cooldown_ms: 5_000,
+            cleanup_on_start: false,
+            cleanup_interval_seconds: 0,
+            cleanup_grace_seconds: 86_400,
+            fetch_on_get: true,
+            delete_on_overwrite: true,
         }
     }
 }

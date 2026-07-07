@@ -26,6 +26,7 @@ impl FlatMap {
             self.next_access_tick()
         };
         self.record_lru_touch(hash, access_tick);
+        let _ = self.delete_remote_hashed(hash, key.as_ref(), DeleteReason::Explicit);
         #[cfg(feature = "telemetry")]
         let written_len = replacement.as_ref().map_or(0, |bytes| bytes.len());
         #[cfg(feature = "telemetry")]
@@ -130,6 +131,7 @@ impl FlatMap {
             0
         };
         self.record_lru_touch(hash, access_tick);
+        let _ = self.delete_remote_hashed(hash, key, DeleteReason::Explicit);
         let reuse_values =
             should_reuse_value_buffer(value.len()) && !self.reusable_values.is_empty();
         let mut reusable_values = if reuse_values {
@@ -316,6 +318,7 @@ impl FlatMap {
             0
         };
         self.record_lru_touch(hash, access_tick);
+        let _ = self.delete_remote_hashed(hash, key, DeleteReason::Explicit);
         #[cfg(feature = "telemetry")]
         let written_len = value.len();
         #[cfg(feature = "telemetry")]

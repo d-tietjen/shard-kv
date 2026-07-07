@@ -4,6 +4,7 @@ impl FlatMap {
     pub fn new() -> Self {
         Self {
             entries: HashTable::new(),
+            remote_entries: FastHashMap::default(),
             semantic_index: SemanticIndex::default(),
             #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             fast_points: FastPointMap::default(),
@@ -13,8 +14,13 @@ impl FlatMap {
             reusable_values: Vec::new(),
             reusable_value_bytes: 0,
             stored_bytes: 0,
+            remote_value_bytes: 0,
             memory_limit_bytes: None,
             eviction_policy: EvictionPolicy::None,
+            object_overflow: None,
+            object_overflow_shard_id: 0,
+            object_overflow_sequence: 0,
+            object_overflow_stats: ObjectOverflowStats::default(),
             access_clock: 0,
             read_sample_counter: 0,
             lru_touch_log: VecDeque::new(),
@@ -52,12 +58,63 @@ impl FlatMap {
         if self.fast_points.is_active() {
             return self.fast_points.len();
         }
-        self.entries.len()
+        self.entries.len().saturating_add(self.remote_entries.len())
     }
 
     #[inline(always)]
     pub fn stored_bytes(&self) -> usize {
         self.stored_bytes
+    }
+
+    #[inline(always)]
+    pub fn remote_value_bytes(&self) -> usize {
+        self.remote_value_bytes
+    }
+
+    #[inline(always)]
+    pub fn object_overflow_stats(&self) -> ObjectOverflowStats {
+        let mut stats = self.object_overflow_stats.clone();
+        stats.remote_entries = self.remote_entries.len();
+        stats.remote_value_bytes = self.remote_value_bytes;
+        stats.remote_stored_bytes = self
+            .remote_entries
+            .values()
+            .map(|entry| entry.object.stored_len)
+            .sum();
+        if let Some(object_overflow) = &self.object_overflow {
+            let health = object_overflow.health_snapshot();
+            stats.enabled = health.enabled;
+            stats.backend = health.backend;
+            stats.degraded = health.degraded;
+            stats.queue_capacity = health.queue_capacity;
+            stats.queue_depth = health.queue_depth;
+            stats.pending_jobs = health.pending_jobs;
+            stats.active_workers = health.active_workers;
+            stats.worker_threads = health.worker_threads;
+            stats.encode_ops = health.stats.encode_ops;
+            stats.compress_ops = health.stats.compress_ops;
+            stats.upload_ops = health.stats.upload_ops;
+            stats.download_ops = health.stats.download_ops;
+            stats.decode_ops = health.stats.decode_ops;
+            stats.delete_ops = health.stats.delete_ops;
+            stats.retries = health.stats.retries;
+            stats.timeouts = health.stats.timeouts;
+            stats.auth_config_failures = health.stats.auth_config_failures;
+            stats.unavailable_failures = health.stats.unavailable_failures;
+            stats.integrity_failures = health.stats.integrity_failures;
+            stats.not_found_failures = health.stats.not_found_failures;
+            stats.delete_failures = health.stats.delete_failures;
+            stats.cleanup_scans = health.stats.cleanup_scans;
+            stats.cleanup_deletes = health.stats.cleanup_deletes;
+            stats.object_bytes_raw = health.stats.object_bytes_raw;
+            stats.object_bytes_stored = health.stats.object_bytes_stored;
+            stats.encode_latency_us = health.stats.encode_latency_us;
+            stats.upload_latency_us = health.stats.upload_latency_us;
+            stats.download_latency_us = health.stats.download_latency_us;
+            stats.decode_latency_us = health.stats.decode_latency_us;
+            stats.delete_latency_us = health.stats.delete_latency_us;
+        }
+        stats
     }
 
     #[inline(always)]
@@ -81,7 +138,18 @@ impl FlatMap {
         if self.fast_points.is_active() {
             return self.fast_points.is_empty();
         }
-        self.entries.is_empty()
+        self.entries.is_empty() && self.remote_entries.is_empty()
+    }
+
+    pub fn configure_object_overflow(
+        &mut self,
+        object_overflow: Option<ObjectOverflowRuntime>,
+        shard_id: usize,
+        now_ms: u64,
+    ) {
+        self.object_overflow = object_overflow;
+        self.object_overflow_shard_id = shard_id;
+        self.enforce_memory_limit(now_ms);
     }
 
     #[cfg(feature = "telemetry")]
@@ -120,6 +188,10 @@ impl FlatMap {
         self.entries
             .find(hash, |entry| entry.matches(hash, key))
             .is_some_and(|entry| entry.is_expired(now_ms))
+            || self
+                .remote_entries
+                .get(key)
+                .is_some_and(|entry| entry.matches(hash, key) && entry.is_expired(now_ms))
     }
 
     #[inline(always)]
@@ -330,7 +402,7 @@ impl FlatMap {
         let Some((_rank, hash, key)) = self.eviction_candidate(policy) else {
             return false;
         };
-        self.delete_hashed_internal(hash, &key, now_ms, DeleteReason::Evicted)
+        self.evict_or_offload_hashed(hash, &key, now_ms)
     }
 
     pub(crate) fn evict_to_memory_target(
@@ -374,12 +446,8 @@ impl FlatMap {
                 if self.stored_bytes <= target_bytes {
                     break;
                 }
-                evicted_batch |= self.delete_hashed_internal(
-                    candidate.hash,
-                    &candidate.key,
-                    now_ms,
-                    DeleteReason::Evicted,
-                );
+                evicted_batch |=
+                    self.evict_or_offload_hashed(candidate.hash, &candidate.key, now_ms);
             }
             if !evicted_batch {
                 break;
@@ -402,17 +470,12 @@ impl FlatMap {
             else {
                 continue;
             };
-            let removed_bytes = entry.get().stored_bytes();
-            let had_ttl = entry.get().expire_at_ms.is_some();
-            let (removed, _) = entry.remove();
-            if had_ttl {
-                self.ttl_entries = self.ttl_entries.saturating_sub(1);
+            let key = entry.get().key.as_ref().to_vec();
+            let hash = touch.hash;
+            let _ = entry;
+            if !self.evict_or_offload_hashed(hash, &key, _now_ms) {
+                continue;
             }
-            self.stored_bytes = self.stored_bytes.saturating_sub(removed_bytes);
-            self.retire_value(removed.value);
-            self.evictions = self.evictions.saturating_add(1);
-            #[cfg(feature = "telemetry")]
-            self.record_delete_metrics(DeleteReason::Evicted, -1, -(removed_bytes as isize));
             evicted = true;
         }
         evicted

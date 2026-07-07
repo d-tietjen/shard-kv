@@ -1469,15 +1469,11 @@ impl EmbeddedStore {
     }
 
     fn get_with_route(&self, route: EmbeddedKeyRoute, key: &[u8], now_ms: u64) -> Option<Bytes> {
-        // Fast path: non-session keys can answer from the read lock using the
-        // `&self` shared accessor on `FlatMap`. This is the dominant case for
-        // workloads that don't use derived session prefixes.
+        // Owned reads use the write path so object-overflow entries can fault
+        // back into resident memory when needed.
         if uses_flat_key_storage(self.route_mode, key) {
-            let shard = self.shards[route.shard_id].read();
-            return shard
-                .map
-                .get_ref_hashed_shared(route.key_hash, key, now_ms)
-                .map(<[u8]>::to_vec);
+            let mut shard = self.shards[route.shard_id].write();
+            return shard.map.get(key, now_ms);
         }
 
         // Session-prefixed keys still need the write lock because

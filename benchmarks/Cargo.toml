@@ -32,6 +32,7 @@ prefix-eviction = ["shardmap/prefix-eviction"]
 # Build benchmark binaries with shardmap telemetry available. Telemetry cost
 # rows use explicit `*-telemetry` backends so ordinary rows remain inactive.
 telemetry = ["shardmap/telemetry"]
+object-overflow = ["shardmap/object-overflow"]
 # Build the benchmark-only server that exposes a caller-owned shardmap store
 # through the shardcache RESP/SCNP server path.
 embedded-server = ["shardmap/redis-server"]
@@ -85,6 +86,11 @@ path = "src/bin/wal_tcp_export_cost.rs"
 [[bin]]
 name = "memory_write_cost"
 path = "src/bin/memory_write_cost.rs"
+
+[[bin]]
+name = "object_overflow_fs_cost"
+path = "src/bin/object_overflow_fs_cost.rs"
+required-features = ["object-overflow"]
 
 [[bin]]
 name = "redis_command_matrix"

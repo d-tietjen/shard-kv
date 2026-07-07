@@ -25,6 +25,9 @@ pub enum ShardCacheError {
     #[error("persistence error: {0}")]
     Persistence(String),
 
+    #[error("object integrity error: {0}")]
+    ObjectIntegrity(String),
+
     #[error("channel closed: {0}")]
     ChannelClosed(&'static str),
 

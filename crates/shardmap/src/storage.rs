@@ -30,6 +30,7 @@ mod embedded_store_sharded;
 mod embedded_store_shared;
 mod engine;
 mod flat_map;
+mod object_overflow;
 mod records;
 #[cfg(feature = "redis")]
 #[path = "redis_compat/storage/redis_objects.rs"]
@@ -98,6 +99,9 @@ pub(crate) use engine::{
     ExpirationChange, RESP_SPANNED_VALUE_MIN, ShardKey, ShardOperation, ShardReply, ShardValue,
 };
 pub use flat_map::FlatMap;
+pub use object_overflow::{
+    ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore, ObjectValueRef,
+};
 pub use records::{MutationBytes, MutationOp, MutationRecord, StoredEntry};
 #[cfg(feature = "redis")]
 pub(crate) use redis_objects::{
@@ -115,7 +119,10 @@ pub(crate) use semantic::{
     SemanticEmbedding, SemanticIndex, SemanticIndexCandidate, SemanticIndexToken,
     validate_similarity_threshold,
 };
-pub use stats::{GlobalStatsSnapshot, ShardStatsSnapshot, TierStatsSnapshot, WalStatsSnapshot};
+pub use stats::{
+    GlobalStatsSnapshot, ObjectOverflowStatsSnapshot, ShardStatsSnapshot, TierStatsSnapshot,
+    WalStatsSnapshot,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

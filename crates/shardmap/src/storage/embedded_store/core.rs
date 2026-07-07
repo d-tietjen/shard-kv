@@ -245,14 +245,20 @@ impl EmbeddedStore {
     /// Redis object values are intentionally excluded; the native replication
     /// stream v1 covers byte-string cache mutations.
     pub fn entry_snapshot(&self) -> Vec<StoredEntry> {
+        self.try_entry_snapshot().unwrap_or_default()
+    }
+
+    /// Returns currently live string entries, failing if a remote overflow
+    /// value cannot be materialized.
+    pub fn try_entry_snapshot(&self) -> crate::Result<Vec<StoredEntry>> {
         let now_ms = now_millis();
         let mut entries = Vec::new();
         for shard in &self.shards {
             let shard = shard.read();
-            entries.extend(shard.map.snapshot_entries(now_ms));
+            entries.extend(shard.map.try_snapshot_entries(now_ms)?);
         }
         entries.sort_by_key(|entry| hash_key(entry.key.as_ref()));
-        entries
+        Ok(entries)
     }
 
     /// Returns the approximate number of bytes stored in string values.
@@ -276,6 +282,17 @@ impl EmbeddedStore {
                 eviction_policy,
                 now_ms,
             );
+        }
+    }
+
+    /// Configures object-storage overflow for string values.
+    pub fn configure_object_overflow(&self, object_overflow: Option<ObjectOverflowRuntime>) {
+        let now_ms = now_millis();
+        for (shard_id, shard) in self.shards.iter().enumerate() {
+            shard
+                .write()
+                .map
+                .configure_object_overflow(object_overflow.clone(), shard_id, now_ms);
         }
     }
 

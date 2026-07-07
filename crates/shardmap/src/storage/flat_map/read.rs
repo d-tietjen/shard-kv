@@ -1,4 +1,5 @@
 use super::*;
+use crate::ShardCacheError;
 
 impl FlatMap {
     #[inline(always)]
@@ -495,7 +496,12 @@ impl FlatMap {
     }
 
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Option<Bytes> {
-        self.get_ref(key, now_ms).map(<[u8]>::to_vec)
+        let hash = hash_key(key);
+        if let Some(value) = self.get_ref_hashed(hash, key, now_ms) {
+            return Some(value.to_vec());
+        }
+        self.fault_remote_hashed(hash, key, now_ms)
+            .map(|value| value.as_ref().to_vec())
     }
 
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
@@ -508,6 +514,54 @@ impl FlatMap {
         self.entries
             .find(hash, |entry| entry.matches(hash, key))
             .is_some()
+            || self
+                .remote_entries
+                .get(key)
+                .is_some_and(|entry| entry.matches(hash, key))
+    }
+
+    pub(super) fn fault_remote_hashed(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<SharedBytes> {
+        let object_overflow = self.object_overflow.clone()?;
+        if !object_overflow.fetch_on_get() {
+            return None;
+        }
+        let remote = self.remote_entries.get(key)?;
+        if !remote.matches(hash, key) {
+            return None;
+        }
+        if remote.is_expired(now_ms) {
+            let _ = self.delete_remote_hashed(hash, key, DeleteReason::Expired);
+            return None;
+        }
+
+        self.object_overflow_stats.fault_attempts =
+            self.object_overflow_stats.fault_attempts.saturating_add(1);
+        let value = match object_overflow.get_value(&remote.object) {
+            Ok(value) => value,
+            Err(error) => {
+                self.object_overflow_stats.fault_failures =
+                    self.object_overflow_stats.fault_failures.saturating_add(1);
+                if matches!(error, ShardCacheError::ObjectIntegrity(_)) {
+                    self.object_overflow_stats.checksum_failures = self
+                        .object_overflow_stats
+                        .checksum_failures
+                        .saturating_add(1);
+                }
+                return None;
+            }
+        };
+        let key_bytes = remote.key.as_ref().to_vec();
+        let expire_at_ms = remote.expire_at_ms;
+        let _ = self.delete_remote_hashed(hash, key, DeleteReason::Explicit);
+        self.set_bytes_hashed(hash, &key_bytes, value.clone(), expire_at_ms, now_ms);
+        self.object_overflow_stats.fault_successes =
+            self.object_overflow_stats.fault_successes.saturating_add(1);
+        Some(value)
     }
 
     /// Starts a shard-local read epoch.
