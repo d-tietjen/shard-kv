@@ -158,7 +158,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-shardmap = { version = "$shardmap_version", features = ["kv-overflow"] }
+shardmap = { version = "$shardmap_version", features = ["kv-overflow-redis"] }
 EOF
 write_patch_table >>"$kv_overflow_consumer/Cargo.toml"
 

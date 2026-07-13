@@ -32,6 +32,8 @@ pub use crate::redis_embedded::{
     execute_redis_command, execute_redis_command_slices, try_execute_redis_command,
     try_execute_redis_command_slices,
 };
+#[cfg(feature = "kv-overflow-redis")]
+pub use crate::storage::RedisKvOverflowNode;
 pub use crate::storage::SharedEmbeddedStore as SharedCacheStore;
 #[cfg(feature = "kv-overflow")]
 pub use crate::storage::{

@@ -11,7 +11,7 @@ use parking_lot::{Mutex, RwLock};
 use shardcache_client_rs::{ShardCacheClient, ShardCacheClientError};
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
-use crate::config::{EvictionPolicy, KvOverflowConfig};
+use crate::config::{EvictionPolicy, KvOverflowBackend, KvOverflowConfig};
 use crate::storage::{Bytes, EmbeddedStore, StoredEntry, now_millis};
 use crate::{Result, ShardCacheError};
 
@@ -179,13 +179,7 @@ impl KvOverflowNode for ScnpKvOverflowNode {
     }
 
     fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
-        let expire_at_ms = ttl_ms.map_or(0, |ttl| now_millis().saturating_add(ttl));
-        let mut encoded = Vec::with_capacity(KV_OVERFLOW_HEADER_LEN.saturating_add(value.len()));
-        encoded.extend_from_slice(KV_OVERFLOW_MAGIC);
-        encoded.extend_from_slice(&expire_at_ms.to_le_bytes());
-        encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        encoded.extend_from_slice(&crc32fast::hash(value).to_le_bytes());
-        encoded.extend_from_slice(value);
+        let encoded = encode_overflow_value(value, ttl_ms);
         self.execute(|client| client.set(key, &encoded))
     }
 
@@ -195,38 +189,8 @@ impl KvOverflowNode for ScnpKvOverflowNode {
             if !client.get_into(key, &mut value)? {
                 return Ok(None);
             }
-            if value.len() < KV_OVERFLOW_HEADER_LEN
-                || &value[..KV_OVERFLOW_MAGIC.len()] != KV_OVERFLOW_MAGIC
-            {
-                return Err(ShardCacheClientError::Protocol(
-                    "invalid key-value overflow envelope".into(),
-                ));
-            }
-            let expire_at_ms =
-                u64::from_le_bytes(value[8..16].try_into().expect("fixed expiry field"));
-            let payload_len = u64::from_le_bytes(
-                value[16..24]
-                    .try_into()
-                    .expect("fixed payload length field"),
-            );
-            let checksum =
-                u32::from_le_bytes(value[24..28].try_into().expect("fixed checksum field"));
-            let payload = &value[KV_OVERFLOW_HEADER_LEN..];
-            if usize::try_from(payload_len).ok() != Some(payload.len())
-                || crc32fast::hash(payload) != checksum
-            {
-                return Err(ShardCacheClientError::Protocol(
-                    "invalid key-value overflow payload integrity".into(),
-                ));
-            }
-            let now_ms = now_millis();
-            if expire_at_ms != 0 && expire_at_ms <= now_ms {
-                return Ok(None);
-            }
-            Ok(Some(KvOverflowValue {
-                value: SharedBytes::copy_from_slice(payload),
-                ttl_ms: (expire_at_ms != 0).then_some(expire_at_ms.saturating_sub(now_ms)),
-            }))
+            decode_overflow_value(&value)
+                .map_err(|message| ShardCacheClientError::Protocol(message.to_string()))
         })
     }
 
@@ -235,8 +199,272 @@ impl KvOverflowNode for ScnpKvOverflowNode {
     }
 }
 
+/// Redis/Valkey-compatible overflow node with pooled blocking connections.
+#[cfg(feature = "kv-overflow-redis")]
+pub struct RedisKvOverflowNode {
+    endpoint: String,
+    key_prefix: Box<[u8]>,
+    client: redis_client::Client,
+    connections: Box<[Mutex<Option<redis_client::Connection>>]>,
+    next_connection: AtomicUsize,
+    connect_timeout: Duration,
+    operation_timeout: Duration,
+    max_retries: usize,
+    retry_backoff: Duration,
+}
+
+#[cfg(feature = "kv-overflow-redis")]
+impl std::fmt::Debug for RedisKvOverflowNode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RedisKvOverflowNode")
+            .field("endpoint", &self.endpoint)
+            .field("key_prefix", &String::from_utf8_lossy(&self.key_prefix))
+            .field("connections", &self.connections.len())
+            .field("connect_timeout", &self.connect_timeout)
+            .field("operation_timeout", &self.operation_timeout)
+            .field("max_retries", &self.max_retries)
+            .finish()
+    }
+}
+
+#[cfg(feature = "kv-overflow-redis")]
+impl RedisKvOverflowNode {
+    pub fn from_config(endpoint: String, config: &KvOverflowConfig) -> Result<Self> {
+        use redis_client::IntoConnectionInfo;
+
+        if config.redis_key_prefix.is_empty() {
+            return Err(ShardCacheError::Config(
+                "kv_overflow.redis_key_prefix must not be empty for the Redis backend".into(),
+            ));
+        }
+        let mut connection_info = endpoint
+            .as_str()
+            .into_connection_info()
+            .map_err(|error| redis_config_error(&endpoint, error))?;
+        if connection_info.redis.username.is_some() || connection_info.redis.password.is_some() {
+            return Err(ShardCacheError::Config(
+                "Redis overflow credentials must use configured environment variables, not endpoint URLs"
+                    .into(),
+            ));
+        }
+        connection_info.redis.username = read_redis_credential_env(
+            config.redis_username_env.as_deref(),
+            "kv_overflow.redis_username_env",
+        )?;
+        connection_info.redis.password = read_redis_credential_env(
+            config.redis_password_env.as_deref(),
+            "kv_overflow.redis_password_env",
+        )?;
+        if connection_info.redis.username.is_some() && connection_info.redis.password.is_none() {
+            return Err(ShardCacheError::Config(
+                "kv_overflow.redis_password_env is required with redis_username_env".into(),
+            ));
+        }
+        let client = redis_client::Client::open(connection_info)
+            .map_err(|error| redis_config_error(&endpoint, error))?;
+        let connection_count = config.connections_per_endpoint.max(1);
+        Ok(Self {
+            endpoint,
+            key_prefix: config.redis_key_prefix.as_bytes().into(),
+            client,
+            connections: (0..connection_count)
+                .map(|_| Mutex::new(None))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            next_connection: AtomicUsize::new(0),
+            connect_timeout: Duration::from_millis(config.connect_timeout_ms.max(1)),
+            operation_timeout: Duration::from_millis(config.operation_timeout_ms.max(1)),
+            max_retries: config.max_retries,
+            retry_backoff: Duration::from_millis(config.retry_backoff_ms.max(1)),
+        })
+    }
+
+    fn execute<T>(
+        &self,
+        mut operation: impl FnMut(&mut redis_client::Connection) -> redis_client::RedisResult<T>,
+    ) -> Result<T> {
+        let slot = self.next_connection.fetch_add(1, Ordering::Relaxed) % self.connections.len();
+        let mut last_error = None;
+        for attempt in 0..=self.max_retries {
+            let mut connection = self.connections[slot].lock();
+            if connection.is_none() {
+                match self.connect() {
+                    Ok(client) => *connection = Some(client),
+                    Err(error) => {
+                        last_error = Some(error);
+                        drop(connection);
+                        self.retry_delay(attempt);
+                        continue;
+                    }
+                }
+            }
+            let result = operation(connection.as_mut().expect("connection initialized"));
+            match result {
+                Ok(value) => return Ok(value),
+                Err(error) => {
+                    *connection = None;
+                    last_error = Some(error);
+                }
+            }
+            drop(connection);
+            self.retry_delay(attempt);
+        }
+        Err(redis_node_error(
+            &self.endpoint,
+            last_error.expect("at least one connection attempt"),
+        ))
+    }
+
+    fn connect(&self) -> redis_client::RedisResult<redis_client::Connection> {
+        let connection = self
+            .client
+            .get_connection_with_timeout(self.connect_timeout)?;
+        connection.set_read_timeout(Some(self.operation_timeout))?;
+        connection.set_write_timeout(Some(self.operation_timeout))?;
+        Ok(connection)
+    }
+
+    fn retry_delay(&self, attempt: usize) {
+        if attempt < self.max_retries {
+            thread::sleep(self.retry_backoff);
+        }
+    }
+
+    fn storage_key(&self, key: &[u8]) -> Vec<u8> {
+        let mut storage_key = Vec::with_capacity(self.key_prefix.len().saturating_add(key.len()));
+        storage_key.extend_from_slice(&self.key_prefix);
+        storage_key.extend_from_slice(key);
+        storage_key
+    }
+}
+
+#[cfg(feature = "kv-overflow-redis")]
+impl KvOverflowNode for RedisKvOverflowNode {
+    fn id(&self) -> &str {
+        &self.endpoint
+    }
+
+    fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
+        let storage_key = self.storage_key(key);
+        let encoded = encode_overflow_value(value, ttl_ms);
+        self.execute(|connection| {
+            let mut command = redis_client::cmd("SET");
+            command.arg(&storage_key).arg(&encoded);
+            if let Some(ttl_ms) = ttl_ms {
+                command.arg("PX").arg(ttl_ms.max(1));
+            }
+            command.query(connection)
+        })
+    }
+
+    fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
+        let storage_key = self.storage_key(key);
+        let encoded: Option<Vec<u8>> = self
+            .execute(|connection| redis_client::cmd("GET").arg(&storage_key).query(connection))?;
+        encoded
+            .map(|value| {
+                decode_overflow_value(&value).map_err(|message| {
+                    ShardCacheError::Protocol(format!(
+                        "Redis overflow node {}: {message}",
+                        self.endpoint
+                    ))
+                })
+            })
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    fn delete(&self, key: &[u8]) -> Result<()> {
+        let storage_key = self.storage_key(key);
+        self.execute(|connection| {
+            redis_client::cmd("DEL")
+                .arg(&storage_key)
+                .query::<u64>(connection)
+                .map(|_| ())
+        })
+    }
+}
+
+#[cfg(feature = "kv-overflow-redis")]
+fn read_redis_credential_env(name: Option<&str>, field: &str) -> Result<Option<String>> {
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    if name.is_empty() {
+        return Err(ShardCacheError::Config(format!(
+            "{field} must not be empty"
+        )));
+    }
+    let value = std::env::var(name).map_err(|error| {
+        ShardCacheError::Config(format!(
+            "failed to read Redis credential env {name:?}: {error}"
+        ))
+    })?;
+    if value.is_empty() {
+        return Err(ShardCacheError::Config(format!(
+            "Redis credential env {name:?} must not be empty"
+        )));
+    }
+    Ok(Some(value))
+}
+
+#[cfg(feature = "kv-overflow-redis")]
+fn redis_config_error(endpoint: &str, error: redis_client::RedisError) -> ShardCacheError {
+    ShardCacheError::Config(format!(
+        "invalid Redis overflow endpoint {endpoint:?}: {error}"
+    ))
+}
+
+#[cfg(feature = "kv-overflow-redis")]
+fn redis_node_error(endpoint: &str, error: redis_client::RedisError) -> ShardCacheError {
+    ShardCacheError::Protocol(format!("Redis overflow node {endpoint}: {error}"))
+}
+
 fn client_error(endpoint: &str, error: ShardCacheClientError) -> ShardCacheError {
     ShardCacheError::Protocol(format!("kv overflow node {endpoint}: {error}"))
+}
+
+fn encode_overflow_value(value: &[u8], ttl_ms: Option<u64>) -> Vec<u8> {
+    let expire_at_ms = ttl_ms.map_or(0, |ttl| now_millis().saturating_add(ttl));
+    let mut encoded = Vec::with_capacity(KV_OVERFLOW_HEADER_LEN.saturating_add(value.len()));
+    encoded.extend_from_slice(KV_OVERFLOW_MAGIC);
+    encoded.extend_from_slice(&expire_at_ms.to_le_bytes());
+    encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    encoded.extend_from_slice(&crc32fast::hash(value).to_le_bytes());
+    encoded.extend_from_slice(value);
+    encoded
+}
+
+fn decode_overflow_value(
+    value: &[u8],
+) -> std::result::Result<Option<KvOverflowValue>, &'static str> {
+    if value.len() < KV_OVERFLOW_HEADER_LEN
+        || &value[..KV_OVERFLOW_MAGIC.len()] != KV_OVERFLOW_MAGIC
+    {
+        return Err("invalid key-value overflow envelope");
+    }
+    let expire_at_ms = u64::from_le_bytes(value[8..16].try_into().expect("fixed expiry field"));
+    let payload_len = u64::from_le_bytes(
+        value[16..24]
+            .try_into()
+            .expect("fixed payload length field"),
+    );
+    let checksum = u32::from_le_bytes(value[24..28].try_into().expect("fixed checksum field"));
+    let payload = &value[KV_OVERFLOW_HEADER_LEN..];
+    if usize::try_from(payload_len).ok() != Some(payload.len())
+        || crc32fast::hash(payload) != checksum
+    {
+        return Err("invalid key-value overflow payload integrity");
+    }
+    let now_ms = now_millis();
+    if expire_at_ms != 0 && expire_at_ms <= now_ms {
+        return Ok(None);
+    }
+    Ok(Some(KvOverflowValue {
+        value: SharedBytes::copy_from_slice(payload),
+        ttl_ms: (expire_at_ms != 0).then_some(expire_at_ms.saturating_sub(now_ms)),
+    }))
 }
 
 #[derive(Debug, Default)]
@@ -317,19 +545,35 @@ impl KvOverflowCluster {
                 "kv_overflow.endpoints must contain at least one server".into(),
             ));
         }
-        let make_nodes = |endpoints: &[String]| {
+        let make_nodes = |endpoints: &[String]| -> Result<Vec<Arc<dyn KvOverflowNode>>> {
             endpoints
                 .iter()
                 .cloned()
-                .map(|endpoint| {
-                    Arc::new(ScnpKvOverflowNode::from_config(endpoint, config))
-                        as Arc<dyn KvOverflowNode>
+                .map(|endpoint| match config.backend {
+                    KvOverflowBackend::Scnp => Ok(Arc::new(
+                        ScnpKvOverflowNode::from_config(endpoint, config),
+                    ) as Arc<dyn KvOverflowNode>),
+                    KvOverflowBackend::Redis => {
+                        #[cfg(feature = "kv-overflow-redis")]
+                        {
+                            Ok(Arc::new(RedisKvOverflowNode::from_config(endpoint, config)?)
+                                as Arc<dyn KvOverflowNode>)
+                        }
+                        #[cfg(not(feature = "kv-overflow-redis"))]
+                        {
+                            let _ = endpoint;
+                            Err(ShardCacheError::Config(
+                                "kv_overflow.backend = \"redis\" requires the kv-overflow-redis feature"
+                                    .into(),
+                            ))
+                        }
+                    }
                 })
                 .collect()
         };
         Self::with_previous(
-            make_nodes(&config.endpoints),
-            make_nodes(&config.previous_endpoints),
+            make_nodes(&config.endpoints)?,
+            make_nodes(&config.previous_endpoints)?,
             config.slot_count,
         )
     }

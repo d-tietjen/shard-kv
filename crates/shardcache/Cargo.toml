@@ -65,6 +65,7 @@ prefix-eviction = ["shardmap/prefix-eviction"]
 object-overflow = ["shardmap/object-overflow"]
 object-overflow-s3 = ["object-overflow", "shardmap/object-overflow-s3"]
 kv-overflow = ["server", "shardmap/kv-overflow"]
+kv-overflow-redis = ["kv-overflow", "shardmap/kv-overflow-redis"]
 
 [dependencies]
 shardmap = { workspace = true, default-features = false }

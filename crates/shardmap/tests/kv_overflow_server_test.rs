@@ -176,9 +176,13 @@ fn live_scnp_nodes_form_disjoint_overflow_tier() {
 
     let config = KvOverflowConfig {
         enabled: true,
+        backend: shardmap::config::KvOverflowBackend::Scnp,
         endpoints: vec![first_addr.clone(), second_addr],
         previous_endpoints: Vec::new(),
         slot_count: 16_384,
+        redis_key_prefix: "shardcache:overflow:".into(),
+        redis_username_env: None,
+        redis_password_env: None,
         max_memory_bytes: 96,
         eviction_policy: EvictionPolicy::Lfu,
         connections_per_endpoint: 2,

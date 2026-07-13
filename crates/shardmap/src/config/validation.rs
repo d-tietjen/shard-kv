@@ -1,3 +1,5 @@
+#[cfg(feature = "kv-overflow")]
+use super::KvOverflowBackend;
 #[cfg(feature = "object-overflow")]
 use super::ObjectOverflowBackend;
 use super::{
@@ -216,6 +218,24 @@ impl<'a> KvOverflowValidation<'a> {
                 self.config.slot_count > 0 && self.config.slot_count.is_power_of_two(),
                 "kv_overflow.slot_count must be a non-zero power of two",
             )?;
+            match self.config.backend {
+                KvOverflowBackend::Scnp => {
+                    ConfigCheck::require(
+                        self.config.redis_username_env.is_none()
+                            && self.config.redis_password_env.is_none(),
+                        "kv_overflow Redis credential env vars require backend = \"redis\"",
+                    )?;
+                }
+                KvOverflowBackend::Redis => {
+                    #[cfg(not(feature = "kv-overflow-redis"))]
+                    return Err(ShardCacheError::Config(
+                        "kv_overflow.backend = \"redis\" requires the kv-overflow-redis feature"
+                            .into(),
+                    ));
+                    #[cfg(feature = "kv-overflow-redis")]
+                    self.validate_redis_backend()?;
+                }
+            }
             ConfigCheck::require(
                 self.config.max_memory_bytes > 0,
                 "kv_overflow.max_memory_bytes must be > 0",
@@ -243,6 +263,45 @@ impl<'a> KvOverflowValidation<'a> {
                 "kv_overflow timeouts, retry_backoff_ms, and cleanup_interval_ms must be > 0",
             )
         }
+    }
+
+    #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
+    fn validate_redis_backend(&self) -> Result<()> {
+        use redis_client::IntoConnectionInfo;
+
+        ConfigCheck::require(
+            !self.config.redis_key_prefix.is_empty(),
+            "kv_overflow.redis_key_prefix must not be empty for the Redis backend",
+        )?;
+        ConfigCheck::optional_token(
+            self.config.redis_username_env.as_deref(),
+            "kv_overflow.redis_username_env must not be empty",
+        )?;
+        ConfigCheck::optional_token(
+            self.config.redis_password_env.as_deref(),
+            "kv_overflow.redis_password_env must not be empty",
+        )?;
+        ConfigCheck::require(
+            self.config.redis_username_env.is_none() || self.config.redis_password_env.is_some(),
+            "kv_overflow.redis_password_env is required with redis_username_env",
+        )?;
+        for endpoint in self
+            .config
+            .endpoints
+            .iter()
+            .chain(&self.config.previous_endpoints)
+        {
+            let connection = endpoint.as_str().into_connection_info().map_err(|error| {
+                ShardCacheError::Config(format!(
+                    "invalid Redis overflow endpoint {endpoint:?}: {error}"
+                ))
+            })?;
+            ConfigCheck::require(
+                connection.redis.username.is_none() && connection.redis.password.is_none(),
+                "Redis overflow credentials must use configured environment variables, not endpoint URLs",
+            )?;
+        }
+        Ok(())
     }
 }
 

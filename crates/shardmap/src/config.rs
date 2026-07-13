@@ -255,15 +255,17 @@ pub enum ObjectOverflowFailurePolicy {
 
 /// Partitioned key-value overflow settings.
 ///
-/// Each key is mirrored to one deterministic shardcache server. The embedded
-/// primary may then evict acknowledged cold values and fault them back from
-/// their owner. Overflow servers hold disjoint key partitions rather than full
-/// read-replica copies.
+/// Each key is mirrored to one deterministic shardcache or Redis-compatible
+/// endpoint. The embedded primary may then evict acknowledged cold values and
+/// fault them back from their owner. Overflow endpoints hold disjoint key
+/// partitions rather than full read-replica copies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KvOverflowConfig {
     /// Enable the embedded key-value overflow wrapper.
     pub enabled: bool,
+    /// Protocol used by every endpoint in this overflow membership.
+    pub backend: KvOverflowBackend,
     /// Stable SCNP addresses for the current overflow membership.
     pub endpoints: Vec<String>,
     /// Previous membership retained during an online slot handoff.
@@ -276,6 +278,12 @@ pub struct KvOverflowConfig {
     ///
     /// This must remain unchanged for the lifetime of the overflow data.
     pub slot_count: u32,
+    /// Prefix prepended to binary keys stored in a Redis-compatible backend.
+    pub redis_key_prefix: String,
+    /// Environment variable containing an optional Redis ACL username.
+    pub redis_username_env: Option<String>,
+    /// Environment variable containing the Redis password.
+    pub redis_password_env: Option<String>,
     /// Total resident-byte target for the in-memory primary.
     pub max_memory_bytes: u64,
     /// Policy used to choose acknowledged resident values for offload.
@@ -298,6 +306,17 @@ pub struct KvOverflowConfig {
     pub worker_threads: usize,
     /// Maximum total queued and active remote replication jobs.
     pub queue_capacity: usize,
+}
+
+/// Wire protocol used by key-value overflow nodes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvOverflowBackend {
+    /// Shardcache's native SCNP protocol.
+    #[default]
+    Scnp,
+    /// RESP connection to a Redis/Valkey-compatible database.
+    Redis,
 }
 
 /// Optional live WAL export settings.
@@ -560,9 +579,13 @@ impl Default for KvOverflowConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            backend: KvOverflowBackend::Scnp,
             endpoints: Vec::new(),
             previous_endpoints: Vec::new(),
             slot_count: 16_384,
+            redis_key_prefix: "shardcache:overflow:".into(),
+            redis_username_env: None,
+            redis_password_env: None,
             max_memory_bytes: 0,
             eviction_policy: EvictionPolicy::Lru,
             connections_per_endpoint: 2,
@@ -742,6 +765,8 @@ impl PersistenceConfig {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
+    use super::KvOverflowBackend;
     #[cfg(feature = "kv-overflow")]
     use super::{EvictionPolicy, KvOverflowConfig};
     use super::{ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser};
@@ -820,6 +845,32 @@ mod tests {
 
         config.kv_overflow.previous_endpoints.pop();
         config.kv_overflow.slot_count = 10_000;
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
+    #[test]
+    fn validates_redis_key_value_overflow_endpoints_and_credentials() {
+        let mut config = ShardCacheConfig {
+            kv_overflow: KvOverflowConfig {
+                enabled: true,
+                backend: KvOverflowBackend::Redis,
+                endpoints: vec!["redis://127.0.0.1:6379/0".into()],
+                max_memory_bytes: 1024,
+                ..KvOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        config.kv_overflow.endpoints[0] = "127.0.0.1:6379".into();
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.endpoints[0] = "redis://:secret@127.0.0.1:6379/0".into();
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.endpoints[0] = "redis://127.0.0.1:6379/0".into();
+        config.kv_overflow.redis_username_env = Some("REDIS_USER".into());
         assert!(config.validate().is_err());
     }
 }

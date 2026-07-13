@@ -101,6 +101,8 @@ pub(crate) use engine::{
     ExpirationChange, RESP_SPANNED_VALUE_MIN, ShardKey, ShardOperation, ShardReply, ShardValue,
 };
 pub use flat_map::FlatMap;
+#[cfg(feature = "kv-overflow-redis")]
+pub use kv_overflow::RedisKvOverflowNode;
 #[cfg(feature = "kv-overflow")]
 pub use kv_overflow::{
     DEFAULT_KV_OVERFLOW_SLOT_COUNT, KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode,

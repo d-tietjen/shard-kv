@@ -114,6 +114,52 @@ is worth retaining, while the working set still needs in-process latency. For
 cheap disposable values, ordinary eviction and an origin refill remain the
 simpler design.
 
+## Redis And Valkey Endpoints
+
+Enable `kv-overflow-redis` instead of `kv-overflow` to use Redis, Valkey, or a
+compatible managed service as the overflow tier:
+
+```toml
+[dependencies]
+shardmap = { version = "0.6.0", features = ["kv-overflow-redis"] }
+```
+
+```toml
+[kv_overflow]
+enabled = true
+backend = "redis"
+endpoints = [
+  "rediss://cache-a.example.com:6380/0",
+  "rediss://cache-b.example.com:6380/0",
+]
+previous_endpoints = []
+slot_count = 16384
+redis_key_prefix = "my-service:overflow:"
+redis_username_env = "OVERFLOW_REDIS_USERNAME"
+redis_password_env = "OVERFLOW_REDIS_PASSWORD"
+max_memory_bytes = 1073741824
+eviction_policy = "lfu"
+```
+
+Endpoint URLs may use `redis://`, `rediss://`, `valkey://`, or `valkeys://`.
+Credentials in URLs are rejected so secrets cannot appear in configuration,
+debug output, or ownership IDs; configure the names of credential environment
+variables instead. The URL path selects the Redis database. All endpoints in a
+membership use the same backend and key prefix.
+
+Redis keys are binary-safe and namespaced with `redis_key_prefix`. Values use
+the same versioned expiry, length, and CRC32 envelope as SCNP. TTL values also
+use Redis `SET ... PX`, so the database removes expired envelopes without
+waiting for a Shardmap cleanup pass. Connections are pooled per endpoint and
+use the same connect timeout, operation deadline, retry count, and backoff
+settings as SCNP nodes. TLS certificate verification is enabled for `rediss://`
+and `valkeys://` endpoints.
+
+The adapter targets standalone Redis-compatible endpoints. Redis Cluster
+`MOVED`/`ASK` topology discovery is not part of 0.6.0; use one endpoint per
+independent overflow owner or a managed endpoint that handles routing behind a
+stable address.
+
 ## Replica LRU And Object Overflow
 
 An overflow node can enforce its own `max_memory_bytes` with `eviction_policy =

@@ -11,6 +11,9 @@
   reads, TTL-preserving value envelopes, CRC32 integrity checks, SCNP
   connection pooling, operation deadlines, reconnect retries, and health
   counters.
+- Added a feature-gated Redis/Valkey-compatible overflow adapter with pooled
+  RESP connections, TLS URLs, environment-only ACL credentials, key
+  namespacing, and server-side TTL enforcement.
 - Added fallible snapshot materialization and recovery synchronization so the
   local persistence path remains authoritative for remote-only values.
 - Added unit coverage for placement, cold-only eviction, failed-write

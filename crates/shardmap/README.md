@@ -486,7 +486,8 @@ can apply their own LRU/LFU memory limits and cascade cold envelopes into
 object overflow. Other services can read through the same `KvOverflowCluster`
 without touching the primary. See
 [`docs/KV_OVERFLOW.md`](../../docs/KV_OVERFLOW.md) for the API and operational
-contract.
+contract. Enable `kv-overflow-redis` to use Redis, Valkey, or a compatible
+managed endpoint instead of shardcache SCNP servers.
 
 ## Semantic Cache
 
@@ -603,6 +604,10 @@ embedding the protocol layer, or wiring storage into a specialized runtime.
 | `parent-telemetry-runtime` | No | Embedded telemetry constructors that use a parent-provided fast-telemetry runtime or create a shardmap-owned fallback. |
 | `monoio` | No | Linux-only server transport internals. |
 | `prefix-eviction` | No | Enables `EvictionPolicy::Prefix` for prefix-group memory-limit eviction. |
+| `object-overflow` | No | Cold-value overflow into filesystem object storage. |
+| `object-overflow-s3` | No | S3/RustFS-compatible object overflow adapter. |
+| `kv-overflow` | No | Fixed-slot overflow into shardcache SCNP servers. |
+| `kv-overflow-redis` | No | Redis/Valkey-compatible endpoint adapter for fixed-slot KV overflow. |
 
 ## License
 

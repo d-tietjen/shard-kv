@@ -1925,6 +1925,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "redis"
+version = "0.32.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "014cc767fefab6a3e798ca45112bccad9c6e0e218fbd49720042716c73cfef44"
+dependencies = [
+ "combine",
+ "itoa",
+ "num-bigint",
+ "percent-encoding",
+ "rustls",
+ "rustls-native-certs",
+ "ryu",
+ "socket2 0.6.3",
+ "url",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2350,6 +2367,7 @@ dependencies = [
  "object_store",
  "parking_lot",
  "rblock",
+ "redis",
  "serde",
  "serde_json",
  "shardcache-client-rs",

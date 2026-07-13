@@ -38,6 +38,7 @@ libc = "0.2"
 lz4_flex = "0.11"
 parking_lot = "0.12"
 rblock = "0.1.0"
+redis-client = { package = "redis", version = "0.32.7", default-features = false, features = ["tls-rustls"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.15"

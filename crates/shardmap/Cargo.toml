@@ -99,6 +99,7 @@ prefix-eviction = []
 object-overflow = []
 object-overflow-s3 = ["object-overflow", "dep:futures-util", "dep:object_store"]
 kv-overflow = ["embedded", "dep:shardcache-client-rs"]
+kv-overflow-redis = ["kv-overflow", "dep:redis-client"]
 
 # Internal/benchmark knobs. These are intentionally not part of the small public
 # feature story; use them only for measured deployments or local experiments.
@@ -129,6 +130,7 @@ memchr = "2"
 object_store = { version = "0.14", default-features = false, features = ["aws"], optional = true }
 parking_lot = { workspace = true }
 rblock = { workspace = true }
+redis-client = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 shardcache-client-rs = { workspace = true, optional = true }
@@ -182,6 +184,11 @@ required-features = ["redis-server"]
 name = "kv_overflow_server_test"
 path = "tests/kv_overflow_server_test.rs"
 required-features = ["server", "kv-overflow"]
+
+[[test]]
+name = "kv_overflow_redis_test"
+path = "tests/kv_overflow_redis_test.rs"
+required-features = ["kv-overflow-redis"]
 
 [[test]]
 name = "fuzz_harness_test"

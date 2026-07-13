@@ -42,9 +42,15 @@ wal_channel_capacity = 16384
 # authoritative primary has resynchronized every fixed logical slot.
 [kv_overflow]
 enabled = false
+backend = "scnp"
 endpoints = ["10.0.0.11:6380", "10.0.0.12:6380"]
 previous_endpoints = []
 slot_count = 16384
+# Redis backend only: endpoints must be redis://, rediss://, valkey://, or
+# valkeys:// URLs without credentials. Credentials are read from these env vars.
+redis_key_prefix = "shardcache:overflow:"
+# redis_username_env = "SHARDCACHE_OVERFLOW_REDIS_USERNAME"
+# redis_password_env = "SHARDCACHE_OVERFLOW_REDIS_PASSWORD"
 max_memory_bytes = 1073741824
 eviction_policy = "lfu"
 connections_per_endpoint = 2
