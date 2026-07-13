@@ -292,9 +292,7 @@ impl<'a> KvOverflowValidation<'a> {
             .chain(&self.config.previous_endpoints)
         {
             let connection = endpoint.as_str().into_connection_info().map_err(|error| {
-                ShardCacheError::Config(format!(
-                    "invalid Redis overflow endpoint {endpoint:?}: {error}"
-                ))
+                ShardCacheError::Config(format!("invalid Redis overflow endpoint: {error}"))
             })?;
             ConfigCheck::require(
                 connection.redis.username.is_none() && connection.redis.password.is_none(),

@@ -32,6 +32,18 @@ pub trait KvOverflowNode: Send + Sync + 'static {
     /// Stable node identity used by rendezvous hashing.
     fn id(&self) -> &str;
     fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()>;
+    /// Stores a value using an absolute primary expiry deadline.
+    ///
+    /// Implementations with native expiry support should override this so
+    /// queueing and request latency cannot restart the value's TTL.
+    fn put_until(&self, key: &[u8], value: &[u8], expire_at_ms: Option<u64>) -> Result<()> {
+        let ttl_ms = expire_at_ms.map(|deadline| deadline.saturating_sub(now_millis()));
+        if ttl_ms == Some(0) {
+            self.delete(key)
+        } else {
+            self.put(key, value, ttl_ms)
+        }
+    }
     fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>>;
     fn delete(&self, key: &[u8]) -> Result<()>;
 }
@@ -179,7 +191,15 @@ impl KvOverflowNode for ScnpKvOverflowNode {
     }
 
     fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
-        let encoded = encode_overflow_value(value, ttl_ms);
+        let expire_at_ms = ttl_ms.map(|ttl| now_millis().saturating_add(ttl));
+        self.put_until(key, value, expire_at_ms)
+    }
+
+    fn put_until(&self, key: &[u8], value: &[u8], expire_at_ms: Option<u64>) -> Result<()> {
+        if expire_at_ms.is_some_and(|deadline| deadline <= now_millis()) {
+            return self.delete(key);
+        }
+        let encoded = encode_overflow_value_until(value, expire_at_ms);
         self.execute(|client| client.set(key, &encoded))
     }
 
@@ -241,7 +261,7 @@ impl RedisKvOverflowNode {
         let mut connection_info = endpoint
             .as_str()
             .into_connection_info()
-            .map_err(|error| redis_config_error(&endpoint, error))?;
+            .map_err(redis_config_error)?;
         if connection_info.redis.username.is_some() || connection_info.redis.password.is_some() {
             return Err(ShardCacheError::Config(
                 "Redis overflow credentials must use configured environment variables, not endpoint URLs"
@@ -261,8 +281,7 @@ impl RedisKvOverflowNode {
                 "kv_overflow.redis_password_env is required with redis_username_env".into(),
             ));
         }
-        let client = redis_client::Client::open(connection_info)
-            .map_err(|error| redis_config_error(&endpoint, error))?;
+        let client = redis_client::Client::open(connection_info).map_err(redis_config_error)?;
         let connection_count = config.connections_per_endpoint.max(1);
         Ok(Self {
             endpoint,
@@ -346,13 +365,25 @@ impl KvOverflowNode for RedisKvOverflowNode {
     }
 
     fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
+        let expire_at_ms = ttl_ms.map(|ttl| now_millis().saturating_add(ttl));
+        self.put_until(key, value, expire_at_ms)
+    }
+
+    fn put_until(&self, key: &[u8], value: &[u8], expire_at_ms: Option<u64>) -> Result<()> {
         let storage_key = self.storage_key(key);
-        let encoded = encode_overflow_value(value, ttl_ms);
+        let encoded = encode_overflow_value_until(value, expire_at_ms);
         self.execute(|connection| {
+            let ttl_ms = expire_at_ms.map(|deadline| deadline.saturating_sub(now_millis()));
+            if ttl_ms == Some(0) {
+                return redis_client::cmd("DEL")
+                    .arg(&storage_key)
+                    .query::<u64>(connection)
+                    .map(|_| ());
+            }
             let mut command = redis_client::cmd("SET");
             command.arg(&storage_key).arg(&encoded);
             if let Some(ttl_ms) = ttl_ms {
-                command.arg("PX").arg(ttl_ms.max(1));
+                command.arg("PX").arg(ttl_ms);
             }
             command.query(connection)
         })
@@ -410,10 +441,8 @@ fn read_redis_credential_env(name: Option<&str>, field: &str) -> Result<Option<S
 }
 
 #[cfg(feature = "kv-overflow-redis")]
-fn redis_config_error(endpoint: &str, error: redis_client::RedisError) -> ShardCacheError {
-    ShardCacheError::Config(format!(
-        "invalid Redis overflow endpoint {endpoint:?}: {error}"
-    ))
+fn redis_config_error(error: redis_client::RedisError) -> ShardCacheError {
+    ShardCacheError::Config(format!("invalid Redis overflow endpoint: {error}"))
 }
 
 #[cfg(feature = "kv-overflow-redis")]
@@ -425,8 +454,8 @@ fn client_error(endpoint: &str, error: ShardCacheClientError) -> ShardCacheError
     ShardCacheError::Protocol(format!("kv overflow node {endpoint}: {error}"))
 }
 
-fn encode_overflow_value(value: &[u8], ttl_ms: Option<u64>) -> Vec<u8> {
-    let expire_at_ms = ttl_ms.map_or(0, |ttl| now_millis().saturating_add(ttl));
+fn encode_overflow_value_until(value: &[u8], expire_at_ms: Option<u64>) -> Vec<u8> {
+    let expire_at_ms = expire_at_ms.unwrap_or(0);
     let mut encoded = Vec::with_capacity(KV_OVERFLOW_HEADER_LEN.saturating_add(value.len()));
     encoded.extend_from_slice(KV_OVERFLOW_MAGIC);
     encoded.extend_from_slice(&expire_at_ms.to_le_bytes());
@@ -671,9 +700,14 @@ impl KvOverflowCluster {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
+        let expire_at_ms = ttl_ms.map(|ttl| now_millis().saturating_add(ttl));
+        self.put_until(key, value, expire_at_ms)
+    }
+
+    fn put_until(&self, key: &[u8], value: &[u8], expire_at_ms: Option<u64>) -> Result<()> {
         self.metrics.puts.fetch_add(1, Ordering::Relaxed);
         let result = self.nodes[self.owner_index(key)]
-            .put(key, value, ttl_ms)
+            .put_until(key, value, expire_at_ms)
             .and_then(|()| {
                 let Some(previous) = self.previous_owner(key) else {
                     return Ok(());
@@ -775,7 +809,6 @@ enum KvOverflowJob {
     Put {
         key: Bytes,
         value: SharedBytes,
-        ttl_ms: Option<u64>,
         expire_at_ms: Option<u64>,
         generation: u64,
     },
@@ -830,6 +863,7 @@ pub struct KvOverflowStore {
     pending_keys: Arc<RwLock<HashMap<Bytes, PendingKeyMeta>>>,
     key_gates: Arc<[Mutex<()>]>,
     maintenance: Arc<Mutex<()>>,
+    admission: RwLock<()>,
     flush_gate: Mutex<()>,
     sequence: AtomicU64,
     workers: KvOverflowWorkerPool,
@@ -910,6 +944,7 @@ impl KvOverflowStore {
             pending_keys,
             key_gates,
             maintenance,
+            admission: RwLock::new(()),
             flush_gate: Mutex::new(()),
             sequence: AtomicU64::new(1),
             workers,
@@ -932,6 +967,7 @@ impl KvOverflowStore {
         K: Into<Bytes>,
         V: Into<Bytes>,
     {
+        let _admission = self.admission.read();
         let key = key.into();
         self.workers.reserve()?;
         let value = SharedBytes::from(value.into());
@@ -949,7 +985,6 @@ impl KvOverflowStore {
         if self.workers.enqueue_reserved(KvOverflowJob::Put {
             key: key.clone(),
             value,
-            ttl_ms,
             expire_at_ms,
             generation,
         }) {
@@ -976,7 +1011,9 @@ impl KvOverflowStore {
             return Ok(Some(value));
         }
         let Some(remote) = self.cluster.get(key)? else {
-            self.remote_keys.write().remove(key);
+            if self.cluster.delete(key).is_ok() {
+                self.remote_keys.write().remove(key);
+            }
             return Ok(None);
         };
         self.inner
@@ -995,6 +1032,7 @@ impl KvOverflowStore {
     }
 
     pub fn delete(&self, key: &[u8]) -> Result<bool> {
+        let admission = self.admission.read();
         self.workers.reserve()?;
         let generation = self.sequence.fetch_add(1, Ordering::Relaxed);
         let (completion, result) = bounded(1);
@@ -1014,6 +1052,7 @@ impl KvOverflowStore {
             return Err(ShardCacheError::ChannelClosed("kv overflow workers"));
         }
         drop(_key_gate);
+        drop(admission);
         result
             .recv()
             .map_err(|_| ShardCacheError::ChannelClosed("kv overflow delete completion"))??;
@@ -1023,6 +1062,7 @@ impl KvOverflowStore {
     /// Waits until all remote mutations admitted before this call are complete.
     pub fn flush_remote(&self) -> Result<()> {
         let _flush = self.flush_gate.lock();
+        let admission = self.admission.write();
         let mut completions = Vec::with_capacity(self.workers.senders.len());
         for sender in &self.workers.senders {
             let (completion, result) = bounded(1);
@@ -1031,6 +1071,7 @@ impl KvOverflowStore {
                 .map_err(|_| ShardCacheError::ChannelClosed("kv overflow workers"))?;
             completions.push(result);
         }
+        drop(admission);
         for completion in completions {
             completion
                 .recv()
@@ -1041,13 +1082,11 @@ impl KvOverflowStore {
 
     /// Mirrors all resident values, used after authoritative local recovery.
     pub fn synchronize_resident(&self) -> Result<()> {
+        let _admission = self.admission.write();
         let _key_gates = self.lock_all_keys();
-        let now_ms = now_millis();
         for entry in self.inner.try_entry_snapshot()? {
-            let ttl_ms = entry
-                .expire_at_ms
-                .map(|deadline| deadline.saturating_sub(now_ms));
-            self.cluster.put(&entry.key, &entry.value, ttl_ms)?;
+            self.cluster
+                .put_until(&entry.key, &entry.value, entry.expire_at_ms)?;
             self.remote_keys.write().insert(
                 entry.key,
                 RemoteKeyMeta {
@@ -1187,7 +1226,6 @@ impl KvOverflowWorkerPool {
                             KvOverflowJob::Put {
                                 key,
                                 value,
-                                ttl_ms,
                                 expire_at_ms,
                                 generation,
                             } => {
@@ -1195,7 +1233,7 @@ impl KvOverflowWorkerPool {
                                     .metrics
                                     .active_workers
                                     .fetch_add(1, Ordering::Relaxed);
-                                let result = worker_cluster.put(&key, &value, ttl_ms);
+                                let result = worker_cluster.put_until(&key, &value, expire_at_ms);
                                 worker_cluster
                                     .metrics
                                     .active_workers
@@ -1719,6 +1757,80 @@ mod tests {
         release.send(()).unwrap();
         store.flush_remote().unwrap();
         assert_eq!(store.health_snapshot().pending_keys, 0);
+    }
+
+    #[test]
+    fn queued_replication_does_not_restart_primary_ttl() {
+        let (node, started, release) = blocking_node();
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
+        let mut serial = options(1024);
+        serial.worker_threads = 1;
+        serial.queue_capacity = 2;
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, serial).unwrap();
+
+        store
+            .set(b"blocker".to_vec(), b"value".to_vec(), None)
+            .unwrap();
+        started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker started blocking write");
+        store
+            .set(b"expiring".to_vec(), b"value".to_vec(), Some(50))
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        release.send(()).unwrap();
+        store.flush_remote().unwrap();
+
+        assert!(!node.values.read().contains_key(b"expiring".as_slice()));
+        assert_eq!(store.get(b"expiring").unwrap(), None);
+        assert!(
+            !store
+                .remote_keys
+                .read()
+                .contains_key(b"expiring".as_slice())
+        );
+    }
+
+    #[test]
+    fn flush_waits_for_reserved_mutation_to_enqueue() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
+        let mut serial = options(1024);
+        serial.worker_threads = 1;
+        let store = Arc::new(KvOverflowStore::new(EmbeddedStore::new(1), cluster, serial).unwrap());
+        let key_gate = store.key_gate(b"key");
+        let writer_store = Arc::clone(&store);
+        let writer =
+            thread::spawn(move || writer_store.set(b"key".to_vec(), b"value".to_vec(), None));
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while store.health_snapshot().queue_depth == 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(store.health_snapshot().queue_depth, 1);
+
+        let (flush_done, flush_result) = bounded(1);
+        let flush_store = Arc::clone(&store);
+        let flush = thread::spawn(move || {
+            let _ = flush_done.send(flush_store.flush_remote());
+        });
+        assert!(
+            flush_result
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+
+        drop(key_gate);
+        writer.join().unwrap().unwrap();
+        flush_result
+            .recv_timeout(Duration::from_secs(1))
+            .expect("flush completed after admitted write enqueued")
+            .unwrap();
+        flush.join().unwrap();
+        assert_eq!(
+            node.values.read()[b"key".as_slice()].value.as_ref(),
+            b"value"
+        );
     }
 
     #[test]

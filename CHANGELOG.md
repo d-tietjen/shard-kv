@@ -31,12 +31,16 @@
 
 - Bumped the workspace and publishable crate surfaces to `0.6.0`.
 - Added explicit timeout-capable connections to `shardcache-client-rs`.
+- Preserve primary TTL deadlines across queued/retried overflow writes, make
+  `flush_remote` include writes already admitted but not yet enqueued, and
+  redact malformed Redis endpoints from configuration errors.
 
 ### Validation
 
-- Measured release-mode 1 KiB primary writes at 181.9 ns/op for embedded SET
-  and 248.2 ns/op for bounded KV-overflow admission (1.36x, 66.3 ns absolute
-  enqueue overhead) on the development machine.
+- A three-run release-mode sample of 1 KiB primary writes measured a 121.9
+  ns/op median for embedded SET and 250.2 ns/op for bounded KV-overflow
+  admission (2.05x, 128.3 ns absolute enqueue overhead) on the development
+  machine.
 
 ## 0.5.0 - Unreleased
 

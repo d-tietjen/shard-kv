@@ -869,6 +869,10 @@ mod tests {
         config.kv_overflow.endpoints[0] = "redis://:secret@127.0.0.1:6379/0".into();
         assert!(config.validate().is_err());
 
+        config.kv_overflow.endpoints[0] = "redis://user:super-secret@/".into();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(!error.contains("super-secret"));
+
         config.kv_overflow.endpoints[0] = "redis://127.0.0.1:6379/0".into();
         config.kv_overflow.redis_username_env = Some("REDIS_USER".into());
         assert!(config.validate().is_err());

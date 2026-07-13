@@ -96,11 +96,12 @@ let remote = cache.cluster().get(b"model:7")?;
   their own persistence or object overflow when remote loss must survive until
   the primary can rebuild them.
 - Use `KvOverflowCluster` for direct reads. Values on the raw server include a
-  versioned expiry, length, and CRC32 envelope that the cluster client checks
-  and removes.
-- TTL is enforced from the envelope during every remote read. The primary also
-  runs a configurable cleanup pass that deletes expired envelopes which are no
-  longer read.
+  versioned expiry, length, and CRC32 envelope that the cluster client checks.
+- TTL starts when the primary accepts the write, not when a worker reaches the
+  queued replication job. It is enforced from the absolute envelope deadline
+  during every remote read. Redis also receives the remaining server-side TTL.
+  The wrapped primary deletes an expired or missing remote copy on fault-in and
+  runs a configurable cleanup pass for expired envelopes that are not read.
 - Deletes remove the remote copy before deleting the primary copy. A remote
   delete failure is returned and the primary value remains available.
 - The wrapper supports byte-string entries. Redis object families and session
@@ -164,8 +165,10 @@ stable address.
 
 An overflow node can enforce its own `max_memory_bytes` with `eviction_policy =
 "lru"` or `"lfu"`. Plain replica eviction is intentionally lossy: if the node
-drops an envelope, a later direct read misses and the primary invalidates its
-remote acknowledgment metadata.
+drops an envelope, a later direct read misses. A wrapped-primary fault-in also
+invalidates its remote acknowledgment metadata. The local WAL/snapshot remains
+authoritative, but the value is unavailable through the live overflow tier
+until it is restored from that authority or refilled from its origin.
 
 For a capacity-preserving cascade, run each overflow node with both a memory
 limit and `[object_overflow]`. The node keeps its hot envelope working set in
@@ -225,9 +228,9 @@ enqueue overhead ratio, and the remaining `flush_remote` drain time. Use the
 live two-server integration path for end-to-end SCNP latency; this benchmark is
 specifically the primary CPU and synchronization budget.
 
-A release run on the development machine on 2026-07-13 with the command above
-measured 181.9 ns/op for embedded SET and 248.2 ns/op for KV-overflow queue
-admission. That is 66.3 ns of primary-path overhead, 1.36x the plain SET cost,
-and 4.03 million admitted 1 KiB writes/second on one producer thread. Treat
-this as a local implementation regression baseline, not a cross-machine
-capacity claim.
+Three release runs on the development machine on 2026-07-13 with the command
+above measured medians of 121.9 ns/op for embedded SET and 250.2 ns/op for
+KV-overflow queue admission. That is 128.3 ns of primary-path overhead, 2.05x
+the plain SET cost, and approximately 4.00 million admitted 1 KiB writes/second
+on one producer thread. Treat this as a local implementation regression
+baseline, not a cross-machine capacity claim.
