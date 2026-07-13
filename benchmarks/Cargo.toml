@@ -33,6 +33,7 @@ prefix-eviction = ["shardmap/prefix-eviction"]
 # rows use explicit `*-telemetry` backends so ordinary rows remain inactive.
 telemetry = ["shardmap/telemetry"]
 object-overflow = ["shardmap/object-overflow"]
+kv-overflow = ["shardmap/kv-overflow"]
 # Build the benchmark-only server that exposes a caller-owned shardmap store
 # through the shardcache RESP/SCNP server path.
 embedded-server = ["shardmap/redis-server"]
@@ -91,6 +92,11 @@ path = "src/bin/memory_write_cost.rs"
 name = "object_overflow_fs_cost"
 path = "src/bin/object_overflow_fs_cost.rs"
 required-features = ["object-overflow"]
+
+[[bin]]
+name = "kv_overflow_primary_cost"
+path = "src/bin/kv_overflow_primary_cost.rs"
+required-features = ["kv-overflow"]
 
 [[bin]]
 name = "redis_command_matrix"

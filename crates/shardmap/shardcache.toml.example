@@ -35,3 +35,20 @@ snapshot_every_seconds = 300
 snapshot_min_writes = 1000
 compress_snapshots = true
 wal_channel_capacity = 16384
+
+# Embedded-only partitioned overflow. Overflow nodes are ordinary shardcache
+# SCNP servers. Keep this membership list stable while the process is running.
+[kv_overflow]
+enabled = false
+endpoints = ["10.0.0.11:6380", "10.0.0.12:6380"]
+max_memory_bytes = 1073741824
+eviction_policy = "lfu"
+connections_per_endpoint = 2
+connect_timeout_ms = 250
+operation_timeout_ms = 500
+max_retries = 2
+retry_backoff_ms = 10
+cleanup_interval_ms = 1000
+fetch_on_miss = true
+worker_threads = 2
+queue_capacity = 1024

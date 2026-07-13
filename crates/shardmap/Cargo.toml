@@ -98,6 +98,7 @@ parent-telemetry-runtime = ["telemetry"]
 prefix-eviction = []
 object-overflow = []
 object-overflow-s3 = ["object-overflow", "dep:futures-util", "dep:object_store"]
+kv-overflow = ["embedded", "dep:shardcache-client-rs"]
 
 # Internal/benchmark knobs. These are intentionally not part of the small public
 # feature story; use them only for measured deployments or local experiments.
@@ -130,6 +131,7 @@ parking_lot = { workspace = true }
 rblock = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+shardcache-client-rs = { workspace = true, optional = true }
 smallvec = "1"
 socket2 = { version = "0.5", features = ["all"], optional = true }
 thiserror = { workspace = true }
@@ -175,6 +177,11 @@ required-features = ["object-overflow"]
 name = "embedded_server_test"
 path = "tests/embedded_server_test.rs"
 required-features = ["redis-server"]
+
+[[test]]
+name = "kv_overflow_server_test"
+path = "tests/kv_overflow_server_test.rs"
+required-features = ["server", "kv-overflow"]
 
 [[test]]
 name = "fuzz_harness_test"

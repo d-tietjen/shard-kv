@@ -1,6 +1,7 @@
 #[cfg(feature = "redis")]
 use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
+use std::time::Duration;
 
 use crate::commands::del::{self, Del};
 use crate::commands::exists::{self, Exists};
@@ -42,6 +43,19 @@ impl ShardCacheClient {
     pub fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
         Ok(Self {
             conn: ScnpConnection::connect(addr)?,
+            #[cfg(feature = "redis")]
+            redis_pipeline_responses: VecDeque::new(),
+        })
+    }
+
+    /// Connects with explicit TCP connect and per-operation I/O deadlines.
+    pub fn connect_with_timeouts(
+        addr: impl ToSocketAddrs,
+        connect_timeout: Duration,
+        operation_timeout: Duration,
+    ) -> Result<Self> {
+        Ok(Self {
+            conn: ScnpConnection::connect_with_timeouts(addr, connect_timeout, operation_timeout)?,
             #[cfg(feature = "redis")]
             redis_pipeline_responses: VecDeque::new(),
         })

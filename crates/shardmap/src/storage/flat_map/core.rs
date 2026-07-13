@@ -350,13 +350,11 @@ impl FlatMap {
         if self.eviction_policy == EvictionPolicy::None {
             return false;
         }
-        if self.memory_limit_bytes.is_none() {
-            return false;
-        }
-        let limit = self.memory_limit_bytes.unwrap();
-        let watermark = limit.saturating_mul(3) / 4;
-        if self.stored_bytes < watermark.max(1) {
-            return false;
+        if let Some(limit) = self.memory_limit_bytes {
+            let watermark = limit.saturating_mul(3) / 4;
+            if self.stored_bytes < watermark.max(1) {
+                return false;
+            }
         }
         self.read_sample_counter = self.read_sample_counter.wrapping_add(1);
         (self.read_sample_counter & READ_TOUCH_SAMPLE_MASK) == 0
@@ -425,6 +423,32 @@ impl FlatMap {
             }
         }
         let (_rank, hash, key) = self.eviction_candidate(policy)?;
+        self.evict_or_offload_hashed(hash, &key, now_ms)
+            .then_some(key)
+    }
+
+    pub(crate) fn evict_one_with_policy_if(
+        &mut self,
+        policy: EvictionPolicy,
+        now_ms: u64,
+        mut eligible: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Bytes> {
+        if policy == EvictionPolicy::None || self.entries.is_empty() {
+            return None;
+        }
+        let mut selected: Option<(EvictionRank, u64, &[u8])> = None;
+        for entry in self.entries.iter() {
+            if !eligible(entry.key.as_ref()) {
+                continue;
+            }
+            let candidate = (entry.access.rank(policy), entry.hash, entry.key.as_ref());
+            selected = match selected {
+                Some(current) if current.0 <= candidate.0 => Some(current),
+                _ => Some(candidate),
+            };
+        }
+        let (_rank, hash, key) = selected?;
+        let key = key.to_vec();
         self.evict_or_offload_hashed(hash, &key, now_ms)
             .then_some(key)
     }

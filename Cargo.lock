@@ -2237,7 +2237,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "clap",
  "shardmap",
@@ -2246,7 +2246,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-benchmarks"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "clap",
@@ -2269,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-c"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "shardmap",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-client-rs"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "libc",
  "thiserror",
@@ -2286,14 +2286,14 @@ dependencies = [
 
 [[package]]
 name = "shardcache-formal"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "creusot-std",
 ]
 
 [[package]]
 name = "shardcache-py"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "core_affinity",
  "dashmap",
@@ -2307,7 +2307,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-runtime"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cust",
  "serde",
@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "shardmap"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "bytes-handoff",
@@ -2352,6 +2352,7 @@ dependencies = [
  "rblock",
  "serde",
  "serde_json",
+ "shardcache-client-rs",
  "smallvec",
  "socket2 0.5.10",
  "tempfile",

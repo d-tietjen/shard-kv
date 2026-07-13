@@ -836,6 +836,20 @@ fn explicit_single_point_eviction_uses_shard_lru_order() {
     assert_eq!(store.evict_one_point_in_shard(1, EvictionPolicy::Lru), None);
 }
 
+#[test]
+fn explicit_single_point_eviction_respects_eligibility() {
+    let store = EmbeddedStore::new(1);
+    store.configure_memory_policy(None, EvictionPolicy::Lru);
+    store.set(b"cold-unacked".to_vec(), vec![1], None);
+    store.set(b"warm-acked".to_vec(), vec![2], None);
+
+    assert_eq!(
+        store.evict_one_point_in_shard_if(0, EvictionPolicy::Lru, |key| key == b"warm-acked"),
+        Some(b"warm-acked".to_vec())
+    );
+    assert!(store.exists(b"cold-unacked"));
+}
+
 #[cfg(feature = "redis")]
 #[test]
 fn vector_shard_can_use_total_memory_budget() {

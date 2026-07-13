@@ -520,7 +520,7 @@ impl FlatMap {
                 .is_some_and(|entry| entry.matches(hash, key))
     }
 
-    pub(super) fn fault_remote_hashed(
+    pub(crate) fn fault_remote_hashed(
         &mut self,
         hash: u64,
         key: &[u8],

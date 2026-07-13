@@ -1,8 +1,8 @@
 #[cfg(feature = "object-overflow")]
 use super::ObjectOverflowBackend;
 use super::{
-    EvictionPolicy, ObjectOverflowConfig, PersistenceConfig, ReplicationConfig, ReplicationRole,
-    ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
+    EvictionPolicy, KvOverflowConfig, ObjectOverflowConfig, PersistenceConfig, ReplicationConfig,
+    ReplicationRole, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
 };
 use crate::{Result, ShardCacheError};
 
@@ -27,6 +27,7 @@ enum ConfigValidationRule {
     TierCapacities,
     Persistence,
     ObjectOverflow,
+    KvOverflow,
     Replication,
     Cuda,
 }
@@ -47,6 +48,12 @@ struct ObjectOverflowValidation<'a> {
 
 struct ReplicationValidation<'a> {
     config: &'a ReplicationConfig,
+}
+
+struct KvOverflowValidation<'a> {
+    config: &'a KvOverflowConfig,
+    #[cfg(feature = "kv-overflow")]
+    root: &'a ShardCacheConfig,
 }
 
 struct ConfigCheck;
@@ -73,6 +80,7 @@ impl ConfigValidationRule {
             Self::TierCapacities,
             Self::Persistence,
             Self::ObjectOverflow,
+            Self::KvOverflow,
             Self::Replication,
             Self::Cuda,
         ]
@@ -105,6 +113,7 @@ impl ConfigValidationRule {
             Self::ObjectOverflow => {
                 ObjectOverflowValidation::new(&config.object_overflow, config).validate()
             }
+            Self::KvOverflow => KvOverflowValidation::new(&config.kv_overflow, config).validate(),
             Self::Replication => ReplicationValidation::new(&config.replication).validate(),
             Self::Cuda => Self::validate_cuda(config),
         }
@@ -142,6 +151,79 @@ impl ConfigValidationRule {
                     "cuda.pinned_host_bytes must be > 0 when direct host dma is disabled",
                 )
             }
+        }
+    }
+}
+
+impl<'a> KvOverflowValidation<'a> {
+    fn new(config: &'a KvOverflowConfig, root: &'a ShardCacheConfig) -> Self {
+        #[cfg(not(feature = "kv-overflow"))]
+        let _ = root;
+        Self {
+            config,
+            #[cfg(feature = "kv-overflow")]
+            root,
+        }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+        #[cfg(not(feature = "kv-overflow"))]
+        return Err(ShardCacheError::Config(
+            "kv_overflow.enabled requires the kv-overflow feature".into(),
+        ));
+        #[cfg(feature = "kv-overflow")]
+        {
+            ConfigCheck::require(
+                !self.root.object_overflow.enabled,
+                "kv_overflow and object_overflow cannot be enabled together",
+            )?;
+            ConfigCheck::require(
+                !self.config.endpoints.is_empty(),
+                "kv_overflow.endpoints must contain at least one server",
+            )?;
+            ConfigCheck::require(
+                self.config
+                    .endpoints
+                    .iter()
+                    .all(|endpoint| !endpoint.trim().is_empty()),
+                "kv_overflow.endpoints must not contain empty addresses",
+            )?;
+            let mut endpoints = self.config.endpoints.clone();
+            endpoints.sort();
+            endpoints.dedup();
+            ConfigCheck::require(
+                endpoints.len() == self.config.endpoints.len(),
+                "kv_overflow.endpoints must be unique",
+            )?;
+            ConfigCheck::require(
+                self.config.max_memory_bytes > 0,
+                "kv_overflow.max_memory_bytes must be > 0",
+            )?;
+            ConfigCheck::require(
+                matches!(
+                    self.config.eviction_policy,
+                    EvictionPolicy::Lru | EvictionPolicy::Lfu
+                ),
+                "kv_overflow.eviction_policy must be lru or lfu",
+            )?;
+            ConfigCheck::require(
+                self.config.connections_per_endpoint > 0,
+                "kv_overflow.connections_per_endpoint must be > 0",
+            )?;
+            ConfigCheck::require(
+                self.config.worker_threads > 0 && self.config.queue_capacity > 0,
+                "kv_overflow.worker_threads and queue_capacity must be > 0",
+            )?;
+            ConfigCheck::require(
+                self.config.connect_timeout_ms > 0
+                    && self.config.operation_timeout_ms > 0
+                    && self.config.retry_backoff_ms > 0
+                    && self.config.cleanup_interval_ms > 0,
+                "kv_overflow timeouts, retry_backoff_ms, and cleanup_interval_ms must be > 0",
+            )
         }
     }
 }

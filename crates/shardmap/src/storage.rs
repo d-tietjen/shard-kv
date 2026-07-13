@@ -30,6 +30,8 @@ mod embedded_store_sharded;
 mod embedded_store_shared;
 mod engine;
 mod flat_map;
+#[cfg(feature = "kv-overflow")]
+mod kv_overflow;
 mod object_overflow;
 mod records;
 #[cfg(feature = "redis")]
@@ -99,6 +101,11 @@ pub(crate) use engine::{
     ExpirationChange, RESP_SPANNED_VALUE_MIN, ShardKey, ShardOperation, ShardReply, ShardValue,
 };
 pub use flat_map::FlatMap;
+#[cfg(feature = "kv-overflow")]
+pub use kv_overflow::{
+    KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode, KvOverflowOptions,
+    KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
+};
 pub use object_overflow::{
     ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore, ObjectValueRef,
 };

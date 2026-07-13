@@ -31,6 +31,23 @@ impl EmbeddedStore {
         shard.map.evict_one_with_policy(policy, now_millis())
     }
 
+    /// Evicts the coldest point entry accepted by `eligible` from one shard.
+    ///
+    /// External overflow tiers use this to retain values until a remote write
+    /// is acknowledged. Session and Redis object entries are excluded.
+    pub fn evict_one_point_in_shard_if(
+        &self,
+        shard_id: usize,
+        policy: EvictionPolicy,
+        eligible: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Bytes> {
+        let shard = self.shards.get(shard_id)?;
+        let mut shard = shard.write();
+        shard
+            .map
+            .evict_one_with_policy_if(policy, now_millis(), eligible)
+    }
+
     #[cfg(feature = "redis")]
     pub(super) fn delete_pinned_vector_value_if_distinct(
         &self,

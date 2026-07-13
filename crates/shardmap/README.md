@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.5.0"
+shardmap = "0.6.0"
 ```
 
 ## Quick Start
@@ -477,6 +477,16 @@ Native replication v1 streams byte-string cache mutations and consistent
 snapshots. It is intended for read replicas, sidecar cache mirrors, and service
 subscribers that consume shardcache's FCRP frames; Redis object-family
 replication is outside this embedded replication surface.
+
+For capacity scaling without full replica copies, enable `kv-overflow` and use
+`KvOverflowStore`. It mirrors each key to one rendezvous-hashed shardcache
+server through bounded ordered workers, evicts only acknowledged cold values
+from primary memory, and faults remote values back on demand. Overflow servers
+can apply their own LRU/LFU memory limits and cascade cold envelopes into
+object overflow. Other services can read through the same `KvOverflowCluster`
+without touching the primary. See
+[`docs/KV_OVERFLOW.md`](../../docs/KV_OVERFLOW.md) for the API and operational
+contract.
 
 ## Semantic Cache
 

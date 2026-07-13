@@ -24,6 +24,11 @@ package_crate_with_local_shardmap_patch() {
     "$@"
 }
 
+package_shardmap_with_local_client_patch() {
+  cargo package -p shardmap --locked --all-features \
+    --config "patch.crates-io.shardcache-client-rs.path=\"$root/crates/shardcache-client-rs\""
+}
+
 unpack_crate() {
   local package="$1"
   local version="$2"
@@ -91,8 +96,8 @@ trap 'rm -rf "$tmp"' EXIT
 unpacked="$tmp/unpacked"
 mkdir -p "$unpacked"
 
-package_crate shardmap --all-features
 package_crate shardcache-client-rs
+package_shardmap_with_local_client_patch
 
 # This crate depends on the workspace shardmap version. During a PR for a new
 # shardmap release, that exact version is not indexed on crates.io yet. Use a
@@ -140,3 +145,20 @@ write_patch_table >>"$redis_consumer/Cargo.toml"
 
 check_consumer default-consumer
 check_consumer redis-consumer
+
+kv_overflow_consumer="$tmp/kv-overflow-consumer"
+mkdir -p "$kv_overflow_consumer"
+write_consumer_main "$kv_overflow_consumer"
+cat >"$kv_overflow_consumer/Cargo.toml" <<EOF
+[package]
+name = "shard-kv-publish-kv-overflow-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shardmap = { version = "$shardmap_version", features = ["kv-overflow"] }
+EOF
+write_patch_table >>"$kv_overflow_consumer/Cargo.toml"
+
+check_consumer kv-overflow-consumer

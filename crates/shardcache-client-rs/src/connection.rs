@@ -1,5 +1,6 @@
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 use crate::commands::ScnpCommand;
 #[cfg(feature = "redis")]
@@ -22,7 +23,35 @@ pub(crate) struct ScnpConnection {
 impl ScnpConnection {
     pub(crate) fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
         let s = TcpStream::connect(addr)?;
+        Self::from_stream(s, None)
+    }
+
+    pub(crate) fn connect_with_timeouts(
+        addr: impl ToSocketAddrs,
+        connect_timeout: Duration,
+        operation_timeout: Duration,
+    ) -> Result<Self> {
+        let mut last_error = None;
+        for addr in addr.to_socket_addrs()? {
+            match TcpStream::connect_timeout(&addr, connect_timeout) {
+                Ok(stream) => return Self::from_stream(stream, Some(operation_timeout)),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "address resolved to no endpoints",
+                )
+            })
+            .into())
+    }
+
+    fn from_stream(s: TcpStream, operation_timeout: Option<Duration>) -> Result<Self> {
         s.set_nodelay(true)?;
+        s.set_read_timeout(operation_timeout)?;
+        s.set_write_timeout(operation_timeout)?;
         tune_tcp_stream_buffers(&s);
         let s2 = s.try_clone()?;
         Ok(Self {

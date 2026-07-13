@@ -46,6 +46,8 @@ pub struct ShardCacheConfig {
     pub persistence: PersistenceConfig,
     /// Object-storage overflow configuration for cold values.
     pub object_overflow: ObjectOverflowConfig,
+    /// Partitioned key-value overflow configuration for cold values.
+    pub kv_overflow: KvOverflowConfig,
     /// Native mutation-stream replication configuration.
     pub replication: ReplicationConfig,
     /// Redis transaction execution mode.
@@ -251,6 +253,43 @@ pub enum ObjectOverflowFailurePolicy {
     EvictResident,
 }
 
+/// Partitioned key-value overflow settings.
+///
+/// Each key is mirrored to one deterministic shardcache server. The embedded
+/// primary may then evict acknowledged cold values and fault them back from
+/// their owner. Overflow servers hold disjoint key partitions rather than full
+/// read-replica copies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KvOverflowConfig {
+    /// Enable the embedded key-value overflow wrapper.
+    pub enabled: bool,
+    /// Stable SCNP addresses for the overflow nodes.
+    pub endpoints: Vec<String>,
+    /// Total resident-byte target for the in-memory primary.
+    pub max_memory_bytes: u64,
+    /// Policy used to choose acknowledged resident values for offload.
+    pub eviction_policy: EvictionPolicy,
+    /// TCP connections retained per overflow node.
+    pub connections_per_endpoint: usize,
+    /// Maximum TCP connect duration.
+    pub connect_timeout_ms: u64,
+    /// Maximum duration for one SCNP operation.
+    pub operation_timeout_ms: u64,
+    /// Retries after the first failed SCNP attempt.
+    pub max_retries: usize,
+    /// Delay between retries.
+    pub retry_backoff_ms: u64,
+    /// Interval for deleting expired values from overflow nodes.
+    pub cleanup_interval_ms: u64,
+    /// Promote remotely found values back into primary memory.
+    pub fetch_on_miss: bool,
+    /// Number of ordered remote replication workers.
+    pub worker_threads: usize,
+    /// Maximum total queued and active remote replication jobs.
+    pub queue_capacity: usize,
+}
+
 /// Optional live WAL export settings.
 ///
 /// The TCP exporter streams the same framed WAL records used on disk. It is a
@@ -415,6 +454,7 @@ impl Default for ShardCacheConfig {
             cuda: CudaConfig::default(),
             persistence: PersistenceConfig::default(),
             object_overflow: ObjectOverflowConfig::default(),
+            kv_overflow: KvOverflowConfig::default(),
             replication: ReplicationConfig::default(),
             transaction_mode: TransactionMode::default(),
             server_endpoint_mode: ServerEndpointMode::default(),
@@ -502,6 +542,26 @@ impl Default for ObjectOverflowConfig {
             cleanup_grace_seconds: 86_400,
             fetch_on_get: true,
             delete_on_overwrite: true,
+        }
+    }
+}
+
+impl Default for KvOverflowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoints: Vec::new(),
+            max_memory_bytes: 0,
+            eviction_policy: EvictionPolicy::Lru,
+            connections_per_endpoint: 2,
+            connect_timeout_ms: 250,
+            operation_timeout_ms: 500,
+            max_retries: 2,
+            retry_backoff_ms: 10,
+            cleanup_interval_ms: 1_000,
+            fetch_on_miss: true,
+            worker_threads: 2,
+            queue_capacity: 1_024,
         }
     }
 }
@@ -670,6 +730,8 @@ impl PersistenceConfig {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "kv-overflow")]
+    use super::{EvictionPolicy, KvOverflowConfig};
     use super::{ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser};
 
     #[test]
@@ -719,5 +781,24 @@ mod tests {
             toml::from_str(r#"server_endpoint_mode = "direct_shard""#).unwrap();
 
         assert_eq!(config.server_endpoint_mode, ServerEndpointMode::DirectShard);
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    #[test]
+    fn validates_key_value_overflow_membership() {
+        let mut config = ShardCacheConfig {
+            kv_overflow: KvOverflowConfig {
+                enabled: true,
+                endpoints: vec!["127.0.0.1:6381".into(), "127.0.0.1:6382".into()],
+                max_memory_bytes: 1024,
+                eviction_policy: EvictionPolicy::Lfu,
+                ..KvOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        config.kv_overflow.endpoints[1] = config.kv_overflow.endpoints[0].clone();
+        assert!(config.validate().is_err());
     }
 }

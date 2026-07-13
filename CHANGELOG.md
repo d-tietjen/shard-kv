@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.6.0 - Unreleased
+
+### Added
+
+- Added the `kv-overflow` feature and `KvOverflowStore`, a bounded embedded
+  primary backed by disjoint rendezvous-hashed shardcache server partitions.
+- Added acknowledged-only LRU/LFU eviction, remote fault-in, direct cluster
+  reads, TTL-preserving value envelopes, CRC32 integrity checks, SCNP
+  connection pooling, operation deadlines, reconnect retries, and health
+  counters.
+- Added fallible snapshot materialization and recovery synchronization so the
+  local persistence path remains authoritative for remote-only values.
+- Added unit coverage for placement, cold-only eviction, failed-write
+  retention, fault-in, and snapshot materialization, plus a live two-server
+  SCNP integration test for disjoint placement and direct reads.
+- Added bounded asynchronous replication with per-key ordered worker lanes,
+  generation-safe acknowledgments, queue backpressure, explicit remote flush,
+  and queue/worker health counters so primary writes do not wait on SCNP I/O.
+- Added replica-side LRU plus filesystem object-overflow integration coverage,
+  including transparent SCNP fault-in for envelopes evicted from replica RAM.
+- Added the `kv_overflow_primary_cost` benchmark for measuring embedded SET
+  versus key-value overflow enqueue overhead and remote drain time.
+
+### Changed
+
+- Bumped the workspace and publishable crate surfaces to `0.6.0`.
+- Added explicit timeout-capable connections to `shardcache-client-rs`.
+
+### Validation
+
+- Measured release-mode 1 KiB primary writes at 181.9 ns/op for embedded SET
+  and 248.2 ns/op for bounded KV-overflow admission (1.36x, 66.3 ns absolute
+  enqueue overhead) on the development machine.
+
 ## 0.5.0 - Unreleased
 
 ### Added

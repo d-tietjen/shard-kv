@@ -39,6 +39,11 @@ pub use crate::storage::{
     SharedEmbeddedLockPolicy, SharedEmbeddedStore, shift_for, stripe_index,
 };
 pub use crate::storage::{EmbeddedStore as ShardedEmbeddedStore, EmbeddedStore as ShardedEngine};
+#[cfg(feature = "kv-overflow")]
+pub use crate::storage::{
+    KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode, KvOverflowOptions,
+    KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
+};
 
 #[cfg(feature = "sharded")]
 pub use crate::storage::{

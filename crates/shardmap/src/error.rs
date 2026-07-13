@@ -31,6 +31,9 @@ pub enum ShardCacheError {
     #[error("channel closed: {0}")]
     ChannelClosed(&'static str),
 
+    #[error("backpressure: {0}")]
+    Backpressure(&'static str),
+
     #[error("task join error: {0}")]
     TaskJoin(String),
 }

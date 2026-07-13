@@ -126,6 +126,7 @@ impl ShardCacheServer {
     }
 
     pub async fn run(self) -> Result<()> {
+        self.reject_embedded_kv_overflow_config()?;
         if self.shard_arc_store.is_some() {
             return self
                 .run_shard_arc_with_shutdown(async {
@@ -158,6 +159,7 @@ impl ShardCacheServer {
     where
         F: std::future::Future<Output = ()> + Send,
     {
+        self.reject_embedded_kv_overflow_config()?;
         if self.shard_arc_store.is_some() {
             return self.run_shard_arc_with_shutdown(shutdown).await;
         }
@@ -178,12 +180,23 @@ impl ShardCacheServer {
     where
         F: std::future::Future<Output = ()>,
     {
+        self.reject_embedded_kv_overflow_config()?;
         if !self.should_run_direct() {
             return Err(crate::ShardCacheError::Config(
                 "run_thread_local_with_shutdown requires from_thread_local_embedded_store".into(),
             ));
         }
         self.run_direct_with_shutdown(shutdown).await
+    }
+
+    fn reject_embedded_kv_overflow_config(&self) -> Result<()> {
+        if self.config.kv_overflow.enabled {
+            return Err(crate::ShardCacheError::Config(
+                "kv_overflow is an embedded KvOverflowStore feature; standalone server mode can be used as an overflow node but cannot act as the wrapped primary"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn run_shard_arc_with_shutdown<F>(self, shutdown: F) -> Result<()>
