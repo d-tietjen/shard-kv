@@ -37,10 +37,14 @@ compress_snapshots = true
 wal_channel_capacity = 16384
 
 # Embedded-only partitioned overflow. Overflow nodes are ordinary shardcache
-# SCNP servers. Keep this membership list stable while the process is running.
+# SCNP servers. To expand horizontally, move the old endpoints to
+# previous_endpoints and put the expanded membership in endpoints until the
+# authoritative primary has resynchronized every fixed logical slot.
 [kv_overflow]
 enabled = false
 endpoints = ["10.0.0.11:6380", "10.0.0.12:6380"]
+previous_endpoints = []
+slot_count = 16384
 max_memory_bytes = 1073741824
 eviction_policy = "lfu"
 connections_per_endpoint = 2

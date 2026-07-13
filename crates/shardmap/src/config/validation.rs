@@ -199,6 +199,24 @@ impl<'a> KvOverflowValidation<'a> {
                 "kv_overflow.endpoints must be unique",
             )?;
             ConfigCheck::require(
+                self.config
+                    .previous_endpoints
+                    .iter()
+                    .all(|endpoint| !endpoint.trim().is_empty()),
+                "kv_overflow.previous_endpoints must not contain empty addresses",
+            )?;
+            let mut previous_endpoints = self.config.previous_endpoints.clone();
+            previous_endpoints.sort();
+            previous_endpoints.dedup();
+            ConfigCheck::require(
+                previous_endpoints.len() == self.config.previous_endpoints.len(),
+                "kv_overflow.previous_endpoints must be unique",
+            )?;
+            ConfigCheck::require(
+                self.config.slot_count > 0 && self.config.slot_count.is_power_of_two(),
+                "kv_overflow.slot_count must be a non-zero power of two",
+            )?;
+            ConfigCheck::require(
                 self.config.max_memory_bytes > 0,
                 "kv_overflow.max_memory_bytes must be > 0",
             )?;

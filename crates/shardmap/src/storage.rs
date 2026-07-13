@@ -103,8 +103,8 @@ pub(crate) use engine::{
 pub use flat_map::FlatMap;
 #[cfg(feature = "kv-overflow")]
 pub use kv_overflow::{
-    KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode, KvOverflowOptions,
-    KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
+    DEFAULT_KV_OVERFLOW_SLOT_COUNT, KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode,
+    KvOverflowOptions, KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
 };
 pub use object_overflow::{
     ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore, ObjectValueRef,

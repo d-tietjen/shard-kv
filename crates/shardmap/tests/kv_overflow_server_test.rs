@@ -177,6 +177,8 @@ fn live_scnp_nodes_form_disjoint_overflow_tier() {
     let config = KvOverflowConfig {
         enabled: true,
         endpoints: vec![first_addr.clone(), second_addr],
+        previous_endpoints: Vec::new(),
+        slot_count: 16_384,
         max_memory_bytes: 96,
         eviction_policy: EvictionPolicy::Lfu,
         connections_per_endpoint: 2,
@@ -250,6 +252,95 @@ fn live_scnp_nodes_form_disjoint_overflow_tier() {
         None,
     );
     assert!(cluster.get(corrupt_key.as_bytes()).is_err());
+}
+
+#[test]
+fn live_scnp_expansion_preserves_slots_and_handoffs_on_ordered_write() {
+    let first_addr = free_addr();
+    let second_addr = free_addr();
+    let added_addr = free_addr();
+    let first_store = Arc::new(EmbeddedStore::new(1));
+    let second_store = Arc::new(EmbeddedStore::new(1));
+    let added_store = Arc::new(EmbeddedStore::new(1));
+    let _first_server = TestServer::start(first_addr.clone(), Arc::clone(&first_store));
+    let _second_server = TestServer::start(second_addr.clone(), Arc::clone(&second_store));
+    let _added_server = TestServer::start(added_addr.clone(), Arc::clone(&added_store));
+    wait_for_server(&first_addr);
+    wait_for_server(&second_addr);
+    wait_for_server(&added_addr);
+
+    let previous_endpoints = vec![first_addr.clone(), second_addr.clone()];
+    let old_config = KvOverflowConfig {
+        enabled: true,
+        endpoints: previous_endpoints.clone(),
+        max_memory_bytes: 1024,
+        ..KvOverflowConfig::default()
+    };
+    let old_cluster = shardmap::storage::KvOverflowCluster::from_config(&old_config).unwrap();
+    let expanded_config = KvOverflowConfig {
+        endpoints: vec![first_addr.clone(), second_addr.clone(), added_addr.clone()],
+        previous_endpoints,
+        ..old_config.clone()
+    };
+    let expanded = KvOverflowStore::from_config(EmbeddedStore::new(1), &expanded_config).unwrap();
+    let key = (0..100_000)
+        .map(|index| format!("moving-key-{index}"))
+        .find(|key| {
+            old_cluster.owner_id(key.as_bytes()) != expanded.cluster().owner_id(key.as_bytes())
+        })
+        .expect("third node must acquire at least one logical slot");
+    let slot = old_cluster.slot_for_key(key.as_bytes());
+    let previous_owner = old_cluster.owner_id(key.as_bytes()).to_owned();
+
+    assert_eq!(expanded.cluster().slot_for_key(key.as_bytes()), slot);
+    assert_eq!(expanded.cluster().owner_id(key.as_bytes()), added_addr);
+    old_cluster
+        .put(key.as_bytes(), b"migrated-value", None)
+        .unwrap();
+    assert!(if previous_owner == first_addr {
+        first_store.exists(key.as_bytes())
+    } else {
+        second_store.exists(key.as_bytes())
+    });
+
+    assert_eq!(
+        expanded
+            .get_remote(key.as_bytes())
+            .unwrap()
+            .unwrap()
+            .value
+            .as_ref(),
+        b"migrated-value"
+    );
+    assert!(!added_store.exists(key.as_bytes()));
+    assert!(if previous_owner == first_addr {
+        first_store.exists(key.as_bytes())
+    } else {
+        second_store.exists(key.as_bytes())
+    });
+    let health = expanded.health_snapshot();
+    assert_eq!(health.slot_count, 16_384);
+    assert_eq!(health.previous_node_count, 2);
+    assert_eq!(health.handoff_reads, 1);
+    assert_eq!(health.handoff_hits, 1);
+    assert_eq!(health.handoff_failures, 0);
+
+    expanded
+        .set(key.as_bytes().to_vec(), b"current-value".to_vec(), None)
+        .unwrap();
+    expanded.flush_remote().unwrap();
+    assert_eq!(
+        expanded
+            .get_remote(key.as_bytes())
+            .unwrap()
+            .unwrap()
+            .value
+            .as_ref(),
+        b"current-value"
+    );
+    assert!(added_store.exists(key.as_bytes()));
+    assert!(!first_store.exists(key.as_bytes()));
+    assert!(!second_store.exists(key.as_bytes()));
 }
 
 #[tokio::test(flavor = "current_thread")]

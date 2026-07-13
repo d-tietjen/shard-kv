@@ -3,8 +3,10 @@
 The `kv-overflow` feature turns an embedded `EmbeddedStore` into a bounded
 in-memory primary backed by a horizontally scalable shardcache server tier.
 Unlike a conventional read-replica set, overflow nodes do not each receive the
-whole data set. Rendezvous hashing assigns every key to one node, so usable
-remote capacity grows with the number of nodes.
+whole data set. Keys hash into a fixed logical slot space and rendezvous
+ownership assigns each complete slot to one node, so usable remote capacity
+grows with the number of nodes without coupling slots to the primary's local
+shard count.
 
 Writes are applied to the local primary and admitted to a bounded asynchronous
 replication pool. Deterministic worker lanes preserve mutation order for each
@@ -36,6 +38,7 @@ let config = KvOverflowConfig {
         "10.0.0.11:6380".into(),
         "10.0.0.12:6380".into(),
     ],
+    slot_count: 16_384,
     max_memory_bytes: 1024 * 1024 * 1024,
     eviction_policy: EvictionPolicy::Lfu,
     ..KvOverflowConfig::default()
@@ -69,9 +72,25 @@ let remote = cache.cluster().get(b"model:7")?;
   bounds queued plus active jobs across all lanes. Size the queue for expected
   bursts and monitor `queue_depth`, `pending_keys`, `active_workers`,
   `enqueue_failures`, and `replication_failures`.
-- Membership is static for this release. Changing endpoint IDs changes key
-  ownership. Restart from the authoritative local snapshot and resynchronize
-  when adding, removing, or renaming nodes.
+- `slot_count` is a persistent routing invariant and must not change while
+  overflow data exists. It defaults to 16,384 and is independent of local
+  `shard_count` and the number of overflow servers.
+- Horizontal expansion moves complete logical slots. Rendezvous ownership
+  guarantees that adding a node moves slots only from an old owner to the new
+  node; slots that do not move retain their existing owner.
+- For online expansion, put the expanded membership in `endpoints` and the old
+  membership in `previous_endpoints`. Writes establish the current-owner copy
+  before deleting the old copy. A current-owner miss may read the previous
+  owner, but fallback reads never mutate either node; this prevents an
+  uncoordinated reader from overwriting a concurrent primary write. Current
+  owner errors never fall back, avoiding stale reads after an acknowledged
+  handoff.
+- Keep `previous_endpoints` configured until the authoritative local snapshot
+  has been loaded and `synchronize_resident`/`flush_remote` has completed for
+  the expanded membership. Then remove it. Node removal uses the same handoff
+  mechanism, but the removed server must remain reachable during migration.
+- Monitor `previous_node_count`, `handoff_reads`, `handoff_hits`, and
+  `handoff_failures` while a membership handoff is active.
 - Each key has one remote owner in 0.6.0. This provides aggregate capacity and
   read isolation, not remote-node high availability. Run overflow nodes with
   their own persistence or object overflow when remote loss must survive until

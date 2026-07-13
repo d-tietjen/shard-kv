@@ -18,6 +18,7 @@ use crate::{Result, ShardCacheError};
 const KV_OVERFLOW_MAGIC: &[u8; 8] = b"SCKVOV01";
 const KV_OVERFLOW_HEADER_LEN: usize = KV_OVERFLOW_MAGIC.len() + 8 + 8 + 4;
 const KV_OVERFLOW_KEY_GATES: usize = 64;
+pub const DEFAULT_KV_OVERFLOW_SLOT_COUNT: u32 = 16_384;
 
 /// Value returned by a key-value overflow node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,6 +254,9 @@ struct KvOverflowMetrics {
     enqueue_failures: AtomicU64,
     replicated_puts: AtomicU64,
     replication_failures: AtomicU64,
+    handoff_reads: AtomicU64,
+    handoff_hits: AtomicU64,
+    handoff_failures: AtomicU64,
     active_workers: AtomicUsize,
 }
 
@@ -260,6 +264,8 @@ struct KvOverflowMetrics {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KvOverflowHealthSnapshot {
     pub node_count: usize,
+    pub previous_node_count: usize,
+    pub slot_count: u32,
     pub resident_keys: usize,
     pub remote_keys: usize,
     pub resident_bytes: usize,
@@ -280,11 +286,16 @@ pub struct KvOverflowHealthSnapshot {
     pub enqueue_failures: u64,
     pub replicated_puts: u64,
     pub replication_failures: u64,
+    pub handoff_reads: u64,
+    pub handoff_hits: u64,
+    pub handoff_failures: u64,
 }
 
-/// Rendezvous-hashed collection of disjoint key-value overflow nodes.
+/// Fixed-slot collection of disjoint key-value overflow nodes.
 pub struct KvOverflowCluster {
     nodes: Box<[Arc<dyn KvOverflowNode>]>,
+    previous_nodes: Box<[Arc<dyn KvOverflowNode>]>,
+    slot_count: u32,
     metrics: Arc<KvOverflowMetrics>,
 }
 
@@ -293,6 +304,8 @@ impl std::fmt::Debug for KvOverflowCluster {
         formatter
             .debug_struct("KvOverflowCluster")
             .field("nodes", &self.node_ids())
+            .field("previous_nodes", &self.previous_node_ids())
+            .field("slot_count", &self.slot_count)
             .finish()
     }
 }
@@ -304,20 +317,39 @@ impl KvOverflowCluster {
                 "kv_overflow.endpoints must contain at least one server".into(),
             ));
         }
-        let nodes = config
-            .endpoints
-            .iter()
-            .cloned()
-            .map(|endpoint| {
-                Arc::new(ScnpKvOverflowNode::from_config(endpoint, config))
-                    as Arc<dyn KvOverflowNode>
-            })
-            .collect();
-        Self::new(nodes)
+        let make_nodes = |endpoints: &[String]| {
+            endpoints
+                .iter()
+                .cloned()
+                .map(|endpoint| {
+                    Arc::new(ScnpKvOverflowNode::from_config(endpoint, config))
+                        as Arc<dyn KvOverflowNode>
+                })
+                .collect()
+        };
+        Self::with_previous(
+            make_nodes(&config.endpoints),
+            make_nodes(&config.previous_endpoints),
+            config.slot_count,
+        )
     }
 
-    pub fn new(mut nodes: Vec<Arc<dyn KvOverflowNode>>) -> Result<Self> {
+    pub fn new(nodes: Vec<Arc<dyn KvOverflowNode>>) -> Result<Self> {
+        Self::with_previous(nodes, Vec::new(), DEFAULT_KV_OVERFLOW_SLOT_COUNT)
+    }
+
+    /// Creates a fixed-slot membership with an optional previous ring.
+    ///
+    /// The previous ring is consulted only when the current owner returns a
+    /// clean miss. Migration is performed only by ordered writes or an
+    /// authoritative resynchronization, never by an uncoordinated read.
+    pub fn with_previous(
+        mut nodes: Vec<Arc<dyn KvOverflowNode>>,
+        mut previous_nodes: Vec<Arc<dyn KvOverflowNode>>,
+        slot_count: u32,
+    ) -> Result<Self> {
         nodes.sort_by(|left, right| left.id().cmp(right.id()));
+        previous_nodes.sort_by(|left, right| left.id().cmp(right.id()));
         if nodes.is_empty() {
             return Err(ShardCacheError::Config(
                 "kv overflow cluster requires at least one node".into(),
@@ -328,8 +360,23 @@ impl KvOverflowCluster {
                 "kv overflow node IDs must be unique".into(),
             ));
         }
+        if previous_nodes
+            .windows(2)
+            .any(|pair| pair[0].id() == pair[1].id())
+        {
+            return Err(ShardCacheError::Config(
+                "previous kv overflow node IDs must be unique".into(),
+            ));
+        }
+        if slot_count == 0 || !slot_count.is_power_of_two() {
+            return Err(ShardCacheError::Config(
+                "kv overflow slot count must be a non-zero power of two".into(),
+            ));
+        }
         Ok(Self {
             nodes: nodes.into_boxed_slice(),
+            previous_nodes: previous_nodes.into_boxed_slice(),
+            slot_count,
             metrics: Arc::new(KvOverflowMetrics::default()),
         })
     }
@@ -338,26 +385,61 @@ impl KvOverflowCluster {
         self.nodes.iter().map(|node| node.id()).collect()
     }
 
+    pub fn previous_node_ids(&self) -> Vec<&str> {
+        self.previous_nodes.iter().map(|node| node.id()).collect()
+    }
+
+    /// Returns the stable logical overflow slot for `key`.
+    pub fn slot_for_key(&self, key: &[u8]) -> u32 {
+        (xxh3_64(key) as u32) & (self.slot_count - 1)
+    }
+
+    pub fn slot_count(&self) -> u32 {
+        self.slot_count
+    }
+
     pub fn owner_index(&self, key: &[u8]) -> usize {
-        self.nodes
-            .iter()
-            .enumerate()
-            .max_by(|(left_index, left), (right_index, right)| {
-                rendezvous_score(key, left.id())
-                    .cmp(&rendezvous_score(key, right.id()))
-                    .then_with(|| right_index.cmp(left_index))
-            })
-            .map(|(index, _)| index)
-            .expect("cluster is non-empty")
+        owner_index_for_slot(&self.nodes, self.slot_for_key(key))
     }
 
     pub fn owner_id(&self, key: &[u8]) -> &str {
         self.nodes[self.owner_index(key)].id()
     }
 
+    /// Returns the current owner for a logical slot.
+    pub fn slot_owner_id(&self, slot: u32) -> Result<&str> {
+        if slot >= self.slot_count {
+            return Err(ShardCacheError::Config(format!(
+                "kv overflow slot {slot} is outside 0..{}",
+                self.slot_count
+            )));
+        }
+        Ok(self.nodes[owner_index_for_slot(&self.nodes, slot)].id())
+    }
+
+    fn previous_owner(&self, key: &[u8]) -> Option<&Arc<dyn KvOverflowNode>> {
+        if self.previous_nodes.is_empty() {
+            return None;
+        }
+        let owner = &self.previous_nodes
+            [owner_index_for_slot(&self.previous_nodes, self.slot_for_key(key))];
+        (owner.id() != self.owner_id(key)).then_some(owner)
+    }
+
     pub fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
         self.metrics.puts.fetch_add(1, Ordering::Relaxed);
-        let result = self.nodes[self.owner_index(key)].put(key, value, ttl_ms);
+        let result = self.nodes[self.owner_index(key)]
+            .put(key, value, ttl_ms)
+            .and_then(|()| {
+                let Some(previous) = self.previous_owner(key) else {
+                    return Ok(());
+                };
+                previous.delete(key).inspect_err(|_| {
+                    self.metrics
+                        .handoff_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                })
+            });
         if result.is_err() {
             self.metrics.put_failures.fetch_add(1, Ordering::Relaxed);
         }
@@ -366,7 +448,12 @@ impl KvOverflowCluster {
 
     pub fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
         self.metrics.gets.fetch_add(1, Ordering::Relaxed);
-        let result = self.nodes[self.owner_index(key)].get(key);
+        let current = &self.nodes[self.owner_index(key)];
+        let result = match current.get(key) {
+            Ok(Some(value)) => Ok(Some(value)),
+            Ok(None) => self.get_from_previous(key),
+            Err(error) => Err(error),
+        };
         match &result {
             Ok(Some(_)) => {
                 self.metrics.get_hits.fetch_add(1, Ordering::Relaxed);
@@ -381,16 +468,53 @@ impl KvOverflowCluster {
 
     pub fn delete(&self, key: &[u8]) -> Result<()> {
         self.metrics.deletes.fetch_add(1, Ordering::Relaxed);
-        let result = self.nodes[self.owner_index(key)].delete(key);
+        let current_result = self.nodes[self.owner_index(key)].delete(key);
+        let previous_result = self.previous_owner(key).map_or(Ok(()), |previous| {
+            previous.delete(key).inspect_err(|_| {
+                self.metrics
+                    .handoff_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            })
+        });
+        let result = current_result.and(previous_result);
         if result.is_err() {
             self.metrics.delete_failures.fetch_add(1, Ordering::Relaxed);
         }
         result
     }
+
+    fn get_from_previous(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
+        let Some(previous) = self.previous_owner(key) else {
+            return Ok(None);
+        };
+        self.metrics.handoff_reads.fetch_add(1, Ordering::Relaxed);
+        let result = previous.get(key).inspect_err(|_| {
+            self.metrics
+                .handoff_failures
+                .fetch_add(1, Ordering::Relaxed);
+        });
+        if matches!(result, Ok(Some(_))) {
+            self.metrics.handoff_hits.fetch_add(1, Ordering::Relaxed);
+        }
+        result
+    }
 }
 
-fn rendezvous_score(key: &[u8], node_id: &str) -> u64 {
-    xxh3_64_with_seed(key, xxh3_64(node_id.as_bytes()))
+fn owner_index_for_slot(nodes: &[Arc<dyn KvOverflowNode>], slot: u32) -> usize {
+    nodes
+        .iter()
+        .enumerate()
+        .max_by(|(left_index, left), (right_index, right)| {
+            rendezvous_score(slot, left.id())
+                .cmp(&rendezvous_score(slot, right.id()))
+                .then_with(|| right_index.cmp(left_index))
+        })
+        .map(|(index, _)| index)
+        .expect("membership is non-empty")
+}
+
+fn rendezvous_score(slot: u32, node_id: &str) -> u64 {
+    xxh3_64_with_seed(&slot.to_le_bytes(), xxh3_64(node_id.as_bytes()))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -724,6 +848,8 @@ impl KvOverflowStore {
         let metrics = &self.cluster.metrics;
         KvOverflowHealthSnapshot {
             node_count: self.cluster.nodes.len(),
+            previous_node_count: self.cluster.previous_nodes.len(),
+            slot_count: self.cluster.slot_count,
             resident_keys: self.inner.len(),
             remote_keys: self.remote_keys.read().len(),
             resident_bytes: self.inner.stored_bytes(),
@@ -744,6 +870,9 @@ impl KvOverflowStore {
             enqueue_failures: metrics.enqueue_failures.load(Ordering::Relaxed),
             replicated_puts: metrics.replicated_puts.load(Ordering::Relaxed),
             replication_failures: metrics.replication_failures.load(Ordering::Relaxed),
+            handoff_reads: metrics.handoff_reads.load(Ordering::Relaxed),
+            handoff_hits: metrics.handoff_hits.load(Ordering::Relaxed),
+            handoff_failures: metrics.handoff_failures.load(Ordering::Relaxed),
         }
     }
 
@@ -1094,6 +1223,7 @@ mod tests {
         id: String,
         values: RwLock<HashMap<Bytes, KvOverflowValue>>,
         fail_puts: bool,
+        fail_gets: bool,
         fail_deletes: bool,
     }
 
@@ -1103,6 +1233,7 @@ mod tests {
                 id: id.into(),
                 values: RwLock::new(HashMap::new()),
                 fail_puts: false,
+                fail_gets: false,
                 fail_deletes: false,
             }
         }
@@ -1128,6 +1259,9 @@ mod tests {
         }
 
         fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
+            if self.fail_gets {
+                return Err(ShardCacheError::Protocol("injected get failure".into()));
+            }
             Ok(self.values.read().get(key).cloned())
         }
 
@@ -1220,6 +1354,109 @@ mod tests {
                 cluster_b.owner_id(key.as_bytes())
             );
         }
+    }
+
+    #[test]
+    fn horizontal_expansion_moves_whole_slots_only_to_the_added_node() {
+        let first = Arc::new(MemoryNode::new("node-a"));
+        let second = Arc::new(MemoryNode::new("node-b"));
+        let added = Arc::new(MemoryNode::new("node-c"));
+        let original = KvOverflowCluster::new(vec![first.clone(), second.clone()]).unwrap();
+        let expanded = KvOverflowCluster::with_previous(
+            vec![first.clone(), second.clone(), added],
+            vec![first, second],
+            DEFAULT_KV_OVERFLOW_SLOT_COUNT,
+        )
+        .unwrap();
+
+        let mut moved_slots = 0;
+        for slot in 0..DEFAULT_KV_OVERFLOW_SLOT_COUNT {
+            let old_owner = original.slot_owner_id(slot).unwrap();
+            let new_owner = expanded.slot_owner_id(slot).unwrap();
+            if old_owner != new_owner {
+                moved_slots += 1;
+                assert_eq!(new_owner, "node-c");
+            }
+        }
+        assert!(moved_slots > 0);
+
+        for index in 0..1_000 {
+            let key = format!("key-{index}");
+            assert_eq!(
+                original.slot_for_key(key.as_bytes()),
+                expanded.slot_for_key(key.as_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn previous_membership_fallback_is_read_only_until_ordered_write() {
+        let first = Arc::new(MemoryNode::new("node-a"));
+        let second = Arc::new(MemoryNode::new("node-b"));
+        let added = Arc::new(MemoryNode::new("node-c"));
+        let original = KvOverflowCluster::new(vec![first.clone(), second.clone()]).unwrap();
+        let expanded = KvOverflowCluster::with_previous(
+            vec![first.clone(), second.clone(), added.clone()],
+            vec![first.clone(), second.clone()],
+            DEFAULT_KV_OVERFLOW_SLOT_COUNT,
+        )
+        .unwrap();
+        let key = (0..100_000)
+            .map(|index| format!("moving-key-{index}"))
+            .find(|key| original.owner_id(key.as_bytes()) != expanded.owner_id(key.as_bytes()))
+            .expect("expansion must move at least one slot");
+        let old_owner = original.owner_id(key.as_bytes()).to_owned();
+
+        original.put(key.as_bytes(), b"value", None).unwrap();
+        assert_eq!(expanded.owner_id(key.as_bytes()), "node-c");
+        assert_eq!(
+            expanded
+                .get(key.as_bytes())
+                .unwrap()
+                .unwrap()
+                .value
+                .as_ref(),
+            b"value"
+        );
+        let previous = if old_owner == "node-a" { first } else { second };
+        assert!(!added.values.read().contains_key(key.as_bytes()));
+        assert!(previous.values.read().contains_key(key.as_bytes()));
+        assert_eq!(expanded.metrics.handoff_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(expanded.metrics.handoff_hits.load(Ordering::Relaxed), 1);
+
+        expanded.put(key.as_bytes(), b"new-value", None).unwrap();
+        assert_eq!(
+            added.values.read()[key.as_bytes()].value.as_ref(),
+            b"new-value"
+        );
+        assert!(!previous.values.read().contains_key(key.as_bytes()));
+    }
+
+    #[test]
+    fn previous_owner_failure_is_reported_without_falling_through() {
+        let mut first_node = MemoryNode::new("node-a");
+        first_node.fail_gets = true;
+        let first = Arc::new(first_node);
+        let mut second_node = MemoryNode::new("node-b");
+        second_node.fail_gets = true;
+        let second = Arc::new(second_node);
+        let added = Arc::new(MemoryNode::new("node-c"));
+        let original = KvOverflowCluster::new(vec![first.clone(), second.clone()]).unwrap();
+        let expanded = KvOverflowCluster::with_previous(
+            vec![first.clone(), second.clone(), added],
+            vec![first, second],
+            DEFAULT_KV_OVERFLOW_SLOT_COUNT,
+        )
+        .unwrap();
+        let key = (0..100_000)
+            .map(|index| format!("moving-key-{index}"))
+            .find(|key| original.owner_id(key.as_bytes()) != expanded.owner_id(key.as_bytes()))
+            .expect("expansion must move at least one slot");
+
+        assert!(expanded.get(key.as_bytes()).is_err());
+        assert_eq!(expanded.metrics.handoff_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(expanded.metrics.handoff_failures.load(Ordering::Relaxed), 1);
+        assert_eq!(expanded.metrics.get_failures.load(Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -264,8 +264,18 @@ pub enum ObjectOverflowFailurePolicy {
 pub struct KvOverflowConfig {
     /// Enable the embedded key-value overflow wrapper.
     pub enabled: bool,
-    /// Stable SCNP addresses for the overflow nodes.
+    /// Stable SCNP addresses for the current overflow membership.
     pub endpoints: Vec<String>,
+    /// Previous membership retained during an online slot handoff.
+    ///
+    /// Keep this empty for steady state. During horizontal expansion, set it
+    /// to the membership that previously owned the logical slots until the
+    /// authoritative primary has resynchronized the new membership.
+    pub previous_endpoints: Vec<String>,
+    /// Fixed logical slot count used for overflow ownership.
+    ///
+    /// This must remain unchanged for the lifetime of the overflow data.
+    pub slot_count: u32,
     /// Total resident-byte target for the in-memory primary.
     pub max_memory_bytes: u64,
     /// Policy used to choose acknowledged resident values for offload.
@@ -551,6 +561,8 @@ impl Default for KvOverflowConfig {
         Self {
             enabled: false,
             endpoints: Vec::new(),
+            previous_endpoints: Vec::new(),
+            slot_count: 16_384,
             max_memory_bytes: 0,
             eviction_policy: EvictionPolicy::Lru,
             connections_per_endpoint: 2,
@@ -799,6 +811,15 @@ mod tests {
         assert!(config.validate().is_ok());
 
         config.kv_overflow.endpoints[1] = config.kv_overflow.endpoints[0].clone();
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.endpoints[1] = "127.0.0.1:6382".into();
+        config.kv_overflow.previous_endpoints =
+            vec!["127.0.0.1:6381".into(), "127.0.0.1:6381".into()];
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.previous_endpoints.pop();
+        config.kv_overflow.slot_count = 10_000;
         assert!(config.validate().is_err());
     }
 }

@@ -5,7 +5,8 @@
 ### Added
 
 - Added the `kv-overflow` feature and `KvOverflowStore`, a bounded embedded
-  primary backed by disjoint rendezvous-hashed shardcache server partitions.
+  primary backed by disjoint, fixed-slot shardcache server partitions with
+  previous-membership handoff for horizontal expansion.
 - Added acknowledged-only LRU/LFU eviction, remote fault-in, direct cluster
   reads, TTL-preserving value envelopes, CRC32 integrity checks, SCNP
   connection pooling, operation deadlines, reconnect retries, and health

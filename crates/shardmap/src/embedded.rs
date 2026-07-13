@@ -33,17 +33,17 @@ pub use crate::redis_embedded::{
     try_execute_redis_command_slices,
 };
 pub use crate::storage::SharedEmbeddedStore as SharedCacheStore;
+#[cfg(feature = "kv-overflow")]
+pub use crate::storage::{
+    DEFAULT_KV_OVERFLOW_SLOT_COUNT, KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode,
+    KvOverflowOptions, KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
+};
 pub use crate::storage::{
     EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedSessionRoute, PackedSessionWrite,
     PreparedPointKey, SemanticCacheError, SemanticMatch, SharedEmbeddedConfig,
     SharedEmbeddedLockPolicy, SharedEmbeddedStore, shift_for, stripe_index,
 };
 pub use crate::storage::{EmbeddedStore as ShardedEmbeddedStore, EmbeddedStore as ShardedEngine};
-#[cfg(feature = "kv-overflow")]
-pub use crate::storage::{
-    KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode, KvOverflowOptions,
-    KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
-};
 
 #[cfg(feature = "sharded")]
 pub use crate::storage::{

@@ -479,7 +479,7 @@ subscribers that consume shardcache's FCRP frames; Redis object-family
 replication is outside this embedded replication surface.
 
 For capacity scaling without full replica copies, enable `kv-overflow` and use
-`KvOverflowStore`. It mirrors each key to one rendezvous-hashed shardcache
+`KvOverflowStore`. It mirrors each fixed logical key slot to one shardcache
 server through bounded ordered workers, evicts only acknowledged cold values
 from primary memory, and faults remote values back on demand. Overflow servers
 can apply their own LRU/LFU memory limits and cascade cold envelopes into
