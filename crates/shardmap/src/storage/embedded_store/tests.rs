@@ -817,6 +817,25 @@ fn memory_cap_lru_evicts_colder_generic_entry_before_session_slot() {
     assert!(store.stored_bytes() <= 8);
 }
 
+#[test]
+fn explicit_single_point_eviction_uses_shard_lru_order() {
+    let store = EmbeddedStore::new(1);
+    store.configure_memory_policy(None, EvictionPolicy::Lru);
+    store.set(b"a".to_vec(), vec![1], None);
+    store.set(b"b".to_vec(), vec![2], None);
+    store.set(b"c".to_vec(), vec![3], None);
+    store.set(b"a".to_vec(), vec![1], None);
+
+    assert_eq!(
+        store.evict_one_point_in_shard(0, EvictionPolicy::Lru),
+        Some(b"b".to_vec())
+    );
+    assert!(store.exists(b"a"));
+    assert!(!store.exists(b"b"));
+    assert!(store.exists(b"c"));
+    assert_eq!(store.evict_one_point_in_shard(1, EvictionPolicy::Lru), None);
+}
+
 #[cfg(feature = "redis")]
 #[test]
 fn vector_shard_can_use_total_memory_budget() {

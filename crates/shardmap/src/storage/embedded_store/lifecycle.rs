@@ -13,6 +13,24 @@ impl EmbeddedStore {
         deleted
     }
 
+    /// Evicts one point entry from `shard_id` according to `policy` and
+    /// returns its key.
+    ///
+    /// This is intended for external stores whose payload memory is owned by
+    /// another allocator. The caller can use Shardmap for recency and victim
+    /// selection, then release the corresponding external allocation without
+    /// relying on the cache's byte-budget hysteresis. Session and Redis object
+    /// entries are intentionally excluded.
+    pub fn evict_one_point_in_shard(
+        &self,
+        shard_id: usize,
+        policy: EvictionPolicy,
+    ) -> Option<Bytes> {
+        let shard = self.shards.get(shard_id)?;
+        let mut shard = shard.write();
+        shard.map.evict_one_with_policy(policy, now_millis())
+    }
+
     #[cfg(feature = "redis")]
     pub(super) fn delete_pinned_vector_value_if_distinct(
         &self,

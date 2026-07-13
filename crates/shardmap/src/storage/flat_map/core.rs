@@ -399,10 +399,34 @@ impl FlatMap {
     }
 
     pub(crate) fn evict_with_policy(&mut self, policy: EvictionPolicy, now_ms: u64) -> bool {
-        let Some((_rank, hash, key)) = self.eviction_candidate(policy) else {
-            return false;
-        };
+        self.evict_one_with_policy(policy, now_ms).is_some()
+    }
+
+    pub(crate) fn evict_one_with_policy(
+        &mut self,
+        policy: EvictionPolicy,
+        now_ms: u64,
+    ) -> Option<Bytes> {
+        if policy == EvictionPolicy::Lru {
+            while let Some(touch) = self.lru_touch_log.pop_front() {
+                let Some(entry) = self
+                    .entries
+                    .find_entry(touch.hash, |entry| entry.access.last_touch == touch.tick)
+                    .ok()
+                else {
+                    continue;
+                };
+                let key = entry.get().key.as_ref().to_vec();
+                let hash = touch.hash;
+                let _ = entry;
+                if self.evict_or_offload_hashed(hash, &key, now_ms) {
+                    return Some(key);
+                }
+            }
+        }
+        let (_rank, hash, key) = self.eviction_candidate(policy)?;
         self.evict_or_offload_hashed(hash, &key, now_ms)
+            .then_some(key)
     }
 
     pub(crate) fn evict_to_memory_target(
