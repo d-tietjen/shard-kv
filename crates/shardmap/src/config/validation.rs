@@ -1,11 +1,11 @@
-#[cfg(feature = "kv-overflow")]
-use super::KvOverflowBackend;
 #[cfg(feature = "object-overflow")]
 use super::ObjectOverflowBackend;
 use super::{
     EvictionPolicy, KvOverflowConfig, ObjectOverflowConfig, PersistenceConfig, ReplicationConfig,
     ReplicationRole, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
 };
+#[cfg(feature = "kv-overflow")]
+use super::{KvOverflowBackend, MAX_KV_OVERFLOW_SLOT_COUNT};
 use crate::{Result, ShardCacheError};
 
 #[cfg(feature = "prefix-eviction")]
@@ -217,6 +217,10 @@ impl<'a> KvOverflowValidation<'a> {
             ConfigCheck::require(
                 self.config.slot_count > 0 && self.config.slot_count.is_power_of_two(),
                 "kv_overflow.slot_count must be a non-zero power of two",
+            )?;
+            ConfigCheck::require(
+                self.config.slot_count <= MAX_KV_OVERFLOW_SLOT_COUNT,
+                "kv_overflow.slot_count exceeds the supported maximum",
             )?;
             match self.config.backend {
                 KvOverflowBackend::Scnp => {

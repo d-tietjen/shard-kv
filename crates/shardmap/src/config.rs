@@ -253,6 +253,9 @@ pub enum ObjectOverflowFailurePolicy {
     EvictResident,
 }
 
+/// Largest fixed slot table accepted by key-value overflow.
+pub const MAX_KV_OVERFLOW_SLOT_COUNT: u32 = 1_048_576;
+
 /// Partitioned key-value overflow settings.
 ///
 /// Each key is mirrored to one deterministic shardcache or Redis-compatible
@@ -276,7 +279,8 @@ pub struct KvOverflowConfig {
     pub previous_endpoints: Vec<String>,
     /// Fixed logical slot count used for overflow ownership.
     ///
-    /// This must remain unchanged for the lifetime of the overflow data.
+    /// This must remain unchanged for the lifetime of the overflow data and
+    /// cannot exceed [`MAX_KV_OVERFLOW_SLOT_COUNT`].
     pub slot_count: u32,
     /// Prefix prepended to binary keys stored in a Redis-compatible backend.
     pub redis_key_prefix: String,
@@ -768,7 +772,7 @@ mod tests {
     #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
     use super::KvOverflowBackend;
     #[cfg(feature = "kv-overflow")]
-    use super::{EvictionPolicy, KvOverflowConfig};
+    use super::{EvictionPolicy, KvOverflowConfig, MAX_KV_OVERFLOW_SLOT_COUNT};
     use super::{ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser};
 
     #[test]
@@ -845,6 +849,9 @@ mod tests {
 
         config.kv_overflow.previous_endpoints.pop();
         config.kv_overflow.slot_count = 10_000;
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.slot_count = MAX_KV_OVERFLOW_SLOT_COUNT * 2;
         assert!(config.validate().is_err());
     }
 

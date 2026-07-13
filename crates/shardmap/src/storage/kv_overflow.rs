@@ -6,18 +6,21 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use bytes::Bytes as SharedBytes;
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TryRecvError, bounded, unbounded};
+use crossbeam_channel::{RecvTimeoutError, Sender, TryRecvError, bounded, unbounded};
 use parking_lot::{Mutex, RwLock};
 use shardcache_client_rs::{ShardCacheClient, ShardCacheClientError};
 use xxhash_rust::xxh3::{xxh3_64, xxh3_64_with_seed};
 
-use crate::config::{EvictionPolicy, KvOverflowBackend, KvOverflowConfig};
+use crate::config::{
+    EvictionPolicy, KvOverflowBackend, KvOverflowConfig, MAX_KV_OVERFLOW_SLOT_COUNT,
+};
 use crate::storage::{Bytes, EmbeddedStore, StoredEntry, now_millis};
 use crate::{Result, ShardCacheError};
 
 const KV_OVERFLOW_MAGIC: &[u8; 8] = b"SCKVOV01";
 const KV_OVERFLOW_HEADER_LEN: usize = KV_OVERFLOW_MAGIC.len() + 8 + 8 + 4;
 const KV_OVERFLOW_KEY_GATES: usize = 64;
+const KV_OVERFLOW_WORKER_BATCH_SIZE: usize = 64;
 pub const DEFAULT_KV_OVERFLOW_SLOT_COUNT: u32 = 16_384;
 
 /// Value returned by a key-value overflow node.
@@ -25,6 +28,14 @@ pub const DEFAULT_KV_OVERFLOW_SLOT_COUNT: u32 = 16_384;
 pub struct KvOverflowValue {
     pub value: SharedBytes,
     pub ttl_ms: Option<u64>,
+}
+
+/// One absolute-expiry write in an overflow-node batch.
+#[derive(Debug, Clone, Copy)]
+pub struct KvOverflowPutRequest<'a> {
+    pub key: &'a [u8],
+    pub value: &'a [u8],
+    pub expire_at_ms: Option<u64>,
 }
 
 /// One independently addressable member of a partitioned overflow cluster.
@@ -43,6 +54,14 @@ pub trait KvOverflowNode: Send + Sync + 'static {
         } else {
             self.put(key, value, ttl_ms)
         }
+    }
+    /// Stores an ordered group of writes. Remote adapters can override this
+    /// to pipeline a worker batch without changing per-key ordering.
+    fn put_batch_until(&self, requests: &[KvOverflowPutRequest<'_>]) -> Result<()> {
+        for request in requests {
+            self.put_until(request.key, request.value, request.expire_at_ms)?;
+        }
+        Ok(())
     }
     fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>>;
     fn delete(&self, key: &[u8]) -> Result<()>;
@@ -389,6 +408,42 @@ impl KvOverflowNode for RedisKvOverflowNode {
         })
     }
 
+    fn put_batch_until(&self, requests: &[KvOverflowPutRequest<'_>]) -> Result<()> {
+        struct EncodedPut {
+            key: Vec<u8>,
+            value: Vec<u8>,
+            expire_at_ms: Option<u64>,
+        }
+
+        let encoded = requests
+            .iter()
+            .map(|request| EncodedPut {
+                key: self.storage_key(request.key),
+                value: encode_overflow_value_until(request.value, request.expire_at_ms),
+                expire_at_ms: request.expire_at_ms,
+            })
+            .collect::<Vec<_>>();
+        self.execute(|connection| {
+            let now_ms = now_millis();
+            let mut pipeline = redis_client::pipe();
+            for request in &encoded {
+                let ttl_ms = request
+                    .expire_at_ms
+                    .map(|deadline| deadline.saturating_sub(now_ms));
+                if ttl_ms == Some(0) {
+                    pipeline.cmd("DEL").arg(&request.key).ignore();
+                    continue;
+                }
+                let command = pipeline.cmd("SET").arg(&request.key).arg(&request.value);
+                if let Some(ttl_ms) = ttl_ms {
+                    command.arg("PX").arg(ttl_ms);
+                }
+                command.ignore();
+            }
+            pipeline.query(connection)
+        })
+    }
+
     fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
         let storage_key = self.storage_key(key);
         let encoded: Option<Vec<u8>> = self
@@ -553,6 +608,8 @@ pub struct KvOverflowCluster {
     nodes: Box<[Arc<dyn KvOverflowNode>]>,
     previous_nodes: Box<[Arc<dyn KvOverflowNode>]>,
     slot_count: u32,
+    slot_owners: Box<[usize]>,
+    previous_slot_owners: Box<[usize]>,
     metrics: Arc<KvOverflowMetrics>,
 }
 
@@ -646,10 +703,29 @@ impl KvOverflowCluster {
                 "kv overflow slot count must be a non-zero power of two".into(),
             ));
         }
+        if slot_count > MAX_KV_OVERFLOW_SLOT_COUNT {
+            return Err(ShardCacheError::Config(format!(
+                "kv overflow slot count cannot exceed {MAX_KV_OVERFLOW_SLOT_COUNT}"
+            )));
+        }
+        let slot_owners = (0..slot_count)
+            .map(|slot| owner_index_for_slot(&nodes, slot))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        let previous_slot_owners = if previous_nodes.is_empty() {
+            Box::default()
+        } else {
+            (0..slot_count)
+                .map(|slot| owner_index_for_slot(&previous_nodes, slot))
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        };
         Ok(Self {
             nodes: nodes.into_boxed_slice(),
             previous_nodes: previous_nodes.into_boxed_slice(),
             slot_count,
+            slot_owners,
+            previous_slot_owners,
             metrics: Arc::new(KvOverflowMetrics::default()),
         })
     }
@@ -672,7 +748,7 @@ impl KvOverflowCluster {
     }
 
     pub fn owner_index(&self, key: &[u8]) -> usize {
-        owner_index_for_slot(&self.nodes, self.slot_for_key(key))
+        self.slot_owners[self.slot_for_key(key) as usize]
     }
 
     pub fn owner_id(&self, key: &[u8]) -> &str {
@@ -687,15 +763,15 @@ impl KvOverflowCluster {
                 self.slot_count
             )));
         }
-        Ok(self.nodes[owner_index_for_slot(&self.nodes, slot)].id())
+        Ok(self.nodes[self.slot_owners[slot as usize]].id())
     }
 
     fn previous_owner(&self, key: &[u8]) -> Option<&Arc<dyn KvOverflowNode>> {
         if self.previous_nodes.is_empty() {
             return None;
         }
-        let owner = &self.previous_nodes
-            [owner_index_for_slot(&self.previous_nodes, self.slot_for_key(key))];
+        let owner =
+            &self.previous_nodes[self.previous_slot_owners[self.slot_for_key(key) as usize]];
         (owner.id() != self.owner_id(key)).then_some(owner)
     }
 
@@ -722,6 +798,52 @@ impl KvOverflowCluster {
             self.metrics.put_failures.fetch_add(1, Ordering::Relaxed);
         }
         result
+    }
+
+    fn put_batch_until(&self, requests: &[KvOverflowPutRequest<'_>]) -> Vec<bool> {
+        self.metrics
+            .puts
+            .fetch_add(requests.len() as u64, Ordering::Relaxed);
+        let mut by_owner = (0..self.nodes.len())
+            .map(|_| Vec::new())
+            .collect::<Vec<Vec<usize>>>();
+        for (index, request) in requests.iter().enumerate() {
+            by_owner[self.owner_index(request.key)].push(index);
+        }
+
+        let mut succeeded = vec![false; requests.len()];
+        for (owner_index, indexes) in by_owner.into_iter().enumerate() {
+            if indexes.is_empty() {
+                continue;
+            }
+            let owner_requests = indexes
+                .iter()
+                .map(|index| requests[*index])
+                .collect::<Vec<_>>();
+            if self.nodes[owner_index]
+                .put_batch_until(&owner_requests)
+                .is_err()
+            {
+                continue;
+            }
+            for index in indexes {
+                let request = requests[index];
+                succeeded[index] = self.previous_owner(request.key).is_none_or(|previous| {
+                    previous.delete(request.key).is_ok() || {
+                        self.metrics
+                            .handoff_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                        false
+                    }
+                });
+            }
+        }
+
+        let failures = succeeded.iter().filter(|result| !**result).count();
+        self.metrics
+            .put_failures
+            .fetch_add(failures as u64, Ordering::Relaxed);
+        succeeded
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
@@ -805,6 +927,9 @@ struct PendingKeyMeta {
     generation: u64,
 }
 
+type RemoteKeyShards = Arc<[RwLock<HashMap<Bytes, RemoteKeyMeta>>]>;
+type PendingKeyShards = Arc<[RwLock<HashMap<Bytes, PendingKeyMeta>>]>;
+
 enum KvOverflowJob {
     Put {
         key: Bytes,
@@ -823,9 +948,9 @@ enum KvOverflowJob {
 
 struct KvOverflowWorkerPool {
     senders: Box<[Sender<KvOverflowJob>]>,
-    available: Receiver<()>,
-    permits: Sender<()>,
+    in_flight: Arc<AtomicUsize>,
     capacity: usize,
+    cluster: Arc<KvOverflowCluster>,
     metrics: Arc<KvOverflowMetrics>,
     joins: Mutex<Vec<JoinHandle<()>>>,
 }
@@ -859,8 +984,8 @@ pub struct KvOverflowStore {
     inner: Arc<EmbeddedStore>,
     cluster: Arc<KvOverflowCluster>,
     options: KvOverflowOptions,
-    remote_keys: Arc<RwLock<HashMap<Bytes, RemoteKeyMeta>>>,
-    pending_keys: Arc<RwLock<HashMap<Bytes, PendingKeyMeta>>>,
+    remote_keys: RemoteKeyShards,
+    pending_keys: PendingKeyShards,
     key_gates: Arc<[Mutex<()>]>,
     maintenance: Arc<Mutex<()>>,
     admission: RwLock<()>,
@@ -877,8 +1002,8 @@ impl std::fmt::Debug for KvOverflowStore {
             .field("inner", &self.inner)
             .field("cluster", &self.cluster)
             .field("options", &self.options)
-            .field("remote_keys", &self.remote_keys.read().len())
-            .field("pending_keys", &self.pending_keys.read().len())
+            .field("remote_keys", &metadata_len(&self.remote_keys))
+            .field("pending_keys", &metadata_len(&self.pending_keys))
             .field("workers", &self.workers)
             .finish()
     }
@@ -912,8 +1037,14 @@ impl KvOverflowStore {
         }
         inner.configure_memory_policy(None, options.eviction_policy);
         let inner = Arc::new(inner);
-        let remote_keys = Arc::new(RwLock::new(HashMap::new()));
-        let pending_keys = Arc::new(RwLock::new(HashMap::new()));
+        let remote_keys: RemoteKeyShards = (0..KV_OVERFLOW_KEY_GATES)
+            .map(|_| RwLock::new(HashMap::new()))
+            .collect::<Vec<_>>()
+            .into();
+        let pending_keys: PendingKeyShards = (0..KV_OVERFLOW_KEY_GATES)
+            .map(|_| RwLock::new(HashMap::new()))
+            .collect::<Vec<_>>()
+            .into();
         let key_gates: Arc<[Mutex<()>]> = (0..KV_OVERFLOW_KEY_GATES)
             .map(|_| Mutex::new(()))
             .collect::<Vec<_>>()
@@ -972,14 +1103,15 @@ impl KvOverflowStore {
         self.workers.reserve()?;
         let value = SharedBytes::from(value.into());
         let _key_gate = self.key_gate(&key);
+        let metadata_index = key_gate_index(&key, self.remote_keys.len());
         let generation = self.sequence.fetch_add(1, Ordering::Relaxed);
         let expire_at_ms = ttl_ms.map(|ttl| now_millis().saturating_add(ttl));
         {
-            let mut remote_keys = self.remote_keys.write();
+            let mut remote_keys = self.remote_keys[metadata_index].write();
             remote_keys.remove(key.as_slice());
             self.inner.set_value_bytes(&key, value.clone(), ttl_ms);
         }
-        self.pending_keys
+        self.pending_keys[metadata_index]
             .write()
             .insert(key.clone(), PendingKeyMeta { generation });
         if self.workers.enqueue_reserved(KvOverflowJob::Put {
@@ -994,7 +1126,9 @@ impl KvOverflowStore {
                 .fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
-            self.pending_keys.write().remove(key.as_slice());
+            self.pending_keys[metadata_index]
+                .write()
+                .remove(key.as_slice());
             Err(ShardCacheError::ChannelClosed("kv overflow workers"))
         }
     }
@@ -1003,7 +1137,9 @@ impl KvOverflowStore {
         if let Some(value) = self.inner.get(key) {
             return Ok(Some(value));
         }
-        if !self.options.fetch_on_miss || !self.remote_keys.read().contains_key(key) {
+        let metadata_index = key_gate_index(key, self.remote_keys.len());
+        if !self.options.fetch_on_miss || !self.remote_keys[metadata_index].read().contains_key(key)
+        {
             return Ok(None);
         }
         let _key_gate = self.key_gate(key);
@@ -1012,7 +1148,7 @@ impl KvOverflowStore {
         }
         let Some(remote) = self.cluster.get(key)? else {
             if self.cluster.delete(key).is_ok() {
-                self.remote_keys.write().remove(key);
+                self.remote_keys[metadata_index].write().remove(key);
             }
             return Ok(None);
         };
@@ -1037,10 +1173,11 @@ impl KvOverflowStore {
         let generation = self.sequence.fetch_add(1, Ordering::Relaxed);
         let (completion, result) = bounded(1);
         let _key_gate = self.key_gate(key);
+        let metadata_index = key_gate_index(key, self.remote_keys.len());
         let present = self.inner.exists(key)
-            || self.remote_keys.read().contains_key(key)
-            || self.pending_keys.read().contains_key(key);
-        self.pending_keys
+            || self.remote_keys[metadata_index].read().contains_key(key)
+            || self.pending_keys[metadata_index].read().contains_key(key);
+        self.pending_keys[metadata_index]
             .write()
             .insert(key.to_vec(), PendingKeyMeta { generation });
         if !self.workers.enqueue_reserved(KvOverflowJob::Delete {
@@ -1048,7 +1185,7 @@ impl KvOverflowStore {
             generation,
             completion,
         }) {
-            self.pending_keys.write().remove(key);
+            self.pending_keys[metadata_index].write().remove(key);
             return Err(ShardCacheError::ChannelClosed("kv overflow workers"));
         }
         drop(_key_gate);
@@ -1087,7 +1224,8 @@ impl KvOverflowStore {
         for entry in self.inner.try_entry_snapshot()? {
             self.cluster
                 .put_until(&entry.key, &entry.value, entry.expire_at_ms)?;
-            self.remote_keys.write().insert(
+            let metadata_index = key_gate_index(&entry.key, self.remote_keys.len());
+            self.remote_keys[metadata_index].write().insert(
                 entry.key,
                 RemoteKeyMeta {
                     expire_at_ms: entry.expire_at_ms,
@@ -1107,18 +1245,29 @@ impl KvOverflowStore {
             .map(|entry| entry.key.clone())
             .collect::<HashSet<_>>();
         let now_ms = now_millis();
-        for (key, meta) in self.remote_keys.read().iter() {
-            if resident.contains(key) || meta.expire_at_ms.is_some_and(|expiry| expiry <= now_ms) {
+        let remote_entries = self
+            .remote_keys
+            .iter()
+            .flat_map(|shard| {
+                shard
+                    .read()
+                    .iter()
+                    .map(|(key, meta)| (key.clone(), *meta))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        for (key, meta) in remote_entries {
+            if resident.contains(&key) || meta.expire_at_ms.is_some_and(|expiry| expiry <= now_ms) {
                 continue;
             }
-            let remote = self.cluster.get(key)?.ok_or_else(|| {
+            let remote = self.cluster.get(&key)?.ok_or_else(|| {
                 ShardCacheError::Persistence(format!(
                     "kv overflow snapshot could not materialize key owned by {}",
-                    self.cluster.owner_id(key)
+                    self.cluster.owner_id(&key)
                 ))
             })?;
             entries.push(StoredEntry {
-                key: key.clone(),
+                key,
                 value: remote.value.as_ref().to_vec(),
                 expire_at_ms: meta.expire_at_ms,
             });
@@ -1134,7 +1283,7 @@ impl KvOverflowStore {
             previous_node_count: self.cluster.previous_nodes.len(),
             slot_count: self.cluster.slot_count,
             resident_keys: self.inner.len(),
-            remote_keys: self.remote_keys.read().len(),
+            remote_keys: metadata_len(&self.remote_keys),
             resident_bytes: self.inner.stored_bytes(),
             puts: metrics.puts.load(Ordering::Relaxed),
             put_failures: metrics.put_failures.load(Ordering::Relaxed),
@@ -1147,7 +1296,7 @@ impl KvOverflowStore {
             fault_ins: metrics.fault_ins.load(Ordering::Relaxed),
             queue_depth: self.workers.queue_depth(),
             queue_capacity: self.workers.capacity,
-            pending_keys: self.pending_keys.read().len(),
+            pending_keys: metadata_len(&self.pending_keys),
             active_workers: metrics.active_workers.load(Ordering::Relaxed),
             enqueued_puts: metrics.enqueued_puts.load(Ordering::Relaxed),
             enqueue_failures: metrics.enqueue_failures.load(Ordering::Relaxed),
@@ -1193,18 +1342,13 @@ impl KvOverflowWorkerPool {
         capacity: usize,
         inner: Arc<EmbeddedStore>,
         cluster: Arc<KvOverflowCluster>,
-        remote_keys: Arc<RwLock<HashMap<Bytes, RemoteKeyMeta>>>,
-        pending_keys: Arc<RwLock<HashMap<Bytes, PendingKeyMeta>>>,
+        remote_keys: RemoteKeyShards,
+        pending_keys: PendingKeyShards,
         key_gates: Arc<[Mutex<()>]>,
         maintenance: Arc<Mutex<()>>,
         options: KvOverflowOptions,
     ) -> Result<Self> {
-        let (permits, available) = bounded(capacity);
-        for _ in 0..capacity {
-            permits
-                .send(())
-                .expect("new permit channel must remain connected");
-        }
+        let in_flight = Arc::new(AtomicUsize::new(0));
         let mut senders: Vec<Sender<KvOverflowJob>> = Vec::with_capacity(worker_threads);
         let mut joins: Vec<JoinHandle<()>> = Vec::with_capacity(worker_threads);
         for worker_id in 0..worker_threads {
@@ -1216,12 +1360,20 @@ impl KvOverflowWorkerPool {
             let worker_key_gates = Arc::clone(&key_gates);
             let worker_maintenance = Arc::clone(&maintenance);
             let worker_options = options.clone();
-            let worker_permits = permits.clone();
+            let worker_in_flight = Arc::clone(&in_flight);
             let join = match thread::Builder::new()
                 .name(format!("shardmap-kv-overflow-{worker_id}"))
                 .spawn(move || {
                     let mut failed_since_barrier = false;
-                    while let Ok(job) = receiver.recv() {
+                    let mut deferred = None;
+                    loop {
+                        let job = match deferred.take() {
+                            Some(job) => job,
+                            None => match receiver.recv() {
+                                Ok(job) => job,
+                                Err(_) => break,
+                            },
+                        };
                         match job {
                             KvOverflowJob::Put {
                                 key,
@@ -1229,50 +1381,85 @@ impl KvOverflowWorkerPool {
                                 expire_at_ms,
                                 generation,
                             } => {
+                                let mut puts = vec![(key, value, expire_at_ms, generation)];
+                                while puts.len() < KV_OVERFLOW_WORKER_BATCH_SIZE {
+                                    match receiver.try_recv() {
+                                        Ok(KvOverflowJob::Put {
+                                            key,
+                                            value,
+                                            expire_at_ms,
+                                            generation,
+                                        }) => puts.push((key, value, expire_at_ms, generation)),
+                                        Ok(job) => {
+                                            deferred = Some(job);
+                                            break;
+                                        }
+                                        Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
+                                            break;
+                                        }
+                                    }
+                                }
+                                let requests = puts
+                                    .iter()
+                                    .map(|(key, value, expire_at_ms, _)| KvOverflowPutRequest {
+                                        key,
+                                        value,
+                                        expire_at_ms: *expire_at_ms,
+                                    })
+                                    .collect::<Vec<_>>();
                                 worker_cluster
                                     .metrics
                                     .active_workers
                                     .fetch_add(1, Ordering::Relaxed);
-                                let result = worker_cluster.put_until(&key, &value, expire_at_ms);
+                                let results = worker_cluster.put_batch_until(&requests);
                                 worker_cluster
                                     .metrics
                                     .active_workers
                                     .fetch_sub(1, Ordering::Relaxed);
-                                let succeeded = result.is_ok();
-                                if succeeded {
-                                    worker_cluster
-                                        .metrics
-                                        .replicated_puts
-                                        .fetch_add(1, Ordering::Relaxed);
-                                } else {
-                                    failed_since_barrier = true;
-                                    worker_cluster
-                                        .metrics
-                                        .replication_failures
-                                        .fetch_add(1, Ordering::Relaxed);
-                                }
-                                let gate_index = key_gate_index(&key, worker_key_gates.len());
-                                let _key_gate = worker_key_gates[gate_index].lock();
-                                let is_current = worker_pending_keys
-                                    .read()
-                                    .get(key.as_slice())
-                                    .is_some_and(|meta| meta.generation == generation);
-                                if is_current {
-                                    worker_pending_keys.write().remove(key.as_slice());
+                                let mut enforce_memory = false;
+                                for ((key, _, expire_at_ms, generation), succeeded) in
+                                    puts.into_iter().zip(results)
+                                {
                                     if succeeded {
-                                        worker_remote_keys
-                                            .write()
-                                            .insert(key, RemoteKeyMeta { expire_at_ms });
-                                        enforce_memory_target(
-                                            &worker_inner,
-                                            &worker_cluster,
-                                            &worker_options,
-                                            &worker_remote_keys,
-                                            &worker_maintenance,
-                                        );
+                                        worker_cluster
+                                            .metrics
+                                            .replicated_puts
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    } else {
+                                        failed_since_barrier = true;
+                                        worker_cluster
+                                            .metrics
+                                            .replication_failures
+                                            .fetch_add(1, Ordering::Relaxed);
                                     }
+                                    let gate_index = key_gate_index(&key, worker_key_gates.len());
+                                    let _key_gate = worker_key_gates[gate_index].lock();
+                                    let is_current = worker_pending_keys[gate_index]
+                                        .read()
+                                        .get(key.as_slice())
+                                        .is_some_and(|meta| meta.generation == generation);
+                                    if is_current {
+                                        worker_pending_keys[gate_index]
+                                            .write()
+                                            .remove(key.as_slice());
+                                        if succeeded {
+                                            worker_remote_keys[gate_index]
+                                                .write()
+                                                .insert(key, RemoteKeyMeta { expire_at_ms });
+                                            enforce_memory = true;
+                                        }
+                                    }
+                                    worker_in_flight.fetch_sub(1, Ordering::Release);
                                 }
-                                let _ = worker_permits.send(());
+                                if enforce_memory {
+                                    enforce_memory_target(
+                                        &worker_inner,
+                                        &worker_cluster,
+                                        &worker_options,
+                                        &worker_remote_keys,
+                                        &worker_maintenance,
+                                    );
+                                }
                             }
                             KvOverflowJob::Delete {
                                 key,
@@ -1294,20 +1481,23 @@ impl KvOverflowWorkerPool {
                                 }
                                 let gate_index = key_gate_index(&key, worker_key_gates.len());
                                 let _key_gate = worker_key_gates[gate_index].lock();
-                                let is_current = worker_pending_keys
+                                let is_current = worker_pending_keys[gate_index]
                                     .read()
                                     .get(key.as_slice())
                                     .is_some_and(|meta| meta.generation == generation);
                                 if is_current {
-                                    worker_pending_keys.write().remove(key.as_slice());
+                                    worker_pending_keys[gate_index]
+                                        .write()
+                                        .remove(key.as_slice());
                                     if succeeded {
-                                        let mut remote_keys = worker_remote_keys.write();
+                                        let mut remote_keys =
+                                            worker_remote_keys[gate_index].write();
                                         remote_keys.remove(key.as_slice());
                                         worker_inner.delete(&key);
                                     }
                                 }
                                 let _ = completion.send(result);
-                                let _ = worker_permits.send(());
+                                worker_in_flight.fetch_sub(1, Ordering::Release);
                             }
                             KvOverflowJob::Barrier(completion) => {
                                 let result = if failed_since_barrier {
@@ -1342,18 +1532,22 @@ impl KvOverflowWorkerPool {
         }
         Ok(Self {
             senders: senders.into_boxed_slice(),
-            available,
-            permits,
+            in_flight,
             capacity,
+            cluster: Arc::clone(&cluster),
             metrics: Arc::clone(&cluster.metrics),
             joins: Mutex::new(joins),
         })
     }
 
     fn reserve(&self) -> Result<()> {
-        match self.available.try_recv() {
-            Ok(()) => Ok(()),
-            Err(TryRecvError::Empty) => {
+        match self
+            .in_flight
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| {
+                (depth < self.capacity).then_some(depth + 1)
+            }) {
+            Ok(_) => Ok(()),
+            Err(_) => {
                 self.metrics
                     .enqueue_failures
                     .fetch_add(1, Ordering::Relaxed);
@@ -1361,29 +1555,36 @@ impl KvOverflowWorkerPool {
                     "kv overflow replication queue is full",
                 ))
             }
-            Err(TryRecvError::Disconnected) => {
-                Err(ShardCacheError::ChannelClosed("kv overflow permits"))
-            }
         }
     }
 
     fn enqueue_reserved(&self, job: KvOverflowJob) -> bool {
         let lane = match &job {
             KvOverflowJob::Put { key, .. } | KvOverflowJob::Delete { key, .. } => {
-                key_gate_index(key, self.senders.len())
+                self.lane_for_key(key)
             }
             KvOverflowJob::Barrier(_) | KvOverflowJob::Shutdown => 0,
         };
         if self.senders[lane].send(job).is_ok() {
             true
         } else {
-            let _ = self.permits.send(());
+            self.in_flight.fetch_sub(1, Ordering::Release);
             false
         }
     }
 
+    fn lane_for_key(&self, key: &[u8]) -> usize {
+        let owner = self.cluster.owner_index(key);
+        let node_count = self.cluster.nodes.len();
+        if self.senders.len() <= node_count {
+            return owner % self.senders.len();
+        }
+        let lanes_for_owner = (self.senders.len() - 1 - owner) / node_count + 1;
+        owner + node_count * ((xxh3_64(key) as usize) % lanes_for_owner)
+    }
+
     fn queue_depth(&self) -> usize {
-        self.capacity.saturating_sub(self.available.len())
+        self.in_flight.load(Ordering::Acquire)
     }
 
     fn shutdown(&self) {
@@ -1402,18 +1603,19 @@ fn enforce_memory_target(
     inner: &EmbeddedStore,
     cluster: &KvOverflowCluster,
     options: &KvOverflowOptions,
-    remote_keys: &RwLock<HashMap<Bytes, RemoteKeyMeta>>,
+    remote_keys: &[RwLock<HashMap<Bytes, RemoteKeyMeta>>],
     maintenance: &Mutex<()>,
 ) {
     let _maintenance = maintenance.lock();
     while inner.stored_bytes() > options.max_memory_bytes {
-        let remote_keys = remote_keys.read();
+        let remote_keys = remote_keys.iter().map(RwLock::read).collect::<Vec<_>>();
         let now_ms = now_millis();
         let mut evicted = false;
         for shard_id in 0..inner.shard_count() {
             let victim =
                 inner.evict_one_point_in_shard_if(shard_id, options.eviction_policy, |key| {
-                    remote_keys
+                    let metadata_index = key_gate_index(key, remote_keys.len());
+                    remote_keys[metadata_index]
                         .get(key)
                         .is_some_and(|meta| meta.expire_at_ms.is_none_or(|expiry| expiry > now_ms))
                 });
@@ -1436,10 +1638,14 @@ fn key_gate_index(key: &[u8], count: usize) -> usize {
     (xxh3_64(key) as usize) % count
 }
 
+fn metadata_len<V>(shards: &[RwLock<HashMap<Bytes, V>>]) -> usize {
+    shards.iter().map(|shard| shard.read().len()).sum()
+}
+
 impl KvOverflowCleanupTask {
     fn start(
         cluster: Arc<KvOverflowCluster>,
-        remote_keys: Arc<RwLock<HashMap<Bytes, RemoteKeyMeta>>>,
+        remote_keys: RemoteKeyShards,
         key_gates: Arc<[Mutex<()>]>,
         interval: Duration,
     ) -> Result<Self> {
@@ -1454,22 +1660,27 @@ impl KvOverflowCleanupTask {
                     }
                     let now_ms = now_millis();
                     let expired = remote_keys
-                        .read()
                         .iter()
-                        .filter(|(_key, meta)| {
-                            meta.expire_at_ms.is_some_and(|expiry| expiry <= now_ms)
+                        .flat_map(|shard| {
+                            shard
+                                .read()
+                                .iter()
+                                .filter(|(_key, meta)| {
+                                    meta.expire_at_ms.is_some_and(|expiry| expiry <= now_ms)
+                                })
+                                .map(|(key, meta)| (key.clone(), meta.expire_at_ms))
+                                .collect::<Vec<_>>()
                         })
-                        .map(|(key, meta)| (key.clone(), meta.expire_at_ms))
                         .collect::<Vec<_>>();
                     for (key, expected_expiry) in expired {
                         let gate_index = (xxh3_64(&key) as usize) & (key_gates.len() - 1);
                         let _key_gate = key_gates[gate_index].lock();
-                        let still_expired = remote_keys
+                        let still_expired = remote_keys[gate_index]
                             .read()
                             .get(key.as_slice())
                             .is_some_and(|meta| meta.expire_at_ms == expected_expiry);
                         if still_expired && cluster.delete(&key).is_ok() {
-                            remote_keys.write().remove(key.as_slice());
+                            remote_keys[gate_index].write().remove(key.as_slice());
                         }
                     }
                 }
@@ -1498,6 +1709,7 @@ impl KvOverflowCleanupTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossbeam_channel::Receiver;
     use std::sync::atomic::AtomicBool;
 
     #[derive(Debug)]
@@ -1562,6 +1774,58 @@ mod tests {
         release: Receiver<()>,
         values: RwLock<HashMap<Bytes, KvOverflowValue>>,
         block_once: AtomicBool,
+    }
+
+    struct BatchingNode {
+        id: String,
+        started: Sender<()>,
+        release: Receiver<()>,
+        values: RwLock<HashMap<Bytes, KvOverflowValue>>,
+        batch_sizes: Mutex<Vec<usize>>,
+        block_once: AtomicBool,
+    }
+
+    impl KvOverflowNode for BatchingNode {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
+            self.values.write().insert(
+                key.to_vec(),
+                KvOverflowValue {
+                    value: SharedBytes::copy_from_slice(value),
+                    ttl_ms,
+                },
+            );
+            Ok(())
+        }
+
+        fn put_batch_until(&self, requests: &[KvOverflowPutRequest<'_>]) -> Result<()> {
+            if self.block_once.swap(false, Ordering::Relaxed) {
+                let _ = self.started.send(());
+                self.release
+                    .recv()
+                    .map_err(|_| ShardCacheError::ChannelClosed("batching test node"))?;
+            }
+            self.batch_sizes.lock().push(requests.len());
+            for request in requests {
+                let ttl_ms = request
+                    .expire_at_ms
+                    .map(|deadline| deadline.saturating_sub(now_millis()));
+                self.put(request.key, request.value, ttl_ms)?;
+            }
+            Ok(())
+        }
+
+        fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
+            Ok(self.values.read().get(key).cloned())
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<()> {
+            self.values.write().remove(key);
+            Ok(())
+        }
     }
 
     impl KvOverflowNode for BlockingNode {
@@ -1639,6 +1903,17 @@ mod tests {
     }
 
     #[test]
+    fn oversized_slot_table_is_rejected_before_allocation() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let result = KvOverflowCluster::with_previous(
+            vec![node],
+            Vec::new(),
+            MAX_KV_OVERFLOW_SLOT_COUNT * 2,
+        );
+        assert!(matches!(result, Err(ShardCacheError::Config(_))));
+    }
+
+    #[test]
     fn horizontal_expansion_moves_whole_slots_only_to_the_added_node() {
         let first = Arc::new(MemoryNode::new("node-a"));
         let second = Arc::new(MemoryNode::new("node-b"));
@@ -1667,6 +1942,41 @@ mod tests {
             assert_eq!(
                 original.slot_for_key(key.as_bytes()),
                 expanded.slot_for_key(key.as_bytes())
+            );
+        }
+    }
+
+    #[test]
+    fn worker_lanes_are_affine_to_overflow_owners() {
+        let nodes: Vec<Arc<dyn KvOverflowNode>> = (0..4)
+            .map(|index| {
+                Arc::new(MemoryNode::new(&format!("node-{index}"))) as Arc<dyn KvOverflowNode>
+            })
+            .collect::<Vec<_>>();
+        let cluster = Arc::new(KvOverflowCluster::new(nodes).unwrap());
+        let mut parallel = options(usize::MAX);
+        parallel.worker_threads = 8;
+        let store = KvOverflowStore::new(EmbeddedStore::new(4), cluster.clone(), parallel).unwrap();
+        let mut lane_owners = [None; 8];
+
+        for index in 0..10_000 {
+            let key = format!("key-{index}");
+            let owner = cluster.owner_index(key.as_bytes());
+            let lane = store.workers.lane_for_key(key.as_bytes());
+            match lane_owners[lane] {
+                Some(existing) => assert_eq!(existing, owner),
+                None => lane_owners[lane] = Some(owner),
+            }
+        }
+
+        assert!(lane_owners.iter().all(Option::is_some));
+        for owner in 0..4 {
+            assert_eq!(
+                lane_owners
+                    .iter()
+                    .filter(|lane_owner| **lane_owner == Some(owner))
+                    .count(),
+                2
             );
         }
     }
@@ -1760,6 +2070,49 @@ mod tests {
     }
 
     #[test]
+    fn worker_batches_queued_puts_without_losing_acknowledgements() {
+        let (started, started_rx) = bounded(1);
+        let (release, release_rx) = bounded(1);
+        let node = Arc::new(BatchingNode {
+            id: "batching-node".into(),
+            started,
+            release: release_rx,
+            values: RwLock::new(HashMap::new()),
+            batch_sizes: Mutex::new(Vec::new()),
+            block_once: AtomicBool::new(true),
+        });
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
+        let mut serial = options(usize::MAX);
+        serial.worker_threads = 1;
+        serial.queue_capacity = 256;
+        let store = KvOverflowStore::new(EmbeddedStore::new(4), cluster, serial).unwrap();
+
+        store
+            .set(b"key-0".to_vec(), b"value".to_vec(), None)
+            .unwrap();
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first batch reached overflow node");
+        for index in 1..129 {
+            store
+                .set(format!("key-{index}").into_bytes(), b"value".to_vec(), None)
+                .unwrap();
+        }
+        release.send(()).unwrap();
+        store.flush_remote().unwrap();
+
+        let batch_sizes = node.batch_sizes.lock();
+        assert_eq!(batch_sizes.iter().sum::<usize>(), 129);
+        assert!(batch_sizes.iter().any(|size| *size > 1));
+        assert!(batch_sizes.iter().all(|size| *size <= 64));
+        assert_eq!(node.values.read().len(), 129);
+        let health = store.health_snapshot();
+        assert_eq!(health.pending_keys, 0);
+        assert_eq!(health.remote_keys, 129);
+        assert_eq!(health.replicated_puts, 129);
+    }
+
+    #[test]
     fn queued_replication_does_not_restart_primary_ttl() {
         let (node, started, release) = blocking_node();
         let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
@@ -1784,9 +2137,9 @@ mod tests {
 
         assert!(!node.values.read().contains_key(b"expiring".as_slice()));
         assert_eq!(store.get(b"expiring").unwrap(), None);
+        let metadata_index = key_gate_index(b"expiring", store.remote_keys.len());
         assert!(
-            !store
-                .remote_keys
+            !store.remote_keys[metadata_index]
                 .read()
                 .contains_key(b"expiring".as_slice())
         );
@@ -1892,6 +2245,37 @@ mod tests {
         store.flush_remote().unwrap();
 
         assert_eq!(node.values.read()[b"key".as_slice()].value.as_ref(), &[99]);
+    }
+
+    #[test]
+    fn concurrent_producers_preserve_all_acknowledgements() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
+        let mut concurrent = options(usize::MAX);
+        concurrent.worker_threads = 4;
+        concurrent.queue_capacity = 2_048;
+        let store =
+            Arc::new(KvOverflowStore::new(EmbeddedStore::new(8), cluster, concurrent).unwrap());
+        let mut producers = Vec::new();
+        for producer in 0..8 {
+            let store = Arc::clone(&store);
+            producers.push(thread::spawn(move || {
+                for index in 0..128 {
+                    let key = format!("producer-{producer}-key-{index}").into_bytes();
+                    store.set(key, vec![producer as u8; 32], None).unwrap();
+                }
+            }));
+        }
+        for producer in producers {
+            producer.join().unwrap();
+        }
+        store.flush_remote().unwrap();
+
+        let health = store.health_snapshot();
+        assert_eq!(health.pending_keys, 0);
+        assert_eq!(health.remote_keys, 1_024);
+        assert_eq!(health.replicated_puts, 1_024);
+        assert_eq!(node.values.read().len(), 1_024);
     }
 
     #[test]

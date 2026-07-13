@@ -9,14 +9,17 @@ grows with the number of nodes without coupling slots to the primary's local
 shard count.
 
 Writes are applied to the local primary and admitted to a bounded asynchronous
-replication pool. Deterministic worker lanes preserve mutation order for each
-key without putting network latency on the primary write path. A value becomes
-eligible for local eviction only after its matching generation is acknowledged
-by the remote owner. When resident bytes exceed the configured target, ShardMap
-chooses acknowledged victims with its LRU or LFU metadata. Pending or failed
-replications remain resident even when that temporarily exceeds the target.
-Queue admission happens before the local mutation, so a full queue returns
-`ShardCacheError::Backpressure` without changing the primary value.
+replication pool. A precomputed fixed-slot table makes ownership lookup O(1).
+Deterministic, endpoint-affine worker lanes preserve mutation order for each
+key without putting network latency on the primary write path. Workers drain
+ordered groups of up to 64 writes; the Redis adapter sends each group as a
+pipeline. A value becomes eligible for local eviction only after its matching
+generation is acknowledged by the remote owner. When resident bytes exceed the
+configured target, ShardMap chooses acknowledged victims with its LRU or LFU
+metadata. Pending or failed replications remain resident even when that
+temporarily exceeds the target. Queue admission happens before the local
+mutation, so a full queue returns `ShardCacheError::Backpressure` without
+changing the primary value.
 
 On a local miss, `KvOverflowStore::get` fetches the deterministic owner and
 promotes the value back into memory. Other services can call
@@ -72,9 +75,14 @@ let remote = cache.cluster().get(b"model:7")?;
   bounds queued plus active jobs across all lanes. Size the queue for expected
   bursts and monitor `queue_depth`, `pending_keys`, `active_workers`,
   `enqueue_failures`, and `replication_failures`.
+- Worker lanes are endpoint-affine when there are at least as many workers as
+  endpoints. For Redis, start with four workers per independent endpoint and
+  tune from production telemetry. Fewer workers than endpoints share lanes and
+  cannot drive every endpoint concurrently.
 - `slot_count` is a persistent routing invariant and must not change while
   overflow data exists. It defaults to 16,384 and is independent of local
-  `shard_count` and the number of overflow servers.
+  `shard_count` and the number of overflow servers. The maximum is 1,048,576
+  so the precomputed owner table has a bounded startup and memory cost.
 - Horizontal expansion moves complete logical slots. Rendezvous ownership
   guarantees that adding a node moves slots only from an old owner to the new
   node; slots that do not move retain their existing owner.
@@ -151,10 +159,11 @@ membership use the same backend and key prefix.
 Redis keys are binary-safe and namespaced with `redis_key_prefix`. Values use
 the same versioned expiry, length, and CRC32 envelope as SCNP. TTL values also
 use Redis `SET ... PX`, so the database removes expired envelopes without
-waiting for a Shardmap cleanup pass. Connections are pooled per endpoint and
-use the same connect timeout, operation deadline, retry count, and backoff
-settings as SCNP nodes. TLS certificate verification is enabled for `rediss://`
-and `valkeys://` endpoints.
+waiting for a Shardmap cleanup pass. Ordered worker batches use Redis pipelines
+to amortize network round trips. Connections are pooled per endpoint and use
+the same connect timeout, operation deadline, retry count, and backoff settings
+as SCNP nodes. TLS certificate verification is enabled for `rediss://` and
+`valkeys://` endpoints.
 
 The adapter targets standalone Redis-compatible endpoints. Redis Cluster
 `MOVED`/`ASK` topology discovery is not part of 0.6.0; use one endpoint per
@@ -214,23 +223,39 @@ local memory policy cascades to object storage, not another embedded primary.
 
 ## Primary Cost Benchmark
 
-The benchmark isolates local enqueue cost from remote drain time by holding
-in-process overflow workers until the producer finishes:
+The benchmark can isolate local enqueue cost by holding in-process overflow
+workers until the producers finish:
 
 ```bash
 cargo run --release -p shardcache-benchmarks --features kv-overflow \
   --bin kv_overflow_primary_cost -- \
-  --iterations 200000 --keys 16384 --value-size 1024 --worker-threads 2
+  --iterations 500000 --keys 65536 --value-size 1024 \
+  --worker-threads 4 --producers 4 --drain-mode blocked
 ```
 
-It reports plain `EmbeddedStore::set`, `KvOverflowStore::set` admission, the
-enqueue overhead ratio, and the remaining `flush_remote` drain time. Use the
-live two-server integration path for end-to-end SCNP latency; this benchmark is
-specifically the primary CPU and synchronization budget.
+Use `--drain-mode concurrent` to include contention from active workers. Live
+SCNP or Redis runs use `--backend`, one or more repeated `--endpoint` arguments,
+and the matching benchmark feature. The output separates primary enqueue time,
+post-producer drain time, and end-to-end replication throughput.
 
-Three release runs on the development machine on 2026-07-13 with the command
-above measured medians of 121.9 ns/op for embedded SET and 250.2 ns/op for
-KV-overflow queue admission. That is 128.3 ns of primary-path overhead, 2.05x
-the plain SET cost, and approximately 4.00 million admitted 1 KiB writes/second
-on one producer thread. Treat this as a local implementation regression
-baseline, not a cross-machine capacity claim.
+Five release runs on Adam on 2026-07-13 used four producers, 1 KiB values,
+131,072 keys, 400,000 writes, Valkey 8.1.8 containers pinned to dedicated CPUs,
+and four workers per endpoint. Medians were:
+
+| Valkey endpoints | Workers | Embedded SET | Overflow enqueue | End-to-end replicated writes/s |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4 | 350 ns/op | 954 ns/op | 339K |
+| 2 | 8 | 350 ns/op | 991 ns/op | 506K |
+| 4 | 16 | 343 ns/op | 1,309 ns/op | 740K |
+
+Redis pipelining raised the single-endpoint, four-worker median from 34.4K to
+347K replicated writes/second in a separate 200,000-write run, approximately
+10.1x. With a concurrent in-process no-op endpoint, four workers admitted a
+median 1.93 million writes/second at 517 ns/op, isolating the local metadata and
+queue path from network service time.
+
+These results are regression and sizing references, not universal capacity
+claims. The queue absorbs bursts but cannot create remote capacity: sustained
+write throughput must remain below the aggregate endpoint drain rate, or the
+bounded queue will eventually return `ShardCacheError::Backpressure` before
+mutating the primary.

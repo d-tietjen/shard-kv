@@ -22,6 +22,9 @@
 - Added bounded asynchronous replication with per-key ordered worker lanes,
   generation-safe acknowledgments, queue backpressure, explicit remote flush,
   and queue/worker health counters so primary writes do not wait on SCNP I/O.
+- Added endpoint-affine worker lanes, ordered 64-write Redis pipelines, O(1)
+  fixed-slot owner lookup, and striped acknowledgment metadata to keep primary
+  overhead bounded while overflow endpoints scale horizontally.
 - Added replica-side LRU plus filesystem object-overflow integration coverage,
   including transparent SCNP fault-in for envelopes evicted from replica RAM.
 - Added the `kv_overflow_primary_cost` benchmark for measuring embedded SET
@@ -34,13 +37,17 @@
 - Preserve primary TTL deadlines across queued/retried overflow writes, make
   `flush_remote` include writes already admitted but not yet enqueued, and
   redact malformed Redis endpoints from configuration errors.
+- Replaced contended queue permits and global remote-key metadata locks with
+  atomic bounded admission and 64 metadata stripes.
 
 ### Validation
 
-- A three-run release-mode sample of 1 KiB primary writes measured a 121.9
-  ns/op median for embedded SET and 250.2 ns/op for bounded KV-overflow
-  admission (2.05x, 128.3 ns absolute enqueue overhead) on the development
-  machine.
+- Five-run release benchmarks on Adam with four producers and 1 KiB values
+  measured 954 ns/op primary admission and 339K end-to-end writes/second for
+  one Valkey endpoint. Four disjoint endpoints with four workers each admitted
+  writes at 1,309 ns/op and replicated 740K writes/second end to end.
+- Redis worker pipelining improved a one-endpoint, four-worker production-path
+  benchmark from 34.4K to 347K replicated writes/second, approximately 10.1x.
 
 ## 0.5.0 - Unreleased
 

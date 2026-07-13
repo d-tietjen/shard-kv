@@ -106,7 +106,7 @@ pub use kv_overflow::RedisKvOverflowNode;
 #[cfg(feature = "kv-overflow")]
 pub use kv_overflow::{
     DEFAULT_KV_OVERFLOW_SLOT_COUNT, KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode,
-    KvOverflowOptions, KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
+    KvOverflowOptions, KvOverflowPutRequest, KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
 };
 pub use object_overflow::{
     ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore, ObjectValueRef,
