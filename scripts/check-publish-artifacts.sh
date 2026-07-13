@@ -62,6 +62,7 @@ write_shardcache_patch_table() {
 
 [patch.crates-io]
 shardmap = { path = "$unpacked/shardmap-$shardmap_version" }
+shardcache-client-rs = { path = "$unpacked/shardcache-client-rs-$client_version" }
 EOF
 }
 
