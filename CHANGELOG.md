@@ -54,6 +54,25 @@
   including transparent SCNP fault-in for envelopes evicted from replica RAM.
 - Added the `kv_overflow_primary_cost` benchmark for measuring embedded SET
   versus key-value overflow enqueue overhead and remote drain time.
+- Added stable replica identities, topology handshakes, `OverflowSlot` routing,
+  and route-checked direct shard ports. Every remote shard target now has one
+  primary-shard owner and one shard-owned mutation/read connection pair.
+- Added exact online rebalance for replica and primary-shard topology changes.
+  Handoff migrates resident and remote-only values through write, verification,
+  and old-owner deletion while preserving the fixed logical slot namespace.
+- Added native Rustls TLS 1.3 for SCNP overflow, optional mTLS with leaf
+  certificate pinning, reloadable certificates and tokens, bounded concurrent
+  handshakes, and non-loopback authentication requirements. The all-feature
+  dependency graph contains no OpenSSL or native-tls implementation. Published
+  `shardmap` and `shardcache` packages expose the `scnp-tls` build feature.
+- Added target-local circuit breakers, adaptive byte-bounded pipelines,
+  compression negotiation, topology/path failover counters, per-shard queue
+  health, and handoff progress reporting.
+- Added independent resident-value and key-metadata ceilings, bounded cleanup,
+  key/value and slot-table limits, decompression expansion limits, and bounded
+  RESP, SCNP, FCRP, and client response collection decoding.
+- Added filesystem-backed cascading-tier, restart, TLS, topology, stalled
+  target, malformed-frame, and memory-amplification tests.
 
 ### Changed
 
@@ -64,6 +83,14 @@
   redact malformed Redis endpoints from configuration errors.
 - Replaced contended queue permits and global remote-key metadata locks with
   atomic bounded admission and 64 metadata stripes.
+- Moved resident hard-limit projection into the existing shard write critical
+  section. This removes a second shard read, a maintenance mutex, and an
+  accidental object fault-in from bounded primary writes while keeping
+  concurrent admission atomic.
+- Replaced address-only membership with stable `replicas` and
+  `previous_replicas`. Rebalance is exact and may move ranges between existing
+  replicas; operators must retain the previous membership until handoff
+  completes.
 
 ### Validation
 
@@ -79,6 +106,12 @@
   writes at 1,309 ns/op and replicated 740K writes/second end to end.
 - Redis worker pipelining improved a one-endpoint, four-worker production-path
   benchmark from 34.4K to 347K replicated writes/second, approximately 10.1x.
+- A final interleaved A/B on Adam compared the hardened branch with commit
+  `46a4ca8`. The fully bounded KV enqueue path sustained a median 2.05M
+  writes/second, 3.5% below the pre-hardening baseline. Embedded, local/TCP
+  replication, RESP, and SCNP median throughput deltas all stayed within 3.6%;
+  the worst measured median p99 change was 4.9%. No replication drops,
+  backpressure, or server protocol errors were observed.
 
 ## 0.5.0 - Unreleased
 

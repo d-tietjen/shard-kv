@@ -39,6 +39,7 @@ this repository for now.
 | shardcache Docker/server | [`docs/SHARDCACHE_DOCKER.md`](docs/SHARDCACHE_DOCKER.md) | You want to build and run the server locally or in a private container registry. |
 | Benchmarks | [`benchmarks/README.md`](benchmarks/README.md) | You want reproducible head-to-head and hardware-ceiling artifacts. |
 | Prefix-aware eviction | [`docs/PREFIX_AWARE_EVICTION.md`](docs/PREFIX_AWARE_EVICTION.md) | You want the feature-gated KV-cache hit-rate policy boundary beyond LRU/LFU. |
+| Partitioned KV overflow | [`docs/KV_OVERFLOW.md`](docs/KV_OVERFLOW.md) | You want an in-memory primary whose acknowledged cold data and read traffic can scale across shard-owned SCNP or Redis/Valkey overflow capacity. |
 
 ## Quick Starts
 

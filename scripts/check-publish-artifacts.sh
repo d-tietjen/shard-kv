@@ -86,6 +86,11 @@ check_shardcache_binary() {
   cargo check --manifest-path "$manifest" \
     --no-default-features \
     --features redis-server,redis-functions,redis-modules-all
+
+  echo "checking packaged binary: shardcache SCNP TLS overflow"
+  cargo check --manifest-path "$manifest" \
+    --no-default-features \
+    --features redis-server,kv-overflow,scnp-tls
 }
 
 shardmap_version="$(pkg_version shardmap)"
@@ -163,3 +168,20 @@ EOF
 write_patch_table >>"$kv_overflow_consumer/Cargo.toml"
 
 check_consumer kv-overflow-consumer
+
+scnp_tls_consumer="$tmp/scnp-tls-consumer"
+mkdir -p "$scnp_tls_consumer"
+write_consumer_main "$scnp_tls_consumer"
+cat >"$scnp_tls_consumer/Cargo.toml" <<EOF
+[package]
+name = "shard-kv-publish-scnp-tls-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shardmap = { version = "$shardmap_version", default-features = false, features = ["scnp-tls"] }
+EOF
+write_patch_table >>"$scnp_tls_consumer/Cargo.toml"
+
+check_consumer scnp-tls-consumer

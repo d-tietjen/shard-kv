@@ -91,6 +91,10 @@ redis_key_prefix = "shardcache:overflow:"
 # scnp_auth_token_reload_interval_ms = 30000
 allow_insecure_scnp = false
 max_memory_bytes = 1073741824
+# Key-tracking memory is independent of resident value memory. Zero derives a
+# bounded default from max_memory_bytes and max_key_bytes.
+max_metadata_bytes = 268435456
+max_key_bytes = 1048576
 eviction_policy = "lfu"
 queue_capacity_per_shard = 1024
 pipeline_max_items = 64

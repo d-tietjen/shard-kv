@@ -608,6 +608,7 @@ embedding the protocol layer, or wiring storage into a specialized runtime.
 | `object-overflow-s3` | No | S3/RustFS-compatible object overflow adapter. |
 | `kv-overflow` | No | Fixed-slot overflow into shardcache SCNP servers. |
 | `kv-overflow-redis` | No | Redis/Valkey-compatible endpoint adapter for fixed-slot KV overflow. |
+| `scnp-tls` | No | Rustls TLS 1.3 and mTLS for shard-owned SCNP overflow connections. |
 
 ## License
 
