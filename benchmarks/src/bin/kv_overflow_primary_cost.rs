@@ -33,6 +33,12 @@ struct Args {
     /// leave headroom for per-shard distribution in blocked mode.
     #[arg(long)]
     queue_capacity: Option<usize>,
+    /// Resident memory limit exercised by the overflow store.
+    #[arg(long, default_value_t = usize::MAX)]
+    max_memory_bytes: usize,
+    /// Key metadata limit exercised by the overflow store.
+    #[arg(long, default_value_t = usize::MAX)]
+    max_metadata_bytes: usize,
     /// Overflow endpoint used by workers.
     #[arg(long, value_enum, default_value_t = BenchmarkBackend::Noop)]
     backend: BenchmarkBackend,
@@ -267,7 +273,7 @@ fn main() -> Result<(), BoxError> {
     let health = overflow.health_snapshot();
 
     println!(
-        "kv-overflow-primary-cost: iterations={} keys={} value_size={} workers={} drains_per_shard={} primary_shards={} producers={} queue_capacity={} backend={:?} transport={:?} endpoints={} noop_replicas={} noop_shards_per_replica={} pipeline_max_items={} pipeline_max_bytes={} max_inflight_per_target={} latency_sample_every={} drain_mode={:?}",
+        "kv-overflow-primary-cost: iterations={} keys={} value_size={} workers={} drains_per_shard={} primary_shards={} producers={} queue_capacity={} max_memory_bytes={} max_metadata_bytes={} backend={:?} transport={:?} endpoints={} noop_replicas={} noop_shards_per_replica={} pipeline_max_items={} pipeline_max_bytes={} max_inflight_per_target={} latency_sample_every={} drain_mode={:?}",
         args.iterations,
         args.keys,
         args.value_size,
@@ -276,6 +282,8 @@ fn main() -> Result<(), BoxError> {
         health.primary_shard_count,
         args.producers,
         queue_capacity,
+        args.max_memory_bytes,
+        args.max_metadata_bytes,
         args.backend,
         args.transport,
         args.endpoint.len(),
@@ -368,8 +376,8 @@ fn make_overflow_store(
                 EmbeddedStore::new(16),
                 cluster,
                 KvOverflowOptions {
-                    max_memory_bytes: usize::MAX,
-                    max_metadata_bytes: usize::MAX,
+                    max_memory_bytes: args.max_memory_bytes,
+                    max_metadata_bytes: args.max_metadata_bytes,
                     max_key_bytes: 1024 * 1024,
                     eviction_policy: EvictionPolicy::Lru,
                     fetch_on_miss: true,
@@ -429,7 +437,10 @@ fn make_overflow_store(
                     BenchmarkTransport::Fanout => KvOverflowTransport::Fanout,
                     BenchmarkTransport::Direct => KvOverflowTransport::DirectShard,
                 },
-                max_memory_bytes: u64::MAX,
+                max_memory_bytes: u64::try_from(args.max_memory_bytes)
+                    .expect("max memory bytes must fit u64"),
+                max_metadata_bytes: u64::try_from(args.max_metadata_bytes)
+                    .expect("max metadata bytes must fit u64"),
                 queue_capacity,
                 queue_capacity_per_shard: queue_capacity.div_ceil(16),
                 pipeline_max_items: args.pipeline_max_items,

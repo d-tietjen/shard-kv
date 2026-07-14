@@ -382,6 +382,9 @@ and the matching benchmark feature. The output separates primary enqueue time,
 post-producer drain time, and end-to-end replication throughput.
 Set `--read-iterations` to add embedded GET and direct overflow GET throughput
 plus sampled p50/p95/p99 latency after all writes are remotely visible.
+Use `--max-memory-bytes` and `--max-metadata-bytes` to benchmark the bounded
+production path. Both default to `usize::MAX` so historical enqueue-only runs
+continue to isolate queue and worker overhead.
 
 To measure topology-validated direct ports and SCNP pipelines against a
 16-shard replica:
@@ -421,6 +424,24 @@ claims. The queue absorbs bursts but cannot create remote capacity: sustained
 write throughput must remain below the aggregate endpoint drain rate, or the
 bounded queue will eventually return `ShardCacheError::Backpressure` before
 mutating the primary.
+
+An interleaved release A/B on Adam on 2026-07-14 compared the memory-bound
+hardening against commit `46a4ca8`. All cases used release builds pinned to
+separate server/client CPU sets and three or more repetitions. Median results
+stayed inside the release gates of 5% throughput and 10% p99 regression:
+
+| Path | Workloads | Median throughput delta | Worst median p99 delta |
+| --- | --- | ---: | ---: |
+| KV enqueue, unlimited | 1 KiB, 4 producers, 2M writes | +7.0% | within gate |
+| KV enqueue, resident + metadata limits | 1 KiB, 4 producers, 1M writes | -3.5% | within gate |
+| Embedded map | GET, SET, 80/20; 64 B and 4 KiB | -1.4% to +2.3% | within timer resolution |
+| Local/TCP replication | 64 B and 4 KiB mutation batches | -1.4% to +1.5% | within gate |
+| RESP server | GET, SET, and 65-argument DEL; pipeline 1/16 | -3.3% to +2.6% | +3.5% |
+| SCNP fanout | 80/20; 64 B and 4 KiB; pipeline 1/16 | -3.6% to +1.6% | +4.9% |
+
+The bounded KV path admitted a median 2.05 million writes/second. Replication
+runs reported no drops or backpressure, and server runs reported no protocol
+errors.
 
 ### Shard-Owned Direct SCNP Results
 

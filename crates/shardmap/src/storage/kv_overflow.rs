@@ -3756,26 +3756,23 @@ impl KvOverflowStore {
         let key_hash = xxh3_64(&key);
         let route = self.inner.route_key_prehashed(key_hash, &key);
         let primary_shard = route.shard_id;
-        let shard_target =
-            shard_memory_target(&self.options, self.inner.shard_count(), primary_shard);
-        if self.inner.stored_bytes_in_shard(primary_shard) > shard_target {
-            self.drain_completions(primary_shard, self.options.pipeline_max_items);
-        }
+        let shard_target = (self.options.max_memory_bytes != usize::MAX)
+            .then(|| shard_memory_target(&self.options, self.inner.shard_count(), primary_shard));
         let lane = self.workers.lane_for_hash(primary_shard, key_hash);
         let _admission = self.admission[lane].read();
         self.reserve_worker_slot(primary_shard)?;
         let _key_gate = self.key_gate_for_hash(key_hash);
         let metadata_index = key_gate_index_for_hash(key_hash, self.remote_keys.len());
-        let already_tracked = self.inner.exists(&key)
-            || self.remote_keys[metadata_index]
-                .read()
-                .get_hashed(key_hash, &key)
-                .is_some()
-            || self.pending_keys[metadata_index]
-                .read()
-                .get_hashed(key_hash, &key)
-                .is_some_and(|meta| meta.tracks_key);
-        let newly_tracked = !already_tracked;
+        let newly_tracked = self.options.max_metadata_bytes != usize::MAX
+            && !(self.inner.exists(&key)
+                || self.remote_keys[metadata_index]
+                    .read()
+                    .get_hashed(key_hash, &key)
+                    .is_some()
+                || self.pending_keys[metadata_index]
+                    .read()
+                    .get_hashed(key_hash, &key)
+                    .is_some_and(|meta| meta.tracks_key));
         if newly_tracked && !self.metadata_budget.try_reserve(key.len()) {
             self.workers.shard_in_flight[primary_shard].fetch_sub(1, Ordering::Release);
             self.cluster
@@ -3791,20 +3788,20 @@ impl KvOverflowStore {
             .fetch_add(1, Ordering::Relaxed);
         let now_ms = ttl_ms.map(|_| now_millis());
         let expire_at_ms = ttl_ms.zip(now_ms).map(|(ttl, now)| now.saturating_add(ttl));
-        let _maintenance = self.maintenance[primary_shard].lock();
-        let current_bytes = self.inner.stored_bytes_in_shard(primary_shard);
-        let previous_bytes = self
-            .inner
-            .get(&key)
-            .map_or(0, |previous| key.len().saturating_add(previous.len()));
-        let projected_bytes = current_bytes
-            .saturating_sub(previous_bytes)
-            .saturating_add(key.len())
-            .saturating_add(value.len());
-        let hard_limit = shard_target
-            .saturating_add(self.options.max_key_bytes)
-            .saturating_add(self.options.max_value_bytes);
-        if projected_bytes > hard_limit && projected_bytes > current_bytes {
+        let hard_limit = shard_target.map_or(usize::MAX, |shard_target| {
+            shard_target
+                .saturating_add(self.options.max_key_bytes)
+                .saturating_add(self.options.max_value_bytes)
+        });
+        let inserted = self.inner.try_set_value_bytes_routed_overflow(
+            route,
+            &key,
+            value.clone(),
+            expire_at_ms,
+            generation,
+            hard_limit,
+        );
+        if !inserted {
             if newly_tracked {
                 self.metadata_budget.release(key.len());
             }
@@ -3820,15 +3817,6 @@ impl KvOverflowStore {
         self.remote_keys[metadata_index]
             .write()
             .remove_hashed(key_hash, key.as_ref());
-        self.inner.set_value_bytes_routed_overflow(
-            route,
-            &key,
-            value.clone(),
-            expire_at_ms,
-            now_ms.unwrap_or(0),
-            generation,
-        );
-        drop(_maintenance);
         if self.workers.enqueue_reserved_to_lane(
             lane,
             KvOverflowJob::Put {
@@ -3945,8 +3933,6 @@ impl KvOverflowStore {
             return Ok(FaultInOutcome::Return(None));
         };
         let route = self.inner.route_key_prehashed(key_hash, key);
-        let _maintenance = self.maintenance[expected.primary_shard].lock();
-        let current_bytes = self.inner.stored_bytes_in_shard(expected.primary_shard);
         let shard_target = shard_memory_target(
             &self.options,
             self.inner.shard_count(),
@@ -3955,25 +3941,20 @@ impl KvOverflowStore {
         let hard_limit = shard_target
             .saturating_add(self.options.max_key_bytes)
             .saturating_add(self.options.max_value_bytes);
-        let projected_bytes = current_bytes
-            .saturating_add(key.len())
-            .saturating_add(remote.value.len());
-        if projected_bytes > hard_limit {
+        if !self.inner.try_set_value_bytes_routed_overflow(
+            route,
+            key,
+            remote.value.clone(),
+            expected.expire_at_ms,
+            expected.generation,
+            hard_limit,
+        ) {
             self.cluster
                 .metrics
                 .resident_backpressure
                 .fetch_add(1, Ordering::Relaxed);
             return Ok(FaultInOutcome::Return(Some(remote.value.to_vec())));
         }
-        self.inner.set_value_bytes_routed_overflow(
-            route,
-            key,
-            remote.value.clone(),
-            expected.expire_at_ms,
-            now_millis(),
-            expected.generation,
-        );
-        drop(_maintenance);
         self.cluster
             .metrics
             .fault_ins
@@ -8375,6 +8356,29 @@ mod tests {
         assert_eq!(store.inner().stored_bytes(), retained_bytes);
         assert!(!store.inner().exists(b"b"));
         assert_eq!(store.health_snapshot().resident_backpressure, 1);
+    }
+
+    #[test]
+    fn resident_hard_limit_accounts_for_replaced_value_under_shard_lock() {
+        let node = MemoryNode::new("node-a");
+        node.fail_puts.store(true, Ordering::Relaxed);
+        let cluster = Arc::new(KvOverflowCluster::new(vec![Arc::new(node)]).unwrap());
+        let mut constrained = options(4);
+        constrained.max_key_bytes = 1;
+        constrained.max_value_bytes = 5;
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, constrained).unwrap();
+
+        store.set(b"a", b"x", None).unwrap();
+        store.set(b"a", b"value", None).unwrap();
+        let retained_bytes = store.inner().stored_bytes();
+
+        assert_eq!(store.inner().get(b"a"), Some(b"value".to_vec()));
+        assert!(matches!(
+            store.set(b"b", b"value", None),
+            Err(ShardCacheError::Backpressure(_))
+        ));
+        assert_eq!(store.inner().stored_bytes(), retained_bytes);
+        assert!(!store.inner().exists(b"b"));
     }
 
     #[test]

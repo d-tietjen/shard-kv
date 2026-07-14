@@ -80,15 +80,16 @@ impl EmbeddedStore {
     }
 
     #[cfg(feature = "kv-overflow")]
-    pub(crate) fn set_value_bytes_routed_overflow(
+    pub(crate) fn try_set_value_bytes_routed_overflow(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],
         value: bytes::Bytes,
         expire_at_ms: Option<u64>,
-        now_ms: u64,
         generation: u64,
-    ) {
+        hard_limit: usize,
+    ) -> bool {
+        let now_ms = expire_at_ms.map_or(0, |_| now_millis());
         let route = match route.shard_id < self.shards.len() {
             true => route,
             false => self.route_key(key),
@@ -99,6 +100,14 @@ impl EmbeddedStore {
         if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
             let mut shard = self.shards[route.shard_id].write();
+            if !shard.map.can_set_bytes_hashed_with_limit(
+                route.key_hash,
+                key,
+                value.len(),
+                hard_limit,
+            ) {
+                return false;
+            }
             if bucket.delete_any(key) {
                 self.objects.note_deleted(route.shard_id);
             }
@@ -117,9 +126,15 @@ impl EmbeddedStore {
             );
             shard.enforce_memory_limit(now_ms);
             self.refresh_string_key_count(route.shard_id, &shard);
-            return;
+            return true;
         }
         let mut shard = self.shards[route.shard_id].write();
+        if !shard
+            .map
+            .can_set_bytes_hashed_with_limit(route.key_hash, key, value.len(), hard_limit)
+        {
+            return false;
+        }
         if let Some(session_prefix) = point_write_session_storage_prefix(key) {
             shard
                 .session_slots
@@ -136,6 +151,7 @@ impl EmbeddedStore {
         shard.enforce_memory_limit(now_ms);
         #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
+        true
     }
 
     #[cfg(feature = "kv-overflow")]

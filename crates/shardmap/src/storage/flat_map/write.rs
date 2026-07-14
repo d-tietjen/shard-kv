@@ -171,6 +171,36 @@ impl FlatMap {
     }
 
     #[cfg(feature = "kv-overflow")]
+    pub(crate) fn can_set_bytes_hashed_with_limit(
+        &self,
+        hash: u64,
+        key: &[u8],
+        value_len: usize,
+        hard_limit: usize,
+    ) -> bool {
+        if hard_limit == usize::MAX {
+            return true;
+        }
+        let previous_bytes = self
+            .entries
+            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .map(FlatEntry::stored_bytes)
+            .or_else(|| {
+                self.remote_entries
+                    .get(key)
+                    .filter(|entry| entry.matches(hash, key))
+                    .map(RemoteEntry::stored_bytes)
+            })
+            .unwrap_or(0);
+        let projected_bytes = self
+            .stored_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(key.len())
+            .saturating_add(value_len);
+        projected_bytes <= hard_limit || projected_bytes <= self.stored_bytes
+    }
+
+    #[cfg(feature = "kv-overflow")]
     pub(crate) fn set_bytes_hashed_overflow(
         &mut self,
         hash: u64,
