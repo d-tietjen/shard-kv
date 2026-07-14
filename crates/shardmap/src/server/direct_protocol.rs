@@ -30,6 +30,7 @@ pub(super) use resp::RespDirectCommand;
 pub(super) enum ScnpScanCommand {
     Scan,
     ScanShard,
+    Topology,
 }
 
 #[cfg(feature = "embedded")]
@@ -38,6 +39,7 @@ impl ScnpScanCommand {
         (b"SCNP.SCAN", Self::Scan),
         (b"SCNP.SCANSHARD", Self::ScanShard),
         (b"SCNP.SCAN.SHARD", Self::ScanShard),
+        (b"SCNP.TOPOLOGY", Self::Topology),
     ];
 
     pub(super) fn from_name(name: &[u8]) -> Option<Self> {
@@ -50,7 +52,6 @@ impl ScnpScanCommand {
         parts.first().and_then(|name| Self::from_name(name))
     }
 
-    #[cfg(feature = "redis")]
     pub(super) fn write_fast_response(
         self,
         store: &EmbeddedStore,
@@ -58,9 +59,38 @@ impl ScnpScanCommand {
         out: &mut BytesMut,
     ) {
         match self {
+            Self::Topology => {
+                if !args.is_empty() {
+                    ServerWire::write_fast_error(
+                        out,
+                        "ERR wrong number of arguments for SCNP.TOPOLOGY",
+                    );
+                    return;
+                }
+                let (node_id, direct_base_port) =
+                    store.overflow_replica_topology().unwrap_or_default();
+                let payload = format!(
+                    "{}\t{}\t{}\t{}\toverflow_slot_v1",
+                    node_id,
+                    store.shard_count(),
+                    store.route_mode().as_str(),
+                    direct_base_port,
+                );
+                let start = ServerWire::begin_fast_value(out);
+                ServerWire::write_resp_blob_string(out, payload.as_bytes());
+                ServerWire::finish_fast_value(out, start);
+            }
+            #[cfg(feature = "redis")]
             Self::Scan => crate::commands::redis::write_scnp_scan_fast_response(store, args, out),
+            #[cfg(not(feature = "redis"))]
+            Self::Scan => ServerWire::write_fast_error(out, "ERR SCNP.SCAN requires redis support"),
+            #[cfg(feature = "redis")]
             Self::ScanShard => {
                 crate::commands::redis::write_scnp_scan_shard_fast_response(store, args, out);
+            }
+            #[cfg(not(feature = "redis"))]
+            Self::ScanShard => {
+                ServerWire::write_fast_error(out, "ERR SCNP.SCANSHARD requires redis support");
             }
         }
     }

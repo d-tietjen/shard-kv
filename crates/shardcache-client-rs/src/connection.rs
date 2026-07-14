@@ -13,6 +13,9 @@ use crate::protocol::{
 #[cfg(feature = "redis")]
 use crate::protocol::{STATUS_ARRAY, STATUS_FLOAT};
 
+const SCNP_READ_BUFFER_BYTES: usize = 8 * 1024;
+const SCNP_WRITE_BUFFER_BYTES: usize = 8 * 1024;
+
 #[derive(Debug)]
 pub(crate) struct ScnpConnection {
     r: BufReader<TcpStream>,
@@ -55,8 +58,8 @@ impl ScnpConnection {
         tune_tcp_stream_buffers(&s);
         let s2 = s.try_clone()?;
         Ok(Self {
-            r: BufReader::with_capacity(64 * 1024, s),
-            w: BufWriter::with_capacity(64 * 1024, s2),
+            r: BufReader::with_capacity(SCNP_READ_BUFFER_BYTES, s),
+            w: BufWriter::with_capacity(SCNP_WRITE_BUFFER_BYTES, s2),
             scratch: Vec::with_capacity(64),
         })
     }

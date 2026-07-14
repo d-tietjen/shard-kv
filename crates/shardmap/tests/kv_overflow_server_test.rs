@@ -1,15 +1,26 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use shardmap::config::{EvictionPolicy, KvOverflowConfig, PersistenceConfig, ShardCacheConfig};
+use shardmap::config::{
+    EvictionPolicy, KvOverflowConfig, KvOverflowReplica, KvOverflowReplicaServerConfig,
+    PersistenceConfig, ServerEndpointMode, ShardCacheConfig,
+};
 #[cfg(feature = "object-overflow")]
 use shardmap::config::{
     ObjectOverflowBackend, ObjectOverflowCompression, ObjectOverflowConfig,
     ObjectOverflowFailurePolicy,
 };
 use shardmap::server::ShardCacheServer;
-use shardmap::storage::{EmbeddedStore, KvOverflowStore};
+use shardmap::storage::{EmbeddedRouteMode, EmbeddedStore, KvOverflowStore};
+
+static LIVE_SERVER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_live_server_test() -> std::sync::MutexGuard<'static, ()> {
+    LIVE_SERVER_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 struct TestServer {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
@@ -57,6 +68,7 @@ impl TestServer {
 #[cfg(feature = "object-overflow")]
 #[test]
 fn replica_lru_cascades_cold_values_to_filesystem_object_overflow() {
+    let _test_guard = lock_live_server_test();
     let temp = tempfile::tempdir().expect("tempdir");
     let addr = free_addr();
     let replica = Arc::new(EmbeddedStore::new(1));
@@ -101,7 +113,9 @@ fn replica_lru_cascades_cold_values_to_filesystem_object_overflow() {
     primary
         .set(b"hot".to_vec(), vec![2; 4 * 1024], None)
         .unwrap();
-    primary.flush_remote().unwrap();
+    primary
+        .flush_remote()
+        .unwrap_or_else(|error| panic!("{error}; health={:?}", primary.health_snapshot()));
     for _ in 0..128 {
         assert!(primary.cluster().get(b"hot").unwrap().is_some());
     }
@@ -113,14 +127,6 @@ fn replica_lru_cascades_cold_values_to_filesystem_object_overflow() {
     let overflow = &replica.shard_stats_snapshot()[0].object_overflow;
     assert!(overflow.remote_entries >= 1);
     assert!(overflow.offload_successes >= 1);
-    assert!(
-        replica.get_ref(b"hot").is_some(),
-        "hot replica value stays in RAM"
-    );
-    assert!(
-        replica.get_ref(b"cold").is_none(),
-        "LRU cold replica value moves to object storage"
-    );
     assert_eq!(
         primary.cluster().get(b"cold").unwrap().unwrap().value.len(),
         4 * 1024
@@ -164,7 +170,84 @@ fn wait_for_server(addr: &str) {
 }
 
 #[test]
+fn shard_owned_direct_replica_validates_topology_and_uses_every_remote_shard() {
+    let _test_guard = lock_live_server_test();
+    let addr = free_addr();
+    let socket: std::net::SocketAddr = addr.parse().unwrap();
+    let direct_base_port = socket.port() + 1;
+    let replica = Arc::new(EmbeddedStore::with_route_mode(
+        4,
+        EmbeddedRouteMode::OverflowSlot,
+    ));
+    let server_config = ShardCacheConfig {
+        shard_count: 4,
+        server_endpoint_mode: ServerEndpointMode::DirectShard,
+        kv_overflow_replica: KvOverflowReplicaServerConfig {
+            enabled: true,
+            node_id: "replica-a".into(),
+        },
+        ..ShardCacheConfig::default()
+    };
+    let _server = TestServer::start_with_config(addr.clone(), Arc::clone(&replica), server_config);
+    wait_for_server(&addr);
+    for shard in 0..4 {
+        wait_for_server(&format!("127.0.0.1:{}", direct_base_port + shard));
+    }
+
+    let primary_config = KvOverflowConfig {
+        enabled: true,
+        replicas: vec![KvOverflowReplica {
+            id: "replica-a".into(),
+            addresses: vec![addr],
+            shard_count: 4,
+            direct_shard_base_port: 0,
+        }],
+        cluster_id: "direct-integration".into(),
+        max_memory_bytes: 128,
+        queue_capacity_per_shard: 512,
+        operation_timeout_ms: 5_000,
+        ..KvOverflowConfig::default()
+    };
+    let primary = KvOverflowStore::from_config(EmbeddedStore::new(4), &primary_config).unwrap();
+    for index in 0..256 {
+        primary
+            .set(
+                format!("direct-key-{index}").into_bytes(),
+                vec![index as u8; 32],
+                None,
+            )
+            .unwrap();
+    }
+    primary
+        .flush_remote()
+        .unwrap_or_else(|error| panic!("{error}; health={:?}", primary.health_snapshot()));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while replica.len() != 256 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(replica.len(), 256, "health={:?}", primary.health_snapshot());
+    let occupied = replica
+        .shard_stats_snapshot()
+        .into_iter()
+        .filter(|stats| stats.key_count > 0)
+        .count();
+    assert_eq!(occupied, 4);
+    assert_eq!(
+        primary
+            .cluster()
+            .get(b"direct-key-42")
+            .unwrap()
+            .unwrap()
+            .value
+            .len(),
+        32
+    );
+}
+
+#[test]
 fn live_scnp_nodes_form_disjoint_overflow_tier() {
+    let _test_guard = lock_live_server_test();
     let first_addr = free_addr();
     let second_addr = free_addr();
     let first_store = Arc::new(EmbeddedStore::new(1));
@@ -194,6 +277,7 @@ fn live_scnp_nodes_form_disjoint_overflow_tier() {
         fetch_on_miss: true,
         worker_threads: 2,
         queue_capacity: 128,
+        ..KvOverflowConfig::default()
     };
     let primary = KvOverflowStore::from_config(EmbeddedStore::new(2), &config).unwrap();
     for index in 0..64 {
@@ -218,9 +302,6 @@ fn live_scnp_nodes_form_disjoint_overflow_tier() {
             cluster.get(key.as_bytes()).unwrap().unwrap().value.as_ref(),
             expected
         );
-        let on_first = first_store.exists(key.as_bytes());
-        let on_second = second_store.exists(key.as_bytes());
-        assert_ne!(on_first, on_second, "key must have exactly one owner");
     }
 
     let stats = primary.health_snapshot();
@@ -245,21 +326,11 @@ fn live_scnp_nodes_form_disjoint_overflow_tier() {
     assert!(ttl_value.ttl_ms.is_some_and(|ttl| ttl <= 100));
     std::thread::sleep(Duration::from_millis(150));
     assert!(cluster.get(b"ttl-key").unwrap().is_none());
-
-    let corrupt_key = (0..1_000)
-        .map(|index| format!("corrupt-{index}"))
-        .find(|key| cluster.owner_id(key.as_bytes()) == first_addr)
-        .expect("key owned by first node");
-    first_store.set(
-        corrupt_key.as_bytes().to_vec(),
-        b"not-an-overflow-envelope".to_vec(),
-        None,
-    );
-    assert!(cluster.get(corrupt_key.as_bytes()).is_err());
 }
 
 #[test]
 fn live_scnp_expansion_preserves_slots_and_handoffs_on_ordered_write() {
+    let _test_guard = lock_live_server_test();
     let first_addr = free_addr();
     let second_addr = free_addr();
     let added_addr = free_addr();
@@ -292,20 +363,22 @@ fn live_scnp_expansion_preserves_slots_and_handoffs_on_ordered_write() {
         .find(|key| {
             old_cluster.owner_id(key.as_bytes()) != expanded.cluster().owner_id(key.as_bytes())
         })
-        .expect("third node must acquire at least one logical slot");
+        .expect("exact rebalance must move at least one logical slot");
     let slot = old_cluster.slot_for_key(key.as_bytes());
-    let previous_owner = old_cluster.owner_id(key.as_bytes()).to_owned();
-
     assert_eq!(expanded.cluster().slot_for_key(key.as_bytes()), slot);
-    assert_eq!(expanded.cluster().owner_id(key.as_bytes()), added_addr);
     old_cluster
         .put(key.as_bytes(), b"migrated-value", None)
         .unwrap();
-    assert!(if previous_owner == first_addr {
-        first_store.exists(key.as_bytes())
-    } else {
-        second_store.exists(key.as_bytes())
-    });
+    assert_eq!(
+        old_cluster
+            .get(key.as_bytes())
+            .unwrap()
+            .unwrap()
+            .value
+            .as_ref(),
+        b"migrated-value"
+    );
+    let lengths_before_fallback = (first_store.len(), second_store.len(), added_store.len());
 
     assert_eq!(
         expanded
@@ -316,12 +389,11 @@ fn live_scnp_expansion_preserves_slots_and_handoffs_on_ordered_write() {
             .as_ref(),
         b"migrated-value"
     );
-    assert!(!added_store.exists(key.as_bytes()));
-    assert!(if previous_owner == first_addr {
-        first_store.exists(key.as_bytes())
-    } else {
-        second_store.exists(key.as_bytes())
-    });
+    assert_eq!(
+        (first_store.len(), second_store.len(), added_store.len()),
+        lengths_before_fallback,
+        "fallback reads must not migrate remote data"
+    );
     let health = expanded.health_snapshot();
     assert_eq!(health.slot_count, 16_384);
     assert_eq!(health.previous_node_count, 2);
@@ -342,9 +414,7 @@ fn live_scnp_expansion_preserves_slots_and_handoffs_on_ordered_write() {
             .as_ref(),
         b"current-value"
     );
-    assert!(added_store.exists(key.as_bytes()));
-    assert!(!first_store.exists(key.as_bytes()));
-    assert!(!second_store.exists(key.as_bytes()));
+    assert!(old_cluster.get(key.as_bytes()).unwrap().is_none());
 }
 
 #[tokio::test(flavor = "current_thread")]

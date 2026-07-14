@@ -72,7 +72,10 @@ use routing::can_skip_session_lookup;
 pub use routing::{
     EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedSessionRoute, shift_for, stripe_index,
 };
-pub(crate) use routing::{assert_valid_shard_count, compute_key_route, compute_session_shard};
+pub(crate) use routing::{
+    assert_valid_shard_count, compute_key_route, compute_session_shard, overflow_slot_shard,
+    route_hash_for_shard,
+};
 use routing::{
     batch_derived_session_storage_prefix, can_route_with_key_hash, can_use_route_hash_as_key_hash,
     derived_session_storage_prefix, point_write_session_storage_prefix, session_route_prefix,
@@ -108,6 +111,7 @@ pub struct EmbeddedStore {
     #[cfg(feature = "redis-module-topk")]
     topk: modules::TopKStore,
     route_mode: EmbeddedRouteMode,
+    overflow_replica_topology: RwLock<Option<(String, u16)>>,
     #[cfg(feature = "telemetry")]
     metrics: Option<Arc<CacheTelemetry>>,
 }

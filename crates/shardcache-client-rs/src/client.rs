@@ -38,6 +38,16 @@ pub struct ShardCacheClient {
     redis_pipeline_responses: VecDeque<RedisPipelineResponse>,
 }
 
+/// Topology advertised by a shardcache server bootstrap listener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardCacheTopology {
+    pub node_id: String,
+    pub shard_count: usize,
+    pub route_mode: String,
+    pub direct_shard_base_port: u16,
+    pub capabilities: Vec<String>,
+}
+
 impl ShardCacheClient {
     /// Connects to a shardcache server listener that accepts generic SCNP.
     pub fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
@@ -183,6 +193,17 @@ impl ShardCacheClient {
             ],
             out,
         )
+    }
+
+    /// Reads the server's stable topology and transport capabilities.
+    pub fn topology(&mut self) -> Result<ShardCacheTopology> {
+        let mut response = Vec::new();
+        if !self.resp_command_into(&[b"SCNP.TOPOLOGY"], &mut response)? {
+            return Err(ShardCacheClientError::Protocol(
+                "SCNP.TOPOLOGY returned null".into(),
+            ));
+        }
+        parse_topology_response(&response)
     }
 
     /// Writes a GET request without flushing or reading its response.
@@ -340,6 +361,52 @@ impl ShardCacheClient {
     }
 }
 
+fn parse_topology_response(response: &[u8]) -> Result<ShardCacheTopology> {
+    if response.first() != Some(&b'$') {
+        return Err(ShardCacheClientError::Protocol(
+            "SCNP.TOPOLOGY did not return a RESP bulk string".into(),
+        ));
+    }
+    let header_end = response
+        .windows(2)
+        .position(|bytes| bytes == b"\r\n")
+        .ok_or_else(|| ShardCacheClientError::Protocol("invalid topology RESP header".into()))?;
+    let length = std::str::from_utf8(&response[1..header_end])
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| ShardCacheClientError::Protocol("invalid topology RESP length".into()))?;
+    let body_start = header_end + 2;
+    let body_end = body_start.checked_add(length).ok_or_else(|| {
+        ShardCacheClientError::Protocol("topology response length overflow".into())
+    })?;
+    if response.len() < body_end + 2 || &response[body_end..body_end + 2] != b"\r\n" {
+        return Err(ShardCacheClientError::Protocol(
+            "truncated topology RESP body".into(),
+        ));
+    }
+    let body = std::str::from_utf8(&response[body_start..body_end])
+        .map_err(|_| ShardCacheClientError::Protocol("topology body is not UTF-8".into()))?;
+    let mut fields = body.split('\t');
+    let node_id = fields.next().unwrap_or_default().to_string();
+    let shard_count = fields
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| ShardCacheClientError::Protocol("invalid topology shard count".into()))?;
+    let route_mode = fields.next().unwrap_or_default().to_string();
+    let direct_shard_base_port = fields
+        .next()
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| ShardCacheClientError::Protocol("invalid topology direct port".into()))?;
+    let capabilities = fields.map(str::to_string).collect::<Vec<_>>();
+    Ok(ShardCacheTopology {
+        node_id,
+        shard_count,
+        route_mode,
+        direct_shard_base_port,
+        capabilities,
+    })
+}
+
 impl ShardCacheDirectRouter {
     /// Connects directly to one shard-owned port.
     pub fn connect_shard(&self, shard_id: usize) -> Result<ShardCacheDirectShardClient> {
@@ -347,6 +414,24 @@ impl ShardCacheDirectRouter {
             router: *self,
             shard_id,
             conn: ScnpConnection::connect(self.shard_addr(shard_id)?)?,
+        })
+    }
+
+    /// Connects directly to one shard-owned port with explicit deadlines.
+    pub fn connect_shard_with_timeouts(
+        &self,
+        shard_id: usize,
+        connect_timeout: Duration,
+        operation_timeout: Duration,
+    ) -> Result<ShardCacheDirectShardClient> {
+        Ok(ShardCacheDirectShardClient {
+            router: *self,
+            shard_id,
+            conn: ScnpConnection::connect_with_timeouts(
+                self.shard_addr(shard_id)?,
+                connect_timeout,
+                operation_timeout,
+            )?,
         })
     }
 }

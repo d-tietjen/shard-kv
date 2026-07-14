@@ -51,6 +51,7 @@ pub use embedded_store::ShardArcEmbeddedStore;
 pub(crate) use embedded_store::TimeSeriesMultiRangeWriter;
 #[cfg(feature = "redis-module-topk")]
 pub(crate) use embedded_store::TopKError;
+pub(crate) use embedded_store::overflow_slot_shard;
 #[cfg(feature = "redis")]
 pub(crate) use embedded_store::{
     DEFAULT_SCAN_COUNT, RedisHashStore, RedisKeyScanType, RedisKeyStore, RedisListStore,
@@ -106,7 +107,8 @@ pub use kv_overflow::RedisKvOverflowNode;
 #[cfg(feature = "kv-overflow")]
 pub use kv_overflow::{
     DEFAULT_KV_OVERFLOW_SLOT_COUNT, KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode,
-    KvOverflowOptions, KvOverflowPutRequest, KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
+    KvOverflowOptions, KvOverflowPrimaryOwnershipSnapshot, KvOverflowPutRequest, KvOverflowStore,
+    KvOverflowValue, ScnpKvOverflowNode,
 };
 pub use object_overflow::{
     ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore, ObjectValueRef,

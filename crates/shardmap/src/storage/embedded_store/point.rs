@@ -1182,6 +1182,15 @@ impl EmbeddedStore {
                 }
                 shard.set_session_slice_hashed_no_ttl(&session_prefix, key_hash, key, value);
             }
+            EmbeddedRouteMode::OverflowSlot => {
+                let route = compute_key_route(self.route_mode, self.shift, key);
+                if route.shard_id != shard_id || route.key_hash != key_hash {
+                    return false;
+                }
+                shard
+                    .map
+                    .set_slice_hashed_tagged_no_ttl_local(key_hash, key_tag, key, value);
+            }
         }
         #[cfg(feature = "redis")]
         self.refresh_string_key_count(shard_id, &shard);
@@ -1247,6 +1256,18 @@ impl EmbeddedStore {
                         return false;
                     }
                     shard.set_session_slice_hashed_no_ttl(&session_prefix, key_hash, key, value);
+                }
+                EmbeddedRouteMode::OverflowSlot => {
+                    let route = compute_key_route(self.route_mode, self.shift, key);
+                    if route.shard_id != shard_id || route.key_hash != key_hash {
+                        return false;
+                    }
+                    // SAFETY: forwarded from this function's worker-local ownership contract.
+                    unsafe {
+                        shard
+                            .map
+                            .set_slice_hashed_tagged_no_ttl_hot(key_hash, key_tag, key, value)
+                    };
                 }
             }
             #[cfg(feature = "redis")]

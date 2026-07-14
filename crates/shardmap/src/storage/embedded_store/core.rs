@@ -41,6 +41,7 @@ impl EmbeddedStore {
                 #[cfg(feature = "redis-module-topk")]
                 topk: modules::TopKStore::new(shard_count),
                 route_mode,
+                overflow_replica_topology: RwLock::new(None),
             }
         }
     }
@@ -115,6 +116,7 @@ impl EmbeddedStore {
             #[cfg(feature = "redis-module-topk")]
             topk: modules::TopKStore::new(shard_count),
             route_mode,
+            overflow_replica_topology: RwLock::new(None),
             metrics,
         }
     }
@@ -123,6 +125,15 @@ impl EmbeddedStore {
     #[inline(always)]
     pub fn shard_count(&self) -> usize {
         self.shards.len()
+    }
+
+    /// Configures the identity and direct port advertised by an overflow replica.
+    pub fn configure_overflow_replica(&self, topology: Option<(String, u16)>) {
+        *self.overflow_replica_topology.write() = topology;
+    }
+
+    pub(crate) fn overflow_replica_topology(&self) -> Option<(String, u16)> {
+        self.overflow_replica_topology.read().clone()
     }
 
     #[cfg(feature = "redis")]
@@ -267,6 +278,12 @@ impl EmbeddedStore {
             .iter()
             .map(|shard| shard.read().stored_bytes())
             .sum()
+    }
+
+    /// Returns the approximate bytes stored in one string-value shard.
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn stored_bytes_in_shard(&self, shard_id: usize) -> usize {
+        self.shards[shard_id].read().stored_bytes()
     }
 
     /// Applies a per-shard memory budget and eviction policy.
@@ -425,6 +442,9 @@ impl EmbeddedStore {
         let route_hash = match self.route_mode {
             EmbeddedRouteMode::FullKey => key_hash,
             EmbeddedRouteMode::SessionPrefix => hash_key(session_route_prefix(key)),
+            EmbeddedRouteMode::OverflowSlot => overflow_slot_shard(key, self.shift)
+                .map(|shard_id| route_hash_for_shard(shard_id, self.shift))
+                .unwrap_or(key_hash),
         };
         (route_hash, key_hash)
     }

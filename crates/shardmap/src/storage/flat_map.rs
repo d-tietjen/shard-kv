@@ -29,6 +29,8 @@ struct FlatEntry {
     expire_at_ms: Option<u64>,
     semantic_index_token: Option<SemanticIndexToken>,
     semantic_governance: Option<SharedBytes>,
+    #[cfg(feature = "kv-overflow")]
+    overflow_generation: u64,
     access: EntryAccessMeta,
 }
 
@@ -108,6 +110,10 @@ impl FlatEntry {
     fn clear_semantic_embedding(&mut self) {
         self.semantic_index_token = None;
         self.semantic_governance = None;
+        #[cfg(feature = "kv-overflow")]
+        {
+            self.overflow_generation = 0;
+        }
     }
 }
 

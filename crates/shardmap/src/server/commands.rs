@@ -276,6 +276,16 @@ impl ScnpCommandContext<'_, '_, '_, '_> {
                     && route.shard_id == owned_shard_id
                     && route.key_hash == key_hash
             }),
+            EmbeddedRouteMode::OverflowSlot => self.owned_shard_id.is_some_and(|owned_shard_id| {
+                let route = self.store.route_key(key);
+                route_shard == owned_shard_id
+                    && route.shard_id == owned_shard_id
+                    && route.key_hash == key_hash
+                    && crate::storage::overflow_slot_shard(
+                        key,
+                        crate::storage::shift_for(self.store.shard_count()),
+                    ) == Some(owned_shard_id)
+            }),
         }
     }
 

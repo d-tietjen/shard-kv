@@ -165,6 +165,19 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
         };
         match &request.command {
             FastCommand::RespCommand { parts }
+                if ScnpScanCommand::from_parts(parts) == Some(ScnpScanCommand::Topology) =>
+            {
+                DirectProtocol::shared_execute_fast_into(
+                    self.store,
+                    request,
+                    self.write_buffer,
+                    self.fast_write_queue.as_deref_mut(),
+                    self.single_threaded,
+                    self.started_at,
+                );
+                Ok(Some(RequestBufferStep::Consumed(consumed)))
+            }
+            FastCommand::RespCommand { parts }
                 if ScnpScanCommand::from_parts(parts) == Some(ScnpScanCommand::ScanShard) =>
             {
                 match scnp_scan_shard_matches(parts, owned_shard_id) {

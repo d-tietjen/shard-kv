@@ -867,6 +867,9 @@ impl ThreadedStoreCore {
             EmbeddedRouteMode::SessionPrefix => {
                 shardmap_crate::storage::hash_key(session_route_prefix(key))
             }
+            EmbeddedRouteMode::OverflowSlot => {
+                unreachable!("overflow-slot routing is internal to overflow replica servers")
+            }
         }
     }
 
@@ -1001,6 +1004,9 @@ fn routed_shard_for_key(
         EmbeddedRouteMode::FullKey => shardmap_crate::storage::hash_key(key),
         EmbeddedRouteMode::SessionPrefix => {
             shardmap_crate::storage::hash_key(session_route_prefix(key))
+        }
+        EmbeddedRouteMode::OverflowSlot => {
+            unreachable!("overflow-slot routing is internal to overflow replica servers")
         }
     };
     stripe_index(route_hash, shift_for(shard_count))

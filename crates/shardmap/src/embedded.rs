@@ -38,7 +38,8 @@ pub use crate::storage::SharedEmbeddedStore as SharedCacheStore;
 #[cfg(feature = "kv-overflow")]
 pub use crate::storage::{
     DEFAULT_KV_OVERFLOW_SLOT_COUNT, KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode,
-    KvOverflowOptions, KvOverflowStore, KvOverflowValue, ScnpKvOverflowNode,
+    KvOverflowOptions, KvOverflowPrimaryOwnershipSnapshot, KvOverflowStore, KvOverflowValue,
+    ScnpKvOverflowNode,
 };
 pub use crate::storage::{
     EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedSessionRoute, PackedSessionWrite,

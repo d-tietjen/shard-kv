@@ -21,8 +21,8 @@ use crate::storage::TelemetryRuntime;
 use crate::storage::command::{BorrowedCommand, Command};
 use crate::storage::stats::{GlobalStatsSnapshot, ShardStatsSnapshot};
 use crate::storage::{
-    Bytes, FlatMap, MutationOp, MutationRecord, ObjectOverflowRuntime, StoredEntry, hash_key,
-    now_millis, shift_for, stripe_index,
+    Bytes, EmbeddedRouteMode, FlatMap, MutationOp, MutationRecord, ObjectOverflowRuntime,
+    StoredEntry, hash_key, now_millis, overflow_slot_shard, shift_for, stripe_index,
 };
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetry, CacheTelemetryHandle};
@@ -37,6 +37,7 @@ struct EngineInner {
     config: ShardCacheConfig,
     started_at: Instant,
     shift: u32,
+    route_mode: EmbeddedRouteMode,
     shard_senders: Vec<Sender<ShardMessage>>,
     shard_threads: Mutex<Vec<JoinHandle<()>>>,
     persistence: PersistenceRuntime,
@@ -235,7 +236,8 @@ impl EngineHandle {
             let replication = start_replication_primary(&config)?;
             let object_overflow = ObjectOverflowRuntime::from_config(&config.object_overflow)?;
             let shift = shift_for(config.shard_count);
-            let recovered = RecoveredShardEntries::partition(&recovery.entries, shift);
+            let route_mode = configured_engine_route_mode(&config);
+            let recovered = RecoveredShardEntries::partition(&recovery.entries, shift, route_mode);
 
             let mut shard_senders = Vec::with_capacity(config.shard_count);
             let mut shard_threads = Vec::with_capacity(config.shard_count);
@@ -273,6 +275,7 @@ impl EngineHandle {
                     config,
                     started_at: Instant::now(),
                     shift,
+                    route_mode,
                     shard_senders,
                     shard_threads: Mutex::new(shard_threads),
                     persistence,
@@ -299,7 +302,8 @@ impl EngineHandle {
         let replication = start_replication_primary(&config)?;
         let object_overflow = ObjectOverflowRuntime::from_config(&config.object_overflow)?;
         let shift = shift_for(config.shard_count);
-        let recovered = RecoveredShardEntries::partition(&recovery.entries, shift);
+        let route_mode = configured_engine_route_mode(&config);
+        let recovered = RecoveredShardEntries::partition(&recovery.entries, shift, route_mode);
 
         let mut shard_senders = Vec::with_capacity(config.shard_count);
         let mut shard_threads = Vec::with_capacity(config.shard_count);
@@ -337,6 +341,7 @@ impl EngineHandle {
                 config,
                 started_at: Instant::now(),
                 shift,
+                route_mode,
                 shard_senders,
                 shard_threads: Mutex::new(shard_threads),
                 persistence,
@@ -501,6 +506,11 @@ impl EngineHandle {
     }
 
     fn route(&self, key: &[u8]) -> usize {
+        if self.inner.route_mode == EmbeddedRouteMode::OverflowSlot
+            && let Some(shard_id) = overflow_slot_shard(key, self.inner.shift)
+        {
+            return shard_id;
+        }
         stripe_index(hash_key(key), self.inner.shift)
     }
 
@@ -530,13 +540,30 @@ impl EngineHandle {
 struct RecoveredShardEntries;
 
 impl RecoveredShardEntries {
-    fn partition(entries: &[StoredEntry], shift: u32) -> HashMap<usize, Vec<StoredEntry>> {
+    fn partition(
+        entries: &[StoredEntry],
+        shift: u32,
+        route_mode: EmbeddedRouteMode,
+    ) -> HashMap<usize, Vec<StoredEntry>> {
         let mut shards = HashMap::<usize, Vec<StoredEntry>>::new();
         for entry in entries {
-            let shard = stripe_index(hash_key(entry.key.as_ref()), shift);
+            let shard = if route_mode == EmbeddedRouteMode::OverflowSlot {
+                overflow_slot_shard(entry.key.as_ref(), shift)
+                    .unwrap_or_else(|| stripe_index(hash_key(entry.key.as_ref()), shift))
+            } else {
+                stripe_index(hash_key(entry.key.as_ref()), shift)
+            };
             shards.entry(shard).or_default().push(entry.clone());
         }
         shards
+    }
+}
+
+fn configured_engine_route_mode(config: &ShardCacheConfig) -> EmbeddedRouteMode {
+    if config.kv_overflow_replica.enabled {
+        EmbeddedRouteMode::OverflowSlot
+    } else {
+        EmbeddedRouteMode::FullKey
     }
 }
 

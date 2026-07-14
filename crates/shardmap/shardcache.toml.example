@@ -36,29 +36,48 @@ snapshot_min_writes = 1000
 compress_snapshots = true
 wal_channel_capacity = 16384
 
-# Embedded-only partitioned overflow. Overflow nodes are ordinary shardcache
-# SCNP servers. To expand horizontally, move the old endpoints to
-# previous_endpoints and put the expanded membership in endpoints until the
-# authoritative primary has resynchronized every fixed logical slot.
+# Dedicated SCNP overflow replicas advertise stable topology and expose one
+# direct listener per local shard. Do not enable this role and kv_overflow on
+# the same server.
+[kv_overflow_replica]
+enabled = false
+node_id = "overflow-a"
+
+# Embedded-only partitioned overflow. Stable replica IDs preserve membership
+# identity when addresses change. During exact rebalance, retain the old
+# membership in previous_replicas until flush_remote completes.
 [kv_overflow]
 enabled = false
 backend = "scnp"
-endpoints = ["10.0.0.11:6380", "10.0.0.12:6380"]
-previous_endpoints = []
+cluster_id = "production-cache"
+transport = "direct_shard"
 slot_count = 16384
-# Redis backend only: endpoints must be redis://, rediss://, valkey://, or
+# During a restart that changes the primary `shard_count`, retain the old
+# membership and set this to the old power-of-two shard count until handoff
+# completes.
+# previous_primary_shard_count = 8
+# Redis backend only: addresses must be redis://, rediss://, valkey://, or
 # valkeys:// URLs without credentials. Credentials are read from these env vars.
 redis_key_prefix = "shardcache:overflow:"
 # redis_username_env = "SHARDCACHE_OVERFLOW_REDIS_USERNAME"
 # redis_password_env = "SHARDCACHE_OVERFLOW_REDIS_PASSWORD"
 max_memory_bytes = 1073741824
 eviction_policy = "lfu"
-connections_per_endpoint = 2
+queue_capacity_per_shard = 1024
+pipeline_max_items = 64
+pipeline_max_bytes = 262144
+pipeline_flush_micros = 200
+max_inflight_per_target = 1
 connect_timeout_ms = 250
 operation_timeout_ms = 500
 max_retries = 2
 retry_backoff_ms = 10
 cleanup_interval_ms = 1000
 fetch_on_miss = true
-worker_threads = 2
-queue_capacity = 1024
+
+[[kv_overflow.replicas]]
+id = "overflow-a"
+addresses = ["10.0.0.11:6380"]
+shard_count = 16
+# Set to 0 to use the direct port base advertised by SCNP.TOPOLOGY.
+direct_shard_base_port = 0

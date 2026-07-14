@@ -3,23 +3,29 @@
 The `kv-overflow` feature turns an embedded `EmbeddedStore` into a bounded
 in-memory primary backed by a horizontally scalable shardcache server tier.
 Unlike a conventional read-replica set, overflow nodes do not each receive the
-whole data set. Keys hash into a fixed logical slot space and rendezvous
-ownership assigns each complete slot to one node, so usable remote capacity
-grows with the number of nodes without coupling slots to the primary's local
-shard count.
+whole data set. Every primary shard exclusively owns a deterministic set of
+remote shard targets and the TCP connections to those targets. With 16 primary
+shards and one 16-shard replica, primary shard `N` owns remote shard `N`. With
+16 replicas, primary shard `N` owns complete replica `N`. Larger memberships
+divide complete replicas evenly across primary shards without sharing a target.
+Each primary shard's contiguous logical slot range is subdivided only among its
+owned targets.
 
 Writes are applied to the local primary and admitted to a bounded asynchronous
 replication pool. A precomputed fixed-slot table makes ownership lookup O(1).
-Deterministic, endpoint-affine worker lanes preserve mutation order for each
-key without putting network latency on the primary write path. Workers drain
-ordered groups of up to 64 writes; the Redis adapter sends each group as a
-pipeline. A value becomes eligible for local eviction only after its matching
-generation is acknowledged by the remote owner. When resident bytes exceed the
-configured target, ShardMap chooses acknowledged victims with its LRU or LFU
-metadata. Pending or failed replications remain resident even when that
-temporarily exceeds the target. Queue admission happens before the local
-mutation, so a full queue returns `ShardCacheError::Backpressure` without
-changing the primary value.
+Each embedded shard has one dedicated background I/O drain, an independent
+bounded queue, and its own eviction-maintenance lock. A saturated shard does not
+consume another shard's admission capacity. Deterministic shard-local lanes
+preserve mutation order for each key without putting network latency on the
+primary write path. SCNP and Redis workers drain ordered pipelines of up to 64
+writes per target. A value becomes eligible for local
+eviction only after its matching generation is acknowledged by the remote
+owner. The configured memory target is divided deterministically across the
+embedded shards; each shard chooses acknowledged victims from its own LRU or
+LFU metadata. Pending or failed replications remain resident even when that
+temporarily exceeds a shard's target.
+Queue admission happens before the local mutation, so a full shard queue
+returns `ShardCacheError::Backpressure` without changing the primary value.
 
 On a local miss, `KvOverflowStore::get` fetches the deterministic owner and
 promotes the value back into memory. Other services can call
@@ -32,22 +38,25 @@ shardmap = { version = "0.6.0", features = ["kv-overflow"] }
 ```
 
 ```rust,ignore
-use shardmap::config::{EvictionPolicy, KvOverflowConfig};
-use shardmap::embedded::{KvOverflowStore, ShardedEngine};
+use shardmap::config::{EvictionPolicy, KvOverflowConfig, KvOverflowReplica};
+use shardmap::embedded::{EmbeddedStore, KvOverflowStore};
 
 let config = KvOverflowConfig {
     enabled: true,
-    endpoints: vec![
-        "10.0.0.11:6380".into(),
-        "10.0.0.12:6380".into(),
-    ],
+    cluster_id: "production-cache".into(),
+    replicas: vec![KvOverflowReplica {
+        id: "overflow-a".into(),
+        addresses: vec!["10.0.0.11:6380".into()],
+        shard_count: 16,
+        direct_shard_base_port: 6381,
+    }],
     slot_count: 16_384,
     max_memory_bytes: 1024 * 1024 * 1024,
     eviction_policy: EvictionPolicy::Lfu,
     ..KvOverflowConfig::default()
 };
 
-let cache = KvOverflowStore::from_config(ShardedEngine::new(16), &config)?;
+let cache = KvOverflowStore::from_config(EmbeddedStore::new(16), &config)?;
 cache.set(b"model:7".to_vec(), payload, None)?;
 
 // Optional durability/visibility boundary for all writes admitted so far.
@@ -70,33 +79,65 @@ let remote = cache.cluster().get(b"model:7")?;
   starts enforcing the memory target.
 - `KvOverflowStore::set` confirms local application and queue admission, not
   remote visibility. `flush_remote` waits for every mutation admitted before
-  the call and returns an error if any worker lane reported a failure.
-- `worker_threads` controls ordered replication lanes and `queue_capacity`
-  bounds queued plus active jobs across all lanes. Size the queue for expected
-  bursts and monitor `queue_depth`, `pending_keys`, `active_workers`,
-  `enqueue_failures`, and `replication_failures`.
-- Worker lanes are endpoint-affine when there are at least as many workers as
-  endpoints. For Redis, start with four workers per independent endpoint and
-  tune from production telemetry. Fewer workers than endpoints share lanes and
-  cannot drive every endpoint concurrently.
+  the call. Failed current generations remain resident and retry on each flush;
+  the maintenance interval also retries them in the background. The flush
+  cannot report success while an admitted generation is still dirty.
+  A batch transport failure is retried per item so one ambiguous result does
+  not mark unrelated keys as replicated or failed.
+- Configured stores use one drain per primary shard and
+  `queue_capacity_per_shard` admissions for each drain. Monitor
+  `primary_shard_count`, `drains_per_shard`, `shard_queue_depths`,
+  `shard_queue_capacities`, `completion_backlog`,
+  `shard_completion_backlogs`, `pending_keys`, `failed_pending_keys`,
+  `active_workers`, `enqueue_failures`, and `replication_failures`.
+- A shard's network drain owns only its queue, transport connections, reusable
+  buffers, and network counters. It never receives or locks the embedded
+  store, remote/pending metadata maps, key gates, or eviction state. Successful
+  acknowledgements contain no value payload and return through a bounded
+  single-producer completion lane owned by that primary shard. The lane shares
+  no mutex with the worker. Its capacity is covered by the shard's in-flight
+  reservation, so a worker can always publish an acknowledgement without
+  blocking. The primary path applies bounded completions at admission pressure
+  or while that shard is above its memory target; otherwise they are applied at
+  `flush_remote` or by periodic maintenance.
+- A shard with one SCNP target uses the lower-overhead blocking pipeline because
+  there is no target-level head-of-line risk. A shard with multiple targets runs
+  those target connections independently on one current-thread Tokio runtime;
+  a delayed target therefore cannot stall healthy targets owned by the same
+  shard. `max_inflight_per_target > 1` creates stable key-hash lanes so the same
+  key remains ordered. Every target also has a separate lazy read socket.
+  Direct shard transport is the default and never silently falls back to
+  fanout. At startup every configured address must
+  advertise the same node ID, shard count, `overflow_slot` route mode, direct
+  port base, and `overflow_slot_v1` capability.
 - `slot_count` is a persistent routing invariant and must not change while
-  overflow data exists. It defaults to 16,384 and is independent of local
-  `shard_count` and the number of overflow servers. The maximum is 1,048,576
-  so the precomputed owner table has a bounded startup and memory cost.
-- Horizontal expansion moves complete logical slots. Rendezvous ownership
-  guarantees that adding a node moves slots only from an old owner to the new
-  node; slots that do not move retain their existing owner.
-- For online expansion, put the expanded membership in `endpoints` and the old
-  membership in `previous_endpoints`. Writes establish the current-owner copy
+  overflow data exists. It defaults to 16,384, must be at least the shard
+  count, and is divided evenly into power-of-two shard ranges. Logical slots
+  use the same stable hash prefix as embedded routing, so increasing the
+  primary shard count subdivides existing ranges without renumbering keys.
+  The maximum is 1,048,576 so the precomputed owner table has a bounded
+  startup and memory cost.
+- Topology changes perform an exact rebalance. This can move ranges between
+  existing replicas as well as onto a newly added replica.
+- For online expansion, put the expanded membership in `replicas` and the old
+  membership in `previous_replicas`. Writes establish the current-owner copy
   before deleting the old copy. A current-owner miss may read the previous
   owner, but fallback reads never mutate either node; this prevents an
   uncoordinated reader from overwriting a concurrent primary write. Current
   owner errors never fall back, avoiding stale reads after an acknowledged
   handoff.
-- Keep `previous_endpoints` configured until the authoritative local snapshot
+- Changing the embedded primary shard count requires a restart because the
+  local shard array is immutable. Keep the old membership in
+  `previous_replicas` (it may equal the current membership) and set
+  `previous_primary_shard_count` to the old count. Local WAL/snapshot recovery
+  remains authoritative; the previous geometry lets re-offload and explicit
+  synchronization find and remove copies placed by the old shard ownership.
+- Keep `previous_replicas` configured until the authoritative local snapshot
   has been loaded and `synchronize_resident`/`flush_remote` has completed for
   the expanded membership. Then remove it. Node removal uses the same handoff
   mechanism, but the removed server must remain reachable during migration.
+  `flush_remote` also migrates remote-only metadata by reading the old target,
+  writing and verifying the new target, then deleting the old copy.
 - Monitor `previous_node_count`, `handoff_reads`, `handoff_hits`, and
   `handoff_failures` while a membership handoff is active.
 - Each key has one remote owner in 0.6.0. This provides aggregate capacity and
@@ -108,8 +149,11 @@ let remote = cache.cluster().get(b"model:7")?;
 - TTL starts when the primary accepts the write, not when a worker reaches the
   queued replication job. It is enforced from the absolute envelope deadline
   during every remote read. Redis also receives the remaining server-side TTL.
-  The wrapped primary deletes an expired or missing remote copy on fault-in and
-  runs a configurable cleanup pass for expired envelopes that are not read.
+  Fault-ins coalesce concurrent reads for the same cold key without holding a
+  striped mutation lock during network I/O. The wrapped primary forgets missing
+  remote metadata and runs a configurable cleanup pass for expired envelopes.
+  Cleanup deletes use the same ordered worker lanes as writes and retry in the
+  background without blocking unrelated primary mutations on remote I/O.
 - Deletes remove the remote copy before deleting the primary copy. A remote
   delete failure is returned and the primary value remains available.
 - The wrapper supports byte-string entries. Redis object families and session
@@ -137,17 +181,23 @@ shardmap = { version = "0.6.0", features = ["kv-overflow-redis"] }
 [kv_overflow]
 enabled = true
 backend = "redis"
-endpoints = [
-  "rediss://cache-a.example.com:6380/0",
-  "rediss://cache-b.example.com:6380/0",
-]
-previous_endpoints = []
+cluster_id = "production-cache"
 slot_count = 16384
 redis_key_prefix = "my-service:overflow:"
 redis_username_env = "OVERFLOW_REDIS_USERNAME"
 redis_password_env = "OVERFLOW_REDIS_PASSWORD"
 max_memory_bytes = 1073741824
 eviction_policy = "lfu"
+
+[[kv_overflow.replicas]]
+id = "redis-a"
+addresses = ["rediss://cache-a.example.com:6380/0"]
+shard_count = 1
+
+[[kv_overflow.replicas]]
+id = "redis-b"
+addresses = ["rediss://cache-b.example.com:6380/0"]
+shard_count = 1
 ```
 
 Endpoint URLs may use `redis://`, `rediss://`, `valkey://`, or `valkeys://`.
@@ -230,13 +280,26 @@ workers until the producers finish:
 cargo run --release -p shardcache-benchmarks --features kv-overflow \
   --bin kv_overflow_primary_cost -- \
   --iterations 500000 --keys 65536 --value-size 1024 \
-  --worker-threads 4 --producers 4 --drain-mode blocked
+  --producers 4 --drain-mode blocked
 ```
 
-Use `--drain-mode concurrent` to include contention from active workers. Live
+Use `--drain-mode concurrent` to overlap primary writes with active drains. Live
 SCNP or Redis runs use `--backend`, one or more repeated `--endpoint` arguments,
 and the matching benchmark feature. The output separates primary enqueue time,
 post-producer drain time, and end-to-end replication throughput.
+Set `--read-iterations` to add embedded GET and direct overflow GET throughput
+plus sampled p50/p95/p99 latency after all writes are remotely visible.
+
+To measure topology-validated direct ports and SCNP pipelines against a
+16-shard replica:
+
+```bash
+cargo run --release -p shardcache-benchmarks --features kv-overflow \
+  --bin kv_overflow_primary_cost -- \
+  --backend scnp --transport direct --endpoint 10.0.0.11:6380 \
+  --scnp-replica-id overflow-a --scnp-shard-count 16 \
+  --pipeline-max-items 64 --value-size 1024 --drain-mode concurrent
+```
 
 Five release runs on Adam on 2026-07-13 used four producers, 1 KiB values,
 131,072 keys, 400,000 writes, Valkey 8.1.8 containers pinned to dedicated CPUs,
@@ -259,3 +322,51 @@ claims. The queue absorbs bursts but cannot create remote capacity: sustained
 write throughput must remain below the aggregate endpoint drain rate, or the
 bounded queue will eventually return `ShardCacheError::Backpressure` before
 mutating the primary.
+
+### Shard-Owned Direct SCNP Results
+
+The shard-local counter and bounded-queue implementation was measured on Adam
+on 2026-07-13 with 16 primary shards, exactly 16 network drains, four producers,
+1 KiB values, 131,072 keys, and 400,000 writes. Five in-process no-op runs
+admitted a median 1.70 million writes/second at 589 ns/op after reusing the
+already-computed xxh3 key hash for overflow metadata. Median end-to-end
+throughput was 1.135 million writes/second and the median sampled enqueue p99
+was 8.19 us. A longer run before the metadata optimization admitted 1.96
+million writes/second with four producers and 3.05 million with sixteen. Before
+the shard-local queue/counter work, the four-producer result was 1.68 million;
+cache misses fell 19%, context switches 10%, and total cycles 11% under
+`perf stat`.
+
+The primary path now stores the queued generation in the resident entry, so a
+successful SET does not allocate pending metadata. Five no-op runs after that
+change admitted a median 1.90 million writes/second at 527 ns/op and completed
+1.269 million writes/second end to end. Idle SCNP connection buffering is 16
+KiB per socket pair rather than 128 KiB.
+
+Five 1 KiB and three 64 KiB live runs used one 16-shard direct SCNP replica on
+separately pinned CPUs, pipeline size 64, and a 256 KiB pipeline byte cap.
+Medians were:
+
+| Value size | Embedded SET | Overflow enqueue | End-to-end writes/s | Remote GET p50 | Remote GET p99 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 KiB | 358 ns/op | 680 ns/op | 1.044M | 49.5 us | 132 us |
+| 64 KiB | 9.6 us/op | 16.9 us/op | 58.4K | not measured | not measured |
+
+The 64 KiB byte cap limits pipelines to roughly four values. Compared with an
+unbounded 64-item batch, it reduced median sampled enqueue p99 from about 1.07
+ms to 229 us and raised end-to-end throughput by about 11%. Shards that own
+multiple targets use independent target tasks; a regression test holds one
+target for 300 ms and verifies a healthy target completes within 150 ms on the
+same shard-owned runtime.
+
+A synthetic no-network topology comparison used the benchmark's
+`--noop-replicas` and `--noop-shards-per-replica` controls. Median end-to-end
+throughput was 854K writes/second for `16x1` and 930K for `16x500`, confirming
+that batch CPU and allocation cost no longer grows with all 8,000 cluster
+targets. This does not test socket latency or slow-target isolation.
+
+These measurements do **not** satisfy the original acceptance targets of 90%
+embedded enqueue throughput and at most 1.2x embedded p99. Worker isolation,
+slot correctness, and SCNP pipelining are in place, but primary metadata/queue
+admission and large-value ownership transfer remain optimization work before
+the feature should be described as production-ready.

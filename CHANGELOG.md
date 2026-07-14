@@ -25,6 +25,31 @@
 - Added endpoint-affine worker lanes, ordered 64-write Redis pipelines, O(1)
   fixed-slot owner lookup, and striped acknowledgment metadata to keep primary
   overhead bounded while overflow endpoints scale horizontally.
+- Isolated every network drain from primary storage and metadata locks. Remote
+  acknowledgements return through bounded per-shard completion lanes, discard
+  successful value payloads, and are applied by the primary under admission or
+  memory pressure, at explicit flush boundaries, or by periodic maintenance.
+  Each primary shard has exactly one network drain; no worker or completion
+  mutex is shared across shards.
+- Replaced allocation-backed worker queues with preallocated shard-local rings,
+  split primary and worker counters onto separate cache lines, made generation
+  counters shard-local, aggregated replication metrics per batch, and replaced
+  topology-sized batch allocation with reusable sparse owner grouping.
+- Changed pipeline coalescing to wait once and then drain the shard ring instead
+  of waking the network worker for each arriving item, substantially reducing
+  sparse-producer admission overhead without extending the configured flush
+  deadline.
+- Reused each operation's xxh3 key hash in striped overflow metadata tables.
+  Hashbrown raw-entry lookups now avoid a second key hash on primary admission,
+  completion, retry, and delete paths while retaining resize-safe hashing.
+- Stored queued generations in resident entries so successful replication no
+  longer requires a pending-metadata insertion, and limited pipelines by both
+  item count and encoded bytes to bound large-value allocation and tail cost.
+- Added independent target-local SCNP tasks on one current-thread runtime for
+  shards that own multiple remote targets. Single-target shards retain the
+  lower-overhead blocking pipeline; stable key-hash lanes preserve per-key
+  order when `max_inflight_per_target` is greater than one.
+- Reduced idle SCNP read/write buffers from 64 KiB each to 8 KiB each.
 - Added replica-side LRU plus filesystem object-overflow integration coverage,
   including transparent SCNP fault-in for envelopes evicted from replica RAM.
 - Added the `kv_overflow_primary_cost` benchmark for measuring embedded SET
@@ -42,6 +67,12 @@
 
 ### Validation
 
+- Five-run no-op adapter benchmarks on Adam with 16 shard-local drains, four
+  producers, and 1 KiB values admitted a median 1.90M writes/second at 527
+  ns/op and completed 1.269M writes/second end to end. Five direct-SCNP runs
+  against a separately pinned 16-shard replica sustained a median 1.044M
+  end-to-end writes/second with 680 ns/op primary admission. A 256 KiB byte cap
+  sustained 58.4K writes/second for 64 KiB values with a 229 us sampled p99.
 - Five-run release benchmarks on Adam with four producers and 1 KiB values
   measured 954 ns/op primary admission and 339K end-to-end writes/second for
   one Valkey endpoint. Four disjoint endpoints with four workers each admitted

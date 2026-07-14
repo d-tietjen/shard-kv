@@ -27,6 +27,8 @@ pub enum EmbeddedRouteMode {
     FullKey,
     /// Route all `s:<session>:c:<chunk>` keys for a session to the same shard.
     SessionPrefix,
+    /// Route versioned key-value overflow keys by their encoded remote shard.
+    OverflowSlot,
 }
 
 impl EmbeddedRouteMode {
@@ -36,6 +38,7 @@ impl EmbeddedRouteMode {
         match self {
             Self::FullKey => "full_key",
             Self::SessionPrefix => "session_prefix",
+            Self::OverflowSlot => "overflow_slot",
         }
     }
 }
@@ -47,13 +50,45 @@ pub(crate) fn compute_key_route(
     key: &[u8],
 ) -> EmbeddedKeyRoute {
     let key_hash = hash_key(key);
+    if route_mode == EmbeddedRouteMode::OverflowSlot
+        && let Some(shard_id) = overflow_slot_shard(key, shift)
+    {
+        return EmbeddedKeyRoute { shard_id, key_hash };
+    }
     let route_hash = match route_mode {
-        EmbeddedRouteMode::FullKey => key_hash,
+        EmbeddedRouteMode::FullKey | EmbeddedRouteMode::OverflowSlot => key_hash,
         EmbeddedRouteMode::SessionPrefix => hash_key(session_route_prefix(key)),
     };
     EmbeddedKeyRoute {
         shard_id: stripe_index(route_hash, shift),
         key_hash,
+    }
+}
+
+pub(crate) const OVERFLOW_SLOT_KEY_MAGIC: &[u8; 8] = b"SCKVKEY1";
+
+/// Returns the encoded overflow destination when `key` has a valid internal
+/// header for the configured power-of-two shard geometry.
+#[inline]
+pub(crate) fn overflow_slot_shard(key: &[u8], shift: u32) -> Option<usize> {
+    if key.len() < 18 || &key[..8] != OVERFLOW_SLOT_KEY_MAGIC {
+        return None;
+    }
+    let shard_id = u32::from_le_bytes(key[8..12].try_into().ok()?) as usize;
+    let shard_count = if shift == usize::BITS {
+        1
+    } else {
+        1usize << (usize::BITS - shift)
+    };
+    (shard_id < shard_count).then_some(shard_id)
+}
+
+#[inline]
+pub(crate) fn route_hash_for_shard(shard_id: usize, shift: u32) -> u64 {
+    if shift == usize::BITS {
+        0
+    } else {
+        (shard_id as u64) << (shift - 7)
     }
 }
 
@@ -97,12 +132,20 @@ pub(super) fn can_route_with_key_hash(
     shard_count: usize,
     key: &[u8],
 ) -> bool {
-    route_mode == EmbeddedRouteMode::FullKey || shard_count == 1 || !key.starts_with(b"s:")
+    match route_mode {
+        EmbeddedRouteMode::FullKey => true,
+        EmbeddedRouteMode::SessionPrefix => shard_count == 1 || !key.starts_with(b"s:"),
+        EmbeddedRouteMode::OverflowSlot => shard_count == 1,
+    }
 }
 
 #[inline(always)]
 pub(super) fn can_use_route_hash_as_key_hash(route_mode: EmbeddedRouteMode, key: &[u8]) -> bool {
-    route_mode == EmbeddedRouteMode::FullKey || !key.starts_with(b"s:")
+    match route_mode {
+        EmbeddedRouteMode::FullKey => true,
+        EmbeddedRouteMode::SessionPrefix => !key.starts_with(b"s:"),
+        EmbeddedRouteMode::OverflowSlot => false,
+    }
 }
 
 #[inline(always)]
@@ -177,5 +220,50 @@ pub(super) fn batch_derived_session_storage_prefix(keys: &[Bytes]) -> Option<Byt
         Some(first)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn overflow_key(remote_shard: u32) -> Vec<u8> {
+        let mut key = OVERFLOW_SLOT_KEY_MAGIC.to_vec();
+        key.extend_from_slice(&remote_shard.to_le_bytes());
+        key.extend_from_slice(&7u32.to_le_bytes());
+        key.extend_from_slice(&1u16.to_le_bytes());
+        key.extend_from_slice(b"c");
+        key.extend_from_slice(b"original");
+        key
+    }
+
+    #[test]
+    fn overflow_slot_routes_only_valid_encoded_shards() {
+        let shift = shift_for(4);
+        for shard in 0..4 {
+            assert_eq!(
+                compute_key_route(EmbeddedRouteMode::OverflowSlot, shift, &overflow_key(shard))
+                    .shard_id,
+                shard as usize
+            );
+        }
+
+        let malformed = overflow_key(4);
+        assert_eq!(overflow_slot_shard(&malformed, shift), None);
+        assert!(compute_key_route(EmbeddedRouteMode::OverflowSlot, shift, &malformed).shard_id < 4);
+    }
+
+    #[test]
+    fn overflow_slot_prehashed_shortcuts_are_disabled() {
+        let key = overflow_key(3);
+        assert!(!can_route_with_key_hash(
+            EmbeddedRouteMode::OverflowSlot,
+            4,
+            &key
+        ));
+        assert!(!can_use_route_hash_as_key_hash(
+            EmbeddedRouteMode::OverflowSlot,
+            &key
+        ));
     }
 }

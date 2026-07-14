@@ -9,7 +9,9 @@ mod protocol;
 mod redis;
 mod routing;
 
-pub use client::{ShardCacheClient, ShardCacheDirectClient, ShardCacheDirectShardClient};
+pub use client::{
+    ShardCacheClient, ShardCacheDirectClient, ShardCacheDirectShardClient, ShardCacheTopology,
+};
 #[cfg(feature = "redis")]
 pub use commands::redis::{RedisCommandKind, RedisResponse};
 pub use error::{Result, ShardCacheClientError};

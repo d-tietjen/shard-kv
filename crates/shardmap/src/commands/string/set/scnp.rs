@@ -184,7 +184,7 @@ impl Set {
                 }
             }
             _ => {
-                if !ctx.request_matches_owned_shard(route_shard, key_hash) {
+                if !ctx.request_matches_owned_shard_for_key(route_shard, key_hash, key) {
                     ServerWire::write_fast_error(ctx.out, "ERR SCNP route shard mismatch");
                     return ScnpDispatch::Complete(ctx.frame.frame_len);
                 }

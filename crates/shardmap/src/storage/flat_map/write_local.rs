@@ -67,6 +67,8 @@ impl FlatMap {
                     expire_at_ms,
                     semantic_index_token: None,
                     semantic_governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -268,6 +270,8 @@ impl FlatMap {
                     expire_at_ms: None,
                     semantic_index_token: None,
                     semantic_governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -400,6 +404,8 @@ impl FlatMap {
                     expire_at_ms,
                     semantic_index_token: None,
                     semantic_governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,

@@ -48,6 +48,8 @@ pub struct ShardCacheConfig {
     pub object_overflow: ObjectOverflowConfig,
     /// Partitioned key-value overflow configuration for cold values.
     pub kv_overflow: KvOverflowConfig,
+    /// Enables this server as a shard-addressable key-value overflow replica.
+    pub kv_overflow_replica: KvOverflowReplicaServerConfig,
     /// Native mutation-stream replication configuration.
     pub replication: ReplicationConfig,
     /// Redis transaction execution mode.
@@ -99,6 +101,16 @@ pub enum ServerEndpointMode {
     Fanout,
     /// Expose shard-owned direct ports in addition to the fanout listener.
     DirectShard,
+}
+
+/// Server-side role configuration for a dedicated key-value overflow replica.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct KvOverflowReplicaServerConfig {
+    /// Enable the overflow-slot routing contract on this server.
+    pub enabled: bool,
+    /// Stable node identity reported to overflow primaries.
+    pub node_id: String,
 }
 
 /// Capacity settings for the hot, warm, and cold in-memory tiers.
@@ -269,6 +281,15 @@ pub struct KvOverflowConfig {
     pub enabled: bool,
     /// Protocol used by every endpoint in this overflow membership.
     pub backend: KvOverflowBackend,
+    /// Stable replica membership. New configurations should use this instead
+    /// of `endpoints` so network addresses can change without moving slots.
+    pub replicas: Vec<KvOverflowReplica>,
+    /// Previous stable membership retained while ranges are handed off.
+    pub previous_replicas: Vec<KvOverflowReplica>,
+    /// Namespace included in internal overflow keys.
+    pub cluster_id: String,
+    /// SCNP transport topology.
+    pub transport: KvOverflowTransport,
     /// Stable SCNP addresses for the current overflow membership.
     pub endpoints: Vec<String>,
     /// Previous membership retained during an online slot handoff.
@@ -277,6 +298,12 @@ pub struct KvOverflowConfig {
     /// to the membership that previously owned the logical slots until the
     /// authoritative primary has resynchronized the new membership.
     pub previous_endpoints: Vec<String>,
+    /// Embedded primary shard count that owned the previous membership.
+    ///
+    /// Set this only when changing `shard_count` during a restart handoff.
+    /// When omitted, the previous membership uses the current primary shard
+    /// count.
+    pub previous_primary_shard_count: Option<usize>,
     /// Fixed logical slot count used for overflow ownership.
     ///
     /// This must remain unchanged for the lifetime of the overflow data and
@@ -294,6 +321,16 @@ pub struct KvOverflowConfig {
     pub eviction_policy: EvictionPolicy,
     /// TCP connections retained per overflow node.
     pub connections_per_endpoint: usize,
+    /// Maximum queued plus active jobs for each primary shard.
+    pub queue_capacity_per_shard: usize,
+    /// Maximum requests emitted in one ordered transport pipeline.
+    pub pipeline_max_items: usize,
+    /// Maximum key and value bytes emitted in one ordered transport pipeline.
+    pub pipeline_max_bytes: usize,
+    /// Maximum coalescing delay before a partial pipeline is flushed.
+    pub pipeline_flush_micros: u64,
+    /// Maximum concurrently active batches for one remote target.
+    pub max_inflight_per_target: usize,
     /// Maximum TCP connect duration.
     pub connect_timeout_ms: u64,
     /// Maximum duration for one SCNP operation.
@@ -306,10 +343,49 @@ pub struct KvOverflowConfig {
     pub cleanup_interval_ms: u64,
     /// Promote remotely found values back into primary memory.
     pub fetch_on_miss: bool,
-    /// Number of ordered remote replication workers.
+    /// Legacy pre-0.6 worker setting. Shard-owned overflow always starts
+    /// exactly one network drain for each primary shard.
     pub worker_threads: usize,
-    /// Maximum total queued and active remote replication jobs.
+    /// Legacy pre-0.6 queue setting. Configured stores derive total capacity
+    /// from `queue_capacity_per_shard`.
     pub queue_capacity: usize,
+}
+
+/// Stable identity and network paths for one overflow replica.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KvOverflowReplica {
+    /// Stable membership identity. It must not contain credentials or an
+    /// ephemeral IP address.
+    pub id: String,
+    /// Bootstrap addresses for the same replica, ordered by preference.
+    pub addresses: Vec<String>,
+    /// Expected SCNP shard count. Redis ignores this field.
+    pub shard_count: usize,
+    /// First direct-shard port. Zero derives it as bootstrap port plus one.
+    pub direct_shard_base_port: u16,
+}
+
+impl Default for KvOverflowReplica {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            addresses: Vec::new(),
+            shard_count: 1,
+            direct_shard_base_port: 0,
+        }
+    }
+}
+
+/// Transport used between a primary and shardcache overflow replicas.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvOverflowTransport {
+    /// Connect to the shard-owned port selected by overflow-slot routing.
+    #[default]
+    DirectShard,
+    /// Compatibility path through the replica fanout listener.
+    Fanout,
 }
 
 /// Wire protocol used by key-value overflow nodes.
@@ -488,6 +564,7 @@ impl Default for ShardCacheConfig {
             persistence: PersistenceConfig::default(),
             object_overflow: ObjectOverflowConfig::default(),
             kv_overflow: KvOverflowConfig::default(),
+            kv_overflow_replica: KvOverflowReplicaServerConfig::default(),
             replication: ReplicationConfig::default(),
             transaction_mode: TransactionMode::default(),
             server_endpoint_mode: ServerEndpointMode::default(),
@@ -584,8 +661,13 @@ impl Default for KvOverflowConfig {
         Self {
             enabled: false,
             backend: KvOverflowBackend::Scnp,
+            replicas: Vec::new(),
+            previous_replicas: Vec::new(),
+            cluster_id: "default".into(),
+            transport: KvOverflowTransport::default(),
             endpoints: Vec::new(),
             previous_endpoints: Vec::new(),
+            previous_primary_shard_count: None,
             slot_count: 16_384,
             redis_key_prefix: "shardcache:overflow:".into(),
             redis_username_env: None,
@@ -593,6 +675,11 @@ impl Default for KvOverflowConfig {
             max_memory_bytes: 0,
             eviction_policy: EvictionPolicy::Lru,
             connections_per_endpoint: 2,
+            queue_capacity_per_shard: 1_024,
+            pipeline_max_items: 64,
+            pipeline_max_bytes: 256 * 1024,
+            pipeline_flush_micros: 200,
+            max_inflight_per_target: 1,
             connect_timeout_ms: 250,
             operation_timeout_ms: 500,
             max_retries: 2,
@@ -772,7 +859,7 @@ mod tests {
     #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
     use super::KvOverflowBackend;
     #[cfg(feature = "kv-overflow")]
-    use super::{EvictionPolicy, KvOverflowConfig, MAX_KV_OVERFLOW_SLOT_COUNT};
+    use super::{EvictionPolicy, KvOverflowConfig, KvOverflowReplica, MAX_KV_OVERFLOW_SLOT_COUNT};
     use super::{ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser};
 
     #[test]
@@ -824,10 +911,18 @@ mod tests {
         assert_eq!(config.server_endpoint_mode, ServerEndpointMode::DirectShard);
     }
 
+    #[test]
+    fn example_configuration_parses_and_validates() {
+        let config: ShardCacheConfig =
+            toml::from_str(include_str!("../shardcache.toml.example")).unwrap();
+        config.validate().unwrap();
+    }
+
     #[cfg(feature = "kv-overflow")]
     #[test]
     fn validates_key_value_overflow_membership() {
         let mut config = ShardCacheConfig {
+            shard_count: 16,
             kv_overflow: KvOverflowConfig {
                 enabled: true,
                 endpoints: vec!["127.0.0.1:6381".into(), "127.0.0.1:6382".into()],
@@ -852,6 +947,49 @@ mod tests {
         assert!(config.validate().is_err());
 
         config.kv_overflow.slot_count = MAX_KV_OVERFLOW_SLOT_COUNT * 2;
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.slot_count = 16_384;
+        config.kv_overflow.previous_endpoints.clear();
+        config.kv_overflow.previous_primary_shard_count = Some(2);
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.previous_endpoints = vec!["127.0.0.1:6381".into()];
+        config.kv_overflow.previous_primary_shard_count = Some(3);
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.previous_primary_shard_count = Some(2);
+        assert!(config.validate().is_ok());
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    #[test]
+    fn validates_structured_overflow_replica_identity_and_ports() {
+        let mut config = ShardCacheConfig {
+            shard_count: 16,
+            kv_overflow: KvOverflowConfig {
+                enabled: true,
+                replicas: vec![KvOverflowReplica {
+                    id: "replica-a".into(),
+                    addresses: vec!["127.0.0.1:6380".into()],
+                    shard_count: 16,
+                    direct_shard_base_port: 6381,
+                }],
+                max_memory_bytes: 1024,
+                ..KvOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        config.kv_overflow.previous_replicas = vec![
+            config.kv_overflow.replicas[0].clone(),
+            config.kv_overflow.replicas[0].clone(),
+        ];
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.previous_replicas.clear();
+        config.kv_overflow.replicas[0].direct_shard_base_port = u16::MAX;
         assert!(config.validate().is_err());
     }
 

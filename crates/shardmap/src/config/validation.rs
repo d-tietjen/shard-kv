@@ -2,7 +2,7 @@
 use super::ObjectOverflowBackend;
 use super::{
     EvictionPolicy, KvOverflowConfig, ObjectOverflowConfig, PersistenceConfig, ReplicationConfig,
-    ReplicationRole, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
+    ReplicationRole, ServerEndpointMode, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
 };
 #[cfg(feature = "kv-overflow")]
 use super::{KvOverflowBackend, MAX_KV_OVERFLOW_SLOT_COUNT};
@@ -30,6 +30,7 @@ enum ConfigValidationRule {
     Persistence,
     ObjectOverflow,
     KvOverflow,
+    KvOverflowReplica,
     Replication,
     Cuda,
 }
@@ -83,6 +84,7 @@ impl ConfigValidationRule {
             Self::Persistence,
             Self::ObjectOverflow,
             Self::KvOverflow,
+            Self::KvOverflowReplica,
             Self::Replication,
             Self::Cuda,
         ]
@@ -116,6 +118,23 @@ impl ConfigValidationRule {
                 ObjectOverflowValidation::new(&config.object_overflow, config).validate()
             }
             Self::KvOverflow => KvOverflowValidation::new(&config.kv_overflow, config).validate(),
+            Self::KvOverflowReplica => {
+                if !config.kv_overflow_replica.enabled {
+                    return Ok(());
+                }
+                ConfigCheck::require(
+                    !config.kv_overflow_replica.node_id.trim().is_empty(),
+                    "kv_overflow_replica.node_id must not be empty",
+                )?;
+                ConfigCheck::require(
+                    matches!(config.server_endpoint_mode, ServerEndpointMode::DirectShard),
+                    "kv_overflow_replica requires server_endpoint_mode = \"direct_shard\"",
+                )?;
+                ConfigCheck::require(
+                    !config.kv_overflow.enabled,
+                    "a server cannot be both a kv overflow primary and replica",
+                )
+            }
             Self::Replication => ReplicationValidation::new(&config.replication).validate(),
             Self::Cuda => Self::validate_cuda(config),
         }
@@ -183,9 +202,88 @@ impl<'a> KvOverflowValidation<'a> {
                 "kv_overflow and object_overflow cannot be enabled together",
             )?;
             ConfigCheck::require(
-                !self.config.endpoints.is_empty(),
-                "kv_overflow.endpoints must contain at least one server",
+                !self.config.replicas.is_empty() || !self.config.endpoints.is_empty(),
+                "kv_overflow.replicas must contain at least one server",
             )?;
+            ConfigCheck::require(
+                self.config.replicas.is_empty() || self.config.endpoints.is_empty(),
+                "configure kv_overflow.replicas or legacy endpoints, not both",
+            )?;
+            ConfigCheck::require(
+                self.config.previous_replicas.is_empty()
+                    || self.config.previous_endpoints.is_empty(),
+                "configure previous_replicas or legacy previous_endpoints, not both",
+            )?;
+            ConfigCheck::require(
+                !self.config.cluster_id.is_empty()
+                    && self.config.cluster_id.len() <= u16::MAX as usize,
+                "kv_overflow.cluster_id must contain 1..=65535 bytes",
+            )?;
+            let mut replica_ids = self
+                .config
+                .replicas
+                .iter()
+                .map(|replica| replica.id.as_str())
+                .collect::<Vec<_>>();
+            replica_ids.sort_unstable();
+            ConfigCheck::require(
+                replica_ids.iter().all(|id| !id.trim().is_empty())
+                    && replica_ids.windows(2).all(|pair| pair[0] != pair[1]),
+                "kv_overflow replica IDs must be non-empty and unique",
+            )?;
+            let mut previous_replica_ids = self
+                .config
+                .previous_replicas
+                .iter()
+                .map(|replica| replica.id.as_str())
+                .collect::<Vec<_>>();
+            previous_replica_ids.sort_unstable();
+            ConfigCheck::require(
+                previous_replica_ids
+                    .windows(2)
+                    .all(|pair| pair[0] != pair[1]),
+                "kv_overflow previous replica IDs must be unique",
+            )?;
+            for replica in self
+                .config
+                .replicas
+                .iter()
+                .chain(&self.config.previous_replicas)
+            {
+                ConfigCheck::require(
+                    !replica.id.trim().is_empty()
+                        && !replica.addresses.is_empty()
+                        && replica
+                            .addresses
+                            .iter()
+                            .all(|address| !address.trim().is_empty()),
+                    "kv_overflow replicas require an ID and at least one address",
+                )?;
+                let mut addresses = replica.addresses.clone();
+                addresses.sort();
+                addresses.dedup();
+                ConfigCheck::require(
+                    addresses.len() == replica.addresses.len(),
+                    "kv_overflow replica addresses must be unique per replica",
+                )?;
+                if self.config.backend == KvOverflowBackend::Scnp {
+                    ConfigCheck::require(
+                        replica.shard_count > 0 && replica.shard_count.is_power_of_two(),
+                        "SCNP overflow replica shard_count must be a non-zero power of two",
+                    )?;
+                    ConfigCheck::require(
+                        replica.direct_shard_base_port == 0
+                            || replica
+                                .direct_shard_base_port
+                                .checked_add(
+                                    u16::try_from(replica.shard_count.saturating_sub(1))
+                                        .unwrap_or(u16::MAX),
+                                )
+                                .is_some(),
+                        "SCNP overflow replica direct shard port range overflows u16",
+                    )?;
+                }
+            }
             ConfigCheck::require(
                 self.config
                     .endpoints
@@ -219,9 +317,67 @@ impl<'a> KvOverflowValidation<'a> {
                 "kv_overflow.slot_count must be a non-zero power of two",
             )?;
             ConfigCheck::require(
+                self.root.shard_count <= self.config.slot_count as usize,
+                "kv_overflow.slot_count must be at least the current primary shard count",
+            )?;
+            ConfigCheck::require(
                 self.config.slot_count <= MAX_KV_OVERFLOW_SLOT_COUNT,
                 "kv_overflow.slot_count exceeds the supported maximum",
             )?;
+            if let Some(previous_primary_shard_count) = self.config.previous_primary_shard_count {
+                ConfigCheck::require(
+                    !self.config.previous_replicas.is_empty()
+                        || !self.config.previous_endpoints.is_empty(),
+                    "kv_overflow.previous_primary_shard_count requires a previous membership",
+                )?;
+                ConfigCheck::require(
+                    previous_primary_shard_count > 0
+                        && previous_primary_shard_count.is_power_of_two()
+                        && previous_primary_shard_count <= self.config.slot_count as usize,
+                    "kv_overflow.previous_primary_shard_count must be a non-zero power of two no greater than slot_count",
+                )?;
+            }
+            if self.config.backend == KvOverflowBackend::Scnp && !self.config.replicas.is_empty() {
+                let current_targets = self
+                    .config
+                    .replicas
+                    .iter()
+                    .try_fold(0usize, |total, replica| {
+                        total.checked_add(replica.shard_count)
+                    })
+                    .ok_or_else(|| {
+                        ShardCacheError::Config(
+                            "kv_overflow current remote shard count exceeds platform limits".into(),
+                        )
+                    })?;
+                ConfigCheck::require(
+                    current_targets >= self.root.shard_count,
+                    "kv_overflow requires at least one current SCNP remote shard per primary shard",
+                )?;
+                if !self.config.previous_replicas.is_empty() {
+                    let previous_targets = self
+                        .config
+                        .previous_replicas
+                        .iter()
+                        .try_fold(0usize, |total, replica| {
+                            total.checked_add(replica.shard_count)
+                        })
+                        .ok_or_else(|| {
+                            ShardCacheError::Config(
+                                "kv_overflow previous remote shard count exceeds platform limits"
+                                    .into(),
+                            )
+                        })?;
+                    ConfigCheck::require(
+                        previous_targets
+                            >= self
+                                .config
+                                .previous_primary_shard_count
+                                .unwrap_or(self.root.shard_count),
+                        "kv_overflow requires at least one previous SCNP remote shard per previous primary shard",
+                    )?;
+                }
+            }
             match self.config.backend {
                 KvOverflowBackend::Scnp => {
                     ConfigCheck::require(
@@ -256,8 +412,11 @@ impl<'a> KvOverflowValidation<'a> {
                 "kv_overflow.connections_per_endpoint must be > 0",
             )?;
             ConfigCheck::require(
-                self.config.worker_threads > 0 && self.config.queue_capacity > 0,
-                "kv_overflow.worker_threads and queue_capacity must be > 0",
+                self.config.queue_capacity_per_shard > 0
+                    && self.config.pipeline_max_items > 0
+                    && self.config.pipeline_max_bytes > 0
+                    && self.config.max_inflight_per_target > 0,
+                "kv_overflow per-shard queue and pipeline limits must be > 0",
             )?;
             ConfigCheck::require(
                 self.config.connect_timeout_ms > 0
@@ -289,11 +448,18 @@ impl<'a> KvOverflowValidation<'a> {
             self.config.redis_username_env.is_none() || self.config.redis_password_env.is_some(),
             "kv_overflow.redis_password_env is required with redis_username_env",
         )?;
+        let replica_addresses = self
+            .config
+            .replicas
+            .iter()
+            .chain(&self.config.previous_replicas)
+            .flat_map(|replica| &replica.addresses);
         for endpoint in self
             .config
             .endpoints
             .iter()
             .chain(&self.config.previous_endpoints)
+            .chain(replica_addresses)
         {
             let connection = endpoint.as_str().into_connection_info().map_err(|error| {
                 ShardCacheError::Config(format!("invalid Redis overflow endpoint: {error}"))

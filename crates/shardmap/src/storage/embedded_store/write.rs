@@ -79,6 +79,80 @@ impl EmbeddedStore {
         self.set_value_bytes_routed_expire_at_then(route, key, value, expire_at_ms, now_ms, || {});
     }
 
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn set_value_bytes_routed_overflow(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        value: bytes::Bytes,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+        generation: u64,
+    ) {
+        let route = match route.shard_id < self.shards.len() {
+            true => route,
+            false => self.route_key(key),
+        };
+        #[cfg(feature = "redis")]
+        self.delete_pinned_vector_value_if_distinct(route, key, now_ms);
+        #[cfg(feature = "redis")]
+        if self.objects.shard_has_objects(route.shard_id) {
+            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+            let mut shard = self.shards[route.shard_id].write();
+            if bucket.delete_any(key) {
+                self.objects.note_deleted(route.shard_id);
+            }
+            if let Some(session_prefix) = point_write_session_storage_prefix(key) {
+                shard
+                    .session_slots
+                    .delete_hashed(&session_prefix, route.key_hash, key);
+            }
+            shard.map.set_bytes_hashed_overflow(
+                route.key_hash,
+                key,
+                value,
+                expire_at_ms,
+                now_ms,
+                generation,
+            );
+            shard.enforce_memory_limit(now_ms);
+            self.refresh_string_key_count(route.shard_id, &shard);
+            return;
+        }
+        let mut shard = self.shards[route.shard_id].write();
+        if let Some(session_prefix) = point_write_session_storage_prefix(key) {
+            shard
+                .session_slots
+                .delete_hashed(&session_prefix, route.key_hash, key);
+        }
+        shard.map.set_bytes_hashed_overflow(
+            route.key_hash,
+            key,
+            value,
+            expire_at_ms,
+            now_ms,
+            generation,
+        );
+        shard.enforce_memory_limit(now_ms);
+        #[cfg(feature = "redis")]
+        self.refresh_string_key_count(route.shard_id, &shard);
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn overflow_generation_matches(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        generation: u64,
+    ) -> bool {
+        self.shards.get(route.shard_id).is_some_and(|shard| {
+            shard
+                .read()
+                .map
+                .overflow_generation_matches(route.key_hash, key, generation)
+        })
+    }
+
     /// Stores an already-owned value without reading the wall clock and runs
     /// `after_write` before releasing the shard write lock.
     pub(crate) fn set_value_bytes_routed_no_ttl_then(

@@ -781,6 +781,14 @@ impl ShardCacheServer {
 
     fn multi_direct_store(&self) -> Result<Arc<EmbeddedStore>> {
         if let Some(store) = &self.embedded_store {
+            if self.config.kv_overflow_replica.enabled
+                && store.route_mode() != EmbeddedRouteMode::OverflowSlot
+            {
+                return Err(crate::ShardCacheError::Config(
+                    "kv overflow replica store must use EmbeddedRouteMode::OverflowSlot".into(),
+                ));
+            }
+            store.configure_overflow_replica(self.overflow_replica_topology(store.shard_count())?);
             tracing::info!(
                 "multi-direct: serving caller-owned embedded store with {} shards ({:?} routing)",
                 store.shard_count(),
@@ -792,8 +800,13 @@ impl ShardCacheServer {
             return Ok(Arc::clone(store));
         }
 
-        let route_mode = MultiDirectRouteMode::configured()?;
+        let route_mode = if self.config.kv_overflow_replica.enabled {
+            EmbeddedRouteMode::OverflowSlot
+        } else {
+            MultiDirectRouteMode::configured()?
+        };
         let store = EmbeddedStore::with_route_mode(self.config.shard_count, route_mode);
+        store.configure_overflow_replica(self.overflow_replica_topology(store.shard_count())?);
         store.configure_memory_policy(
             self.config.per_shard_memory_limit_bytes(),
             self.config.eviction_policy,
@@ -807,6 +820,22 @@ impl ShardCacheServer {
             self.config.eviction_policy,
         );
         Ok(Arc::new(store))
+    }
+
+    fn overflow_replica_topology(&self, shard_count: usize) -> Result<Option<(String, u16)>> {
+        if !self.config.kv_overflow_replica.enabled {
+            return Ok(None);
+        }
+        let bind_addr: SocketAddr = self.config.bind_addr.parse().map_err(|error| {
+            crate::ShardCacheError::Config(format!(
+                "invalid bind addr {}: {error}",
+                self.config.bind_addr
+            ))
+        })?;
+        Ok(Some((
+            self.config.kv_overflow_replica.node_id.clone(),
+            MultiDirectAddress::direct_base_port(bind_addr, shard_count)?,
+        )))
     }
 }
 
@@ -829,8 +858,15 @@ impl MultiDirectRouteMode {
             {
                 Ok(EmbeddedRouteMode::FullKey)
             }
+            Ok(value)
+                if value.eq_ignore_ascii_case("overflow_slot")
+                    || value.eq_ignore_ascii_case("overflow-slot")
+                    || value.eq_ignore_ascii_case("overflow") =>
+            {
+                Ok(EmbeddedRouteMode::OverflowSlot)
+            }
             Ok(value) => Err(crate::ShardCacheError::Config(format!(
-                "unknown SHARDCACHE_ROUTE_MODE={value}; use full_key or session_prefix"
+                "unknown SHARDCACHE_ROUTE_MODE={value}; use full_key, session_prefix, or overflow_slot"
             ))),
             Err(_) => Ok(EmbeddedRouteMode::FullKey),
         }

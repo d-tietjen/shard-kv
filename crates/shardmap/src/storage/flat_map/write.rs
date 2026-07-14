@@ -76,6 +76,8 @@ impl FlatMap {
                     expire_at_ms: None,
                     semantic_index_token: None,
                     semantic_governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -148,6 +150,8 @@ impl FlatMap {
                     expire_at_ms,
                     semantic_index_token: None,
                     semantic_governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -164,6 +168,36 @@ impl FlatMap {
         }
 
         self.enforce_memory_limit(now_ms);
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn set_bytes_hashed_overflow(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        value: SharedBytes,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+        generation: u64,
+    ) {
+        self.set_bytes_hashed(hash, key, value, expire_at_ms, now_ms);
+        let entry = self
+            .entries
+            .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))
+            .expect("overflow value was inserted under the same shard lock");
+        entry.overflow_generation = generation.saturating_add(1);
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn overflow_generation_matches(
+        &self,
+        hash: u64,
+        key: &[u8],
+        generation: u64,
+    ) -> bool {
+        self.entries
+            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .is_some_and(|entry| entry.overflow_generation == generation.saturating_add(1))
     }
 
     #[inline(always)]
@@ -237,6 +271,8 @@ impl FlatMap {
                     expire_at_ms,
                     semantic_index_token: None,
                     semantic_governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -399,6 +435,8 @@ impl FlatMap {
                     expire_at_ms: None,
                     semantic_index_token: None,
                     semantic_governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -576,6 +614,8 @@ impl FlatMap {
                     expire_at_ms,
                     semantic_index_token: None,
                     semantic_governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
