@@ -41,6 +41,10 @@ impl EmbeddedStore {
                 #[cfg(feature = "redis-module-topk")]
                 topk: modules::TopKStore::new(shard_count),
                 route_mode,
+                overflow_replica_topology: RwLock::new(None),
+                overflow_replica_auth: RwLock::new(None),
+                #[cfg(feature = "scnp-tls")]
+                overflow_replica_tls: RwLock::new(None),
             }
         }
     }
@@ -115,6 +119,10 @@ impl EmbeddedStore {
             #[cfg(feature = "redis-module-topk")]
             topk: modules::TopKStore::new(shard_count),
             route_mode,
+            overflow_replica_topology: RwLock::new(None),
+            overflow_replica_auth: RwLock::new(None),
+            #[cfg(feature = "scnp-tls")]
+            overflow_replica_tls: RwLock::new(None),
             metrics,
         }
     }
@@ -123,6 +131,48 @@ impl EmbeddedStore {
     #[inline(always)]
     pub fn shard_count(&self) -> usize {
         self.shards.len()
+    }
+
+    /// Configures the identity and direct port advertised by an overflow replica.
+    pub fn configure_overflow_replica(&self, topology: Option<(String, u16)>) {
+        *self.overflow_replica_topology.write() = topology;
+    }
+
+    pub(crate) fn overflow_replica_topology(&self) -> Option<(String, u16)> {
+        self.overflow_replica_topology.read().clone()
+    }
+
+    /// Configures an optional connection token for a dedicated overflow replica.
+    pub fn configure_overflow_replica_auth(&self, token: Option<Box<[u8]>>) {
+        *self.overflow_replica_auth.write() = token.map(|token| {
+            Arc::new(super::OverflowReplicaAuthRuntime::new_static(Arc::from(
+                token,
+            )))
+        });
+    }
+
+    pub(crate) fn configure_overflow_replica_auth_runtime(
+        &self,
+        auth: Option<Arc<super::OverflowReplicaAuthRuntime>>,
+    ) {
+        *self.overflow_replica_auth.write() = auth;
+    }
+
+    pub(crate) fn overflow_replica_auth(&self) -> Option<Arc<super::OverflowReplicaAuthRuntime>> {
+        self.overflow_replica_auth.read().clone()
+    }
+
+    #[cfg(feature = "scnp-tls")]
+    pub(crate) fn configure_overflow_replica_tls(
+        &self,
+        tls: Option<Arc<super::OverflowReplicaTlsRuntime>>,
+    ) {
+        *self.overflow_replica_tls.write() = tls;
+    }
+
+    #[cfg(feature = "scnp-tls")]
+    pub(crate) fn overflow_replica_tls(&self) -> Option<Arc<super::OverflowReplicaTlsRuntime>> {
+        self.overflow_replica_tls.read().clone()
     }
 
     #[cfg(feature = "redis")]
@@ -267,6 +317,12 @@ impl EmbeddedStore {
             .iter()
             .map(|shard| shard.read().stored_bytes())
             .sum()
+    }
+
+    /// Returns the approximate bytes stored in one string-value shard.
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn stored_bytes_in_shard(&self, shard_id: usize) -> usize {
+        self.shards[shard_id].read().stored_bytes()
     }
 
     /// Applies a per-shard memory budget and eviction policy.
@@ -425,6 +481,9 @@ impl EmbeddedStore {
         let route_hash = match self.route_mode {
             EmbeddedRouteMode::FullKey => key_hash,
             EmbeddedRouteMode::SessionPrefix => hash_key(session_route_prefix(key)),
+            EmbeddedRouteMode::OverflowSlot => overflow_slot_shard(key, self.shift)
+                .map(|shard_id| route_hash_for_shard(shard_id, self.shift))
+                .unwrap_or(key_hash),
         };
         (route_hash, key_hash)
     }

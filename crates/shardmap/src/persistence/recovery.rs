@@ -98,6 +98,7 @@ impl RecoveryAccumulator {
                 key,
                 value: record.value.to_vec(),
                 expire_at_ms: record.expire_at_ms,
+                governance: record.governance.map(|metadata| metadata.to_vec()),
             },
         );
     }
@@ -137,5 +138,36 @@ impl RecoveryState {
 impl PersistenceDataDir {
     pub(super) fn normalize(path: &Path) -> PathBuf {
         path.to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes as SharedBytes;
+
+    use super::*;
+
+    #[test]
+    fn wal_recovery_replaces_value_ttl_and_governance_atomically() {
+        let mut recovery = RecoveryAccumulator::default();
+        recovery.replay_records(vec![MutationRecord {
+            shard_id: 0,
+            sequence: 1,
+            timestamp_ms: 10,
+            op: MutationOp::Set,
+            key: SharedBytes::from_static(b"private"),
+            value: SharedBytes::from_static(b"model-state"),
+            expire_at_ms: Some(99),
+            governance: Some(SharedBytes::from_static(b"tenant-a/repo-private")),
+        }]);
+
+        let state = recovery.into_state();
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.entries[0].value, b"model-state");
+        assert_eq!(state.entries[0].expire_at_ms, Some(99));
+        assert_eq!(
+            state.entries[0].governance.as_deref(),
+            Some(b"tenant-a/repo-private".as_slice())
+        );
     }
 }

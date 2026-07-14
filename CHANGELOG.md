@@ -1,5 +1,129 @@
 # Changelog
 
+## 0.6.0 - Unreleased
+
+### Added
+
+- Added fail-closed governance metadata for exact point values through
+  `EmbeddedStore`, shared and worker-local stores, native replication, WAL and
+  snapshots, object overflow, and partitioned KV overflow. Protected entries
+  require a governed filter and cannot be released by ordinary GET, mutable,
+  visitor, removal-return, or Redis paths.
+- Added versioned governed KV-overflow envelopes for SCNP and Redis/Valkey,
+  including metadata integrity checks, retry and handoff preservation, remote
+  read filtering, and protected promotion back into resident memory.
+
+- Added the `kv-overflow` feature and `KvOverflowStore`, a bounded embedded
+  primary backed by disjoint, fixed-slot shardcache server partitions with
+  previous-membership handoff for horizontal expansion.
+- Added acknowledged-only LRU/LFU eviction, remote fault-in, direct cluster
+  reads, TTL-preserving value envelopes, CRC32 integrity checks, SCNP
+  connection pooling, operation deadlines, reconnect retries, and health
+  counters.
+- Added a feature-gated Redis/Valkey-compatible overflow adapter with pooled
+  RESP connections, TLS URLs, environment-only ACL credentials, key
+  namespacing, and server-side TTL enforcement.
+- Added fallible snapshot materialization and recovery synchronization so the
+  local persistence path remains authoritative for remote-only values.
+- Added unit coverage for placement, cold-only eviction, failed-write
+  retention, fault-in, and snapshot materialization, plus a live two-server
+  SCNP integration test for disjoint placement and direct reads.
+- Added bounded asynchronous replication with per-key ordered worker lanes,
+  generation-safe acknowledgments, queue backpressure, explicit remote flush,
+  and queue/worker health counters so primary writes do not wait on SCNP I/O.
+- Added ordered 64-write Redis pipelines, O(1) fixed-slot owner lookup, and
+  striped acknowledgment metadata to keep primary overhead bounded while
+  overflow endpoints scale horizontally.
+- Isolated every network drain from primary storage and metadata locks. Remote
+  acknowledgements return through bounded per-shard completion lanes, discard
+  successful value payloads, and are applied by the primary under admission or
+  memory pressure, at explicit flush boundaries, or by periodic maintenance.
+  Each primary shard has exactly one network drain; no worker or completion
+  mutex is shared across shards.
+- Replaced allocation-backed worker queues with preallocated shard-local rings,
+  split primary and worker counters onto separate cache lines, made generation
+  counters shard-local, aggregated replication metrics per batch, and replaced
+  topology-sized batch allocation with reusable sparse owner grouping.
+- Changed pipeline coalescing to wait once and then drain the shard ring instead
+  of waking the network worker for each arriving item, substantially reducing
+  sparse-producer admission overhead without extending the configured flush
+  deadline.
+- Reused each operation's xxh3 key hash in striped overflow metadata tables.
+  Hashbrown raw-entry lookups now avoid a second key hash on primary admission,
+  completion, retry, and delete paths while retaining resize-safe hashing.
+- Stored queued generations in resident entries so successful replication no
+  longer requires a pending-metadata insertion, and limited pipelines by both
+  item count and encoded bytes to bound large-value allocation and tail cost.
+- Added independent target-local SCNP tasks on one current-thread runtime for
+  shards that own multiple remote targets. Single-target shards retain the
+  lower-overhead blocking pipeline; stable key-hash lanes preserve per-key
+  order when `max_inflight_per_target` is greater than one.
+- Reduced idle SCNP read/write buffers from 64 KiB each to 8 KiB each.
+- Added replica-side LRU plus filesystem object-overflow integration coverage,
+  including transparent SCNP fault-in for envelopes evicted from replica RAM.
+- Added the `kv_overflow_primary_cost` benchmark for measuring embedded SET
+  versus key-value overflow enqueue overhead and remote drain time.
+- Added stable replica identities, topology handshakes, `OverflowSlot` routing,
+  and route-checked direct shard ports. Every remote shard target now has one
+  primary-shard owner and one shard-owned mutation/read connection pair.
+- Added exact online rebalance for replica and primary-shard topology changes.
+  Handoff migrates resident and remote-only values through write, verification,
+  and old-owner deletion while preserving the fixed logical slot namespace.
+- Added native Rustls TLS 1.3 for SCNP overflow, optional mTLS with leaf
+  certificate pinning, reloadable certificates and tokens, bounded concurrent
+  handshakes, and non-loopback authentication requirements. The all-feature
+  dependency graph contains no OpenSSL or native-tls implementation. Published
+  `shardmap` and `shardcache` packages expose the `scnp-tls` build feature.
+- Added target-local circuit breakers, adaptive byte-bounded pipelines,
+  compression negotiation, topology/path failover counters, per-shard queue
+  health, and handoff progress reporting.
+- Added independent resident-value and key-metadata ceilings, bounded cleanup,
+  key/value and slot-table limits, decompression expansion limits, and bounded
+  RESP, SCNP, FCRP, and client response collection decoding.
+- Added filesystem-backed cascading-tier, restart, TLS, topology, stalled
+  target, malformed-frame, and memory-amplification tests.
+- Added a public 0.6 feature and migration guide plus a CI-verified inventory
+  of every locked workspace and third-party dependency.
+
+### Changed
+
+- Bumped the workspace and publishable crate surfaces to `0.6.0`.
+- Added explicit timeout-capable connections to `shardcache-client-rs`.
+- Preserve primary TTL deadlines across queued/retried overflow writes, make
+  `flush_remote` include writes already admitted but not yet enqueued, and
+  redact malformed Redis endpoints from configuration errors.
+- Replaced contended queue permits and global remote-key metadata locks with
+  atomic bounded admission and 64 metadata stripes.
+- Moved resident hard-limit projection into the existing shard write critical
+  section. This removes a second shard read, a maintenance mutex, and an
+  accidental object fault-in from bounded primary writes while keeping
+  concurrent admission atomic.
+- Replaced address-only membership with stable `replicas` and
+  `previous_replicas`. Rebalance is exact and may move ranges between existing
+  replicas; operators must retain the previous membership until handoff
+  completes.
+
+### Validation
+
+- Five-run no-op adapter benchmarks on Adam with 16 shard-local drains, four
+  producers, and 1 KiB values admitted a median 1.90M writes/second at 527
+  ns/op and completed 1.269M writes/second end to end. Five direct-SCNP runs
+  against a separately pinned 16-shard replica sustained a median 1.044M
+  end-to-end writes/second with 680 ns/op primary admission. A 256 KiB byte cap
+  sustained 58.4K writes/second for 64 KiB values with a 229 us sampled p99.
+- Five-run release benchmarks on Adam with four producers and 1 KiB values
+  measured 954 ns/op primary admission and 339K end-to-end writes/second for
+  one Valkey endpoint. Four disjoint endpoints with four workers each admitted
+  writes at 1,309 ns/op and replicated 740K writes/second end to end.
+- Redis worker pipelining improved a one-endpoint, four-worker production-path
+  benchmark from 34.4K to 347K replicated writes/second, approximately 10.1x.
+- A final interleaved A/B on Adam compared the hardened branch with commit
+  `46a4ca8`. The fully bounded KV enqueue path sustained a median 2.05M
+  writes/second, 3.5% below the pre-hardening baseline. Embedded, local/TCP
+  replication, RESP, and SCNP median throughput deltas all stayed within 3.6%;
+  the worst measured median p99 change was 4.9%. No replication drops,
+  backpressure, or server protocol errors were observed.
+
 ## 0.5.0 - Unreleased
 
 ### Added

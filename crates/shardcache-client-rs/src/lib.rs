@@ -8,8 +8,12 @@ mod protocol;
 #[cfg(feature = "redis")]
 mod redis;
 mod routing;
+#[cfg(feature = "tls")]
+mod tls;
 
-pub use client::{ShardCacheClient, ShardCacheDirectClient, ShardCacheDirectShardClient};
+pub use client::{
+    ShardCacheClient, ShardCacheDirectClient, ShardCacheDirectShardClient, ShardCacheTopology,
+};
 #[cfg(feature = "redis")]
 pub use commands::redis::{RedisCommandKind, RedisResponse};
 pub use error::{Result, ShardCacheClientError};
@@ -19,3 +23,5 @@ pub use routing::{
     ShardCacheDirectRouter, ShardCacheRoute, ShardCacheRouteMode, hash_key, hash_key_tag,
     shard_index,
 };
+#[cfg(feature = "tls")]
+pub use tls::ScnpTlsClientConfig;

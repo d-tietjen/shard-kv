@@ -173,7 +173,6 @@ impl DirectProtocol {
         single_threaded: bool,
         started_at: Instant,
     ) {
-        #[cfg(feature = "redis")]
         if let Some(command) = ScnpScanCommand::from_name(command) {
             command.write_fast_response(store, args, out);
             return;

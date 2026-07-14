@@ -91,7 +91,6 @@ impl EmbeddedStore {
                         write_resp_blob_string_into(out, value);
                         return true;
                     }
-                    return false;
                 }
             }
 
@@ -105,15 +104,14 @@ impl EmbeddedStore {
             } else {
                 now_millis()
             };
-            if uses_flat_key_storage(self.route_mode, key) {
-                if let Some(value) = shard.map.get_ref_hashed_shared(route.key_hash, key, now_ms) {
-                    write_resp_blob_string_into(out, value);
-                    return true;
-                }
-                return false;
+            if uses_flat_key_storage(self.route_mode, key)
+                && let Some(value) = shard.map.get_ref_hashed_shared(route.key_hash, key, now_ms)
+            {
+                write_resp_blob_string_into(out, value);
+                return true;
             }
-            // Session-prefixed keys: fall back to the locked path. Bench doesn't
-            // hit this.
+            // Remote object references and session-prefixed keys need the
+            // write-capable path so a cold value can fault back into memory.
             self.get_blob_string_into(key, out)
         }
     }
@@ -292,6 +290,11 @@ impl EmbeddedStore {
                 write_resp_blob_string_into(out, value);
                 return true;
             }
+            drop(shard);
+            if let Some(value) = self.get_value_bytes_routed(route, key, now_millis()) {
+                write_resp_blob_string_into(out, &value);
+                return true;
+            }
             return false;
         }
         // Session-prefixed keys go through the slow path with a write lock.
@@ -389,6 +392,33 @@ impl EmbeddedStore {
         let now_ms = now_millis();
         let route = self.route_key(key);
         self.get_value_bytes_routed(route, key, now_ms)
+    }
+
+    /// Returns an exact point value only when `authorize` accepts its borrowed
+    /// opaque governance metadata. Protected values are never cloned before
+    /// authorization, and rejection is returned as an ordinary cache miss.
+    ///
+    /// Ungoverned entries pass `None`. Keep the callback bounded and
+    /// nonblocking, and do not re-enter this store from the callback because it
+    /// executes while the routed shard read lock is held.
+    pub fn get_value_bytes_with_governance_filter<F>(
+        &self,
+        key: &[u8],
+        authorize: F,
+    ) -> Option<bytes::Bytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        let route = self.route_key(key);
+        match self.get_value_bytes_routed_with_governance_filter(
+            route,
+            key,
+            now_millis(),
+            authorize,
+        ) {
+            GovernedRead::Authorized(value) => Some(value),
+            GovernedRead::Missing | GovernedRead::Denied => None,
+        }
     }
 
     /// FastCodec GET path. The wire header carries a route hash so the server
@@ -646,7 +676,6 @@ impl EmbeddedStore {
                             write(value);
                             return true;
                         }
-                        return false;
                     }
                 }
 
@@ -668,7 +697,6 @@ impl EmbeddedStore {
                         write(value);
                         return true;
                     }
-                    return false;
                 }
             }
 
@@ -707,16 +735,20 @@ impl EmbeddedStore {
                     let shard = unsafe { &*self.shards[0].data_ptr() };
                     if can_skip_session_lookup(key, &shard.session_slots) {
                         if shard.map.has_no_ttl_entries() {
-                            return shard.map.with_shared_value_bytes_hashed_no_ttl(
-                                route_hash, key, &mut write,
-                            );
-                        }
-                        return shard.map.with_shared_value_bytes_hashed(
+                            if shard
+                                .map
+                                .with_shared_value_bytes_hashed_no_ttl(route_hash, key, &mut write)
+                            {
+                                return true;
+                            }
+                        } else if shard.map.with_shared_value_bytes_hashed(
                             route_hash,
                             key,
                             now_millis(),
                             &mut write,
-                        );
+                        ) {
+                            return true;
+                        }
                     }
                 }
 
@@ -728,18 +760,21 @@ impl EmbeddedStore {
                 let shard = unsafe { &*self.shards[route.shard_id].data_ptr() };
                 if uses_flat_key_storage(self.route_mode, key) {
                     if shard.map.has_no_ttl_entries() {
-                        return shard.map.with_shared_value_bytes_hashed_no_ttl(
+                        if shard.map.with_shared_value_bytes_hashed_no_ttl(
                             route.key_hash,
                             key,
                             &mut write,
-                        );
-                    }
-                    return shard.map.with_shared_value_bytes_hashed(
+                        ) {
+                            return true;
+                        }
+                    } else if shard.map.with_shared_value_bytes_hashed(
                         route.key_hash,
                         key,
                         now_millis(),
                         &mut write,
-                    );
+                    ) {
+                        return true;
+                    }
                 }
             }
 
@@ -783,14 +818,24 @@ impl EmbeddedStore {
 
             // SAFETY (per fn contract): no other thread is accessing this shard.
             let shard = unsafe { &*self.shards[0].data_ptr() };
-            if shard.map.has_no_ttl_entries() {
-                return shard
+            let found = if shard.map.has_no_ttl_entries() {
+                shard
                     .map
-                    .with_shared_value_bytes_hashed_no_ttl(key_hash, key, &mut write);
+                    .with_shared_value_bytes_hashed_no_ttl(key_hash, key, &mut write)
+            } else {
+                shard
+                    .map
+                    .with_shared_value_bytes_hashed(key_hash, key, now_millis(), &mut write)
+            };
+            if found {
+                return true;
             }
-            shard
-                .map
-                .with_shared_value_bytes_hashed(key_hash, key, now_millis(), &mut write)
+            if let Some(value) = self.get_value_bytes_route_hashed(key_hash, key) {
+                write(&value);
+                true
+            } else {
+                false
+            }
         }
     }
 
@@ -1164,6 +1209,15 @@ impl EmbeddedStore {
                 }
                 shard.set_session_slice_hashed_no_ttl(&session_prefix, key_hash, key, value);
             }
+            EmbeddedRouteMode::OverflowSlot => {
+                let route = compute_key_route(self.route_mode, self.shift, key);
+                if route.shard_id != shard_id || route.key_hash != key_hash {
+                    return false;
+                }
+                shard
+                    .map
+                    .set_slice_hashed_tagged_no_ttl_local(key_hash, key_tag, key, value);
+            }
         }
         #[cfg(feature = "redis")]
         self.refresh_string_key_count(shard_id, &shard);
@@ -1229,6 +1283,18 @@ impl EmbeddedStore {
                         return false;
                     }
                     shard.set_session_slice_hashed_no_ttl(&session_prefix, key_hash, key, value);
+                }
+                EmbeddedRouteMode::OverflowSlot => {
+                    let route = compute_key_route(self.route_mode, self.shift, key);
+                    if route.shard_id != shard_id || route.key_hash != key_hash {
+                        return false;
+                    }
+                    // SAFETY: forwarded from this function's worker-local ownership contract.
+                    unsafe {
+                        shard
+                            .map
+                            .set_slice_hashed_tagged_no_ttl_hot(key_hash, key_tag, key, value)
+                    };
                 }
             }
             #[cfg(feature = "redis")]
@@ -1331,9 +1397,21 @@ impl EmbeddedStore {
     ) -> Option<bytes::Bytes> {
         if uses_flat_key_storage(self.route_mode, key) {
             let shard = self.shards[route.shard_id].read();
-            return shard
+            if let Some(value) = shard
                 .map
-                .get_value_bytes_hashed(route.key_hash, key, now_ms);
+                .get_value_bytes_hashed(route.key_hash, key, now_ms)
+            {
+                return Some(value);
+            }
+            drop(shard);
+            let mut shard = self.shards[route.shard_id].write();
+            if let Some(value) = shard
+                .map
+                .get_value_bytes_hashed(route.key_hash, key, now_ms)
+            {
+                return Some(value);
+            }
+            return shard.map.fault_remote_hashed(route.key_hash, key, now_ms);
         }
         // Session-prefixed keys still go through the legacy path (write lock,
         // value copied). Bench workload doesn't use session keys.
@@ -1349,6 +1427,61 @@ impl EmbeddedStore {
         shard
             .map
             .get_value_bytes_hashed(route.key_hash, key, now_ms)
+    }
+
+    pub(crate) fn get_value_bytes_routed_with_governance_filter<F>(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+        authorize: F,
+    ) -> GovernedRead<bytes::Bytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        if uses_flat_key_storage(self.route_mode, key) {
+            return self.shards[route.shard_id]
+                .write()
+                .map
+                .get_value_bytes_hashed_with_governance_filter(
+                    route.key_hash,
+                    key,
+                    now_ms,
+                    authorize,
+                );
+        }
+
+        let mut shard = self.shards[route.shard_id].write();
+        if let Some(session_prefix) = derived_session_storage_prefix(key)
+            && let Some(value) =
+                shard
+                    .session_slots
+                    .get_ref_hashed(&session_prefix, route.key_hash, key)
+        {
+            return if authorize(None) {
+                GovernedRead::Authorized(bytes::Bytes::copy_from_slice(value))
+            } else {
+                GovernedRead::Denied
+            };
+        }
+        shard.map.get_value_bytes_hashed_with_governance_filter(
+            route.key_hash,
+            key,
+            now_ms,
+            authorize,
+        )
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn is_value_protected_routed(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        self.shards[route.shard_id]
+            .read()
+            .is_value_protected_hashed(route.key_hash, key, now_ms)
     }
 
     fn with_value_bytes_routed<F>(&self, route: EmbeddedKeyRoute, key: &[u8], write: &mut F) -> bool
@@ -1368,7 +1501,7 @@ impl EmbeddedStore {
                 write(value);
                 return true;
             }
-            return false;
+            drop(shard);
         }
 
         if let Some(value) = self.get_value_bytes_routed(route, key, now_millis()) {
@@ -1390,17 +1523,19 @@ impl EmbeddedStore {
     {
         if uses_flat_key_storage(self.route_mode, key) {
             let shard = self.shards[route.shard_id].read();
-            if shard.map.has_no_ttl_entries() {
-                return shard
+            let found = if shard.map.has_no_ttl_entries() {
+                shard
                     .map
-                    .with_shared_value_bytes_hashed_no_ttl(route.key_hash, key, write);
+                    .with_shared_value_bytes_hashed_no_ttl(route.key_hash, key, write)
+            } else {
+                shard
+                    .map
+                    .with_shared_value_bytes_hashed(route.key_hash, key, now_millis(), write)
+            };
+            if found {
+                return true;
             }
-            return shard.map.with_shared_value_bytes_hashed(
-                route.key_hash,
-                key,
-                now_millis(),
-                write,
-            );
+            drop(shard);
         }
 
         if let Some(value) = self.get_value_bytes_routed(route, key, now_millis()) {
@@ -1555,6 +1690,10 @@ impl EmbeddedStore {
             && let Some(session_prefix) = derived_session_storage_prefix(key)
             && guard.session_slots.has_session(&session_prefix)
         {
+            return None;
+        }
+
+        if guard.is_value_protected_hashed(route.key_hash, key, now_ms) {
             return None;
         }
 

@@ -14,6 +14,8 @@ cd "$root"
 tier="${1:-quick}"
 
 quick() {
+  ./scripts/check-tls-dependency-policy.sh
+  ./scripts/generate-dependency-docs.sh --check
   cargo fmt --all -- --check
   cargo test -p shardcache-benchmarks --bin redis_command_matrix
   cargo test -p shardcache-benchmarks --bin redis_command_manifest

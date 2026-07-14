@@ -214,6 +214,28 @@ impl PersistenceRuntime {
         }
     }
 
+    /// Writes an atomic snapshot from a bounded entry producer and prunes WAL
+    /// only after the snapshot and containing directory are durable.
+    pub fn snapshot_streaming<F>(&self, timestamp_ms: u64, produce: F) -> Result<PathBuf>
+    where
+        F: FnOnce(&mut dyn FnMut(StoredEntry) -> Result<()>) -> Result<()>,
+    {
+        if !self.config.enabled {
+            return Err(ShardCacheError::Persistence(
+                "persistence is disabled".into(),
+            ));
+        }
+        fs::create_dir_all(&self.config.data_dir)?;
+        let path = SnapshotStore::new(&self.config.data_dir).write_snapshot_streaming(
+            timestamp_ms,
+            SnapshotCompression::from_enabled(self.config.compress_snapshots),
+            produce,
+        )?;
+        self.stats.record_snapshot_written();
+        wal::SegmentStore::new(&self.config.data_dir).prune_through(timestamp_ms)?;
+        Ok(path)
+    }
+
     fn write_snapshot(&self, entries: &[StoredEntry], timestamp_ms: u64) -> Result<PathBuf> {
         fs::create_dir_all(&self.config.data_dir)?;
         let snapshots = SnapshotStore::new(&self.config.data_dir);
@@ -296,9 +318,39 @@ mod tests {
     use crate::config::{PersistenceConfig, WalTcpExportMode};
     use bytes::Bytes as SharedBytes;
 
-    use crate::storage::{MutationOp, MutationRecord};
+    use crate::storage::{MutationOp, MutationRecord, StoredEntry};
 
-    use super::PersistenceRuntime;
+    use super::{PersistenceRuntime, SnapshotRepository, SnapshotStore};
+
+    #[test]
+    fn persistence_runtime_streams_durable_snapshot() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let config = PersistenceConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            compress_snapshots: true,
+            ..PersistenceConfig::default()
+        };
+        let runtime = PersistenceRuntime::start(1, config).expect("persistence runtime");
+        runtime
+            .snapshot_streaming(17, |sink| {
+                sink(StoredEntry {
+                    key: b"key".to_vec(),
+                    value: b"value".to_vec(),
+                    expire_at_ms: None,
+                    governance: None,
+                })
+            })
+            .expect("streaming snapshot");
+
+        let loaded = SnapshotStore::new(temp_dir.path())
+            .load_latest_snapshot()
+            .expect("load snapshot")
+            .expect("snapshot exists");
+        assert_eq!(loaded.timestamp_ms, 17);
+        assert_eq!(loaded.entries[0].value, b"value");
+        assert_eq!(runtime.stats_snapshot().snapshots_written, 1);
+        runtime.shutdown().expect("shutdown");
+    }
 
     #[test]
     fn tcp_export_streams_framed_wal_bytes() {
@@ -343,6 +395,7 @@ mod tests {
                 key: SharedBytes::from_static(b"alpha"),
                 value: SharedBytes::from_static(b"one"),
                 expire_at_ms: None,
+                governance: None,
             })
             .expect("append");
 
@@ -394,6 +447,7 @@ mod tests {
                 key: SharedBytes::from_static(b"alpha"),
                 value: SharedBytes::from_static(b"one"),
                 expire_at_ms: None,
+                governance: None,
             })
             .expect("append");
 

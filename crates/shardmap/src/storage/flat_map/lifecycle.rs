@@ -30,6 +30,7 @@ impl FlatMap {
             return None;
         }
 
+        let protected = entry.get().is_protected();
         let removed_bytes = entry.get().stored_bytes();
         if entry.get().expire_at_ms.is_some() {
             self.ttl_entries = self.ttl_entries.saturating_sub(1);
@@ -38,7 +39,12 @@ impl FlatMap {
         self.stored_bytes = self.stored_bytes.saturating_sub(removed_bytes);
         #[cfg(feature = "telemetry")]
         self.record_delete_metrics(DeleteReason::Explicit, -1, -(removed_bytes as isize));
-        Some(removed.value)
+        if protected {
+            self.retire_value(removed.value);
+            None
+        } else {
+            Some(removed.value)
+        }
     }
 
     #[cfg(feature = "embedded")]
@@ -192,6 +198,7 @@ impl FlatMap {
             key: removed.key.clone(),
             object,
             expire_at_ms: removed.expire_at_ms,
+            governance: removed.governance,
         };
         let remote_bytes = remote.stored_bytes();
         self.stored_bytes = self
@@ -251,6 +258,10 @@ impl FlatMap {
         }
         if remote.is_expired(now_ms) {
             let _ = self.delete_remote_hashed(hash, key, DeleteReason::Expired);
+            return None;
+        }
+        if remote.is_protected() {
+            let _ = self.delete_remote_hashed(hash, key, DeleteReason::Explicit);
             return None;
         }
         let bytes = self
@@ -414,6 +425,7 @@ impl FlatMap {
                 key: entry.key.as_ref().to_vec(),
                 value: entry.value.as_ref().to_vec(),
                 expire_at_ms: entry.expire_at_ms,
+                governance: entry.governance.as_deref().map(<[u8]>::to_vec),
             })
             .collect::<Vec<_>>();
         for entry in self
@@ -431,6 +443,7 @@ impl FlatMap {
                 key: entry.key.as_ref().to_vec(),
                 value: value.as_ref().to_vec(),
                 expire_at_ms: entry.expire_at_ms,
+                governance: entry.governance.as_deref().map(<[u8]>::to_vec),
             });
         }
         Ok(entries)
@@ -443,12 +456,12 @@ impl FlatMap {
         }
         self.entries
             .iter()
-            .filter(|entry| !entry.is_expired(now_ms))
+            .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
             .map(|entry| entry.key.as_ref().to_vec())
             .chain(
                 self.remote_entries
                     .values()
-                    .filter(|entry| !entry.is_expired(now_ms))
+                    .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
                     .map(|entry| entry.key.as_ref().to_vec()),
             )
             .collect()
@@ -473,7 +486,7 @@ impl FlatMap {
 
         for (index, entry) in self.entries.iter().enumerate().skip(offset) {
             let next_offset = index + 1;
-            if entry.is_expired(now_ms) {
+            if entry.is_expired(now_ms) || entry.is_protected() {
                 continue;
             }
             *visited = visited.saturating_add(1);
@@ -496,7 +509,7 @@ impl FlatMap {
         for entry in self
             .entries
             .iter()
-            .filter(|entry| !entry.is_expired(now_ms))
+            .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
         {
             if !visit(entry.key.as_ref()) {
                 return false;
@@ -505,7 +518,7 @@ impl FlatMap {
         for entry in self
             .remote_entries
             .values()
-            .filter(|entry| !entry.is_expired(now_ms))
+            .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
         {
             if !visit(entry.key.as_ref()) {
                 return false;
@@ -527,7 +540,7 @@ impl FlatMap {
         for entry in self
             .entries
             .iter()
-            .filter(|entry| !entry.is_expired(now_ms))
+            .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
         {
             if !visit(entry.key.as_ref(), entry.value.as_ref(), entry.expire_at_ms) {
                 return false;
@@ -536,7 +549,7 @@ impl FlatMap {
         for entry in self
             .remote_entries
             .values()
-            .filter(|entry| !entry.is_expired(now_ms))
+            .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
         {
             let Some(value) = self
                 .object_overflow

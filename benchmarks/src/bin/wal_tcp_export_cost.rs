@@ -251,6 +251,7 @@ fn run_appenders(
                     key: MutationBytes::copy_from_slice(&workload.keys()[key_index]),
                     value: MutationBytes::copy_from_slice(values.value_for(key_index)),
                     expire_at_ms: None,
+                    governance: None,
                 };
                 if appender.append(record).is_err() {
                     break;

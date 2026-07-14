@@ -94,7 +94,11 @@ impl Get {
         };
         match value {
             Some(value) => Self::write_fast_value(&mut ctx, value),
-            None => ServerWire::write_fast_null(ctx.out),
+            None => {
+                if !Self::fast_get_value_into(&mut ctx, key_hash, key) {
+                    ServerWire::write_fast_null(ctx.out);
+                }
+            }
         }
         ScnpDispatch::Complete(ctx.frame.frame_len)
     }

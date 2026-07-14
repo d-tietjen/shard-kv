@@ -13,6 +13,41 @@ impl EmbeddedStore {
         deleted
     }
 
+    /// Evicts one point entry from `shard_id` according to `policy` and
+    /// returns its key.
+    ///
+    /// This is intended for external stores whose payload memory is owned by
+    /// another allocator. The caller can use Shardmap for recency and victim
+    /// selection, then release the corresponding external allocation without
+    /// relying on the cache's byte-budget hysteresis. Session and Redis object
+    /// entries are intentionally excluded.
+    pub fn evict_one_point_in_shard(
+        &self,
+        shard_id: usize,
+        policy: EvictionPolicy,
+    ) -> Option<Bytes> {
+        let shard = self.shards.get(shard_id)?;
+        let mut shard = shard.write();
+        shard.map.evict_one_with_policy(policy, now_millis())
+    }
+
+    /// Evicts the coldest point entry accepted by `eligible` from one shard.
+    ///
+    /// External overflow tiers use this to retain values until a remote write
+    /// is acknowledged. Session and Redis object entries are excluded.
+    pub fn evict_one_point_in_shard_if(
+        &self,
+        shard_id: usize,
+        policy: EvictionPolicy,
+        eligible: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Bytes> {
+        let shard = self.shards.get(shard_id)?;
+        let mut shard = shard.write();
+        shard
+            .map
+            .evict_one_with_policy_if(policy, now_millis(), eligible)
+    }
+
     #[cfg(feature = "redis")]
     pub(super) fn delete_pinned_vector_value_if_distinct(
         &self,
@@ -565,10 +600,11 @@ impl EmbeddedStore {
                     .session_slots
                     .delete_hashed(&session_prefix, route.key_hash, &entry.key);
             }
-            shard.map.set_hashed(
+            shard.map.set_bytes_hashed_with_governance_option(
                 route.key_hash,
-                entry.key,
-                entry.value,
+                &entry.key,
+                bytes::Bytes::from(entry.value),
+                entry.governance.map(bytes::Bytes::from),
                 entry.expire_at_ms,
                 now_ms,
             );

@@ -51,11 +51,15 @@ impl ShardCacheDirectRouter {
     /// Computes the routed SCNP metadata for `key`.
     pub fn route_key(&self, key: &[u8]) -> ShardCacheRoute {
         let key_hash = hash_key(key);
-        let route_hash = self.route_mode.route_hash(key, key_hash);
+        let shard_id = match self.route_mode {
+            ShardCacheRouteMode::OverflowSlot => overflow_slot_shard(key, self.shard_count)
+                .unwrap_or_else(|| stripe_index(key_hash, self.shift)),
+            mode => stripe_index(mode.route_hash(key, key_hash), self.shift),
+        };
         ShardCacheRoute {
             key_hash,
             key_tag: hash_key_tag_from_hash(key_hash),
-            shard_id: stripe_index(route_hash, self.shift),
+            shard_id,
         }
     }
 
@@ -88,6 +92,8 @@ pub enum ShardCacheRouteMode {
     FullKey,
     /// Route `s:<session>:c:<chunk>` keys by the session prefix.
     SessionPrefix,
+    /// Route a versioned internal overflow key by its encoded shard field.
+    OverflowSlot,
 }
 
 impl ShardCacheRouteMode {
@@ -96,8 +102,9 @@ impl ShardCacheRouteMode {
         match value {
             "full_key" | "full-key" | "point" => Ok(Self::FullKey),
             "session_prefix" | "session-prefix" | "session" => Ok(Self::SessionPrefix),
+            "overflow_slot" | "overflow-slot" | "overflow" => Ok(Self::OverflowSlot),
             other => Err(ShardCacheClientError::Config(format!(
-                "unknown SCNP direct route mode `{other}`; use full_key or session_prefix"
+                "unknown SCNP direct route mode `{other}`; use full_key, session_prefix, or overflow_slot"
             ))),
         }
     }
@@ -106,8 +113,19 @@ impl ShardCacheRouteMode {
         match self {
             Self::FullKey => key_hash,
             Self::SessionPrefix => hash_key(session_route_prefix(key)),
+            Self::OverflowSlot => key_hash,
         }
     }
+}
+
+const OVERFLOW_SLOT_KEY_MAGIC: &[u8; 8] = b"SCKVKEY1";
+
+fn overflow_slot_shard(key: &[u8], shard_count: usize) -> Option<usize> {
+    if key.len() < 18 || &key[..8] != OVERFLOW_SLOT_KEY_MAGIC {
+        return None;
+    }
+    let shard_id = u32::from_le_bytes(key[8..12].try_into().ok()?) as usize;
+    (shard_id < shard_count).then_some(shard_id)
 }
 
 /// Precomputed routed SCNP metadata for a key.

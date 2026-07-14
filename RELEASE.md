@@ -23,8 +23,27 @@ Use this checklist before publishing the repository or the crates.io crates.
 For full release confidence, also run any Redis compatibility or performance
 validation suites that support the release announcement. Keep raw artifacts
 outside the public repository unless they have been intentionally curated.
-For the current release shape, known limits, and smoke benchmark command, see
-`docs/RELEASE_0_1_READINESS.md`.
+For the 0.6.0 feature catalog and upgrade notes, see
+`docs/RELEASE_0_6.md`. The complete overflow architecture, operating contract,
+known limits, security requirements, and benchmark commands are in
+`docs/KV_OVERFLOW.md`.
+
+The 0.6.0 release gate also includes:
+
+```bash
+cargo fmt --check
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+./scripts/check-feature-matrix.sh
+./scripts/check-publish-artifacts.sh
+./scripts/generate-dependency-docs.sh --check
+```
+
+Run the filesystem-backed KV/object-overflow integration tests for every
+release. The RustFS/S3 smoke test remains ignored and environment-gated; run it
+against the release endpoint before advertising that backend for a production
+deployment. Confirm the all-feature dependency tree contains no `openssl-sys`,
+`openssl`, or `native-tls` packages.
 
 Use `./benchmarks/scripts/run-redis-command-benchmark-bundle.sh` for command
 matrix performance proofs so each run carries metadata, raw CSV, Markdown,

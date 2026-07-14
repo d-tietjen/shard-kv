@@ -169,7 +169,9 @@ impl FlatMap {
                     value: stored_value,
                     expire_at_ms: None,
                     semantic_index_token: None,
-                    semantic_governance: None,
+                    governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: 0,
                         frequency: 1,

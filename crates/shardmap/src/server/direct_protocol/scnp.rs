@@ -155,7 +155,7 @@ impl<'buf> ScnpFrameDecoder<'buf> {
                 ScnpFrameDecode::Ready(ScnpDecodedFrame {
                     opcode: header.opcode,
                     frame: ScnpFrame {
-                        buf: self.buf,
+                        buf: &self.buf[..frame_len],
                         body_len,
                         frame_len,
                         flags: header.flags,
@@ -194,5 +194,55 @@ impl ScnpDecodePolicy {
             }
             Self::AnyScnpFrame => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn declared_body_larger_than_received_bytes_stays_incomplete() {
+        let mut frame = vec![
+            FAST_REQUEST_MAGIC,
+            FAST_PROTOCOL_VERSION,
+            1,
+            FAST_FLAG_KEY_HASH,
+            64,
+            0,
+            0,
+            0,
+        ];
+        frame.extend_from_slice(b"attacker-controlled");
+
+        assert!(matches!(
+            ScnpFrameDecoder::new(&frame).decode_for_catalog(),
+            ScnpFrameDecode::Incomplete
+        ));
+    }
+
+    #[test]
+    fn decoder_never_includes_bytes_beyond_declared_frame() {
+        let mut frame = vec![
+            FAST_REQUEST_MAGIC,
+            FAST_PROTOCOL_VERSION,
+            1,
+            FAST_FLAG_KEY_HASH,
+            8,
+            0,
+            0,
+            0,
+        ];
+        frame.extend_from_slice(&42u64.to_le_bytes());
+        frame.extend_from_slice(b"adjacent-secret");
+
+        let ScnpFrameDecode::Ready(decoded) = ScnpFrameDecoder::new(&frame).decode_for_catalog()
+        else {
+            panic!("complete frame was not decoded");
+        };
+        assert_eq!(decoded.frame.frame_len, REQUEST_HEADER_LEN + 8);
+        assert_eq!(decoded.frame.body_end(), REQUEST_HEADER_LEN + 8);
+        assert_eq!(decoded.frame.buf.len(), REQUEST_HEADER_LEN + 8);
+        assert!(!decoded.frame.buf.ends_with(b"adjacent-secret"));
     }
 }

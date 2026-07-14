@@ -13,7 +13,7 @@ cargo run -p shardcache -- --bind-addr 127.0.0.1:6380 --disable-persistence
 Install the binary from crates.io:
 
 ```sh
-cargo install shardcache --version 0.5.0 --locked
+cargo install shardcache --version 0.6.0 --locked
 ```
 
 Install the binary from a checkout:
@@ -105,6 +105,11 @@ the Docker/server runbook.
 | `redis-modules` | Via `redis-server` | Redis `MODULE` compatibility stubs with an empty module registry and disabled loading. |
 | `redis-modules-all` | No | Aggregate Redis Modules compatibility facades, concrete command discovery metadata, and embedded APIs; individual `redis-module-*` flags can enable one module family at a time. |
 | `monoio` | No | Linux-only transport option for server experiments. |
+| `object-overflow` | No | Filesystem-backed cold-value overflow for server storage. |
+| `object-overflow-s3` | No | S3/RustFS-compatible object overflow adapter. |
+| `kv-overflow` | No | Shardcache SCNP overflow-replica role and embedded primary support. |
+| `kv-overflow-redis` | No | Redis/Valkey-compatible adapter for an embedded KV overflow primary. |
+| `scnp-tls` | No | Rustls TLS 1.3 and mTLS for shard-owned SCNP overflow connections. |
 
 Build the lean server with:
 
@@ -113,6 +118,12 @@ cargo run -p shardcache --no-default-features --features server -- \
   --bind-addr 127.0.0.1:6380 \
   --disable-persistence
 ```
+
+Build an authenticated overflow replica with native SCNP TLS support using
+`--features redis-server,kv-overflow,scnp-tls`. Configure the certificate,
+client authentication, direct shard listeners, and encrypted persistence in
+`shardcache.toml.example`; the complete deployment contract is in
+[`../../docs/KV_OVERFLOW.md`](../../docs/KV_OVERFLOW.md).
 
 ## Operational Notes
 

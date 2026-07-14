@@ -24,6 +24,11 @@ package_crate_with_local_shardmap_patch() {
     "$@"
 }
 
+package_shardmap_with_local_client_patch() {
+  cargo package -p shardmap --locked --all-features \
+    --config "patch.crates-io.shardcache-client-rs.path=\"$root/crates/shardcache-client-rs\""
+}
+
 unpack_crate() {
   local package="$1"
   local version="$2"
@@ -57,6 +62,7 @@ write_shardcache_patch_table() {
 
 [patch.crates-io]
 shardmap = { path = "$unpacked/shardmap-$shardmap_version" }
+shardcache-client-rs = { path = "$unpacked/shardcache-client-rs-$client_version" }
 EOF
 }
 
@@ -80,6 +86,11 @@ check_shardcache_binary() {
   cargo check --manifest-path "$manifest" \
     --no-default-features \
     --features redis-server,redis-functions,redis-modules-all
+
+  echo "checking packaged binary: shardcache SCNP TLS overflow"
+  cargo check --manifest-path "$manifest" \
+    --no-default-features \
+    --features redis-server,kv-overflow,scnp-tls
 }
 
 shardmap_version="$(pkg_version shardmap)"
@@ -91,8 +102,8 @@ trap 'rm -rf "$tmp"' EXIT
 unpacked="$tmp/unpacked"
 mkdir -p "$unpacked"
 
-package_crate shardmap --all-features
 package_crate shardcache-client-rs
+package_shardmap_with_local_client_patch
 
 # This crate depends on the workspace shardmap version. During a PR for a new
 # shardmap release, that exact version is not indexed on crates.io yet. Use a
@@ -140,3 +151,37 @@ write_patch_table >>"$redis_consumer/Cargo.toml"
 
 check_consumer default-consumer
 check_consumer redis-consumer
+
+kv_overflow_consumer="$tmp/kv-overflow-consumer"
+mkdir -p "$kv_overflow_consumer"
+write_consumer_main "$kv_overflow_consumer"
+cat >"$kv_overflow_consumer/Cargo.toml" <<EOF
+[package]
+name = "shard-kv-publish-kv-overflow-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shardmap = { version = "$shardmap_version", features = ["kv-overflow-redis"] }
+EOF
+write_patch_table >>"$kv_overflow_consumer/Cargo.toml"
+
+check_consumer kv-overflow-consumer
+
+scnp_tls_consumer="$tmp/scnp-tls-consumer"
+mkdir -p "$scnp_tls_consumer"
+write_consumer_main "$scnp_tls_consumer"
+cat >"$scnp_tls_consumer/Cargo.toml" <<EOF
+[package]
+name = "shard-kv-publish-scnp-tls-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shardmap = { version = "$shardmap_version", default-features = false, features = ["scnp-tls"] }
+EOF
+write_patch_table >>"$scnp_tls_consumer/Cargo.toml"
+
+check_consumer scnp-tls-consumer

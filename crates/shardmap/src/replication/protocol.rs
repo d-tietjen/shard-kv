@@ -13,10 +13,16 @@ pub const FCRP_VERSION: u8 = 1;
 const HEADER_LEN: usize = 16;
 pub(crate) const FRAME_HEADER_LEN: usize = HEADER_LEN;
 const FLAG_COMPRESSED: u8 = 0x01;
+const MAX_FCRP_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 // u64::MAX is reserved as the wire sentinel for "no expiry". A legitimate
 // `expire_at_ms` of u64::MAX would map to year ~584,942,417, so it is safe to
 // reserve.
 const EXPIRE_NONE: u64 = u64::MAX;
+const MUTATION_RECORD_MIN_BYTES: usize = 53;
+const SNAPSHOT_ENTRY_MIN_BYTES: usize = 16;
+const GOVERNED_SET_OP: u8 = 4;
+const SNAPSHOT_GOVERNANCE_MAGIC: u32 = u32::from_le_bytes(*b"GOV2");
+const GOVERNANCE_NONE: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -168,6 +174,7 @@ pub struct ReplicationMutation {
     pub key: SharedBytes,
     pub value: SharedBytes,
     pub expire_at_ms: Option<u64>,
+    pub governance: Option<SharedBytes>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -181,6 +188,7 @@ pub struct BorrowedReplicationMutation<'a> {
     pub key: &'a [u8],
     pub value: &'a [u8],
     pub expire_at_ms: Option<u64>,
+    pub governance: Option<&'a [u8]>,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +200,7 @@ pub struct FrameBackedReplicationMutation<'a> {
     pub key: &'a [u8],
     pub value: SharedBytes,
     pub expire_at_ms: Option<u64>,
+    pub governance: Option<SharedBytes>,
 }
 
 impl ReplicationMutation {
@@ -211,11 +220,16 @@ impl ReplicationMutation {
             key: record.key.clone(),
             value: record.value.clone(),
             expire_at_ms: record.expire_at_ms,
+            governance: record.governance.clone(),
         }
     }
 
     pub fn estimated_uncompressed_len(&self) -> usize {
-        mutation_record_payload_len(self.key.len(), self.value.len())
+        mutation_record_payload_len(
+            self.key.len(),
+            self.value.len(),
+            self.governance.as_ref().map_or(0, |value| 4 + value.len()),
+        )
     }
 
     pub(crate) fn as_borrowed(&self) -> BorrowedReplicationMutation<'_> {
@@ -229,6 +243,7 @@ impl ReplicationMutation {
             key: self.key.as_ref(),
             value: self.value.as_ref(),
             expire_at_ms: self.expire_at_ms,
+            governance: self.governance.as_deref(),
         }
     }
 }
@@ -253,6 +268,11 @@ pub fn encode_frame(
     zstd_level: i32,
     payload: &[u8],
 ) -> Result<Vec<u8>> {
+    if payload.len() > MAX_FCRP_PAYLOAD_BYTES {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP payload exceeds maximum {MAX_FCRP_PAYLOAD_BYTES}"
+        )));
+    }
     match compression {
         ReplicationCompressionMode::None => {
             let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
@@ -270,6 +290,11 @@ pub fn encode_frame(
             let compressed = zstd::bulk::compress(payload, zstd_level).map_err(|error| {
                 ShardCacheError::Protocol(format!("FCRP zstd compression failed: {error}"))
             })?;
+            if compressed.len() > MAX_FCRP_PAYLOAD_BYTES {
+                return Err(ShardCacheError::Protocol(format!(
+                    "FCRP compressed payload exceeds maximum {MAX_FCRP_PAYLOAD_BYTES}"
+                )));
+            }
             let mut out = Vec::with_capacity(HEADER_LEN + compressed.len());
             write_header(
                 &mut out,
@@ -339,9 +364,11 @@ pub fn decode_frame_payload(bytes: &[u8]) -> Result<ReplicationFramePayload<'_>>
     }
     let kind = FrameKind::from_u8(bytes[5])?;
     let flags = bytes[6];
+    validate_frame_flags(bytes[7], flags)?;
     let payload_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let uncompressed_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    if HEADER_LEN + payload_len != bytes.len() {
+    validate_frame_lengths(payload_len, uncompressed_len, flags)?;
+    if HEADER_LEN.checked_add(payload_len) != Some(bytes.len()) {
         return Err(ShardCacheError::Protocol(
             "FCRP frame length mismatch".into(),
         ));
@@ -380,9 +407,11 @@ pub fn decode_frame_payload_bytes(bytes: SharedBytes) -> Result<ReplicationFrame
 
     let kind = FrameKind::from_u8(bytes[5])?;
     let flags = bytes[6];
+    validate_frame_flags(bytes[7], flags)?;
     let payload_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let uncompressed_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    if HEADER_LEN + payload_len != bytes.len() {
+    validate_frame_lengths(payload_len, uncompressed_len, flags)?;
+    if HEADER_LEN.checked_add(payload_len) != Some(bytes.len()) {
         return Err(ShardCacheError::Protocol(
             "FCRP frame length mismatch".into(),
         ));
@@ -405,6 +434,29 @@ pub fn decode_frame_payload_bytes(bytes: SharedBytes) -> Result<ReplicationFrame
         compressed,
         payload,
     })
+}
+
+fn validate_frame_flags(reserved: u8, flags: u8) -> Result<()> {
+    if reserved != 0 || flags & !FLAG_COMPRESSED != 0 {
+        return Err(ShardCacheError::Protocol(
+            "FCRP frame contains unsupported flags".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_frame_lengths(payload_len: usize, uncompressed_len: usize, flags: u8) -> Result<()> {
+    if payload_len > MAX_FCRP_PAYLOAD_BYTES || uncompressed_len > MAX_FCRP_PAYLOAD_BYTES {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP frame payload exceeds maximum {MAX_FCRP_PAYLOAD_BYTES}"
+        )));
+    }
+    if flags & FLAG_COMPRESSED == 0 && uncompressed_len != payload_len {
+        return Err(ShardCacheError::Protocol(
+            "FCRP uncompressed frame length mismatch".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn encode_mutation_batch(mutations: &[ReplicationMutation]) -> Vec<u8> {
@@ -449,14 +501,22 @@ fn mutation_batch_payload_len(mutations: &[ReplicationMutation]) -> usize {
         .sum::<usize>()
 }
 
-pub(crate) fn mutation_record_payload_len(key_len: usize, value_len: usize) -> usize {
-    4 + 8 + 8 + 1 + 8 + 8 + 8 + 4 + 4 + key_len + value_len
+pub(crate) fn mutation_record_payload_len(
+    key_len: usize,
+    value_len: usize,
+    governance_record_len: usize,
+) -> usize {
+    4 + 8 + 8 + 1 + 8 + 8 + 8 + 4 + 4 + key_len + value_len + governance_record_len
 }
 
 pub(crate) fn borrowed_mutation_record_payload_len(
     mutation: BorrowedReplicationMutation<'_>,
 ) -> usize {
-    mutation_record_payload_len(mutation.key.len(), mutation.value.len())
+    mutation_record_payload_len(
+        mutation.key.len(),
+        mutation.value.len(),
+        mutation.governance.map_or(0, |value| 4 + value.len()),
+    )
 }
 
 pub(crate) fn mutation_batch_record_count(bytes: &[u8]) -> Result<usize> {
@@ -483,7 +543,12 @@ pub(crate) fn write_borrowed_mutation_payload_record(
         write_u32_le(&mut cursor, mutation.shard_id as u32);
         write_u64_le(&mut cursor, mutation.sequence);
         write_u64_le(&mut cursor, mutation.timestamp_ms);
-        write_u8(&mut cursor, mutation.op.to_byte());
+        let op = if mutation.op == ReplicationMutationOp::Set && mutation.governance.is_some() {
+            GOVERNED_SET_OP
+        } else {
+            mutation.op.to_byte()
+        };
+        write_u8(&mut cursor, op);
         write_u64_le(&mut cursor, mutation.key_hash);
         write_u64_le(&mut cursor, mutation.key_tag);
         write_u64_le(&mut cursor, mutation.expire_at_ms.unwrap_or(EXPIRE_NONE));
@@ -491,6 +556,10 @@ pub(crate) fn write_borrowed_mutation_payload_record(
         write_u32_le(&mut cursor, mutation.value.len() as u32);
         write_bytes(&mut cursor, mutation.key);
         write_bytes(&mut cursor, mutation.value);
+        if let Some(governance) = mutation.governance {
+            write_u32_le(&mut cursor, governance.len() as u32);
+            write_bytes(&mut cursor, governance);
+        }
         debug_assert_eq!(
             cursor.offset_from(out.as_ptr().add(start)),
             record_len as isize
@@ -547,12 +616,21 @@ fn write_mutation_batch_payload(out: &mut Vec<u8>, mutations: &[ReplicationMutat
 pub fn decode_mutation_batch(bytes: &[u8]) -> Result<Vec<ReplicationMutation>> {
     let mut cursor = Cursor::new(bytes);
     let count = cursor.u32()? as usize;
-    let mut mutations = Vec::with_capacity(count);
+    cursor.validate_count(count, MUTATION_RECORD_MIN_BYTES, "mutation batch")?;
+    let mut mutations = Vec::new();
+    mutations
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("FCRP mutation batch allocation failed".into()))?;
     for _ in 0..count {
         let shard_id = cursor.u32()? as usize;
         let sequence = cursor.u64()?;
         let timestamp_ms = cursor.u64()?;
-        let op = ReplicationMutationOp::from_byte(cursor.u8()?)?;
+        let raw_op = cursor.u8()?;
+        let op = if raw_op == GOVERNED_SET_OP {
+            ReplicationMutationOp::Set
+        } else {
+            ReplicationMutationOp::from_byte(raw_op)?
+        };
         let key_hash = cursor.u64()?;
         let key_tag = cursor.u64()?;
         let expire_raw = cursor.u64()?;
@@ -560,6 +638,12 @@ pub fn decode_mutation_batch(bytes: &[u8]) -> Result<Vec<ReplicationMutation>> {
         let value_len = cursor.u32()? as usize;
         let key = SharedBytes::from(cursor.bytes(key_len)?.to_vec());
         let value = SharedBytes::from(cursor.bytes(value_len)?.to_vec());
+        let governance = if raw_op == GOVERNED_SET_OP {
+            let len = cursor.u32()? as usize;
+            Some(SharedBytes::copy_from_slice(cursor.bytes(len)?))
+        } else {
+            None
+        };
         mutations.push(ReplicationMutation {
             shard_id,
             sequence,
@@ -570,6 +654,7 @@ pub fn decode_mutation_batch(bytes: &[u8]) -> Result<Vec<ReplicationMutation>> {
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
+            governance,
         });
     }
     cursor.finish()?;
@@ -582,11 +667,17 @@ where
 {
     let mut cursor = Cursor::new(bytes);
     let count = cursor.u32()? as usize;
+    cursor.validate_count(count, MUTATION_RECORD_MIN_BYTES, "mutation batch")?;
     for _ in 0..count {
         let shard_id = cursor.u32()? as usize;
         let sequence = cursor.u64()?;
         let timestamp_ms = cursor.u64()?;
-        let op = ReplicationMutationOp::from_byte(cursor.u8()?)?;
+        let raw_op = cursor.u8()?;
+        let op = if raw_op == GOVERNED_SET_OP {
+            ReplicationMutationOp::Set
+        } else {
+            ReplicationMutationOp::from_byte(raw_op)?
+        };
         let key_hash = cursor.u64()?;
         let key_tag = cursor.u64()?;
         let expire_raw = cursor.u64()?;
@@ -594,6 +685,12 @@ where
         let value_len = cursor.u32()? as usize;
         let key = cursor.bytes(key_len)?;
         let value = cursor.bytes(value_len)?;
+        let governance = if raw_op == GOVERNED_SET_OP {
+            let len = cursor.u32()? as usize;
+            Some(cursor.bytes(len)?)
+        } else {
+            None
+        };
         visit(BorrowedReplicationMutation {
             shard_id,
             sequence,
@@ -604,6 +701,7 @@ where
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
+            governance,
         })?;
     }
     cursor.finish()
@@ -615,11 +713,17 @@ where
 {
     let mut cursor = Cursor::new(bytes.as_ref());
     let count = cursor.u32()? as usize;
+    cursor.validate_count(count, MUTATION_RECORD_MIN_BYTES, "mutation batch")?;
     for _ in 0..count {
         let shard_id = cursor.u32()? as usize;
         let sequence = cursor.u64()?;
         let _timestamp_ms = cursor.u64()?;
-        let op = ReplicationMutationOp::from_byte(cursor.u8()?)?;
+        let raw_op = cursor.u8()?;
+        let op = if raw_op == GOVERNED_SET_OP {
+            ReplicationMutationOp::Set
+        } else {
+            ReplicationMutationOp::from_byte(raw_op)?
+        };
         let key_hash = cursor.u64()?;
         let _key_tag = cursor.u64()?;
         let expire_raw = cursor.u64()?;
@@ -629,6 +733,14 @@ where
         let value_start = cursor.pos;
         let _ = cursor.bytes(value_len)?;
         let value = bytes.slice(value_start..value_start + value_len);
+        let governance = if raw_op == GOVERNED_SET_OP {
+            let len = cursor.u32()? as usize;
+            let start = cursor.pos;
+            let _ = cursor.bytes(len)?;
+            Some(bytes.slice(start..start + len))
+        } else {
+            None
+        };
         visit(FrameBackedReplicationMutation {
             shard_id,
             sequence,
@@ -637,6 +749,7 @@ where
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
+            governance,
         })?;
     }
     cursor.finish()
@@ -714,7 +827,11 @@ pub fn decode_hello(bytes: &[u8]) -> Result<ReplicationHello> {
     let has_since = cursor.u8()? != 0;
     let since = if has_since {
         let count = cursor.u32()? as usize;
-        let mut values = Vec::with_capacity(count);
+        cursor.validate_count(count, 8, "hello watermarks")?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(count).map_err(|_| {
+            ShardCacheError::Protocol("FCRP hello watermark allocation failed".into())
+        })?;
         for _ in 0..count {
             values.push(cursor.u64()?);
         }
@@ -762,7 +879,11 @@ pub fn encode_ack(watermarks: &ShardWatermarks) -> Vec<u8> {
 pub fn decode_ack(bytes: &[u8]) -> Result<ShardWatermarks> {
     let mut cursor = Cursor::new(bytes);
     let count = cursor.u32()? as usize;
-    let mut values = Vec::with_capacity(count);
+    cursor.validate_count(count, 8, "ack watermarks")?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("FCRP ack watermark allocation failed".into()))?;
     for _ in 0..count {
         values.push(cursor.u64()?);
     }
@@ -779,12 +900,23 @@ pub fn encode_snapshot_chunk(chunk: &ReplicationSnapshotChunk) -> Vec<u8> {
         out.extend_from_slice(&watermark.to_le_bytes());
     }
     out.extend_from_slice(&(chunk.entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&SNAPSHOT_GOVERNANCE_MAGIC.to_le_bytes());
     for entry in &chunk.entries {
         out.extend_from_slice(&(entry.key.len() as u32).to_le_bytes());
         out.extend_from_slice(&(entry.value.len() as u32).to_le_bytes());
+        out.extend_from_slice(
+            &entry
+                .governance
+                .as_ref()
+                .map_or(GOVERNANCE_NONE, |value| value.len() as u32)
+                .to_le_bytes(),
+        );
         out.extend_from_slice(&entry.expire_at_ms.unwrap_or(EXPIRE_NONE).to_le_bytes());
         out.extend_from_slice(entry.key.as_ref());
         out.extend_from_slice(entry.value.as_ref());
+        if let Some(governance) = &entry.governance {
+            out.extend_from_slice(governance.as_ref());
+        }
     }
     out
 }
@@ -794,22 +926,44 @@ pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
     let chunk_index = cursor.u64()?;
     let is_last = cursor.u8()? != 0;
     let watermark_count = cursor.u32()? as usize;
-    let mut watermarks = Vec::with_capacity(watermark_count);
+    cursor.validate_count(watermark_count, 8, "snapshot watermarks")?;
+    let mut watermarks = Vec::new();
+    watermarks.try_reserve_exact(watermark_count).map_err(|_| {
+        ShardCacheError::Protocol("FCRP snapshot watermark allocation failed".into())
+    })?;
     for _ in 0..watermark_count {
         watermarks.push(cursor.u64()?);
     }
     let entry_count = cursor.u32()? as usize;
-    let mut entries = Vec::with_capacity(entry_count);
+    let has_governance = cursor.peek_u32() == Some(SNAPSHOT_GOVERNANCE_MAGIC);
+    if has_governance {
+        let _ = cursor.u32()?;
+    }
+    cursor.validate_count(entry_count, SNAPSHOT_ENTRY_MIN_BYTES, "snapshot entries")?;
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(entry_count)
+        .map_err(|_| ShardCacheError::Protocol("FCRP snapshot entry allocation failed".into()))?;
     for _ in 0..entry_count {
         let key_len = cursor.u32()? as usize;
         let value_len = cursor.u32()? as usize;
+        let governance_len = if has_governance {
+            Some(cursor.u32()?)
+        } else {
+            None
+        };
         let expire_raw = cursor.u64()?;
         let key = cursor.bytes(key_len)?.to_vec();
         let value = cursor.bytes(value_len)?.to_vec();
+        let governance = match governance_len {
+            Some(GOVERNANCE_NONE) | None => None,
+            Some(len) => Some(cursor.bytes(len as usize)?.to_vec()),
+        };
         entries.push(StoredEntry {
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
+            governance,
         });
     }
     cursor.finish()?;
@@ -827,6 +981,11 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
+    fn peek_u32(&self) -> Option<u32> {
+        self.bytes
+            .get(self.pos..self.pos + 4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+    }
     fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
     }
@@ -852,14 +1011,31 @@ impl<'a> Cursor<'a> {
     }
 
     fn bytes(&mut self, len: usize) -> Result<&'a [u8]> {
-        if self.pos + len > self.bytes.len() {
+        let Some(end) = self.pos.checked_add(len) else {
+            return Err(ShardCacheError::Protocol(
+                "FCRP payload length overflow".into(),
+            ));
+        };
+        if end > self.bytes.len() {
             return Err(ShardCacheError::Protocol(
                 "FCRP payload is truncated".into(),
             ));
         }
-        let bytes = &self.bytes[self.pos..self.pos + len];
-        self.pos += len;
+        let bytes = &self.bytes[self.pos..end];
+        self.pos = end;
         Ok(bytes)
+    }
+
+    fn validate_count(&self, count: usize, min_item_bytes: usize, label: &str) -> Result<()> {
+        let required = count
+            .checked_mul(min_item_bytes)
+            .ok_or_else(|| ShardCacheError::Protocol(format!("FCRP {label} count overflow")))?;
+        if required > self.bytes.len().saturating_sub(self.pos) {
+            return Err(ShardCacheError::Protocol(format!(
+                "FCRP {label} count exceeds remaining payload"
+            )));
+        }
+        Ok(())
     }
 
     fn finish(&self) -> Result<()> {
@@ -890,6 +1066,7 @@ mod tests {
             key: SharedBytes::from(key),
             value: SharedBytes::from_static(b"value"),
             expire_at_ms: Some(99),
+            governance: None,
         }
     }
 
@@ -899,6 +1076,27 @@ mod tests {
         let encoded = encode_mutation_batch(&mutations);
         let decoded = decode_mutation_batch(&encoded).expect("decode");
         assert_eq!(decoded, mutations);
+    }
+
+    #[test]
+    fn governed_mutation_round_trips_through_owned_and_frame_backed_decoders() {
+        let mut mutation = sample_mutation(7);
+        mutation.governance = Some(SharedBytes::from_static(b"tenant-a/repo-private"));
+        let payload = encode_mutation_batch(&[mutation.clone()]);
+        assert_eq!(
+            decode_mutation_batch(&payload).unwrap(),
+            vec![mutation.clone()]
+        );
+
+        let mut visited = None;
+        visit_mutation_batch_payload_bytes(SharedBytes::from(payload), |decoded| {
+            visited = Some((decoded.value, decoded.governance));
+            Ok(())
+        })
+        .unwrap();
+        let (value, governance) = visited.expect("visited mutation");
+        assert_eq!(value, mutation.value);
+        assert_eq!(governance, mutation.governance);
     }
 
     #[test]
@@ -981,10 +1179,41 @@ mod tests {
                 key: b"k".to_vec(),
                 value: b"v".to_vec(),
                 expire_at_ms: None,
+                governance: Some(b"acl".to_vec()),
             }],
         };
         let encoded = encode_snapshot_chunk(&chunk);
         let decoded = decode_snapshot_chunk(&encoded).expect("decode");
         assert_eq!(decoded, chunk);
+    }
+
+    #[test]
+    fn rejects_count_allocation_amplification() {
+        let count_only = u32::MAX.to_le_bytes();
+        assert!(decode_mutation_batch(&count_only).is_err());
+        assert!(decode_ack(&count_only).is_err());
+
+        let mut snapshot = Vec::new();
+        snapshot.extend_from_slice(&0u64.to_le_bytes());
+        snapshot.push(0);
+        snapshot.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_snapshot_chunk(&snapshot).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_decompression_and_unknown_flags() {
+        let mut frame = Vec::new();
+        write_header(
+            &mut frame,
+            FrameKind::Ack,
+            FLAG_COMPRESSED,
+            0,
+            (MAX_FCRP_PAYLOAD_BYTES as u32) + 1,
+        );
+        assert!(decode_frame(&frame).is_err());
+
+        frame[6] = 0x80;
+        frame[12..16].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_frame(&frame).is_err());
     }
 }

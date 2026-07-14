@@ -30,6 +30,8 @@ mod embedded_store_sharded;
 mod embedded_store_shared;
 mod engine;
 mod flat_map;
+#[cfg(feature = "kv-overflow")]
+mod kv_overflow;
 mod object_overflow;
 mod records;
 #[cfg(feature = "redis")]
@@ -41,6 +43,9 @@ mod stats;
 mod telemetry;
 
 pub use command::{BorrowedCommand, Command};
+pub(crate) use embedded_store::OverflowReplicaAuthRuntime;
+#[cfg(feature = "scnp-tls")]
+pub(crate) use embedded_store::OverflowReplicaTlsRuntime;
 #[cfg(feature = "sharded")]
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
 #[doc(hidden)]
@@ -49,6 +54,7 @@ pub use embedded_store::ShardArcEmbeddedStore;
 pub(crate) use embedded_store::TimeSeriesMultiRangeWriter;
 #[cfg(feature = "redis-module-topk")]
 pub(crate) use embedded_store::TopKError;
+pub(crate) use embedded_store::overflow_slot_shard;
 #[cfg(feature = "redis")]
 pub(crate) use embedded_store::{
     DEFAULT_SCAN_COUNT, RedisHashStore, RedisKeyScanType, RedisKeyStore, RedisListStore,
@@ -99,6 +105,15 @@ pub(crate) use engine::{
     ExpirationChange, RESP_SPANNED_VALUE_MIN, ShardKey, ShardOperation, ShardReply, ShardValue,
 };
 pub use flat_map::FlatMap;
+pub(crate) use flat_map::GovernedRead;
+#[cfg(feature = "kv-overflow-redis")]
+pub use kv_overflow::RedisKvOverflowNode;
+#[cfg(feature = "kv-overflow")]
+pub use kv_overflow::{
+    DEFAULT_KV_OVERFLOW_SLOT_COUNT, KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode,
+    KvOverflowOptions, KvOverflowPrimaryOwnershipSnapshot, KvOverflowPutRequest, KvOverflowStore,
+    KvOverflowValue, ScnpKvOverflowNode,
+};
 pub use object_overflow::{
     ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore, ObjectValueRef,
 };

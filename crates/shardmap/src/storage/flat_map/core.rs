@@ -47,7 +47,15 @@ impl FlatMap {
             {
                 continue;
             }
-            map.set(entry.key, entry.value, entry.expire_at_ms, now_ms);
+            let hash = hash_key(&entry.key);
+            map.set_bytes_hashed_with_governance_option(
+                hash,
+                &entry.key,
+                SharedBytes::from(entry.value),
+                entry.governance.map(SharedBytes::from),
+                entry.expire_at_ms,
+                now_ms,
+            );
         }
         map
     }
@@ -203,14 +211,14 @@ impl FlatMap {
         if self.should_sample_read() {
             let tick = self.next_access_tick();
             self.entries
-                .find_mut(hash, |entry| entry.matches(hash, key))
+                .find_mut(hash, |entry| entry.matches_readable(hash, key))
                 .map(|entry| {
                     entry.access.record_access(tick);
                     entry.value.as_ref()
                 })
         } else {
             self.entries
-                .find(hash, |entry| entry.matches(hash, key))
+                .find(hash, |entry| entry.matches_readable(hash, key))
                 .map(|entry| entry.value.as_ref())
         }
     }
@@ -229,14 +237,18 @@ impl FlatMap {
         if self.should_sample_read() {
             let tick = self.next_access_tick();
             self.entries
-                .find_mut(hash, |entry| entry.matches_prepared(hash, key, key_tag))
+                .find_mut(hash, |entry| {
+                    entry.matches_readable_prepared(hash, key, key_tag)
+                })
                 .map(|entry| {
                     entry.access.record_access(tick);
                     entry.value.as_ref()
                 })
         } else {
             self.entries
-                .find(hash, |entry| entry.matches_prepared(hash, key, key_tag))
+                .find(hash, |entry| {
+                    entry.matches_readable_prepared(hash, key, key_tag)
+                })
                 .map(|entry| entry.value.as_ref())
         }
     }
@@ -350,13 +362,11 @@ impl FlatMap {
         if self.eviction_policy == EvictionPolicy::None {
             return false;
         }
-        if self.memory_limit_bytes.is_none() {
-            return false;
-        }
-        let limit = self.memory_limit_bytes.unwrap();
-        let watermark = limit.saturating_mul(3) / 4;
-        if self.stored_bytes < watermark.max(1) {
-            return false;
+        if let Some(limit) = self.memory_limit_bytes {
+            let watermark = limit.saturating_mul(3) / 4;
+            if self.stored_bytes < watermark.max(1) {
+                return false;
+            }
         }
         self.read_sample_counter = self.read_sample_counter.wrapping_add(1);
         (self.read_sample_counter & READ_TOUCH_SAMPLE_MASK) == 0
@@ -399,10 +409,60 @@ impl FlatMap {
     }
 
     pub(crate) fn evict_with_policy(&mut self, policy: EvictionPolicy, now_ms: u64) -> bool {
-        let Some((_rank, hash, key)) = self.eviction_candidate(policy) else {
-            return false;
-        };
+        self.evict_one_with_policy(policy, now_ms).is_some()
+    }
+
+    pub(crate) fn evict_one_with_policy(
+        &mut self,
+        policy: EvictionPolicy,
+        now_ms: u64,
+    ) -> Option<Bytes> {
+        if policy == EvictionPolicy::Lru {
+            while let Some(touch) = self.lru_touch_log.pop_front() {
+                let Some(entry) = self
+                    .entries
+                    .find_entry(touch.hash, |entry| entry.access.last_touch == touch.tick)
+                    .ok()
+                else {
+                    continue;
+                };
+                let key = entry.get().key.as_ref().to_vec();
+                let hash = touch.hash;
+                let _ = entry;
+                if self.evict_or_offload_hashed(hash, &key, now_ms) {
+                    return Some(key);
+                }
+            }
+        }
+        let (_rank, hash, key) = self.eviction_candidate(policy)?;
         self.evict_or_offload_hashed(hash, &key, now_ms)
+            .then_some(key)
+    }
+
+    pub(crate) fn evict_one_with_policy_if(
+        &mut self,
+        policy: EvictionPolicy,
+        now_ms: u64,
+        mut eligible: impl FnMut(&[u8]) -> bool,
+    ) -> Option<Bytes> {
+        if policy == EvictionPolicy::None || self.entries.is_empty() {
+            return None;
+        }
+        let mut selected: Option<(EvictionRank, u64, &[u8])> = None;
+        for entry in self.entries.iter() {
+            if !eligible(entry.key.as_ref()) {
+                continue;
+            }
+            let candidate = (entry.access.rank(policy), entry.hash, entry.key.as_ref());
+            selected = match selected {
+                Some(current) if current.0 <= candidate.0 => Some(current),
+                _ => Some(candidate),
+            };
+        }
+        let (_rank, hash, key) = selected?;
+        let key = key.to_vec();
+        self.evict_or_offload_hashed(hash, &key, now_ms)
+            .then_some(key)
     }
 
     pub(crate) fn evict_to_memory_target(

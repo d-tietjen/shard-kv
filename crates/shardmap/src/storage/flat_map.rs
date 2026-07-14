@@ -28,7 +28,11 @@ struct FlatEntry {
     value: SharedBytes,
     expire_at_ms: Option<u64>,
     semantic_index_token: Option<SemanticIndexToken>,
-    semantic_governance: Option<SharedBytes>,
+    /// Opaque policy metadata. Presence marks the value as protected for every
+    /// ordinary point read, including entries created through semantic APIs.
+    governance: Option<SharedBytes>,
+    #[cfg(feature = "kv-overflow")]
+    overflow_generation: u64,
     access: EntryAccessMeta,
 }
 
@@ -39,6 +43,7 @@ struct RemoteEntry {
     key: Box<[u8]>,
     object: ObjectValueRef,
     expire_at_ms: Option<u64>,
+    governance: Option<SharedBytes>,
 }
 
 impl RemoteEntry {
@@ -57,6 +62,12 @@ impl RemoteEntry {
         self.key_len
             .saturating_add(self.object.object_key.len())
             .saturating_add(std::mem::size_of::<ObjectValueRef>())
+            .saturating_add(self.governance.as_ref().map_or(0, SharedBytes::len))
+    }
+
+    #[inline(always)]
+    fn is_protected(&self) -> bool {
+        self.governance.is_some()
     }
 }
 
@@ -77,6 +88,21 @@ impl FlatEntry {
     }
 
     #[inline(always)]
+    fn matches_readable(&self, hash: u64, key: &[u8]) -> bool {
+        !self.is_protected() && self.matches_hashed_key(hash, key)
+    }
+
+    #[inline(always)]
+    fn matches_readable_prepared(&self, hash: u64, key: &[u8], key_tag: u64) -> bool {
+        !self.is_protected() && self.matches_prepared(hash, key, key_tag)
+    }
+
+    #[inline(always)]
+    fn matches_readable_tagged(&self, hash: u64, key_tag: u64, key_len: usize) -> bool {
+        !self.is_protected() && self.matches_tagged(hash, key_tag, key_len)
+    }
+
+    #[inline(always)]
     fn matches_tagged(&self, hash: u64, key_tag: u64, key_len: usize) -> bool {
         self.hash == hash && self.key_tag == key_tag && self.key_len == key_len
     }
@@ -88,13 +114,9 @@ impl FlatEntry {
 
     #[inline(always)]
     fn semantic_bytes(&self) -> usize {
-        self.semantic_index_token.map_or(0, |token| {
-            token.stored_bytes().saturating_add(
-                self.semantic_governance
-                    .as_ref()
-                    .map_or(0, SharedBytes::len),
-            )
-        })
+        self.semantic_index_token
+            .map_or(0, |token| token.stored_bytes())
+            .saturating_add(self.governance.as_ref().map_or(0, SharedBytes::len))
     }
 
     #[inline(always)]
@@ -107,8 +129,24 @@ impl FlatEntry {
     #[inline(always)]
     fn clear_semantic_embedding(&mut self) {
         self.semantic_index_token = None;
-        self.semantic_governance = None;
+        self.governance = None;
+        #[cfg(feature = "kv-overflow")]
+        {
+            self.overflow_generation = 0;
+        }
     }
+
+    #[inline(always)]
+    fn is_protected(&self) -> bool {
+        self.governance.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GovernedRead<T> {
+    Missing,
+    Denied,
+    Authorized(T),
 }
 
 #[cfg(feature = "unsafe")]

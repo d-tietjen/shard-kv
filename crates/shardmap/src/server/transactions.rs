@@ -111,6 +111,10 @@ impl TransactionCoordinator {
                 let shards = (0..store.shard_count()).collect::<SmallVec<[usize; 8]>>();
                 self.read_guard_for_shards(&shards)
             }
+            EmbeddedRouteMode::OverflowSlot => {
+                let shards = (0..store.shard_count()).collect::<SmallVec<[usize; 8]>>();
+                self.read_guard_for_shards(&shards)
+            }
         }
     }
 

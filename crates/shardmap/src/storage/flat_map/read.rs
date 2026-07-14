@@ -21,7 +21,9 @@ impl FlatMap {
         let can_mutate = self
             .entries
             .find(hash, |entry| entry.matches_hashed_key(hash, key))
-            .is_some_and(|entry| entry.expire_at_ms.is_none() && entry.value.is_unique());
+            .is_some_and(|entry| {
+                !entry.is_protected() && entry.expire_at_ms.is_none() && entry.value.is_unique()
+            });
         if !can_mutate {
             return None;
         }
@@ -65,7 +67,9 @@ impl FlatMap {
         let can_mutate = self
             .entries
             .find(hash, |entry| entry.matches_hashed_key(hash, key))
-            .is_some_and(|entry| entry.expire_at_ms.is_none() && entry.value.is_unique());
+            .is_some_and(|entry| {
+                !entry.is_protected() && entry.expire_at_ms.is_none() && entry.value.is_unique()
+            });
         if !can_mutate {
             return None;
         }
@@ -117,11 +121,11 @@ impl FlatMap {
             }
             return self
                 .entries
-                .find(hash, |entry| entry.matches_hashed_key(hash, key))
+                .find(hash, |entry| entry.matches_readable(hash, key))
                 .map(|entry| entry.value.as_ref());
         }
         self.entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(hash, |entry| entry.matches_readable(hash, key))
             .filter(|entry| !entry.is_expired(now_ms))
             .map(|entry| entry.value.as_ref())
     }
@@ -182,7 +186,7 @@ impl FlatMap {
             return Some(value.as_ref());
         }
         self.entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(hash, |entry| entry.matches_readable(hash, key))
             .map(|entry| entry.value.as_ref())
     }
 
@@ -198,7 +202,9 @@ impl FlatMap {
             return Some(value.as_ref());
         }
         self.entries
-            .find(hash, |entry| entry.matches_prepared(hash, key, key_tag))
+            .find(hash, |entry| {
+                entry.matches_readable_prepared(hash, key, key_tag)
+            })
             .map(|entry| entry.value.as_ref())
     }
 
@@ -219,7 +225,7 @@ impl FlatMap {
         }
         if let Some(entry) = self
             .entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(hash, |entry| entry.matches_readable(hash, key))
         {
             write(&entry.value);
             true
@@ -239,7 +245,7 @@ impl FlatMap {
             return Some(value);
         }
         self.entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(hash, |entry| entry.matches_readable(hash, key))
             .map(|entry| &entry.value)
     }
 
@@ -255,7 +261,9 @@ impl FlatMap {
             return Some(value);
         }
         self.entries
-            .find(hash, |entry| entry.matches_prepared(hash, key, key_tag))
+            .find(hash, |entry| {
+                entry.matches_readable_prepared(hash, key, key_tag)
+            })
             .map(|entry| &entry.value)
     }
 
@@ -271,7 +279,9 @@ impl FlatMap {
             return Some(value);
         }
         self.entries
-            .find(hash, |entry| entry.matches_tagged(hash, key_tag, key_len))
+            .find(hash, |entry| {
+                entry.matches_readable_tagged(hash, key_tag, key_len)
+            })
             .map(|entry| &entry.value)
     }
 
@@ -288,7 +298,7 @@ impl FlatMap {
     {
         if let Some(entry) = self
             .entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(hash, |entry| entry.matches_readable(hash, key))
             .filter(|entry| !entry.is_expired(now_ms))
         {
             write(&entry.value);
@@ -306,7 +316,7 @@ impl FlatMap {
         now_ms: u64,
     ) -> Option<&SharedBytes> {
         self.entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(hash, |entry| entry.matches_readable(hash, key))
             .filter(|entry| !entry.is_expired(now_ms))
             .map(|entry| &entry.value)
     }
@@ -326,9 +336,105 @@ impl FlatMap {
             return Some(value.clone());
         }
         self.entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(hash, |entry| entry.matches_readable(hash, key))
             .filter(|entry| !entry.is_expired(now_ms))
             .map(|entry| entry.value.clone())
+    }
+
+    /// Applies an authorization decision to borrowed policy metadata before
+    /// cloning the stored value. The outcome distinguishes a denied existing
+    /// entry from a miss so higher tiers never fall through after rejection.
+    #[inline(always)]
+    pub(crate) fn get_value_bytes_hashed_with_governance_filter<F>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        authorize: F,
+    ) -> GovernedRead<SharedBytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
+        if let Some(value) = self.fast_points.get(hash, key) {
+            return if authorize(None) {
+                GovernedRead::Authorized(value.clone())
+            } else {
+                GovernedRead::Denied
+            };
+        }
+        if let Some(entry) = self
+            .entries
+            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .filter(|entry| !entry.is_expired(now_ms))
+        {
+            if !authorize(entry.governance.as_deref()) {
+                return GovernedRead::Denied;
+            }
+            return GovernedRead::Authorized(entry.value.clone());
+        }
+
+        let Some(remote) = self.remote_entries.get(key) else {
+            return GovernedRead::Missing;
+        };
+        if !remote.matches(hash, key) {
+            return GovernedRead::Missing;
+        }
+        if remote.is_expired(now_ms) {
+            let _ = self.delete_remote_hashed(hash, key, DeleteReason::Expired);
+            return GovernedRead::Missing;
+        }
+        if !authorize(remote.governance.as_deref()) {
+            return GovernedRead::Denied;
+        }
+        let governance = remote.governance.clone();
+        let Some(object_overflow) = self.object_overflow.clone() else {
+            return GovernedRead::Missing;
+        };
+        if !object_overflow.fetch_on_get() {
+            return GovernedRead::Missing;
+        }
+        self.object_overflow_stats.fault_attempts =
+            self.object_overflow_stats.fault_attempts.saturating_add(1);
+        let value = match object_overflow.get_value(&remote.object) {
+            Ok(value) => value,
+            Err(error) => {
+                self.object_overflow_stats.fault_failures =
+                    self.object_overflow_stats.fault_failures.saturating_add(1);
+                if matches!(error, ShardCacheError::ObjectIntegrity(_)) {
+                    self.object_overflow_stats.checksum_failures = self
+                        .object_overflow_stats
+                        .checksum_failures
+                        .saturating_add(1);
+                }
+                return GovernedRead::Missing;
+            }
+        };
+        let key_bytes = remote.key.as_ref().to_vec();
+        let expire_at_ms = remote.expire_at_ms;
+        let _ = self.delete_remote_hashed(hash, key, DeleteReason::Explicit);
+        self.set_bytes_hashed_with_governance_option(
+            hash,
+            &key_bytes,
+            value.clone(),
+            governance,
+            expire_at_ms,
+            now_ms,
+        );
+        self.object_overflow_stats.fault_successes =
+            self.object_overflow_stats.fault_successes.saturating_add(1);
+        GovernedRead::Authorized(value)
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_value_protected_hashed(&self, hash: u64, key: &[u8], now_ms: u64) -> bool {
+        self.entries
+            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .filter(|entry| !entry.is_expired(now_ms))
+            .is_some_and(FlatEntry::is_protected)
+            || self.remote_entries.get(key).is_some_and(|entry| {
+                entry.matches(hash, key) && !entry.is_expired(now_ms) && entry.is_protected()
+            })
     }
 
     #[inline(always)]
@@ -344,7 +450,9 @@ impl FlatMap {
             return Some(value.clone());
         }
         self.entries
-            .find(hash, |entry| entry.matches_prepared(hash, key, key_tag))
+            .find(hash, |entry| {
+                entry.matches_readable_prepared(hash, key, key_tag)
+            })
             .filter(|entry| !entry.is_expired(now_ms))
             .map(|entry| entry.value.clone())
     }
@@ -363,7 +471,7 @@ impl FlatMap {
 
         let mut entry = self
             .entries
-            .find_entry(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find_entry(hash, |entry| entry.matches_readable(hash, key))
             .ok()?;
         if entry.get().is_expired(now_ms) {
             let _ = entry;
@@ -397,7 +505,7 @@ impl FlatMap {
 
         let Some(mut entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find_entry(hash, |entry| entry.matches_readable(hash, key))
             .ok()
         else {
             return false;
@@ -512,15 +620,15 @@ impl FlatMap {
             return false;
         }
         self.entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(hash, |entry| entry.matches_readable(hash, key))
             .is_some()
             || self
                 .remote_entries
                 .get(key)
-                .is_some_and(|entry| entry.matches(hash, key))
+                .is_some_and(|entry| entry.matches(hash, key) && !entry.is_protected())
     }
 
-    pub(super) fn fault_remote_hashed(
+    pub(crate) fn fault_remote_hashed(
         &mut self,
         hash: u64,
         key: &[u8],
@@ -532,6 +640,9 @@ impl FlatMap {
         }
         let remote = self.remote_entries.get(key)?;
         if !remote.matches(hash, key) {
+            return None;
+        }
+        if remote.is_protected() {
             return None;
         }
         if remote.is_expired(now_ms) {

@@ -65,6 +65,29 @@ impl EmbeddedStore {
         self.set_value_bytes_routed_expire_at(route, key, value, expire_at_ms, now_ms);
     }
 
+    /// Atomically inserts or replaces a protected point value, TTL, and opaque
+    /// governance metadata. Ordinary point reads treat the entry as a miss.
+    pub fn set_value_bytes_with_governance(
+        &self,
+        key: &[u8],
+        value: bytes::Bytes,
+        ttl_ms: Option<u64>,
+        governance: bytes::Bytes,
+    ) {
+        let now_ms = ttl_ms.map_or(0, |_| now_millis());
+        let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        let route = self.route_key(key);
+        self.set_value_bytes_routed_with_governance_then(
+            route,
+            key,
+            value,
+            Some(governance),
+            expire_at_ms,
+            now_ms,
+            || {},
+        );
+    }
+
     /// Stores an already-owned value using precomputed routing and an absolute
     /// expiry timestamp. This is used by native replication apply paths, where
     /// the wire frame already carries both the shard sequence and absolute TTL.
@@ -79,6 +102,124 @@ impl EmbeddedStore {
         self.set_value_bytes_routed_expire_at_then(route, key, value, expire_at_ms, now_ms, || {});
     }
 
+    pub(crate) fn set_value_bytes_routed_expire_at_with_governance(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        value: bytes::Bytes,
+        governance: Option<bytes::Bytes>,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) {
+        self.set_value_bytes_routed_with_governance_then(
+            route,
+            key,
+            value,
+            governance,
+            expire_at_ms,
+            now_ms,
+            || {},
+        );
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_set_value_bytes_routed_overflow(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        value: bytes::Bytes,
+        governance: Option<bytes::Bytes>,
+        expire_at_ms: Option<u64>,
+        generation: u64,
+        hard_limit: usize,
+    ) -> bool {
+        let now_ms = expire_at_ms.map_or(0, |_| now_millis());
+        let route = match route.shard_id < self.shards.len() {
+            true => route,
+            false => self.route_key(key),
+        };
+        #[cfg(feature = "redis")]
+        self.delete_pinned_vector_value_if_distinct(route, key, now_ms);
+        #[cfg(feature = "redis")]
+        if self.objects.shard_has_objects(route.shard_id) {
+            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+            let mut shard = self.shards[route.shard_id].write();
+            if !shard.map.can_set_bytes_hashed_with_limit(
+                route.key_hash,
+                key,
+                value.len(),
+                governance.as_ref().map_or(0, bytes::Bytes::len),
+                hard_limit,
+            ) {
+                return false;
+            }
+            if bucket.delete_any(key) {
+                self.objects.note_deleted(route.shard_id);
+            }
+            if let Some(session_prefix) = point_write_session_storage_prefix(key) {
+                shard
+                    .session_slots
+                    .delete_hashed(&session_prefix, route.key_hash, key);
+            }
+            shard.map.set_bytes_hashed_overflow(
+                route.key_hash,
+                key,
+                value,
+                governance,
+                expire_at_ms,
+                now_ms,
+                generation,
+            );
+            shard.enforce_memory_limit(now_ms);
+            self.refresh_string_key_count(route.shard_id, &shard);
+            return true;
+        }
+        let mut shard = self.shards[route.shard_id].write();
+        if !shard.map.can_set_bytes_hashed_with_limit(
+            route.key_hash,
+            key,
+            value.len(),
+            governance.as_ref().map_or(0, bytes::Bytes::len),
+            hard_limit,
+        ) {
+            return false;
+        }
+        if let Some(session_prefix) = point_write_session_storage_prefix(key) {
+            shard
+                .session_slots
+                .delete_hashed(&session_prefix, route.key_hash, key);
+        }
+        shard.map.set_bytes_hashed_overflow(
+            route.key_hash,
+            key,
+            value,
+            governance,
+            expire_at_ms,
+            now_ms,
+            generation,
+        );
+        shard.enforce_memory_limit(now_ms);
+        #[cfg(feature = "redis")]
+        self.refresh_string_key_count(route.shard_id, &shard);
+        true
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn overflow_generation_matches(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        generation: u64,
+    ) -> bool {
+        self.shards.get(route.shard_id).is_some_and(|shard| {
+            shard
+                .read()
+                .map
+                .overflow_generation_matches(route.key_hash, key, generation)
+        })
+    }
+
     /// Stores an already-owned value without reading the wall clock and runs
     /// `after_write` before releasing the shard write lock.
     pub(crate) fn set_value_bytes_routed_no_ttl_then(
@@ -86,6 +227,28 @@ impl EmbeddedStore {
         route: EmbeddedKeyRoute,
         key: &[u8],
         value: bytes::Bytes,
+        after_write: impl FnOnce(),
+    ) {
+        self.set_value_bytes_routed_with_governance_then(
+            route,
+            key,
+            value,
+            None,
+            None,
+            0,
+            after_write,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn set_value_bytes_routed_with_governance_then(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        value: bytes::Bytes,
+        governance: Option<bytes::Bytes>,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
         after_write: impl FnOnce(),
     ) {
         let route = match route.shard_id < self.shards.len() {
@@ -106,10 +269,15 @@ impl EmbeddedStore {
                     .session_slots
                     .delete_hashed(&session_prefix, route.key_hash, key);
             }
-            shard
-                .map
-                .set_bytes_hashed(route.key_hash, key, value, None, 0);
-            shard.enforce_memory_limit(0);
+            shard.map.set_bytes_hashed_with_governance_option(
+                route.key_hash,
+                key,
+                value,
+                governance,
+                expire_at_ms,
+                now_ms,
+            );
+            shard.enforce_memory_limit(now_ms);
             self.refresh_string_key_count(route.shard_id, &shard);
             after_write();
             return;
@@ -120,10 +288,15 @@ impl EmbeddedStore {
                 .session_slots
                 .delete_hashed(&session_prefix, route.key_hash, key);
         }
-        shard
-            .map
-            .set_bytes_hashed(route.key_hash, key, value, None, 0);
-        shard.enforce_memory_limit(0);
+        shard.map.set_bytes_hashed_with_governance_option(
+            route.key_hash,
+            key,
+            value,
+            governance,
+            expire_at_ms,
+            now_ms,
+        );
+        shard.enforce_memory_limit(now_ms);
         #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
         after_write();
@@ -141,45 +314,15 @@ impl EmbeddedStore {
         now_ms: u64,
         after_write: impl FnOnce(),
     ) {
-        let route = match route.shard_id < self.shards.len() {
-            true => route,
-            false => self.route_key(key),
-        };
-        #[cfg(feature = "redis")]
-        self.delete_pinned_vector_value_if_distinct(route, key, now_ms);
-        #[cfg(feature = "redis")]
-        if self.objects.shard_has_objects(route.shard_id) {
-            let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
-            let mut shard = self.shards[route.shard_id].write();
-            if bucket.delete_any(key) {
-                self.objects.note_deleted(route.shard_id);
-            }
-            if let Some(session_prefix) = point_write_session_storage_prefix(key) {
-                shard
-                    .session_slots
-                    .delete_hashed(&session_prefix, route.key_hash, key);
-            }
-            shard
-                .map
-                .set_bytes_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
-            shard.enforce_memory_limit(now_ms);
-            self.refresh_string_key_count(route.shard_id, &shard);
-            after_write();
-            return;
-        }
-        let mut shard = self.shards[route.shard_id].write();
-        if let Some(session_prefix) = point_write_session_storage_prefix(key) {
-            shard
-                .session_slots
-                .delete_hashed(&session_prefix, route.key_hash, key);
-        }
-        shard
-            .map
-            .set_bytes_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
-        shard.enforce_memory_limit(now_ms);
-        #[cfg(feature = "redis")]
-        self.refresh_string_key_count(route.shard_id, &shard);
-        after_write();
+        self.set_value_bytes_routed_with_governance_then(
+            route,
+            key,
+            value,
+            None,
+            expire_at_ms,
+            now_ms,
+            after_write,
+        );
     }
 
     pub fn set_routed_no_ttl<K, V>(&self, route: EmbeddedKeyRoute, key: K, value: V)

@@ -35,3 +35,113 @@ snapshot_every_seconds = 300
 snapshot_min_writes = 1000
 compress_snapshots = true
 wal_channel_capacity = 16384
+
+# Dedicated SCNP overflow replicas advertise stable topology and expose one
+# direct listener per local shard. Do not enable this role and kv_overflow on
+# the same server.
+[kv_overflow_replica]
+enabled = false
+node_id = "overflow-a"
+# Non-loopback replicas require TLS plus this token or mTLS unless
+# allow_insecure_scnp is explicitly enabled. Use an environment variable for a
+# static token or a mounted file for reloadable rolling rotation.
+# auth_token_env = "SHARDCACHE_OVERFLOW_SCNP_TOKEN"
+# auth_token_path = "/run/secrets/overflow-scnp-token"
+# auth_token_reload_interval_ms = 30000
+allow_insecure_scnp = false
+# Ordinary LRU/LFU eviction without object_overflow is intentionally lossy.
+allow_lossy_eviction = false
+# Required with persistence after provisioning an encrypted filesystem/volume.
+encrypted_persistence = true
+
+[kv_overflow_replica.tls]
+enabled = false
+cert_path = "/run/secrets/overflow-server.pem"
+key_path = "/run/secrets/overflow-server-key.pem"
+# Setting a client CA enables mandatory mTLS client verification.
+# client_ca_path = "/run/secrets/overflow-client-ca.pem"
+# Pin one or more CA-valid client leaf certificates. Keep old and new entries
+# during rotation.
+# client_cert_sha256 = ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"]
+handshake_timeout_ms = 5000
+reload_interval_ms = 30000
+max_concurrent_handshakes = 256
+
+# Embedded-only partitioned overflow. Stable replica IDs preserve membership
+# identity when addresses change. During exact rebalance, retain the old
+# membership in previous_replicas until flush_remote completes.
+[kv_overflow]
+enabled = false
+backend = "scnp"
+cluster_id = "production-cache"
+transport = "direct_shard"
+slot_count = 16384
+# During a restart that changes the primary `shard_count`, retain the old
+# membership and set this to the old power-of-two shard count until handoff
+# completes.
+# previous_primary_shard_count = 8
+# Redis backend only: addresses must be redis://, rediss://, valkey://, or
+# valkeys:// URLs without credentials. Credentials are read from these env vars.
+redis_key_prefix = "shardcache:overflow:"
+# redis_username_env = "SHARDCACHE_OVERFLOW_REDIS_USERNAME"
+# redis_password_env = "SHARDCACHE_OVERFLOW_REDIS_PASSWORD"
+# SCNP backend only. Use the same token env value on the replica.
+# scnp_auth_token_env = "SHARDCACHE_OVERFLOW_SCNP_TOKEN"
+# scnp_auth_token_path = "/run/secrets/overflow-scnp-token"
+# scnp_auth_token_reload_interval_ms = 30000
+allow_insecure_scnp = false
+max_memory_bytes = 1073741824
+# Key-tracking memory is independent of resident value memory. Zero derives a
+# bounded default from max_memory_bytes and max_key_bytes.
+max_metadata_bytes = 268435456
+max_key_bytes = 1048576
+eviction_policy = "lfu"
+queue_capacity_per_shard = 1024
+pipeline_max_items = 64
+pipeline_max_bytes = 262144
+pipeline_flush_micros = 200
+max_inflight_per_target = 1
+adaptive_pipeline = true
+pipeline_target_micros = 1000
+circuit_breaker_failure_threshold = 8
+circuit_breaker_cooldown_ms = 5000
+# Optional worker-side compression; use "none" or "lz4".
+compression = "none"
+# Required before compression can emit the v2 envelope.
+allow_envelope_v2_writes = false
+compression_min_value_bytes = 4096
+compression_min_savings_percent = 12
+max_value_bytes = 67108864
+compression_max_expansion_ratio = 256
+connect_timeout_ms = 250
+operation_timeout_ms = 500
+max_retries = 2
+retry_backoff_ms = 10
+cleanup_interval_ms = 1000
+fetch_on_miss = true
+# Durable default: preserve metadata and make snapshots fail if a replica loses
+# an acknowledged value. Set true only for intentionally lossy caches.
+forget_remote_misses = false
+# Aggregate rebalance bandwidth per primary shard. Zero is unlimited.
+handoff_max_bytes_per_second = 0
+handoff_max_concurrency = 16
+handoff_batch_items = 1024
+retained_buffer_bytes = 16384
+
+[kv_overflow.scnp_tls]
+enabled = false
+ca_path = "/run/secrets/overflow-ca.pem"
+# Configure both fields to use mTLS.
+# client_cert_path = "/run/secrets/overflow-client.pem"
+# client_key_path = "/run/secrets/overflow-client-key.pem"
+# Required only for legacy address-only endpoints.
+# server_name = "overflow.internal"
+
+[[kv_overflow.replicas]]
+id = "overflow-a"
+addresses = ["10.0.0.11:6380"]
+shard_count = 16
+# Set to 0 to use the direct port base advertised by SCNP.TOPOLOGY.
+direct_shard_base_port = 0
+# Defaults to the stable replica ID when omitted.
+tls_server_name = "overflow-a.internal"

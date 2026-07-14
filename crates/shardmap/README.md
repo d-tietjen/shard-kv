@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.5.0"
+shardmap = "0.6.0"
 ```
 
 ## Quick Start
@@ -50,7 +50,7 @@ guard is enough.
 | Parent telemetry runtime | Record shardmap metrics into a parent-owned fast-telemetry runtime, or fall back to shardmap-owned metrics. | Enable the `parent-telemetry-runtime` feature |
 | Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
 | Semantic TTL | Combine semantic reuse with freshness windows. | [`semantic_ttl.rs`](examples/semantic_ttl.rs) |
-| Governance metadata | Attach application-owned authorization context to semantic hits. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
+| Governance metadata | Enforce application-owned authorization context on semantic and exact point hits. | [`semantic_cache.rs`](examples/semantic_cache.rs), [`EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) |
 | Mini app | A small feature-flag cache combining TTL, prepared keys, and locks. | [`mini_feature_flags.rs`](examples/mini_feature_flags.rs) |
 
 Run any example with:
@@ -478,6 +478,17 @@ snapshots. It is intended for read replicas, sidecar cache mirrors, and service
 subscribers that consume shardcache's FCRP frames; Redis object-family
 replication is outside this embedded replication surface.
 
+For capacity scaling without full replica copies, enable `kv-overflow` and use
+`KvOverflowStore`. It mirrors each fixed logical key slot to one shardcache
+server through bounded ordered workers, evicts only acknowledged cold values
+from primary memory, and faults remote values back on demand. Overflow servers
+can apply their own LRU/LFU memory limits and cascade cold envelopes into
+object overflow. Other services can read through the same `KvOverflowCluster`
+without touching the primary. See
+[`docs/KV_OVERFLOW.md`](../../docs/KV_OVERFLOW.md) for the API and operational
+contract. Enable `kv-overflow-redis` to use Redis, Valkey, or a compatible
+managed endpoint instead of shardcache SCNP servers.
+
 ## Semantic Cache
 
 Semantic cache entries attach a normalized embedding to the same point-key
@@ -504,6 +515,14 @@ semantic queries use an internal query-result cache; call
 `disable_semantic_query_cache` when benchmarking the cold vector path.
 
 ## Governance Metadata
+
+Exact byte-key values can also carry opaque governance metadata. Protected
+entries fail closed through ordinary GET, mutable, visitor, removal-return, and
+Redis paths; use `EmbeddedStore::get_value_bytes_with_governance_filter` to
+authorize borrowed metadata before the value handle is cloned. Governance is
+preserved through persistence, replication, object overflow, and KV overflow.
+See [`docs/EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) for the full
+security and compatibility contract.
 
 Cross-user semantic cache entries can carry opaque governance metadata. Entries
 written through the default semantic APIs return `None`; applications that need
@@ -593,6 +612,11 @@ embedding the protocol layer, or wiring storage into a specialized runtime.
 | `parent-telemetry-runtime` | No | Embedded telemetry constructors that use a parent-provided fast-telemetry runtime or create a shardmap-owned fallback. |
 | `monoio` | No | Linux-only server transport internals. |
 | `prefix-eviction` | No | Enables `EvictionPolicy::Prefix` for prefix-group memory-limit eviction. |
+| `object-overflow` | No | Cold-value overflow into filesystem object storage. |
+| `object-overflow-s3` | No | S3/RustFS-compatible object overflow adapter. |
+| `kv-overflow` | No | Fixed-slot overflow into shardcache SCNP servers. |
+| `kv-overflow-redis` | No | Redis/Valkey-compatible endpoint adapter for fixed-slot KV overflow. |
+| `scnp-tls` | No | Rustls TLS 1.3 and mTLS for shard-owned SCNP overflow connections. |
 
 ## License
 

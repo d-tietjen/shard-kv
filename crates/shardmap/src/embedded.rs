@@ -32,7 +32,15 @@ pub use crate::redis_embedded::{
     execute_redis_command, execute_redis_command_slices, try_execute_redis_command,
     try_execute_redis_command_slices,
 };
+#[cfg(feature = "kv-overflow-redis")]
+pub use crate::storage::RedisKvOverflowNode;
 pub use crate::storage::SharedEmbeddedStore as SharedCacheStore;
+#[cfg(feature = "kv-overflow")]
+pub use crate::storage::{
+    DEFAULT_KV_OVERFLOW_SLOT_COUNT, KvOverflowCluster, KvOverflowHealthSnapshot, KvOverflowNode,
+    KvOverflowOptions, KvOverflowPrimaryOwnershipSnapshot, KvOverflowStore, KvOverflowValue,
+    ScnpKvOverflowNode,
+};
 pub use crate::storage::{
     EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedSessionRoute, PackedSessionWrite,
     PreparedPointKey, SemanticCacheError, SemanticMatch, SharedEmbeddedConfig,

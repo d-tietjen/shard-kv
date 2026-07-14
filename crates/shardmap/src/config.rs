@@ -46,6 +46,10 @@ pub struct ShardCacheConfig {
     pub persistence: PersistenceConfig,
     /// Object-storage overflow configuration for cold values.
     pub object_overflow: ObjectOverflowConfig,
+    /// Partitioned key-value overflow configuration for cold values.
+    pub kv_overflow: KvOverflowConfig,
+    /// Enables this server as a shard-addressable key-value overflow replica.
+    pub kv_overflow_replica: KvOverflowReplicaServerConfig,
     /// Native mutation-stream replication configuration.
     pub replication: ReplicationConfig,
     /// Redis transaction execution mode.
@@ -97,6 +101,96 @@ pub enum ServerEndpointMode {
     Fanout,
     /// Expose shard-owned direct ports in addition to the fanout listener.
     DirectShard,
+}
+
+/// Server-side role configuration for a dedicated key-value overflow replica.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct KvOverflowReplicaServerConfig {
+    /// Enable the overflow-slot routing contract on this server.
+    pub enabled: bool,
+    /// Stable node identity reported to overflow primaries.
+    pub node_id: String,
+    /// Environment variable containing the SCNP authentication token.
+    pub auth_token_env: Option<String>,
+    /// File containing a reloadable SCNP authentication token.
+    pub auth_token_path: Option<PathBuf>,
+    /// Interval between authentication token file reloads.
+    ///
+    /// Zero uses a 30 second default.
+    pub auth_token_reload_interval_ms: u64,
+    /// Native TLS and optional client-certificate verification.
+    pub tls: ScnpTlsServerConfig,
+    /// Permit unauthenticated SCNP on a non-loopback listener.
+    ///
+    /// Authentication does not encrypt traffic. Production deployments should
+    /// still use a private network or an encrypted transport overlay.
+    pub allow_insecure_scnp: bool,
+    /// Permit ordinary LRU/LFU eviction without object overflow.
+    ///
+    /// This makes the overflow replica intentionally lossy.
+    pub allow_lossy_eviction: bool,
+    /// Confirm that the persistence directory is protected by encrypted storage.
+    ///
+    /// Overflow replicas persist value envelopes in WAL and snapshots. Set
+    /// this only when the filesystem or attached volume encrypts data at rest.
+    pub encrypted_persistence: bool,
+}
+
+/// Server-side TLS identity for SCNP overflow listeners.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScnpTlsServerConfig {
+    /// Require TLS on the overflow replica's SCNP listeners.
+    pub enabled: bool,
+    /// PEM certificate chain presented by the replica.
+    pub cert_path: PathBuf,
+    /// PEM private key for `cert_path`.
+    pub key_path: PathBuf,
+    /// PEM CA bundle used to require and verify client certificates.
+    pub client_ca_path: Option<PathBuf>,
+    /// Allowed SHA-256 fingerprints for mTLS leaf certificates.
+    ///
+    /// When configured, a CA-valid client certificate must also match one of
+    /// these identities. Multiple entries permit overlap during rotation.
+    pub client_cert_sha256: Vec<String>,
+    /// Maximum TLS handshake duration.
+    pub handshake_timeout_ms: u64,
+    /// Interval between certificate, key, and CA reload checks.
+    pub reload_interval_ms: u64,
+    /// Maximum simultaneous TLS handshakes accepted by this process.
+    pub max_concurrent_handshakes: usize,
+}
+
+impl Default for ScnpTlsServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cert_path: PathBuf::new(),
+            key_path: PathBuf::new(),
+            client_ca_path: None,
+            client_cert_sha256: Vec::new(),
+            handshake_timeout_ms: 5_000,
+            reload_interval_ms: 30_000,
+            max_concurrent_handshakes: 256,
+        }
+    }
+}
+
+/// Client-side trust and identity for SCNP overflow connections.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ScnpTlsClientConfig {
+    /// Verify and encrypt SCNP connections with TLS.
+    pub enabled: bool,
+    /// PEM CA bundle used to verify replica certificates.
+    pub ca_path: PathBuf,
+    /// Optional PEM client certificate chain for mTLS.
+    pub client_cert_path: Option<PathBuf>,
+    /// Optional PEM client private key for mTLS.
+    pub client_key_path: Option<PathBuf>,
+    /// TLS server name for legacy address-only endpoint configuration.
+    pub server_name: Option<String>,
 }
 
 /// Capacity settings for the hot, warm, and cold in-memory tiers.
@@ -249,6 +343,207 @@ pub enum ObjectOverflowFailurePolicy {
     RetainResident,
     /// Fall back to normal cache eviction if offload fails.
     EvictResident,
+}
+
+/// Largest fixed slot table accepted by key-value overflow.
+pub const MAX_KV_OVERFLOW_SLOT_COUNT: u32 = 1_048_576;
+
+/// Partitioned key-value overflow settings.
+///
+/// Each key is mirrored to one deterministic shardcache or Redis-compatible
+/// endpoint. The embedded primary may then evict acknowledged cold values and
+/// fault them back from their owner. Overflow endpoints hold disjoint key
+/// partitions rather than full read-replica copies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KvOverflowConfig {
+    /// Enable the embedded key-value overflow wrapper.
+    pub enabled: bool,
+    /// Protocol used by every endpoint in this overflow membership.
+    pub backend: KvOverflowBackend,
+    /// Stable replica membership. New configurations should use this instead
+    /// of `endpoints` so network addresses can change without moving slots.
+    pub replicas: Vec<KvOverflowReplica>,
+    /// Previous stable membership retained while ranges are handed off.
+    pub previous_replicas: Vec<KvOverflowReplica>,
+    /// Namespace included in internal overflow keys.
+    pub cluster_id: String,
+    /// SCNP transport topology.
+    pub transport: KvOverflowTransport,
+    /// Stable SCNP addresses for the current overflow membership.
+    pub endpoints: Vec<String>,
+    /// Previous membership retained during an online slot handoff.
+    ///
+    /// Keep this empty for steady state. During horizontal expansion, set it
+    /// to the membership that previously owned the logical slots until the
+    /// authoritative primary has resynchronized the new membership.
+    pub previous_endpoints: Vec<String>,
+    /// Embedded primary shard count that owned the previous membership.
+    ///
+    /// Set this only when changing `shard_count` during a restart handoff.
+    /// When omitted, the previous membership uses the current primary shard
+    /// count.
+    pub previous_primary_shard_count: Option<usize>,
+    /// Fixed logical slot count used for overflow ownership.
+    ///
+    /// This must remain unchanged for the lifetime of the overflow data and
+    /// cannot exceed [`MAX_KV_OVERFLOW_SLOT_COUNT`].
+    pub slot_count: u32,
+    /// Prefix prepended to binary keys stored in a Redis-compatible backend.
+    pub redis_key_prefix: String,
+    /// Environment variable containing an optional Redis ACL username.
+    pub redis_username_env: Option<String>,
+    /// Environment variable containing the Redis password.
+    pub redis_password_env: Option<String>,
+    /// Environment variable containing the SCNP authentication token.
+    pub scnp_auth_token_env: Option<String>,
+    /// File containing a reloadable SCNP authentication token.
+    pub scnp_auth_token_path: Option<PathBuf>,
+    /// Interval between primary-side token file reloads; zero uses 30 seconds.
+    pub scnp_auth_token_reload_interval_ms: u64,
+    /// Native SCNP TLS trust and optional mTLS identity.
+    pub scnp_tls: ScnpTlsClientConfig,
+    /// Permit unauthenticated SCNP connections to non-loopback replicas.
+    ///
+    /// Authentication does not encrypt traffic. Production deployments should
+    /// still use a private network or an encrypted transport overlay.
+    pub allow_insecure_scnp: bool,
+    /// Total resident-byte target for the in-memory primary.
+    pub max_memory_bytes: u64,
+    /// Maximum primary memory reserved for tracking logical overflow keys.
+    /// Zero derives a limit equal to 25% of `max_memory_bytes`.
+    pub max_metadata_bytes: u64,
+    /// Maximum key length admitted into the overflow metadata index.
+    pub max_key_bytes: usize,
+    /// Policy used to choose acknowledged resident values for offload.
+    pub eviction_policy: EvictionPolicy,
+    /// TCP connections retained per overflow node.
+    pub connections_per_endpoint: usize,
+    /// Maximum queued plus active jobs for each primary shard.
+    pub queue_capacity_per_shard: usize,
+    /// Maximum requests emitted in one ordered transport pipeline.
+    pub pipeline_max_items: usize,
+    /// Maximum key and value bytes emitted in one ordered transport pipeline.
+    pub pipeline_max_bytes: usize,
+    /// Maximum coalescing delay before a partial pipeline is flushed.
+    pub pipeline_flush_micros: u64,
+    /// Maximum concurrently active batches for one remote target.
+    pub max_inflight_per_target: usize,
+    /// Adjust pipeline item limits from observed target RTT.
+    pub adaptive_pipeline: bool,
+    /// RTT target used by adaptive pipeline sizing.
+    pub pipeline_target_micros: u64,
+    /// Pause a target after this many consecutive transport failures.
+    pub circuit_breaker_failure_threshold: usize,
+    /// Duration a failed target remains open before a half-open probe.
+    pub circuit_breaker_cooldown_ms: u64,
+    /// Optional compression applied only by overflow workers.
+    pub compression: KvOverflowCompression,
+    /// Permit writes using the v2 compressed value envelope.
+    ///
+    /// Enable only after every primary that may read this cluster supports v2.
+    pub allow_envelope_v2_writes: bool,
+    /// Minimum raw value size eligible for KV overflow compression.
+    pub compression_min_value_bytes: usize,
+    /// Minimum percentage reduction required to retain compression.
+    pub compression_min_savings_percent: u8,
+    /// Maximum decoded value accepted from an overflow replica.
+    pub max_value_bytes: usize,
+    /// Maximum permitted decoded-to-stored ratio for compressed values.
+    pub compression_max_expansion_ratio: usize,
+    /// Maximum TCP connect duration.
+    pub connect_timeout_ms: u64,
+    /// Maximum duration for one SCNP operation.
+    pub operation_timeout_ms: u64,
+    /// Retries after the first failed SCNP attempt.
+    pub max_retries: usize,
+    /// Delay between retries.
+    pub retry_backoff_ms: u64,
+    /// Interval for deleting expired values from overflow nodes.
+    pub cleanup_interval_ms: u64,
+    /// Promote remotely found values back into primary memory.
+    pub fetch_on_miss: bool,
+    /// Forget remote metadata after a clean miss.
+    ///
+    /// Keep this false for durable caches so a missing replica value makes the
+    /// next snapshot fail loudly instead of silently omitting the key.
+    pub forget_remote_misses: bool,
+    /// Aggregate handoff bandwidth limit per primary shard; zero is unlimited.
+    pub handoff_max_bytes_per_second: u64,
+    /// Maximum primary shards migrated concurrently during a handoff.
+    pub handoff_max_concurrency: usize,
+    /// Maximum keys retained in memory per primary shard during handoff.
+    pub handoff_batch_items: usize,
+    /// Maximum capacity retained by reusable per-connection buffers.
+    pub retained_buffer_bytes: usize,
+    /// Legacy pre-0.6 worker setting. Shard-owned overflow always starts
+    /// exactly one network drain for each primary shard.
+    pub worker_threads: usize,
+    /// Legacy pre-0.6 queue setting. Configured stores derive total capacity
+    /// from `queue_capacity_per_shard`.
+    pub queue_capacity: usize,
+}
+
+/// Stable identity and network paths for one overflow replica.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KvOverflowReplica {
+    /// Stable membership identity. It must not contain credentials or an
+    /// ephemeral IP address.
+    pub id: String,
+    /// Bootstrap addresses for the same replica, ordered by preference.
+    pub addresses: Vec<String>,
+    /// Expected SCNP shard count. Redis ignores this field.
+    pub shard_count: usize,
+    /// First direct-shard port. Zero derives it as bootstrap port plus one.
+    pub direct_shard_base_port: u16,
+    /// Certificate DNS/IP name. Defaults to the stable replica ID.
+    pub tls_server_name: Option<String>,
+}
+
+impl Default for KvOverflowReplica {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            addresses: Vec::new(),
+            shard_count: 1,
+            direct_shard_base_port: 0,
+            tls_server_name: None,
+        }
+    }
+}
+
+/// Compression used for values stored on KV overflow replicas.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvOverflowCompression {
+    /// Preserve the existing zero-compression envelope.
+    #[default]
+    None,
+    /// Use worker-side LZ4 when it clears the configured savings threshold.
+    Lz4,
+}
+
+/// Transport used between a primary and shardcache overflow replicas.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvOverflowTransport {
+    /// Connect to the shard-owned port selected by overflow-slot routing.
+    #[default]
+    DirectShard,
+    /// Compatibility path through the replica fanout listener.
+    Fanout,
+}
+
+/// Wire protocol used by key-value overflow nodes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum KvOverflowBackend {
+    /// Shardcache's native SCNP protocol.
+    #[default]
+    Scnp,
+    /// RESP connection to a Redis/Valkey-compatible database.
+    Redis,
 }
 
 /// Optional live WAL export settings.
@@ -415,6 +710,8 @@ impl Default for ShardCacheConfig {
             cuda: CudaConfig::default(),
             persistence: PersistenceConfig::default(),
             object_overflow: ObjectOverflowConfig::default(),
+            kv_overflow: KvOverflowConfig::default(),
+            kv_overflow_replica: KvOverflowReplicaServerConfig::default(),
             replication: ReplicationConfig::default(),
             transaction_mode: TransactionMode::default(),
             server_endpoint_mode: ServerEndpointMode::default(),
@@ -502,6 +799,64 @@ impl Default for ObjectOverflowConfig {
             cleanup_grace_seconds: 86_400,
             fetch_on_get: true,
             delete_on_overwrite: true,
+        }
+    }
+}
+
+impl Default for KvOverflowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: KvOverflowBackend::Scnp,
+            replicas: Vec::new(),
+            previous_replicas: Vec::new(),
+            cluster_id: "default".into(),
+            transport: KvOverflowTransport::default(),
+            endpoints: Vec::new(),
+            previous_endpoints: Vec::new(),
+            previous_primary_shard_count: None,
+            slot_count: 16_384,
+            redis_key_prefix: "shardcache:overflow:".into(),
+            redis_username_env: None,
+            redis_password_env: None,
+            scnp_auth_token_env: None,
+            scnp_auth_token_path: None,
+            scnp_auth_token_reload_interval_ms: 30_000,
+            scnp_tls: ScnpTlsClientConfig::default(),
+            allow_insecure_scnp: false,
+            max_memory_bytes: 0,
+            max_metadata_bytes: 0,
+            max_key_bytes: 1024 * 1024,
+            eviction_policy: EvictionPolicy::Lru,
+            connections_per_endpoint: 2,
+            queue_capacity_per_shard: 1_024,
+            pipeline_max_items: 64,
+            pipeline_max_bytes: 256 * 1024,
+            pipeline_flush_micros: 200,
+            max_inflight_per_target: 1,
+            adaptive_pipeline: true,
+            pipeline_target_micros: 1_000,
+            circuit_breaker_failure_threshold: 8,
+            circuit_breaker_cooldown_ms: 5_000,
+            compression: KvOverflowCompression::None,
+            allow_envelope_v2_writes: false,
+            compression_min_value_bytes: 4 * 1024,
+            compression_min_savings_percent: 12,
+            max_value_bytes: 64 * 1024 * 1024,
+            compression_max_expansion_ratio: 256,
+            connect_timeout_ms: 250,
+            operation_timeout_ms: 500,
+            max_retries: 2,
+            retry_backoff_ms: 10,
+            cleanup_interval_ms: 1_000,
+            fetch_on_miss: true,
+            forget_remote_misses: false,
+            handoff_max_bytes_per_second: 0,
+            handoff_max_concurrency: 16,
+            handoff_batch_items: 1_024,
+            retained_buffer_bytes: 16 * 1024,
+            worker_threads: 2,
+            queue_capacity: 1_024,
         }
     }
 }
@@ -670,7 +1025,16 @@ impl PersistenceConfig {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
+    use super::KvOverflowBackend;
+    #[cfg(feature = "kv-overflow")]
+    use super::{
+        EvictionPolicy, KvOverflowConfig, KvOverflowReplica, KvOverflowReplicaServerConfig,
+        MAX_KV_OVERFLOW_SLOT_COUNT, ScnpTlsClientConfig,
+    };
     use super::{ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser};
+    #[cfg(all(feature = "kv-overflow", feature = "scnp-tls"))]
+    use std::path::PathBuf;
 
     #[test]
     fn parses_cache_sizes() {
@@ -719,5 +1083,171 @@ mod tests {
             toml::from_str(r#"server_endpoint_mode = "direct_shard""#).unwrap();
 
         assert_eq!(config.server_endpoint_mode, ServerEndpointMode::DirectShard);
+    }
+
+    #[test]
+    fn example_configuration_parses_and_validates() {
+        let config: ShardCacheConfig =
+            toml::from_str(include_str!("../shardcache.toml.example")).unwrap();
+        config.validate().unwrap();
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    #[test]
+    fn validates_key_value_overflow_membership() {
+        let mut config = ShardCacheConfig {
+            shard_count: 16,
+            kv_overflow: KvOverflowConfig {
+                enabled: true,
+                endpoints: vec!["127.0.0.1:6381".into(), "127.0.0.1:6382".into()],
+                max_memory_bytes: 1024,
+                eviction_policy: EvictionPolicy::Lfu,
+                ..KvOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        config.kv_overflow.endpoints[1] = config.kv_overflow.endpoints[0].clone();
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.endpoints[1] = "127.0.0.1:6382".into();
+        config.kv_overflow.previous_endpoints =
+            vec!["127.0.0.1:6381".into(), "127.0.0.1:6381".into()];
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.previous_endpoints.pop();
+        config.kv_overflow.slot_count = 10_000;
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.slot_count = MAX_KV_OVERFLOW_SLOT_COUNT * 2;
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.slot_count = 16_384;
+        config.kv_overflow.previous_endpoints.clear();
+        config.kv_overflow.previous_primary_shard_count = Some(2);
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.previous_endpoints = vec!["127.0.0.1:6381".into()];
+        config.kv_overflow.previous_primary_shard_count = Some(3);
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.previous_primary_shard_count = Some(2);
+        assert!(config.validate().is_ok());
+
+        config.kv_overflow.previous_primary_shard_count = None;
+        config.kv_overflow.previous_endpoints.clear();
+        config.kv_overflow.endpoints = vec!["10.0.0.10:6380".into()];
+        assert!(config.validate().is_err());
+        config.kv_overflow.scnp_auth_token_env = Some("OVERFLOW_SCNP_TOKEN".into());
+        assert!(config.validate().is_err());
+        config.kv_overflow.allow_insecure_scnp = true;
+        assert!(config.validate().is_ok());
+    }
+
+    #[cfg(all(feature = "kv-overflow", feature = "scnp-tls"))]
+    #[test]
+    fn non_loopback_scnp_accepts_tls_with_authenticated_clients() {
+        let config = ShardCacheConfig {
+            shard_count: 1,
+            kv_overflow: KvOverflowConfig {
+                enabled: true,
+                endpoints: vec!["10.0.0.10:6380".into()],
+                scnp_auth_token_env: Some("OVERFLOW_SCNP_TOKEN".into()),
+                scnp_tls: ScnpTlsClientConfig {
+                    enabled: true,
+                    ca_path: PathBuf::from("/run/secrets/overflow-ca.pem"),
+                    server_name: Some("overflow.internal".into()),
+                    ..ScnpTlsClientConfig::default()
+                },
+                max_memory_bytes: 1024,
+                ..KvOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    #[test]
+    fn overflow_replica_requires_capacity_preserving_eviction_by_default() {
+        let mut config = ShardCacheConfig {
+            bind_addr: "127.0.0.1:6380".into(),
+            max_memory_bytes: 1024,
+            eviction_policy: EvictionPolicy::Lru,
+            server_endpoint_mode: ServerEndpointMode::DirectShard,
+            kv_overflow_replica: KvOverflowReplicaServerConfig {
+                enabled: true,
+                node_id: "replica-a".into(),
+                encrypted_persistence: true,
+                ..KvOverflowReplicaServerConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_err());
+        config.kv_overflow_replica.allow_lossy_eviction = true;
+        assert!(config.validate().is_ok());
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    #[test]
+    fn validates_structured_overflow_replica_identity_and_ports() {
+        let mut config = ShardCacheConfig {
+            shard_count: 16,
+            kv_overflow: KvOverflowConfig {
+                enabled: true,
+                replicas: vec![KvOverflowReplica {
+                    id: "replica-a".into(),
+                    addresses: vec!["127.0.0.1:6380".into()],
+                    shard_count: 16,
+                    direct_shard_base_port: 6381,
+                    tls_server_name: None,
+                }],
+                max_memory_bytes: 1024,
+                ..KvOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        config.kv_overflow.previous_replicas = vec![
+            config.kv_overflow.replicas[0].clone(),
+            config.kv_overflow.replicas[0].clone(),
+        ];
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.previous_replicas.clear();
+        config.kv_overflow.replicas[0].direct_shard_base_port = u16::MAX;
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
+    #[test]
+    fn validates_redis_key_value_overflow_endpoints_and_credentials() {
+        let mut config = ShardCacheConfig {
+            kv_overflow: KvOverflowConfig {
+                enabled: true,
+                backend: KvOverflowBackend::Redis,
+                endpoints: vec!["redis://127.0.0.1:6379/0".into()],
+                max_memory_bytes: 1024,
+                ..KvOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        config.kv_overflow.endpoints[0] = "127.0.0.1:6379".into();
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.endpoints[0] = "redis://:secret@127.0.0.1:6379/0".into();
+        assert!(config.validate().is_err());
+
+        config.kv_overflow.endpoints[0] = "redis://user:super-secret@/".into();
+        let error = config.validate().unwrap_err().to_string();
+        assert!(!error.contains("super-secret"));
+
+        config.kv_overflow.endpoints[0] = "redis://127.0.0.1:6379/0".into();
+        config.kv_overflow.redis_username_env = Some("REDIS_USER".into());
+        assert!(config.validate().is_err());
     }
 }

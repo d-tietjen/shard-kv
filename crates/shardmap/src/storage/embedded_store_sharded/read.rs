@@ -45,6 +45,26 @@ impl WorkerLocalEmbeddedStore {
         Ok(self.inner.local_get(key))
     }
 
+    pub fn get_with_governance_filter<F>(&mut self, key: &[u8], authorize: F) -> Option<Bytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        self.get_with_governance_filter_if_local(key, authorize)
+            .expect("worker-local embedded store key does not belong to this thread")
+    }
+
+    pub fn get_with_governance_filter_if_local<F>(
+        &mut self,
+        key: &[u8],
+        authorize: F,
+    ) -> Result<Option<Bytes>, LocalRouteError>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        self.local_key_route(key)?;
+        Ok(self.inner.local_get_with_governance_filter(key, authorize))
+    }
+
     pub fn get_view<'a>(&'a mut self, key: &[u8]) -> WorkerLocalReadView<'a> {
         self.get_view_if_local(key)
             .expect("worker-local embedded store key does not belong to this thread")

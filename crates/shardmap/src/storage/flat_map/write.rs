@@ -45,7 +45,8 @@ impl FlatMap {
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
-                let (result, value) = transform(Some(entry.value.as_ref()))?;
+                let visible_value = (!entry.is_protected()).then_some(entry.value.as_ref());
+                let (result, value) = transform(visible_value)?;
                 let value = SharedBytes::from(value);
                 let had_ttl = entry.expire_at_ms.is_some();
                 let previous_entry_bytes = entry.stored_bytes();
@@ -75,7 +76,9 @@ impl FlatMap {
                     value,
                     expire_at_ms: None,
                     semantic_index_token: None,
-                    semantic_governance: None,
+                    governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -105,8 +108,41 @@ impl FlatMap {
         expire_at_ms: Option<u64>,
         now_ms: u64,
     ) {
+        self.set_bytes_hashed_with_governance_option(hash, key, value, None, expire_at_ms, now_ms);
+    }
+
+    pub(crate) fn set_bytes_hashed_with_governance(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        value: SharedBytes,
+        governance: SharedBytes,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) {
+        self.set_bytes_hashed_with_governance_option(
+            hash,
+            key,
+            value,
+            Some(governance),
+            expire_at_ms,
+            now_ms,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn set_bytes_hashed_with_governance_option(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        value: SharedBytes,
+        governance: Option<SharedBytes>,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) {
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
+        let mut governance = governance;
         let access_tick = if self.eviction_policy == EvictionPolicy::None {
             0
         } else {
@@ -127,6 +163,7 @@ impl FlatMap {
                 let previous_entry_bytes = entry.stored_bytes();
                 let retired_value = mem::replace(&mut entry.value, value);
                 entry.clear_semantic_embedding();
+                entry.governance = governance.take();
                 entry.access.record_access(access_tick);
                 self.stored_bytes = self
                     .stored_bytes
@@ -139,6 +176,7 @@ impl FlatMap {
             hashbrown::hash_table::Entry::Vacant(vacant) => {
                 let key_len = key.len();
                 let value_len = value.len();
+                let governance_len = governance.as_ref().map_or(0, SharedBytes::len);
                 vacant.insert(FlatEntry {
                     hash,
                     key_tag,
@@ -147,7 +185,9 @@ impl FlatMap {
                     value,
                     expire_at_ms,
                     semantic_index_token: None,
-                    semantic_governance: None,
+                    governance,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -156,7 +196,8 @@ impl FlatMap {
                 self.stored_bytes = self
                     .stored_bytes
                     .saturating_add(key_len)
-                    .saturating_add(value_len);
+                    .saturating_add(value_len)
+                    .saturating_add(governance_len);
                 if expire_at_ms.is_some() {
                     self.ttl_entries = self.ttl_entries.saturating_add(1);
                 }
@@ -164,6 +205,77 @@ impl FlatMap {
         }
 
         self.enforce_memory_limit(now_ms);
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn can_set_bytes_hashed_with_limit(
+        &self,
+        hash: u64,
+        key: &[u8],
+        value_len: usize,
+        governance_len: usize,
+        hard_limit: usize,
+    ) -> bool {
+        if hard_limit == usize::MAX {
+            return true;
+        }
+        let previous_bytes = self
+            .entries
+            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .map(FlatEntry::stored_bytes)
+            .or_else(|| {
+                self.remote_entries
+                    .get(key)
+                    .filter(|entry| entry.matches(hash, key))
+                    .map(RemoteEntry::stored_bytes)
+            })
+            .unwrap_or(0);
+        let projected_bytes = self
+            .stored_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(key.len())
+            .saturating_add(value_len)
+            .saturating_add(governance_len);
+        projected_bytes <= hard_limit || projected_bytes <= self.stored_bytes
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn set_bytes_hashed_overflow(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        value: SharedBytes,
+        governance: Option<SharedBytes>,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+        generation: u64,
+    ) {
+        self.set_bytes_hashed_with_governance_option(
+            hash,
+            key,
+            value,
+            governance,
+            expire_at_ms,
+            now_ms,
+        );
+        let entry = self
+            .entries
+            .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))
+            .expect("overflow value was inserted under the same shard lock");
+        entry.overflow_generation = generation.saturating_add(1);
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn overflow_generation_matches(
+        &self,
+        hash: u64,
+        key: &[u8],
+        generation: u64,
+    ) -> bool {
+        self.entries
+            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .is_some_and(|entry| entry.overflow_generation == generation.saturating_add(1))
     }
 
     #[inline(always)]
@@ -236,7 +348,9 @@ impl FlatMap {
                     value: replacement.take().unwrap(),
                     expire_at_ms,
                     semantic_index_token: None,
-                    semantic_governance: None,
+                    governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -398,7 +512,9 @@ impl FlatMap {
                     value: stored_value,
                     expire_at_ms: None,
                     semantic_index_token: None,
-                    semantic_governance: None,
+                    governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
@@ -575,7 +691,9 @@ impl FlatMap {
                     value: stored_value,
                     expire_at_ms,
                     semantic_index_token: None,
-                    semantic_governance: None,
+                    governance: None,
+                    #[cfg(feature = "kv-overflow")]
+                    overflow_generation: 0,
                     access: EntryAccessMeta {
                         last_touch: access_tick,
                         frequency: 1,
