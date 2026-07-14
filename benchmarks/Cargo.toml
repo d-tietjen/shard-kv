@@ -35,6 +35,7 @@ telemetry = ["shardmap/telemetry"]
 object-overflow = ["shardmap/object-overflow"]
 kv-overflow = ["shardmap/kv-overflow"]
 kv-overflow-redis = ["kv-overflow", "shardmap/kv-overflow-redis"]
+scnp-tls = ["kv-overflow", "shardmap/scnp-tls", "shardcache-client-rs/tls"]
 # Build the benchmark-only server that exposes a caller-owned shardmap store
 # through the shardcache RESP/SCNP server path.
 embedded-server = ["shardmap/redis-server"]

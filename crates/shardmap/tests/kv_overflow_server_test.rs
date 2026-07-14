@@ -11,6 +11,8 @@ use shardmap::config::{
     ObjectOverflowBackend, ObjectOverflowCompression, ObjectOverflowConfig,
     ObjectOverflowFailurePolicy,
 };
+#[cfg(feature = "scnp-tls")]
+use shardmap::config::{ScnpTlsClientConfig, ScnpTlsServerConfig};
 use shardmap::server::ShardCacheServer;
 use shardmap::storage::{EmbeddedRouteMode, EmbeddedStore, KvOverflowStore};
 
@@ -185,6 +187,8 @@ fn shard_owned_direct_replica_validates_topology_and_uses_every_remote_shard() {
         kv_overflow_replica: KvOverflowReplicaServerConfig {
             enabled: true,
             node_id: "replica-a".into(),
+            encrypted_persistence: true,
+            ..KvOverflowReplicaServerConfig::default()
         },
         ..ShardCacheConfig::default()
     };
@@ -201,6 +205,7 @@ fn shard_owned_direct_replica_validates_topology_and_uses_every_remote_shard() {
             addresses: vec![addr],
             shard_count: 4,
             direct_shard_base_port: 0,
+            tls_server_name: None,
         }],
         cluster_id: "direct-integration".into(),
         max_memory_bytes: 128,
@@ -209,6 +214,10 @@ fn shard_owned_direct_replica_validates_topology_and_uses_every_remote_shard() {
         ..KvOverflowConfig::default()
     };
     let primary = KvOverflowStore::from_config(EmbeddedStore::new(4), &primary_config).unwrap();
+    assert_eq!(
+        primary.health_snapshot().shard_queue_capacities,
+        vec![512; 4]
+    );
     for index in 0..256 {
         primary
             .set(
@@ -242,6 +251,224 @@ fn shard_owned_direct_replica_validates_topology_and_uses_every_remote_shard() {
             .value
             .len(),
         32
+    );
+}
+
+#[test]
+fn shard_owned_replica_rejects_invalid_scnp_authentication() {
+    let _test_guard = lock_live_server_test();
+    const TOKEN_ENV: &str = "SHARDCACHE_TEST_KV_OVERFLOW_AUTH";
+    unsafe { std::env::set_var(TOKEN_ENV, "correct-token") };
+    let addr = free_addr();
+    let replica = Arc::new(EmbeddedStore::with_route_mode(
+        1,
+        EmbeddedRouteMode::OverflowSlot,
+    ));
+    let server_config = ShardCacheConfig {
+        shard_count: 1,
+        server_endpoint_mode: ServerEndpointMode::DirectShard,
+        kv_overflow_replica: KvOverflowReplicaServerConfig {
+            enabled: true,
+            node_id: "authenticated-replica".into(),
+            auth_token_env: Some(TOKEN_ENV.into()),
+            encrypted_persistence: true,
+            ..KvOverflowReplicaServerConfig::default()
+        },
+        ..ShardCacheConfig::default()
+    };
+    let _server = TestServer::start_with_config(addr.clone(), replica, server_config);
+    wait_for_server(&addr);
+
+    let config = KvOverflowConfig {
+        enabled: true,
+        replicas: vec![KvOverflowReplica {
+            id: "authenticated-replica".into(),
+            addresses: vec![addr],
+            shard_count: 1,
+            direct_shard_base_port: 0,
+            tls_server_name: None,
+        }],
+        scnp_auth_token_env: Some(TOKEN_ENV.into()),
+        max_memory_bytes: 1,
+        ..KvOverflowConfig::default()
+    };
+    unsafe { std::env::set_var(TOKEN_ENV, "wrong-token") };
+    assert!(KvOverflowStore::from_config(EmbeddedStore::new(1), &config).is_err());
+
+    unsafe { std::env::set_var(TOKEN_ENV, "correct-token") };
+    let primary = KvOverflowStore::from_config(EmbeddedStore::new(1), &config).unwrap();
+    primary
+        .set(b"key".to_vec(), b"value".to_vec(), None)
+        .unwrap();
+    primary.flush_remote().unwrap();
+    assert_eq!(primary.get(b"key").unwrap(), Some(b"value".to_vec()));
+    unsafe { std::env::remove_var(TOKEN_ENV) };
+}
+
+#[cfg(feature = "scnp-tls")]
+#[test]
+fn shard_owned_replica_encrypts_topology_mutation_and_read_connections() {
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair, KeyUsagePurpose,
+    };
+    use sha2::{Digest, Sha256};
+
+    let _test_guard = lock_live_server_test();
+    let directory = tempfile::tempdir().unwrap();
+    let ca_path = directory.path().join("ca.pem");
+    let server_cert_path = directory.path().join("server-cert.pem");
+    let server_key_path = directory.path().join("server-key.pem");
+    let client_cert_path = directory.path().join("client-cert.pem");
+    let client_key_path = directory.path().join("client-key.pem");
+    let unauthorized_cert_path = directory.path().join("unauthorized-cert.pem");
+    let unauthorized_key_path = directory.path().join("unauthorized-key.pem");
+
+    let mut ca_params = CertificateParams::new(vec!["overflow-test-ca".into()]).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let ca = CertifiedIssuer::self_signed(ca_params, KeyPair::generate().unwrap()).unwrap();
+
+    let mut server_params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+    server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let server_key = KeyPair::generate().unwrap();
+    let server_cert = server_params.signed_by(&server_key, &ca).unwrap();
+
+    let mut client_params = CertificateParams::new(vec!["overflow-primary".into()]).unwrap();
+    client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let client_key = KeyPair::generate().unwrap();
+    let client_cert = client_params.signed_by(&client_key, &ca).unwrap();
+    let client_fingerprint = Sha256::digest(client_cert.der())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mut unauthorized_params = CertificateParams::new(vec!["other-service".into()]).unwrap();
+    unauthorized_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let unauthorized_key = KeyPair::generate().unwrap();
+    let unauthorized_cert = unauthorized_params
+        .signed_by(&unauthorized_key, &ca)
+        .unwrap();
+
+    let mut rotated_ca_params = CertificateParams::new(vec!["rotated-overflow-ca".into()]).unwrap();
+    rotated_ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    rotated_ca_params.key_usages = vec![
+        KeyUsagePurpose::KeyCertSign,
+        KeyUsagePurpose::DigitalSignature,
+        KeyUsagePurpose::CrlSign,
+    ];
+    let rotated_ca =
+        CertifiedIssuer::self_signed(rotated_ca_params, KeyPair::generate().unwrap()).unwrap();
+    let mut rotated_server_params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+    rotated_server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let rotated_server_key = KeyPair::generate().unwrap();
+    let rotated_server_cert = rotated_server_params
+        .signed_by(&rotated_server_key, &rotated_ca)
+        .unwrap();
+    let mut rotated_client_params =
+        CertificateParams::new(vec!["rotated-overflow-primary".into()]).unwrap();
+    rotated_client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let rotated_client_key = KeyPair::generate().unwrap();
+    let rotated_client_cert = rotated_client_params
+        .signed_by(&rotated_client_key, &rotated_ca)
+        .unwrap();
+    let rotated_client_fingerprint = Sha256::digest(rotated_client_cert.der())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    std::fs::write(&ca_path, ca.pem()).unwrap();
+    std::fs::write(&server_cert_path, server_cert.pem()).unwrap();
+    std::fs::write(&server_key_path, server_key.serialize_pem()).unwrap();
+    std::fs::write(&client_cert_path, client_cert.pem()).unwrap();
+    std::fs::write(&client_key_path, client_key.serialize_pem()).unwrap();
+    std::fs::write(&unauthorized_cert_path, unauthorized_cert.pem()).unwrap();
+    std::fs::write(&unauthorized_key_path, unauthorized_key.serialize_pem()).unwrap();
+
+    let addr = free_addr();
+    let direct_addr = {
+        let mut address = addr.parse::<std::net::SocketAddr>().unwrap();
+        address.set_port(address.port() + 1);
+        address.to_string()
+    };
+    let replica = Arc::new(EmbeddedStore::with_route_mode(
+        1,
+        EmbeddedRouteMode::OverflowSlot,
+    ));
+    let server_config = ShardCacheConfig {
+        shard_count: 1,
+        server_endpoint_mode: ServerEndpointMode::DirectShard,
+        kv_overflow_replica: KvOverflowReplicaServerConfig {
+            enabled: true,
+            node_id: "tls-replica".into(),
+            encrypted_persistence: true,
+            tls: ScnpTlsServerConfig {
+                enabled: true,
+                cert_path: server_cert_path.clone(),
+                key_path: server_key_path.clone(),
+                client_ca_path: Some(ca_path.clone()),
+                client_cert_sha256: vec![client_fingerprint, rotated_client_fingerprint],
+                reload_interval_ms: 1,
+                ..ScnpTlsServerConfig::default()
+            },
+            ..KvOverflowReplicaServerConfig::default()
+        },
+        ..ShardCacheConfig::default()
+    };
+    let _server = TestServer::start_with_config(addr.clone(), replica, server_config);
+    wait_for_server(&addr);
+    wait_for_server(&direct_addr);
+
+    let mut config = KvOverflowConfig {
+        enabled: true,
+        replicas: vec![KvOverflowReplica {
+            id: "tls-replica".into(),
+            addresses: vec![addr],
+            shard_count: 1,
+            direct_shard_base_port: 0,
+            tls_server_name: Some("localhost".into()),
+        }],
+        scnp_tls: ScnpTlsClientConfig {
+            enabled: true,
+            ca_path: ca_path.clone(),
+            ..ScnpTlsClientConfig::default()
+        },
+        max_memory_bytes: 1,
+        ..KvOverflowConfig::default()
+    };
+    assert!(KvOverflowStore::from_config(EmbeddedStore::new(1), &config).is_err());
+    config.scnp_tls.client_cert_path = Some(unauthorized_cert_path);
+    config.scnp_tls.client_key_path = Some(unauthorized_key_path);
+    assert!(KvOverflowStore::from_config(EmbeddedStore::new(1), &config).is_err());
+    config.scnp_tls.client_cert_path = Some(client_cert_path.clone());
+    config.scnp_tls.client_key_path = Some(client_key_path.clone());
+    let primary = KvOverflowStore::from_config(EmbeddedStore::new(1), &config).unwrap();
+    primary
+        .set(b"tls-key".to_vec(), b"tls-value".to_vec(), None)
+        .unwrap();
+    primary.flush_remote().unwrap();
+    assert_eq!(
+        primary.get(b"tls-key").unwrap(),
+        Some(b"tls-value".to_vec())
+    );
+
+    std::fs::write(&ca_path, rotated_ca.pem()).unwrap();
+    std::fs::write(&server_cert_path, rotated_server_cert.pem()).unwrap();
+    std::fs::write(&server_key_path, rotated_server_key.serialize_pem()).unwrap();
+    std::fs::write(&client_cert_path, rotated_client_cert.pem()).unwrap();
+    std::fs::write(&client_key_path, rotated_client_key.serialize_pem()).unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    let rotated_primary = KvOverflowStore::from_config(EmbeddedStore::new(1), &config).unwrap();
+    rotated_primary
+        .set(b"rotated-key".to_vec(), b"rotated-value".to_vec(), None)
+        .unwrap();
+    rotated_primary.flush_remote().unwrap();
+    assert_eq!(
+        rotated_primary.get(b"rotated-key").unwrap(),
+        Some(b"rotated-value".to_vec())
     );
 }
 

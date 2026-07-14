@@ -100,6 +100,15 @@ object-overflow = []
 object-overflow-s3 = ["object-overflow", "dep:futures-util", "dep:object_store"]
 kv-overflow = ["embedded", "dep:shardcache-client-rs"]
 kv-overflow-redis = ["kv-overflow", "dep:redis-client"]
+scnp-tls = [
+    "server",
+    "kv-overflow",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:sha2",
+    "dep:tokio-rustls",
+    "shardcache-client-rs/tls",
+]
 
 # Internal/benchmark knobs. These are intentionally not part of the small public
 # feature story; use them only for measured deployments or local experiments.
@@ -131,13 +140,17 @@ object_store = { version = "0.14", default-features = false, features = ["aws"],
 parking_lot = { workspace = true }
 rblock = { workspace = true }
 redis-client = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true, optional = true }
 shardcache-client-rs = { workspace = true, optional = true }
 smallvec = "1"
 socket2 = { version = "0.5", features = ["all"], optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true, optional = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
@@ -145,6 +158,7 @@ xxhash-rust = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
+rcgen = "0.14"
 tempfile = { workspace = true }
 
 # Runtime-agnostic mpsc used by the tokio fanout acceptor. Monoio and tokio

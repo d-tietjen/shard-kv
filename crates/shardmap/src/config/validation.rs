@@ -5,8 +5,18 @@ use super::{
     ReplicationRole, ServerEndpointMode, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
 };
 #[cfg(feature = "kv-overflow")]
-use super::{KvOverflowBackend, MAX_KV_OVERFLOW_SLOT_COUNT};
+use super::{KvOverflowBackend, KvOverflowCompression, MAX_KV_OVERFLOW_SLOT_COUNT};
 use crate::{Result, ShardCacheError};
+
+#[cfg(feature = "kv-overflow")]
+fn is_loopback_endpoint(endpoint: &str) -> bool {
+    endpoint
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|address| address.ip().is_loopback())
+        || endpoint
+            .strip_prefix("localhost:")
+            .is_some_and(|port| port.parse::<u16>().is_ok())
+}
 
 #[cfg(feature = "prefix-eviction")]
 fn memory_limit_eviction_policy_message() -> &'static str {
@@ -133,6 +143,75 @@ impl ConfigValidationRule {
                 ConfigCheck::require(
                     !config.kv_overflow.enabled,
                     "a server cannot be both a kv overflow primary and replica",
+                )?;
+                ConfigCheck::require(
+                    !config.persistence.enabled || config.kv_overflow_replica.encrypted_persistence,
+                    "durable kv overflow replicas require encrypted_persistence = true after provisioning an encrypted filesystem or volume",
+                )?;
+                ConfigCheck::optional_token(
+                    config.kv_overflow_replica.auth_token_env.as_deref(),
+                    "kv_overflow_replica.auth_token_env must not be empty",
+                )?;
+                let tls = &config.kv_overflow_replica.tls;
+                if tls.enabled {
+                    #[cfg(not(feature = "scnp-tls"))]
+                    {
+                        return Err(ShardCacheError::Config(
+                            "kv_overflow_replica.tls requires the scnp-tls feature".into(),
+                        ));
+                    }
+                    #[cfg(feature = "scnp-tls")]
+                    {
+                        ConfigCheck::require(
+                            !tls.cert_path.as_os_str().is_empty()
+                                && !tls.key_path.as_os_str().is_empty(),
+                            "kv_overflow_replica.tls cert_path and key_path are required",
+                        )?;
+                        ConfigCheck::require(
+                            tls.handshake_timeout_ms > 0
+                                && tls.reload_interval_ms > 0
+                                && tls.max_concurrent_handshakes > 0,
+                            "kv_overflow_replica TLS handshake and reload intervals must be > 0",
+                        )?;
+                        ConfigCheck::require(
+                            tls.client_cert_sha256.is_empty() || tls.client_ca_path.is_some(),
+                            "kv_overflow_replica TLS client fingerprints require client_ca_path",
+                        )?;
+                        ConfigCheck::require(
+                            tls.client_ca_path.is_none() || !tls.client_cert_sha256.is_empty(),
+                            "kv_overflow_replica mTLS requires at least one authorized client certificate fingerprint",
+                        )?;
+                        ConfigCheck::require(
+                            tls.client_cert_sha256.iter().all(|fingerprint| {
+                                let compact = fingerprint.replace(':', "");
+                                compact.len() == 64
+                                    && compact.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            }),
+                            "kv_overflow_replica TLS client fingerprints must be SHA-256 hexadecimal values",
+                        )?;
+                    }
+                }
+                let loopback = config
+                    .bind_addr
+                    .parse::<std::net::SocketAddr>()
+                    .is_ok_and(|address| address.ip().is_loopback());
+                ConfigCheck::require(
+                    loopback || tls.enabled || config.kv_overflow_replica.allow_insecure_scnp,
+                    "non-loopback kv overflow replicas require TLS or allow_insecure_scnp = true",
+                )?;
+                ConfigCheck::require(
+                    loopback
+                        || config.kv_overflow_replica.auth_token_env.is_some()
+                        || tls.client_ca_path.is_some()
+                        || config.kv_overflow_replica.allow_insecure_scnp,
+                    "non-loopback kv overflow replicas require token authentication, mTLS, or allow_insecure_scnp = true",
+                )?;
+                ConfigCheck::require(
+                    config.max_memory_bytes == 0
+                        || matches!(config.eviction_policy, EvictionPolicy::None)
+                        || config.object_overflow.enabled
+                        || config.kv_overflow_replica.allow_lossy_eviction,
+                    "kv overflow replica eviction requires object_overflow or allow_lossy_eviction = true",
                 )
             }
             Self::Replication => ReplicationValidation::new(&config.replication).validate(),
@@ -385,8 +464,77 @@ impl<'a> KvOverflowValidation<'a> {
                             && self.config.redis_password_env.is_none(),
                         "kv_overflow Redis credential env vars require backend = \"redis\"",
                     )?;
+                    ConfigCheck::optional_token(
+                        self.config.scnp_auth_token_env.as_deref(),
+                        "kv_overflow.scnp_auth_token_env must not be empty",
+                    )?;
+                    let tls = &self.config.scnp_tls;
+                    if tls.enabled {
+                        #[cfg(not(feature = "scnp-tls"))]
+                        {
+                            return Err(ShardCacheError::Config(
+                                "kv_overflow.scnp_tls requires the scnp-tls feature".into(),
+                            ));
+                        }
+                        #[cfg(feature = "scnp-tls")]
+                        {
+                            ConfigCheck::require(
+                                !tls.ca_path.as_os_str().is_empty(),
+                                "kv_overflow.scnp_tls.ca_path is required",
+                            )?;
+                            ConfigCheck::require(
+                                tls.client_cert_path.is_some() == tls.client_key_path.is_some(),
+                                "kv_overflow.scnp_tls client certificate and key must be configured together",
+                            )?;
+                            if self.config.replicas.is_empty() {
+                                ConfigCheck::require(
+                                    tls.server_name
+                                        .as_deref()
+                                        .is_some_and(|name| !name.trim().is_empty()),
+                                    "legacy SCNP endpoints require kv_overflow.scnp_tls.server_name",
+                                )?;
+                            }
+                            ConfigCheck::require(
+                                self.config
+                                    .replicas
+                                    .iter()
+                                    .chain(&self.config.previous_replicas)
+                                    .all(|replica| {
+                                        replica
+                                            .tls_server_name
+                                            .as_deref()
+                                            .is_none_or(|name| !name.trim().is_empty())
+                                    }),
+                                "kv_overflow replica tls_server_name must not be empty",
+                            )?;
+                        }
+                    }
+                    let all_loopback = self
+                        .config
+                        .replicas
+                        .iter()
+                        .chain(&self.config.previous_replicas)
+                        .flat_map(|replica| replica.addresses.iter())
+                        .chain(self.config.endpoints.iter())
+                        .chain(self.config.previous_endpoints.iter())
+                        .all(|endpoint| is_loopback_endpoint(endpoint));
+                    ConfigCheck::require(
+                        all_loopback || tls.enabled || self.config.allow_insecure_scnp,
+                        "non-loopback SCNP overflow requires TLS or allow_insecure_scnp = true",
+                    )?;
+                    ConfigCheck::require(
+                        all_loopback
+                            || self.config.scnp_auth_token_env.is_some()
+                            || tls.client_cert_path.is_some()
+                            || self.config.allow_insecure_scnp,
+                        "non-loopback SCNP overflow requires token authentication, mTLS, or allow_insecure_scnp = true",
+                    )?;
                 }
                 KvOverflowBackend::Redis => {
+                    ConfigCheck::require(
+                        self.config.scnp_auth_token_env.is_none(),
+                        "kv_overflow.scnp_auth_token_env requires backend = \"scnp\"",
+                    )?;
                     #[cfg(not(feature = "kv-overflow-redis"))]
                     return Err(ShardCacheError::Config(
                         "kv_overflow.backend = \"redis\" requires the kv-overflow-redis feature"
@@ -417,6 +565,28 @@ impl<'a> KvOverflowValidation<'a> {
                     && self.config.pipeline_max_bytes > 0
                     && self.config.max_inflight_per_target > 0,
                 "kv_overflow per-shard queue and pipeline limits must be > 0",
+            )?;
+            ConfigCheck::require(
+                self.config.pipeline_target_micros > 0
+                    && self.config.circuit_breaker_failure_threshold > 0
+                    && self.config.circuit_breaker_cooldown_ms > 0,
+                "kv_overflow adaptive pipeline and circuit-breaker limits must be > 0",
+            )?;
+            ConfigCheck::require(
+                self.config.compression_min_value_bytes > 0
+                    && self.config.compression_min_savings_percent <= 100
+                    && self.config.max_value_bytes > 0
+                    && self.config.compression_max_expansion_ratio > 0,
+                "kv_overflow compression and decoded-value limits must be > 0 and savings percent must be <= 100",
+            )?;
+            ConfigCheck::require(
+                !matches!(self.config.compression, KvOverflowCompression::Lz4)
+                    || self.config.allow_envelope_v2_writes,
+                "kv_overflow compression requires allow_envelope_v2_writes = true after all readers support v2",
+            )?;
+            ConfigCheck::require(
+                self.config.handoff_max_concurrency > 0 && self.config.retained_buffer_bytes > 0,
+                "kv_overflow handoff concurrency and retained buffer limits must be > 0",
             )?;
             ConfigCheck::require(
                 self.config.connect_timeout_ms > 0

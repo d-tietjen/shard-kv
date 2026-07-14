@@ -3,8 +3,10 @@ use crossbeam_utils::CachePadded;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(feature = "embedded-read-biased-lock")]
 use rblock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-#[cfg(feature = "telemetry")]
+#[cfg(any(feature = "telemetry", feature = "scnp-tls"))]
 use std::sync::Arc;
+#[cfg(feature = "scnp-tls")]
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 #[cfg(feature = "redis")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(feature = "telemetry")]
@@ -34,6 +36,121 @@ mod core;
 #[path = "../redis_compat/storage/embedded_store/key_scan.rs"]
 mod key_scan;
 mod lifecycle;
+
+#[cfg(feature = "scnp-tls")]
+type TlsReloadFn = dyn Fn() -> crate::Result<Arc<rustls::ServerConfig>> + Send + Sync;
+
+/// Atomically reloadable TLS identity and client authorization for overflow listeners.
+#[cfg(feature = "scnp-tls")]
+pub(crate) struct OverflowReplicaTlsRuntime {
+    current: parking_lot::RwLock<Arc<rustls::ServerConfig>>,
+    reload: Arc<TlsReloadFn>,
+    next_reload_ms: AtomicU64,
+    reload_interval_ms: u64,
+    handshake_timeout: std::time::Duration,
+    client_cert_sha256: Arc<[[u8; 32]]>,
+    handshake_limiter: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(feature = "scnp-tls")]
+impl std::fmt::Debug for OverflowReplicaTlsRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OverflowReplicaTlsRuntime")
+            .field("reload_interval_ms", &self.reload_interval_ms)
+            .field("handshake_timeout", &self.handshake_timeout)
+            .field("authorized_clients", &self.client_cert_sha256.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "scnp-tls")]
+impl OverflowReplicaTlsRuntime {
+    pub(crate) fn new(
+        current: Arc<rustls::ServerConfig>,
+        reload: Arc<TlsReloadFn>,
+        reload_interval_ms: u64,
+        handshake_timeout: std::time::Duration,
+        client_cert_sha256: Arc<[[u8; 32]]>,
+        max_concurrent_handshakes: usize,
+    ) -> Self {
+        Self {
+            current: parking_lot::RwLock::new(current),
+            reload,
+            next_reload_ms: AtomicU64::new(now_millis().saturating_add(reload_interval_ms)),
+            reload_interval_ms,
+            handshake_timeout,
+            client_cert_sha256,
+            handshake_limiter: Arc::new(tokio::sync::Semaphore::new(max_concurrent_handshakes)),
+        }
+    }
+
+    pub(crate) fn server_config(&self) -> Arc<rustls::ServerConfig> {
+        let now = now_millis();
+        let next = self.next_reload_ms.load(AtomicOrdering::Acquire);
+        if now >= next
+            && self
+                .next_reload_ms
+                .compare_exchange(
+                    next,
+                    now.saturating_add(self.reload_interval_ms),
+                    AtomicOrdering::AcqRel,
+                    AtomicOrdering::Acquire,
+                )
+                .is_ok()
+        {
+            match (self.reload)() {
+                Ok(config) => *self.current.write() = config,
+                Err(error) => {
+                    tracing::warn!("SCNP TLS reload failed; retaining prior config: {error}")
+                }
+            }
+        }
+        Arc::clone(&self.current.read())
+    }
+
+    pub(crate) fn handshake_timeout(&self) -> std::time::Duration {
+        self.handshake_timeout
+    }
+
+    pub(crate) fn try_handshake_permit(&self) -> crate::Result<tokio::sync::OwnedSemaphorePermit> {
+        Arc::clone(&self.handshake_limiter)
+            .try_acquire_owned()
+            .map_err(|_| {
+                crate::ShardCacheError::Protocol("SCNP TLS handshake capacity exhausted".into())
+            })
+    }
+
+    pub(crate) fn authorize_client(
+        &self,
+        certificates: Option<&[rustls::pki_types::CertificateDer<'_>]>,
+    ) -> crate::Result<()> {
+        use sha2::{Digest, Sha256};
+
+        if self.client_cert_sha256.is_empty() {
+            return Ok(());
+        }
+        let certificate = certificates
+            .and_then(|certs| certs.first())
+            .ok_or_else(|| {
+                crate::ShardCacheError::Protocol("SCNP mTLS client certificate is required".into())
+            })?;
+        let actual: [u8; 32] = Sha256::digest(certificate.as_ref()).into();
+        let authorized = self.client_cert_sha256.iter().any(|expected| {
+            expected
+                .iter()
+                .zip(actual.iter())
+                .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+                == 0
+        });
+        if !authorized {
+            return Err(crate::ShardCacheError::Protocol(
+                "SCNP mTLS client identity is not authorized".into(),
+            ));
+        }
+        Ok(())
+    }
+}
 #[cfg(feature = "redis-modules")]
 #[path = "../redis_compat/storage/embedded_store/modules.rs"]
 mod modules;
@@ -112,6 +229,9 @@ pub struct EmbeddedStore {
     topk: modules::TopKStore,
     route_mode: EmbeddedRouteMode,
     overflow_replica_topology: RwLock<Option<(String, u16)>>,
+    overflow_replica_auth: RwLock<Option<Box<[u8]>>>,
+    #[cfg(feature = "scnp-tls")]
+    overflow_replica_tls: RwLock<Option<Arc<OverflowReplicaTlsRuntime>>>,
     #[cfg(feature = "telemetry")]
     metrics: Option<Arc<CacheTelemetry>>,
 }

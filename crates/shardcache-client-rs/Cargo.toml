@@ -16,8 +16,11 @@ keywords = ["shardcache", "scnp", "client", "cache", "kv"]
 [features]
 default = []
 redis = []
+tls = ["dep:rustls", "dep:rustls-pemfile"]
 
 [dependencies]
 libc = { workspace = true }
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
 xxhash-rust = { workspace = true }

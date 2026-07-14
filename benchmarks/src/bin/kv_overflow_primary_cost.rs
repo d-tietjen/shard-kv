@@ -1,4 +1,5 @@
 use std::hint::black_box;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -6,7 +7,8 @@ use std::time::{Duration, Instant};
 use clap::{Parser, ValueEnum};
 use shardcache_benchmarks::histogram::LatencyHistogram;
 use shardmap::config::{
-    EvictionPolicy, KvOverflowBackend, KvOverflowConfig, KvOverflowReplica, KvOverflowTransport,
+    EvictionPolicy, KvOverflowBackend, KvOverflowCompression, KvOverflowConfig, KvOverflowReplica,
+    KvOverflowTransport, ScnpTlsClientConfig,
 };
 use shardmap::storage::{
     DEFAULT_KV_OVERFLOW_SLOT_COUNT, EmbeddedStore, KvOverflowCluster, KvOverflowNode,
@@ -53,6 +55,26 @@ struct Args {
     pipeline_max_bytes: usize,
     #[arg(long, default_value_t = 1)]
     max_inflight_per_target: usize,
+    /// Enable RTT-based pipeline item-limit adaptation.
+    #[arg(long, default_value_t = true)]
+    adaptive_pipeline: bool,
+    #[arg(long, default_value_t = 1_000)]
+    pipeline_target_micros: u64,
+    #[arg(long, value_enum, default_value_t = BenchmarkCompression::None)]
+    compression: BenchmarkCompression,
+    #[arg(long, default_value_t = 4 * 1024)]
+    compression_min_value_bytes: usize,
+    /// CA bundle that enables native SCNP TLS for live benchmark endpoints.
+    #[arg(long)]
+    scnp_tls_ca: Option<PathBuf>,
+    #[arg(long)]
+    scnp_tls_server_name: Option<String>,
+    #[arg(long)]
+    scnp_tls_client_cert: Option<PathBuf>,
+    #[arg(long)]
+    scnp_tls_client_key: Option<PathBuf>,
+    #[arg(long)]
+    scnp_auth_token_env: Option<String>,
     /// Number of in-process logical replicas for topology-scaling tests.
     #[arg(long, default_value_t = 1)]
     noop_replicas: usize,
@@ -81,6 +103,12 @@ enum BenchmarkBackend {
 enum BenchmarkTransport {
     Fanout,
     Direct,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BenchmarkCompression {
+    None,
+    Lz4,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
@@ -349,6 +377,22 @@ fn make_overflow_store(
                     pipeline_max_bytes: args.pipeline_max_bytes,
                     pipeline_flush: Duration::from_micros(200),
                     max_inflight_per_target: args.max_inflight_per_target,
+                    forget_remote_misses: false,
+                    adaptive_pipeline: args.adaptive_pipeline,
+                    pipeline_target: Duration::from_micros(args.pipeline_target_micros),
+                    circuit_breaker_failure_threshold: 8,
+                    circuit_breaker_cooldown: Duration::from_secs(5),
+                    compression: match args.compression {
+                        BenchmarkCompression::None => KvOverflowCompression::None,
+                        BenchmarkCompression::Lz4 => KvOverflowCompression::Lz4,
+                    },
+                    compression_min_value_bytes: args.compression_min_value_bytes,
+                    compression_min_savings_percent: 12,
+                    max_value_bytes: 64 * 1024 * 1024,
+                    compression_max_expansion_ratio: 256,
+                    handoff_max_bytes_per_second: 0,
+                    handoff_max_concurrency: 16,
+                    retained_buffer_bytes: 16 * 1024,
                 },
             )
         }
@@ -373,6 +417,7 @@ fn make_overflow_store(
                         addresses: args.endpoint.clone(),
                         shard_count: args.scnp_shard_count,
                         direct_shard_base_port: args.scnp_direct_base_port,
+                        tls_server_name: args.scnp_tls_server_name.clone(),
                     }]
                 } else {
                     Vec::new()
@@ -387,6 +432,22 @@ fn make_overflow_store(
                 pipeline_max_items: args.pipeline_max_items,
                 pipeline_max_bytes: args.pipeline_max_bytes,
                 max_inflight_per_target: args.max_inflight_per_target,
+                adaptive_pipeline: args.adaptive_pipeline,
+                pipeline_target_micros: args.pipeline_target_micros,
+                compression: match args.compression {
+                    BenchmarkCompression::None => KvOverflowCompression::None,
+                    BenchmarkCompression::Lz4 => KvOverflowCompression::Lz4,
+                },
+                allow_envelope_v2_writes: matches!(args.compression, BenchmarkCompression::Lz4),
+                compression_min_value_bytes: args.compression_min_value_bytes,
+                scnp_auth_token_env: args.scnp_auth_token_env.clone(),
+                scnp_tls: ScnpTlsClientConfig {
+                    enabled: args.scnp_tls_ca.is_some(),
+                    ca_path: args.scnp_tls_ca.clone().unwrap_or_default(),
+                    client_cert_path: args.scnp_tls_client_cert.clone(),
+                    client_key_path: args.scnp_tls_client_key.clone(),
+                    server_name: args.scnp_tls_server_name.clone(),
+                },
                 ..KvOverflowConfig::default()
             };
             KvOverflowStore::from_config(EmbeddedStore::new(16), &config)

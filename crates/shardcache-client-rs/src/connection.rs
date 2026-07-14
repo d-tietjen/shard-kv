@@ -1,4 +1,4 @@
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
@@ -12,21 +12,68 @@ use crate::protocol::{
 };
 #[cfg(feature = "redis")]
 use crate::protocol::{STATUS_ARRAY, STATUS_FLOAT};
+#[cfg(feature = "tls")]
+use crate::tls::ScnpTlsClientConfig;
 
 const SCNP_READ_BUFFER_BYTES: usize = 8 * 1024;
 const SCNP_WRITE_BUFFER_BYTES: usize = 8 * 1024;
+const SCNP_AUTH_MAGIC: &[u8; 8] = b"SCAUTH01";
+
+enum ScnpStream {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+}
+
+impl std::fmt::Debug for ScnpStream {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain(_) => formatter.write_str("Plain(TcpStream)"),
+            #[cfg(feature = "tls")]
+            Self::Tls(_) => formatter.write_str("Tls(StreamOwned)"),
+        }
+    }
+}
+
+impl Read for ScnpStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.read(buffer),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl Write for ScnpStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(stream) => stream.write(buffer),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.flush(),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.flush(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct ScnpConnection {
-    r: BufReader<TcpStream>,
-    pub(crate) w: BufWriter<TcpStream>,
+    r: BufReader<ScnpStream>,
+    pub(crate) w: Vec<u8>,
     scratch: Vec<u8>,
 }
 
 impl ScnpConnection {
     pub(crate) fn connect(addr: impl ToSocketAddrs) -> Result<Self> {
         let s = TcpStream::connect(addr)?;
-        Self::from_stream(s, None)
+        Self::from_stream(s, None, None)
     }
 
     pub(crate) fn connect_with_timeouts(
@@ -37,7 +84,7 @@ impl ScnpConnection {
         let mut last_error = None;
         for addr in addr.to_socket_addrs()? {
             match TcpStream::connect_timeout(&addr, connect_timeout) {
-                Ok(stream) => return Self::from_stream(stream, Some(operation_timeout)),
+                Ok(stream) => return Self::from_stream(stream, Some(operation_timeout), None),
                 Err(error) => last_error = Some(error),
             }
         }
@@ -51,28 +98,100 @@ impl ScnpConnection {
             .into())
     }
 
-    fn from_stream(s: TcpStream, operation_timeout: Option<Duration>) -> Result<Self> {
+    #[cfg(feature = "tls")]
+    pub(crate) fn connect_with_timeouts_and_tls(
+        addr: impl ToSocketAddrs,
+        connect_timeout: Duration,
+        operation_timeout: Duration,
+        tls: &ScnpTlsClientConfig,
+    ) -> Result<Self> {
+        let mut last_error = None;
+        for addr in addr.to_socket_addrs()? {
+            match TcpStream::connect_timeout(&addr, connect_timeout) {
+                Ok(stream) => {
+                    return Self::from_stream(stream, Some(operation_timeout), Some(tls));
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error
+            .unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "address resolved to no endpoints",
+                )
+            })
+            .into())
+    }
+
+    fn from_stream(
+        s: TcpStream,
+        operation_timeout: Option<Duration>,
+        #[cfg(feature = "tls")] tls: Option<&ScnpTlsClientConfig>,
+        #[cfg(not(feature = "tls"))] _tls: Option<&()>,
+    ) -> Result<Self> {
         s.set_nodelay(true)?;
         s.set_read_timeout(operation_timeout)?;
         s.set_write_timeout(operation_timeout)?;
         tune_tcp_stream_buffers(&s);
-        let s2 = s.try_clone()?;
+        #[cfg(feature = "tls")]
+        let stream = if let Some(tls) = tls {
+            let connection = rustls::ClientConnection::new(tls.rustls_config(), tls.server_name())
+                .map_err(|error| ShardCacheClientError::Config(error.to_string()))?;
+            let mut stream = rustls::StreamOwned::new(connection, s);
+            stream.conn.complete_io(&mut stream.sock)?;
+            ScnpStream::Tls(Box::new(stream))
+        } else {
+            ScnpStream::Plain(s)
+        };
+        #[cfg(not(feature = "tls"))]
+        let stream = ScnpStream::Plain(s);
         Ok(Self {
-            r: BufReader::with_capacity(SCNP_READ_BUFFER_BYTES, s),
-            w: BufWriter::with_capacity(SCNP_WRITE_BUFFER_BYTES, s2),
+            r: BufReader::with_capacity(SCNP_READ_BUFFER_BYTES, stream),
+            w: Vec::with_capacity(SCNP_WRITE_BUFFER_BYTES),
             scratch: Vec::with_capacity(64),
         })
+    }
+
+    pub(crate) fn authenticate(&mut self, token: Option<&[u8]>) -> Result<()> {
+        let Some(token) = token else {
+            return Ok(());
+        };
+        let token_len = u16::try_from(token.len()).map_err(|_| {
+            ShardCacheClientError::Protocol("SCNP authentication token exceeds 65535 bytes".into())
+        })?;
+        self.w.write_all(SCNP_AUTH_MAGIC)?;
+        self.w.write_all(&token_len.to_le_bytes())?;
+        self.w.write_all(token)?;
+        self.flush()?;
+        let mut response = [0u8; 1];
+        self.r.read_exact(&mut response)?;
+        if response == [1] {
+            Ok(())
+        } else {
+            Err(ShardCacheClientError::Protocol(
+                "SCNP authentication rejected".into(),
+            ))
+        }
     }
 
     pub(crate) fn execute<C: ScnpCommand>(&mut self, command: C) -> Result<C::Output> {
         self.write_header(command.opcode(), command.flags(), command.body_len() as u32)?;
         command.write_body(&mut self.w)?;
-        self.w.flush()?;
+        self.flush()?;
         command.read_response(self)
     }
 
     pub(crate) fn flush(&mut self) -> Result<()> {
-        self.w.flush()?;
+        if !self.w.is_empty() {
+            self.r.get_mut().write_all(&self.w)?;
+            if self.w.capacity() > SCNP_WRITE_BUFFER_BYTES * 2 {
+                self.w = Vec::with_capacity(SCNP_WRITE_BUFFER_BYTES);
+            } else {
+                self.w.clear();
+            }
+        }
+        self.r.get_mut().flush()?;
         Ok(())
     }
 

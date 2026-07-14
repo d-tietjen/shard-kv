@@ -70,7 +70,7 @@ impl ScnpScanCommand {
                 let (node_id, direct_base_port) =
                     store.overflow_replica_topology().unwrap_or_default();
                 let payload = format!(
-                    "{}\t{}\t{}\t{}\toverflow_slot_v1",
+                    "{}\t{}\t{}\t{}\toverflow_slot_v1\tvalue_envelope_v2",
                     node_id,
                     store.shard_count(),
                     store.route_mode().as_str(),

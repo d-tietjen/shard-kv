@@ -43,6 +43,8 @@ mod stats;
 mod telemetry;
 
 pub use command::{BorrowedCommand, Command};
+#[cfg(feature = "scnp-tls")]
+pub(crate) use embedded_store::OverflowReplicaTlsRuntime;
 #[cfg(feature = "sharded")]
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
 #[doc(hidden)]

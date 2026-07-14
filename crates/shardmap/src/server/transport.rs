@@ -15,6 +15,10 @@ use crate::protocol::BorrowedCommandParts;
 #[cfg(feature = "embedded")]
 use bytes::Bytes as BytesFrame;
 #[cfg(feature = "embedded")]
+use std::time::Duration;
+#[cfg(feature = "embedded")]
+use tokio::io::AsyncReadExt;
+#[cfg(feature = "embedded")]
 use tokio::sync::oneshot;
 
 pub(super) struct MultiDirectAddress;
@@ -456,6 +460,70 @@ impl ReusePortListener {
 pub(super) struct MultiDirectConnection;
 
 #[cfg(feature = "embedded")]
+trait ServerConnectionStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {
+    fn try_write_now(&self, _bytes: &[u8]) -> Option<std::io::Result<usize>> {
+        None
+    }
+}
+
+#[cfg(feature = "embedded")]
+impl ServerConnectionStream for TcpStream {
+    fn try_write_now(&self, bytes: &[u8]) -> Option<std::io::Result<usize>> {
+        Some(self.try_write(bytes))
+    }
+}
+
+#[cfg(all(feature = "embedded", feature = "scnp-tls"))]
+impl ServerConnectionStream for tokio_rustls::server::TlsStream<TcpStream> {}
+
+#[cfg(feature = "embedded")]
+async fn authenticate_overflow_stream<S>(stream: &mut S, store: &EmbeddedStore) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    const AUTH_MAGIC: &[u8; 8] = b"SCAUTH01";
+    let Some(expected) = store.overflow_replica_auth() else {
+        return Ok(());
+    };
+    let authenticate = async {
+        let mut header = [0u8; 10];
+        stream.read_exact(&mut header).await?;
+        if &header[..8] != AUTH_MAGIC {
+            return Err(crate::ShardCacheError::Protocol(
+                "SCNP authentication preamble required".into(),
+            ));
+        }
+        let token_len = u16::from_le_bytes([header[8], header[9]]) as usize;
+        if token_len != expected.len() {
+            stream.write_all(&[0]).await?;
+            return Err(crate::ShardCacheError::Protocol(
+                "SCNP authentication rejected".into(),
+            ));
+        }
+        let mut supplied = vec![0u8; token_len];
+        stream.read_exact(&mut supplied).await?;
+        let equal = supplied
+            .iter()
+            .zip(expected.iter())
+            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+            == 0;
+        if !equal {
+            stream.write_all(&[0]).await?;
+            return Err(crate::ShardCacheError::Protocol(
+                "SCNP authentication rejected".into(),
+            ));
+        }
+        stream.write_all(&[1]).await?;
+        Result::<()>::Ok(())
+    };
+    tokio::time::timeout(Duration::from_secs(5), authenticate)
+        .await
+        .map_err(|_| {
+            crate::ShardCacheError::Protocol("SCNP authentication deadline exceeded".into())
+        })?
+}
+
+#[cfg(feature = "embedded")]
 impl MultiDirectConnection {
     pub(super) async fn handle(
         stream: TcpStream,
@@ -466,6 +534,56 @@ impl MultiDirectConnection {
         started_at: Instant,
         transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     ) -> Result<()> {
+        #[cfg(feature = "scnp-tls")]
+        if let Some(tls) = store.overflow_replica_tls() {
+            let handshake_permit = tls.try_handshake_permit()?;
+            let acceptor = tokio_rustls::TlsAcceptor::from(tls.server_config());
+            let stream = tokio::time::timeout(tls.handshake_timeout(), acceptor.accept(stream))
+                .await
+                .map_err(|_| {
+                    crate::ShardCacheError::Protocol("SCNP TLS handshake deadline exceeded".into())
+                })?
+                .map_err(|error| {
+                    crate::ShardCacheError::Protocol(format!("SCNP TLS handshake failed: {error}"))
+                })?;
+            drop(handshake_permit);
+            tls.authorize_client(stream.get_ref().1.peer_certificates())?;
+            return Self::handle_stream(
+                stream,
+                store,
+                _permit,
+                single_threaded,
+                owned_shard_id,
+                started_at,
+                transaction_coordinator,
+            )
+            .await;
+        }
+        Self::handle_stream(
+            stream,
+            store,
+            _permit,
+            single_threaded,
+            owned_shard_id,
+            started_at,
+            transaction_coordinator,
+        )
+        .await
+    }
+
+    async fn handle_stream<S>(
+        mut stream: S,
+        store: Arc<EmbeddedStore>,
+        _permit: OwnedSemaphorePermit,
+        single_threaded: bool,
+        owned_shard_id: Option<usize>,
+        started_at: Instant,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
+    ) -> Result<()>
+    where
+        S: ServerConnectionStream,
+    {
+        authenticate_overflow_stream(&mut stream, &store).await?;
         match TokioResponseWriterMode::configured() {
             TokioResponseWriterMode::Inline => {
                 Self::handle_inline(
@@ -494,15 +612,18 @@ impl MultiDirectConnection {
         }
     }
 
-    async fn handle_split(
-        stream: TcpStream,
+    async fn handle_split<S>(
+        stream: S,
         store: Arc<EmbeddedStore>,
         _permit: OwnedSemaphorePermit,
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
         transaction_coordinator: Option<Arc<TransactionCoordinator>>,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: ServerConnectionStream,
+    {
         let (mut read_half, mut write_half) = tokio::io::split(stream);
         let (write_tx, mut write_rx) =
             tokio::sync::mpsc::channel::<bytes::Bytes>(WRITE_HANDOFF_MAX_ITEMS);
@@ -574,15 +695,18 @@ impl MultiDirectConnection {
         result
     }
 
-    async fn handle_inline(
-        mut stream: TcpStream,
+    async fn handle_inline<S>(
+        mut stream: S,
         store: Arc<EmbeddedStore>,
         _permit: OwnedSemaphorePermit,
         single_threaded: bool,
         owned_shard_id: Option<usize>,
         started_at: Instant,
         transaction_coordinator: Option<Arc<TransactionCoordinator>>,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        S: ServerConnectionStream,
+    {
         let mut frame_buffer = HandoffBuffer::with_config(HandoffConfig::buffer());
         let mut write_buffer = BytesMut::with_capacity(CONNECTION_BUFFER_CAPACITY);
         let mut fast_write_queue = FastWriteQueue::default();
@@ -648,12 +772,56 @@ impl MultiDirectConnection {
     }
 
     pub(super) async fn handle_public_routed(
-        mut stream: TcpStream,
+        stream: TcpStream,
         store: Arc<EmbeddedStore>,
         _permit: OwnedSemaphorePermit,
         worker_txs: Arc<Vec<flume::Sender<MultiDirectWorkerMessage>>>,
         transaction_coordinator: Option<Arc<TransactionCoordinator>>,
     ) -> Result<()> {
+        #[cfg(feature = "scnp-tls")]
+        if let Some(tls) = store.overflow_replica_tls() {
+            let handshake_permit = tls.try_handshake_permit()?;
+            let acceptor = tokio_rustls::TlsAcceptor::from(tls.server_config());
+            let stream = tokio::time::timeout(tls.handshake_timeout(), acceptor.accept(stream))
+                .await
+                .map_err(|_| {
+                    crate::ShardCacheError::Protocol("SCNP TLS handshake deadline exceeded".into())
+                })?
+                .map_err(|error| {
+                    crate::ShardCacheError::Protocol(format!("SCNP TLS handshake failed: {error}"))
+                })?;
+            drop(handshake_permit);
+            tls.authorize_client(stream.get_ref().1.peer_certificates())?;
+            return Self::handle_public_routed_stream(
+                stream,
+                store,
+                _permit,
+                worker_txs,
+                transaction_coordinator,
+            )
+            .await;
+        }
+        Self::handle_public_routed_stream(
+            stream,
+            store,
+            _permit,
+            worker_txs,
+            transaction_coordinator,
+        )
+        .await
+    }
+
+    async fn handle_public_routed_stream<S>(
+        mut stream: S,
+        store: Arc<EmbeddedStore>,
+        _permit: OwnedSemaphorePermit,
+        worker_txs: Arc<Vec<flume::Sender<MultiDirectWorkerMessage>>>,
+        transaction_coordinator: Option<Arc<TransactionCoordinator>>,
+    ) -> Result<()>
+    where
+        S: ServerConnectionStream,
+    {
+        authenticate_overflow_stream(&mut stream, &store).await?;
         if worker_txs.is_empty() {
             return Err(crate::ShardCacheError::Config(
                 "public routed fanout requires at least one worker".into(),
@@ -813,20 +981,23 @@ impl MultiDirectConnection {
         Ok(())
     }
 
-    async fn write_inline_response(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
-        match stream.try_write(bytes) {
-            Ok(written) if written == bytes.len() => Ok(()),
-            Ok(written) => {
-                stream.write_all(&bytes[written..]).await?;
-                Ok(())
+    async fn write_inline_response<S>(stream: &mut S, bytes: &[u8]) -> Result<()>
+    where
+        S: ServerConnectionStream,
+    {
+        if let Some(result) = stream.try_write_now(bytes) {
+            match result {
+                Ok(written) if written == bytes.len() => return Ok(()),
+                Ok(written) => {
+                    stream.write_all(&bytes[written..]).await?;
+                    return Ok(());
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                stream.writable().await?;
-                stream.write_all(bytes).await?;
-                Ok(())
-            }
-            Err(error) => Err(error.into()),
         }
+        stream.write_all(bytes).await?;
+        Ok(())
     }
 }
 

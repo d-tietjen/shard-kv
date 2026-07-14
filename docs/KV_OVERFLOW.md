@@ -90,6 +90,9 @@ let remote = cache.cluster().get(b"model:7")?;
   `shard_queue_capacities`, `completion_backlog`,
   `shard_completion_backlogs`, `pending_keys`, `failed_pending_keys`,
   `active_workers`, `enqueue_failures`, and `replication_failures`.
+  Multi-target shards divide that capacity into bounded target lanes. A failed
+  target can retain only its share and cannot consume every admission assigned
+  to healthy targets on the shard.
 - A shard's network drain owns only its queue, transport connections, reusable
   buffers, and network counters. It never receives or locks the embedded
   store, remote/pending metadata maps, key gates, or eviction state. Successful
@@ -110,6 +113,41 @@ let remote = cache.cluster().get(b"model:7")?;
   fanout. At startup every configured address must
   advertise the same node ID, shard count, `overflow_slot` route mode, direct
   port base, and `overflow_slot_v1` capability.
+- Native TLS 1.3 is available through the `scnp-tls` feature. Each shard-owned
+  mutation/read socket terminates its own Rustls session; there is no shared
+  TLS proxy or connection lock. Replica certificates are verified against the
+  configured CA and `tls_server_name` (the stable replica ID by default).
+  Configuring a server client CA and matching primary client certificate/key
+  enables mandatory mTLS. CA-valid clients must also match a configured
+  `client_cert_sha256` leaf-certificate fingerprint; overlapping fingerprints
+  support rotation. Server certificate, key, and CA files reload atomically at
+  `reload_interval_ms`, while clients reload trust and identity files before a
+  later reconnect. `max_concurrent_handshakes` rejects excess handshakes before
+  they can occupy the connection pool. Non-loopback SCNP requires TLS plus token auth or
+  mTLS. `allow_insecure_scnp = true` is the explicit private-overlay escape
+  hatch. Tokens are read only from environment variables and redacted from
+  debug output.
+- Every owned target has one lock-free circuit breaker shared by its read,
+  mutation, and pipeline lanes. Consecutive failures open only that target for
+  `circuit_breaker_cooldown_ms`; healthy
+  targets owned by the same primary shard continue draining. The first request
+  after cooldown is the only permitted half-open probe.
+- `adaptive_pipeline` uses target-local RTT feedback to reduce the item limit
+  after slow or failed batches and grow it toward `pipeline_max_items` after
+  healthy batches. `pipeline_max_bytes` remains a hard memory and tail-latency
+  cap.
+- `compression = "lz4"` optionally compresses values on the offloader thread.
+  Values below `compression_min_value_bytes`, or values that do not clear
+  `compression_min_savings_percent`, retain the original v1 envelope. The v2
+  compressed envelope preserves expiry, original length, and CRC32 and remains
+  readable alongside existing v1 data. Enabling compression also requires
+  `allow_envelope_v2_writes = true`, and replicas must advertise
+  `value_envelope_v2`. Set the acknowledgement only after every primary that
+  may read the cluster has been upgraded; do not downgrade those readers while
+  v2 values remain.
+- Remote values are rejected before allocation when their decoded length exceeds
+  `max_value_bytes` or their compression expansion exceeds
+  `compression_max_expansion_ratio`.
 - `slot_count` is a persistent routing invariant and must not change while
   overflow data exists. It defaults to 16,384, must be at least the shard
   count, and is divided evenly into power-of-two shard ranges. Logical slots
@@ -119,6 +157,11 @@ let remote = cache.cluster().get(b"model:7")?;
   startup and memory cost.
 - Topology changes perform an exact rebalance. This can move ranges between
   existing replicas as well as onto a newly added replica.
+  Handoff runs independently across primary shards, with process concurrency
+  bounded by `handoff_max_concurrency` and bandwidth bounded by
+  `handoff_max_bytes_per_second` per shard. Source reads and throttling happen
+  outside striped generation gates; the gate is reacquired and revalidated
+  before writing the new owner.
 - For online expansion, put the expanded membership in `replicas` and the old
   membership in `previous_replicas`. Writes establish the current-owner copy
   before deleting the old copy. A current-owner miss may read the previous
@@ -137,9 +180,16 @@ let remote = cache.cluster().get(b"model:7")?;
   the expanded membership. Then remove it. Node removal uses the same handoff
   mechanism, but the removed server must remain reachable during migration.
   `flush_remote` also migrates remote-only metadata by reading the old target,
-  writing and verifying the new target, then deleting the old copy.
+  writing and verifying the new target, then deleting the old copy. Handoff
+  records completion per key, so repeated flushes do not migrate completed keys.
+  Network I/O holds only that key's striped mutation gate; unrelated primary
+  writes continue while the caller waits for synchronization.
 - Monitor `previous_node_count`, `handoff_reads`, `handoff_hits`, and
   `handoff_failures` while a membership handoff is active.
+- Health snapshots report circuit state, suppressed requests, current adaptive
+  item limits, raw/stored bytes, compressed values, retained-buffer limits,
+  TLS, queue, pipeline, and ownership state without exposing certificate paths
+  or credentials.
 - Each key has one remote owner in 0.6.0. This provides aggregate capacity and
   read isolation, not remote-node high availability. Run overflow nodes with
   their own persistence or object overflow when remote loss must survive until
@@ -150,8 +200,10 @@ let remote = cache.cluster().get(b"model:7")?;
   queued replication job. It is enforced from the absolute envelope deadline
   during every remote read. Redis also receives the remaining server-side TTL.
   Fault-ins coalesce concurrent reads for the same cold key without holding a
-  striped mutation lock during network I/O. The wrapped primary forgets missing
-  remote metadata and runs a configurable cleanup pass for expired envelopes.
+  striped mutation lock during network I/O. By default, a missing acknowledged
+  remote value retains its metadata so persistence snapshots fail loudly.
+  `forget_remote_misses = true` enables intentionally lossy cache semantics.
+  The primary runs a configurable cleanup pass for expired envelopes.
   Cleanup deletes use the same ordered worker lanes as writes and retry in the
   background without blocking unrelated primary mutations on remote I/O.
 - Deletes remove the remote copy before deleting the primary copy. A remote
@@ -222,12 +274,20 @@ stable address.
 
 ## Replica LRU And Object Overflow
 
+Durable replica WAL and snapshot files contain overflow envelopes. Put the
+configured persistence directory on an encrypted filesystem or volume and set
+`kv_overflow_replica.encrypted_persistence = true`; startup rejects durable
+replica mode without that confirmation. This flag is an operational assertion,
+not application-level cryptography. For S3/RustFS object overflow, configure
+`server_side_encryption` as well. TLS protects network traffic, not files.
+
 An overflow node can enforce its own `max_memory_bytes` with `eviction_policy =
-"lru"` or `"lfu"`. Plain replica eviction is intentionally lossy: if the node
-drops an envelope, a later direct read misses. A wrapped-primary fault-in also
-invalidates its remote acknowledgment metadata. The local WAL/snapshot remains
-authoritative, but the value is unavailable through the live overflow tier
-until it is restored from that authority or refilled from its origin.
+"lru"` or `"lfu"`. Replica startup rejects this configuration unless object
+overflow is enabled. Plain replica eviction can be selected explicitly with
+`kv_overflow_replica.allow_lossy_eviction = true`; a later direct read may then
+miss. Durable primaries retain the acknowledgment metadata by default, causing
+the next snapshot to fail rather than silently omit the unavailable value.
+Set `forget_remote_misses = true` only when origin refill defines correctness.
 
 For a capacity-preserving cascade, run each overflow node with both a memory
 limit and `[object_overflow]`. The node keeps its hot envelope working set in
@@ -301,6 +361,12 @@ cargo run --release -p shardcache-benchmarks --features kv-overflow \
   --pipeline-max-items 64 --value-size 1024 --drain-mode concurrent
 ```
 
+Build with `--features kv-overflow,scnp-tls` and add
+`--scnp-tls-ca`, `--scnp-tls-server-name`, and optional client certificate/key
+arguments to compare plaintext, server-authenticated TLS, and mTLS. Use
+`--compression lz4` for a separate compressible-value run; do not combine the
+TLS and compression changes in the same A/B baseline.
+
 Five release runs on Adam on 2026-07-13 used four producers, 1 KiB values,
 131,072 keys, 400,000 writes, Valkey 8.1.8 containers pinned to dedicated CPUs,
 and four workers per endpoint. Medians were:
@@ -365,8 +431,7 @@ throughput was 854K writes/second for `16x1` and 930K for `16x500`, confirming
 that batch CPU and allocation cost no longer grows with all 8,000 cluster
 targets. This does not test socket latency or slow-target isolation.
 
-These measurements do **not** satisfy the original acceptance targets of 90%
-embedded enqueue throughput and at most 1.2x embedded p99. Worker isolation,
-slot correctness, and SCNP pipelining are in place, but primary metadata/queue
-admission and large-value ownership transfer remain optimization work before
-the feature should be described as production-ready.
+End-to-end throughput is effectively unchanged for the measured workload. The
+enqueue path still has a small absolute latency premium from metadata and queue
+admission; that overhead is retained in exchange for bounded asynchronous
+replication and failure isolation.

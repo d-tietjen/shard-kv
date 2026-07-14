@@ -53,7 +53,7 @@ fn redis_backend_round_trips_binary_values_ttl_integrity_and_delete() {
 
     let client = redis_client::Client::open(server.endpoint.as_str()).unwrap();
     let mut connection = client.get_connection().unwrap();
-    let storage_key = redis_storage_key(&config, &key);
+    let storage_key = redis_storage_key(&mut connection, &config, &key);
     let envelope: Option<Vec<u8>> = redis_client::cmd("GET")
         .arg(&storage_key)
         .query(&mut connection)
@@ -70,7 +70,7 @@ fn redis_backend_round_trips_binary_values_ttl_integrity_and_delete() {
         .set(ttl_key.clone(), b"expires".to_vec(), Some(200))
         .unwrap();
     store.flush_remote().unwrap();
-    let ttl_storage_key = redis_storage_key(&config, &ttl_key);
+    let ttl_storage_key = redis_storage_key(&mut connection, &config, &ttl_key);
     let redis_ttl: i64 = redis_client::cmd("PTTL")
         .arg(&ttl_storage_key)
         .query(&mut connection)
@@ -85,8 +85,17 @@ fn redis_backend_round_trips_binary_values_ttl_integrity_and_delete() {
     assert!(!exists, "Redis must enforce overflow TTL server-side");
 
     let corrupt_key = b"corrupt";
+    store
+        .set(
+            corrupt_key.to_vec(),
+            b"valid-before-corruption".to_vec(),
+            None,
+        )
+        .unwrap();
+    store.flush_remote().unwrap();
+    let corrupt_storage_key = redis_storage_key(&mut connection, &config, corrupt_key);
     redis_client::cmd("SET")
-        .arg(redis_storage_key(&config, corrupt_key))
+        .arg(corrupt_storage_key)
         .arg(b"not-an-overflow-envelope")
         .query::<()>(&mut connection)
         .unwrap();
@@ -102,10 +111,20 @@ fn redis_backend_round_trips_binary_values_ttl_integrity_and_delete() {
     assert!(server.child.try_wait().unwrap().is_none());
 }
 
-fn redis_storage_key(config: &KvOverflowConfig, key: &[u8]) -> Vec<u8> {
-    let mut storage_key = config.redis_key_prefix.as_bytes().to_vec();
-    storage_key.extend_from_slice(key);
-    storage_key
+fn redis_storage_key(
+    connection: &mut redis_client::Connection,
+    config: &KvOverflowConfig,
+    key: &[u8],
+) -> Vec<u8> {
+    let mut pattern = config.redis_key_prefix.as_bytes().to_vec();
+    pattern.push(b'*');
+    let keys: Vec<Vec<u8>> = redis_client::cmd("KEYS")
+        .arg(pattern)
+        .query(connection)
+        .unwrap();
+    keys.into_iter()
+        .find(|candidate| candidate.ends_with(key))
+        .expect("structured Redis overflow key must retain the original key suffix")
 }
 
 fn start_redis_server() -> Option<RedisServer> {

@@ -514,6 +514,18 @@ impl ShardCacheServer {
         let use_monoio = std::env::var("SHARDCACHE_USE_MONOIO").is_ok_and(|v| v != "0");
         #[cfg(any(not(target_os = "linux"), not(feature = "monoio")))]
         let use_monoio = false;
+        if use_monoio && shared_store.overflow_replica_auth().is_some() {
+            return Err(crate::ShardCacheError::Config(
+                "authenticated kv overflow replicas do not support SHARDCACHE_USE_MONOIO=1 yet"
+                    .into(),
+            ));
+        }
+        #[cfg(feature = "scnp-tls")]
+        if use_monoio && shared_store.overflow_replica_tls().is_some() {
+            return Err(crate::ShardCacheError::Config(
+                "TLS kv overflow replicas do not support SHARDCACHE_USE_MONOIO=1 yet".into(),
+            ));
+        }
         let direct_shard_ports = matches!(
             self.config.server_endpoint_mode,
             ServerEndpointMode::DirectShard
@@ -789,6 +801,9 @@ impl ShardCacheServer {
                 ));
             }
             store.configure_overflow_replica(self.overflow_replica_topology(store.shard_count())?);
+            store.configure_overflow_replica_auth(self.overflow_replica_auth_token()?);
+            #[cfg(feature = "scnp-tls")]
+            store.configure_overflow_replica_tls(self.overflow_replica_tls_config()?);
             tracing::info!(
                 "multi-direct: serving caller-owned embedded store with {} shards ({:?} routing)",
                 store.shard_count(),
@@ -807,6 +822,9 @@ impl ShardCacheServer {
         };
         let store = EmbeddedStore::with_route_mode(self.config.shard_count, route_mode);
         store.configure_overflow_replica(self.overflow_replica_topology(store.shard_count())?);
+        store.configure_overflow_replica_auth(self.overflow_replica_auth_token()?);
+        #[cfg(feature = "scnp-tls")]
+        store.configure_overflow_replica_tls(self.overflow_replica_tls_config()?);
         store.configure_memory_policy(
             self.config.per_shard_memory_limit_bytes(),
             self.config.eviction_policy,
@@ -837,6 +855,137 @@ impl ShardCacheServer {
             MultiDirectAddress::direct_base_port(bind_addr, shard_count)?,
         )))
     }
+
+    fn overflow_replica_auth_token(&self) -> Result<Option<Box<[u8]>>> {
+        let Some(name) = self.config.kv_overflow_replica.auth_token_env.as_deref() else {
+            return Ok(None);
+        };
+        let value = std::env::var(name).map_err(|error| {
+            crate::ShardCacheError::Config(format!(
+                "failed to read kv overflow replica auth token env {name:?}: {error}"
+            ))
+        })?;
+        if value.is_empty() || value.len() > u16::MAX as usize {
+            return Err(crate::ShardCacheError::Config(format!(
+                "kv overflow replica auth token env {name:?} must contain 1..=65535 bytes"
+            )));
+        }
+        Ok(Some(value.into_bytes().into_boxed_slice()))
+    }
+
+    #[cfg(feature = "scnp-tls")]
+    fn overflow_replica_tls_config(
+        &self,
+    ) -> Result<Option<Arc<crate::storage::OverflowReplicaTlsRuntime>>> {
+        let tls = &self.config.kv_overflow_replica.tls;
+        if !tls.enabled {
+            return Ok(None);
+        }
+        let current = build_overflow_replica_tls_server_config(tls)?;
+        let fingerprints = parse_client_certificate_fingerprints(&tls.client_cert_sha256)?;
+        let reload_tls = tls.clone();
+        let reload = Arc::new(move || build_overflow_replica_tls_server_config(&reload_tls));
+        Ok(Some(Arc::new(
+            crate::storage::OverflowReplicaTlsRuntime::new(
+                current,
+                reload,
+                tls.reload_interval_ms,
+                std::time::Duration::from_millis(tls.handshake_timeout_ms),
+                fingerprints,
+                tls.max_concurrent_handshakes,
+            ),
+        )))
+    }
+}
+
+#[cfg(feature = "scnp-tls")]
+fn build_overflow_replica_tls_server_config(
+    tls: &crate::config::ScnpTlsServerConfig,
+) -> Result<Arc<rustls::ServerConfig>> {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    use rustls::RootCertStore;
+    use rustls::server::WebPkiClientVerifier;
+
+    let mut cert_reader = BufReader::new(File::open(&tls.cert_path)?);
+    let certs = rustls_pemfile::certs(&mut cert_reader).collect::<std::io::Result<Vec<_>>>()?;
+    if certs.is_empty() {
+        return Err(crate::ShardCacheError::Config(
+            "SCNP TLS server certificate file contains no certificates".into(),
+        ));
+    }
+    let mut key_reader = BufReader::new(File::open(&tls.key_path)?);
+    let key = rustls_pemfile::private_key(&mut key_reader)?.ok_or_else(|| {
+        crate::ShardCacheError::Config("SCNP TLS server key file contains no private key".into())
+    })?;
+    let builder = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(|error| {
+        crate::ShardCacheError::Config(format!("invalid SCNP TLS protocol config: {error}"))
+    })?;
+    let mut config = if let Some(client_ca_path) = &tls.client_ca_path {
+        let mut roots = RootCertStore::empty();
+        let mut ca_reader = BufReader::new(File::open(client_ca_path)?);
+        let certificates =
+            rustls_pemfile::certs(&mut ca_reader).collect::<std::io::Result<Vec<_>>>()?;
+        if certificates.is_empty() {
+            return Err(crate::ShardCacheError::Config(
+                "SCNP TLS client CA file contains no certificates".into(),
+            ));
+        }
+        for certificate in certificates {
+            roots.add(certificate).map_err(|error| {
+                crate::ShardCacheError::Config(format!(
+                    "invalid SCNP TLS client CA certificate: {error}"
+                ))
+            })?;
+        }
+        let verifier = WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .map_err(|error| {
+            crate::ShardCacheError::Config(format!("invalid SCNP TLS client verifier: {error}"))
+        })?;
+        builder
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certs, key)
+    } else {
+        builder.with_no_client_auth().with_single_cert(certs, key)
+    }
+    .map_err(|error| {
+        crate::ShardCacheError::Config(format!("invalid SCNP TLS server identity: {error}"))
+    })?;
+    config.alpn_protocols = vec![b"scnp/2".to_vec()];
+    Ok(Arc::new(config))
+}
+
+#[cfg(feature = "scnp-tls")]
+fn parse_client_certificate_fingerprints(values: &[String]) -> Result<Arc<[[u8; 32]]>> {
+    let mut fingerprints = Vec::with_capacity(values.len());
+    for value in values {
+        let compact = value.replace(':', "");
+        if compact.len() != 64 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(crate::ShardCacheError::Config(
+                "SCNP client certificate SHA-256 fingerprints must contain 64 hexadecimal digits"
+                    .into(),
+            ));
+        }
+        let mut fingerprint = [0u8; 32];
+        for (index, byte) in fingerprint.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&compact[index * 2..index * 2 + 2], 16).map_err(|_| {
+                crate::ShardCacheError::Config(
+                    "invalid SCNP client certificate SHA-256 fingerprint".into(),
+                )
+            })?;
+        }
+        fingerprints.push(fingerprint);
+    }
+    Ok(fingerprints.into())
 }
 
 struct MultiDirectRouteMode;

@@ -42,6 +42,9 @@ impl EmbeddedStore {
                 topk: modules::TopKStore::new(shard_count),
                 route_mode,
                 overflow_replica_topology: RwLock::new(None),
+                overflow_replica_auth: RwLock::new(None),
+                #[cfg(feature = "scnp-tls")]
+                overflow_replica_tls: RwLock::new(None),
             }
         }
     }
@@ -117,6 +120,9 @@ impl EmbeddedStore {
             topk: modules::TopKStore::new(shard_count),
             route_mode,
             overflow_replica_topology: RwLock::new(None),
+            overflow_replica_auth: RwLock::new(None),
+            #[cfg(feature = "scnp-tls")]
+            overflow_replica_tls: RwLock::new(None),
             metrics,
         }
     }
@@ -134,6 +140,28 @@ impl EmbeddedStore {
 
     pub(crate) fn overflow_replica_topology(&self) -> Option<(String, u16)> {
         self.overflow_replica_topology.read().clone()
+    }
+
+    /// Configures an optional connection token for a dedicated overflow replica.
+    pub fn configure_overflow_replica_auth(&self, token: Option<Box<[u8]>>) {
+        *self.overflow_replica_auth.write() = token;
+    }
+
+    pub(crate) fn overflow_replica_auth(&self) -> Option<Box<[u8]>> {
+        self.overflow_replica_auth.read().clone()
+    }
+
+    #[cfg(feature = "scnp-tls")]
+    pub(crate) fn configure_overflow_replica_tls(
+        &self,
+        tls: Option<Arc<super::OverflowReplicaTlsRuntime>>,
+    ) {
+        *self.overflow_replica_tls.write() = tls;
+    }
+
+    #[cfg(feature = "scnp-tls")]
+    pub(crate) fn overflow_replica_tls(&self) -> Option<Arc<super::OverflowReplicaTlsRuntime>> {
+        self.overflow_replica_tls.read().clone()
     }
 
     #[cfg(feature = "redis")]

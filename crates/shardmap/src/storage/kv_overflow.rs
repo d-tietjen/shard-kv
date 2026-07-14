@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::thread;
@@ -12,6 +13,8 @@ use bytes::Bytes as SharedBytes;
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use hashbrown::HashMap as HashBrownMap;
 use parking_lot::{Mutex, RwLock};
+#[cfg(feature = "scnp-tls")]
+use shardcache_client_rs::ScnpTlsClientConfig as RuntimeScnpTlsClientConfig;
 use shardcache_client_rs::{
     ShardCacheClient, ShardCacheClientError, ShardCacheDirectRouter, ShardCacheDirectShardClient,
     ShardCacheRouteMode,
@@ -22,14 +25,17 @@ use tokio::sync::{mpsc, oneshot};
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
 use crate::config::{
-    EvictionPolicy, KvOverflowBackend, KvOverflowConfig, KvOverflowReplica, KvOverflowTransport,
-    MAX_KV_OVERFLOW_SLOT_COUNT,
+    EvictionPolicy, KvOverflowBackend, KvOverflowCompression, KvOverflowConfig, KvOverflowReplica,
+    KvOverflowTransport, MAX_KV_OVERFLOW_SLOT_COUNT,
 };
 use crate::storage::{Bytes, EmbeddedStore, StoredEntry, now_millis, shift_for, stripe_index};
 use crate::{Result, ShardCacheError};
 
 const KV_OVERFLOW_MAGIC: &[u8; 8] = b"SCKVOV01";
+const KV_OVERFLOW_COMPRESSED_MAGIC: &[u8; 8] = b"SCKVOV02";
 const KV_OVERFLOW_HEADER_LEN: usize = KV_OVERFLOW_MAGIC.len() + 8 + 8 + 4;
+const KV_OVERFLOW_COMPRESSED_HEADER_LEN: usize = KV_OVERFLOW_HEADER_LEN + 1;
+const KV_OVERFLOW_CODEC_LZ4: u8 = 1;
 const KV_OVERFLOW_KEY_GATES: usize = 64;
 const KV_OVERFLOW_EVICTION_BATCH_PER_SHARD: usize = 16;
 const KV_OVERFLOW_STORAGE_KEY_MAGIC: &[u8; 8] = b"SCKVKEY1";
@@ -67,6 +73,16 @@ pub trait KvOverflowNode: Send + Sync + 'static {
     #[doc(hidden)]
     fn direct_scnp_target(&self) -> Option<ScnpDirectTarget> {
         None
+    }
+    /// Returns `(open, open_events, suppressed_requests)` for this target.
+    #[doc(hidden)]
+    fn circuit_breaker_health(&self) -> (bool, u64, u64) {
+        (false, 0, 0)
+    }
+    /// Returns `(raw_bytes, stored_bytes, compressed_values)` for this target.
+    #[doc(hidden)]
+    fn storage_health(&self) -> (u64, u64, u64) {
+        (0, 0, 0)
     }
     fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()>;
     /// Stores a value using an absolute primary expiry deadline.
@@ -151,6 +167,19 @@ pub struct KvOverflowOptions {
     pub pipeline_max_bytes: usize,
     pub pipeline_flush: Duration,
     pub max_inflight_per_target: usize,
+    pub forget_remote_misses: bool,
+    pub adaptive_pipeline: bool,
+    pub pipeline_target: Duration,
+    pub circuit_breaker_failure_threshold: usize,
+    pub circuit_breaker_cooldown: Duration,
+    pub compression: KvOverflowCompression,
+    pub compression_min_value_bytes: usize,
+    pub compression_min_savings_percent: u8,
+    pub max_value_bytes: usize,
+    pub compression_max_expansion_ratio: usize,
+    pub handoff_max_bytes_per_second: u64,
+    pub handoff_max_concurrency: usize,
+    pub retained_buffer_bytes: usize,
 }
 
 impl KvOverflowOptions {
@@ -169,6 +198,15 @@ impl KvOverflowOptions {
             || self.pipeline_max_items == 0
             || self.pipeline_max_bytes == 0
             || self.max_inflight_per_target == 0
+            || self.pipeline_target.is_zero()
+            || self.circuit_breaker_failure_threshold == 0
+            || self.circuit_breaker_cooldown.is_zero()
+            || self.compression_min_value_bytes == 0
+            || self.compression_min_savings_percent > 100
+            || self.max_value_bytes == 0
+            || self.compression_max_expansion_ratio == 0
+            || self.handoff_max_concurrency == 0
+            || self.retained_buffer_bytes == 0
         {
             return Err(ShardCacheError::Config(
                 "kv overflow queue and pipeline limits must be > 0".into(),
@@ -215,6 +253,19 @@ impl TryFrom<&KvOverflowConfig> for KvOverflowOptions {
             pipeline_max_bytes: config.pipeline_max_bytes,
             pipeline_flush: Duration::from_micros(config.pipeline_flush_micros),
             max_inflight_per_target: config.max_inflight_per_target,
+            forget_remote_misses: config.forget_remote_misses,
+            adaptive_pipeline: config.adaptive_pipeline,
+            pipeline_target: Duration::from_micros(config.pipeline_target_micros),
+            circuit_breaker_failure_threshold: config.circuit_breaker_failure_threshold,
+            circuit_breaker_cooldown: Duration::from_millis(config.circuit_breaker_cooldown_ms),
+            compression: config.compression,
+            compression_min_value_bytes: config.compression_min_value_bytes,
+            compression_min_savings_percent: config.compression_min_savings_percent,
+            max_value_bytes: config.max_value_bytes,
+            compression_max_expansion_ratio: config.compression_max_expansion_ratio,
+            handoff_max_bytes_per_second: config.handoff_max_bytes_per_second,
+            handoff_max_concurrency: config.handoff_max_concurrency,
+            retained_buffer_bytes: config.retained_buffer_bytes,
         };
         options.validate()?;
         Ok(options)
@@ -223,7 +274,7 @@ impl TryFrom<&KvOverflowConfig> for KvOverflowOptions {
 
 /// Immutable direct-SCNP connection metadata used by a shard-owned runtime.
 #[doc(hidden)]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ScnpDirectTarget {
     addresses: Box<[SocketAddr]>,
     remote_shard: usize,
@@ -231,11 +282,211 @@ pub struct ScnpDirectTarget {
     operation_timeout: Duration,
     max_retries: usize,
     retry_backoff: Duration,
+    auth_token: Option<Arc<[u8]>>,
+    circuit: Arc<CircuitBreaker>,
+    #[cfg(feature = "scnp-tls")]
+    tls: Option<Arc<RuntimeScnpTlsClientConfig>>,
+}
+
+impl std::fmt::Debug for ScnpDirectTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScnpDirectTarget")
+            .field("addresses", &self.addresses)
+            .field("remote_shard", &self.remote_shard)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("operation_timeout", &self.operation_timeout)
+            .field("max_retries", &self.max_retries)
+            .field("authenticated", &self.auth_token.is_some())
+            .field("tls", &{
+                #[cfg(feature = "scnp-tls")]
+                {
+                    self.tls.is_some()
+                }
+                #[cfg(not(feature = "scnp-tls"))]
+                {
+                    false
+                }
+            })
+            .finish()
+    }
 }
 
 enum ScnpTargetConnection {
     Fanout(ShardCacheClient),
     Direct(ShardCacheDirectShardClient),
+}
+
+struct CircuitBreaker {
+    started: Instant,
+    consecutive_failures: AtomicUsize,
+    failure_threshold: usize,
+    cooldown: Duration,
+    open_until_ns: AtomicU64,
+    open_events: AtomicU64,
+    suppressed_requests: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct OverflowNodeStorageMetrics {
+    raw_bytes: AtomicU64,
+    stored_bytes: AtomicU64,
+    compressed_values: AtomicU64,
+}
+
+impl OverflowNodeStorageMetrics {
+    fn record(&self, raw_len: usize, encoded: &[u8]) {
+        self.raw_bytes.fetch_add(raw_len as u64, Ordering::Relaxed);
+        self.stored_bytes
+            .fetch_add(encoded.len() as u64, Ordering::Relaxed);
+        if encoded.starts_with(KV_OVERFLOW_COMPRESSED_MAGIC) {
+            self.compressed_values.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn snapshot(&self) -> (u64, u64, u64) {
+        (
+            self.raw_bytes.load(Ordering::Relaxed),
+            self.stored_bytes.load(Ordering::Relaxed),
+            self.compressed_values.load(Ordering::Relaxed),
+        )
+    }
+}
+
+impl CircuitBreaker {
+    fn new(failure_threshold: usize, cooldown: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            consecutive_failures: AtomicUsize::new(0),
+            failure_threshold,
+            cooldown,
+            open_until_ns: AtomicU64::new(0),
+            open_events: AtomicU64::new(0),
+            suppressed_requests: AtomicU64::new(0),
+        }
+    }
+
+    fn now_ns(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX - 1)
+    }
+
+    fn allow_request(&self) -> bool {
+        const HALF_OPEN: u64 = u64::MAX;
+        let deadline = self.open_until_ns.load(Ordering::Acquire);
+        if deadline == 0 {
+            return true;
+        }
+        if deadline != HALF_OPEN
+            && deadline <= self.now_ns()
+            && self
+                .open_until_ns
+                .compare_exchange(deadline, HALF_OPEN, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            return true;
+        }
+        self.suppressed_requests.fetch_add(1, Ordering::Relaxed);
+        false
+    }
+
+    fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Release);
+        self.open_until_ns.store(0, Ordering::Release);
+    }
+
+    fn record_failure(&self) {
+        let failures = self
+            .consecutive_failures
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        if failures >= self.failure_threshold {
+            let cooldown_ns = u64::try_from(self.cooldown.as_nanos()).unwrap_or(u64::MAX / 2);
+            let deadline = self.now_ns().saturating_add(cooldown_ns).min(u64::MAX - 1);
+            let previous = self.open_until_ns.swap(deadline, Ordering::AcqRel);
+            if previous == 0 || previous == u64::MAX {
+                self.open_events.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    fn health(&self) -> (bool, u64, u64) {
+        (
+            self.open_until_ns.load(Ordering::Acquire) != 0,
+            self.open_events.load(Ordering::Relaxed),
+            self.suppressed_requests.load(Ordering::Relaxed),
+        )
+    }
+}
+
+struct AdaptivePipeline {
+    enabled: bool,
+    current_items: usize,
+    max_items: usize,
+    target: Duration,
+    ewma_latency_ns: Option<u64>,
+    healthy_samples: u8,
+}
+
+impl AdaptivePipeline {
+    fn new(options: &KvOverflowOptions) -> Self {
+        Self {
+            enabled: options.adaptive_pipeline,
+            current_items: options.pipeline_max_items,
+            max_items: options.pipeline_max_items,
+            target: options.pipeline_target,
+            ewma_latency_ns: None,
+            healthy_samples: 0,
+        }
+    }
+
+    fn item_limit(&self) -> usize {
+        self.current_items.max(1)
+    }
+
+    fn record(
+        &mut self,
+        elapsed: Duration,
+        succeeded: bool,
+        batch_bytes: usize,
+        max_batch_bytes: usize,
+    ) {
+        if !self.enabled || self.max_items <= 1 {
+            return;
+        }
+        if !succeeded {
+            self.current_items = (self.current_items / 2).max(1);
+            self.healthy_samples = 0;
+            return;
+        }
+        let sample = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        let average = self.ewma_latency_ns.map_or(sample, |previous| {
+            previous.saturating_mul(7).saturating_add(sample) / 8
+        });
+        self.ewma_latency_ns = Some(average);
+        let target = u64::try_from(self.target.as_nanos()).unwrap_or(u64::MAX);
+        let byte_saturated = batch_bytes.saturating_mul(4) >= max_batch_bytes.saturating_mul(3);
+        if !byte_saturated && average > target.saturating_mul(3) / 2 {
+            self.current_items = (self.current_items / 2).max(1);
+            self.healthy_samples = 0;
+            self.ewma_latency_ns = None;
+        } else if average <= target {
+            self.healthy_samples = self.healthy_samples.saturating_add(1);
+            if self.healthy_samples < 4 {
+                return;
+            }
+            self.healthy_samples = 0;
+            let increase = (self.max_items / 8).max(1);
+            self.current_items = self
+                .current_items
+                .saturating_add(increase)
+                .min(self.max_items);
+        }
+    }
+}
+
+struct ScnpConnectionSlot {
+    connection: Option<ScnpTargetConnection>,
+    circuit: Arc<CircuitBreaker>,
 }
 
 impl ScnpTargetConnection {
@@ -304,12 +555,21 @@ pub struct ScnpKvOverflowNode {
     remote_shard: usize,
     direct_routers: Box<[ShardCacheDirectRouter]>,
     direct_target: Option<ScnpDirectTarget>,
-    mutation_connection: Mutex<Option<ScnpTargetConnection>>,
-    read_connection: Mutex<Option<ScnpTargetConnection>>,
+    mutation_connection: Mutex<ScnpConnectionSlot>,
+    read_connection: Mutex<ScnpConnectionSlot>,
     connect_timeout: Duration,
     operation_timeout: Duration,
     max_retries: usize,
     retry_backoff: Duration,
+    auth_token: Option<Arc<[u8]>>,
+    compression: KvOverflowCompression,
+    compression_min_value_bytes: usize,
+    compression_min_savings_percent: u8,
+    max_value_bytes: usize,
+    compression_max_expansion_ratio: usize,
+    storage_metrics: OverflowNodeStorageMetrics,
+    #[cfg(feature = "scnp-tls")]
+    tls: Option<Arc<RuntimeScnpTlsClientConfig>>,
 }
 
 impl std::fmt::Debug for ScnpKvOverflowNode {
@@ -328,7 +588,7 @@ impl std::fmt::Debug for ScnpKvOverflowNode {
 }
 
 impl ScnpKvOverflowNode {
-    pub fn from_config(endpoint: String, config: &KvOverflowConfig) -> Self {
+    pub fn from_config(endpoint: String, config: &KvOverflowConfig) -> Result<Self> {
         Self::from_config_for_shards(endpoint, config, 1)
     }
 
@@ -337,21 +597,40 @@ impl ScnpKvOverflowNode {
         endpoint: String,
         config: &KvOverflowConfig,
         _primary_shard_count: usize,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let circuit = Arc::new(CircuitBreaker::new(
+            config.circuit_breaker_failure_threshold,
+            Duration::from_millis(config.circuit_breaker_cooldown_ms),
+        ));
+        Ok(Self {
             id: endpoint.clone(),
             replica_id: endpoint.clone(),
             endpoints: vec![endpoint].into_boxed_slice(),
             remote_shard: 0,
             direct_routers: Box::default(),
             direct_target: None,
-            mutation_connection: Mutex::new(None),
-            read_connection: Mutex::new(None),
+            mutation_connection: Mutex::new(ScnpConnectionSlot {
+                connection: None,
+                circuit: Arc::clone(&circuit),
+            }),
+            read_connection: Mutex::new(ScnpConnectionSlot {
+                connection: None,
+                circuit,
+            }),
             connect_timeout: Duration::from_millis(config.connect_timeout_ms.max(1)),
             operation_timeout: Duration::from_millis(config.operation_timeout_ms.max(1)),
             max_retries: config.max_retries,
             retry_backoff: Duration::from_millis(config.retry_backoff_ms.max(1)),
-        }
+            auth_token: read_scnp_auth_token(config)?,
+            compression: config.compression,
+            compression_min_value_bytes: config.compression_min_value_bytes,
+            compression_min_savings_percent: config.compression_min_savings_percent,
+            max_value_bytes: config.max_value_bytes,
+            compression_max_expansion_ratio: config.compression_max_expansion_ratio,
+            storage_metrics: OverflowNodeStorageMetrics::default(),
+            #[cfg(feature = "scnp-tls")]
+            tls: load_scnp_tls_config(config, config.scnp_tls.server_name.as_deref())?,
+        })
     }
 
     fn from_replica_target(
@@ -359,6 +638,8 @@ impl ScnpKvOverflowNode {
         remote_shard: usize,
         config: &KvOverflowConfig,
         _primary_shard_count: usize,
+        auth_token: Option<Arc<[u8]>>,
+        #[cfg(feature = "scnp-tls")] tls: Option<Arc<RuntimeScnpTlsClientConfig>>,
     ) -> Result<Self> {
         replica.addresses.first().ok_or_else(|| {
             ShardCacheError::Config(format!(
@@ -392,6 +673,10 @@ impl ScnpKvOverflowNode {
                 routers
             }
         };
+        let circuit = Arc::new(CircuitBreaker::new(
+            config.circuit_breaker_failure_threshold,
+            Duration::from_millis(config.circuit_breaker_cooldown_ms),
+        ));
         let direct_target = if direct_routers.is_empty() {
             None
         } else {
@@ -410,6 +695,10 @@ impl ScnpKvOverflowNode {
                 operation_timeout: Duration::from_millis(config.operation_timeout_ms.max(1)),
                 max_retries: config.max_retries,
                 retry_backoff: Duration::from_millis(config.retry_backoff_ms.max(1)),
+                auth_token: auth_token.clone(),
+                circuit: Arc::clone(&circuit),
+                #[cfg(feature = "scnp-tls")]
+                tls: tls.clone(),
             })
         };
         Ok(Self {
@@ -419,28 +708,67 @@ impl ScnpKvOverflowNode {
             remote_shard,
             direct_routers: direct_routers.into_boxed_slice(),
             direct_target,
-            mutation_connection: Mutex::new(None),
-            read_connection: Mutex::new(None),
+            mutation_connection: Mutex::new(ScnpConnectionSlot {
+                connection: None,
+                circuit: Arc::clone(&circuit),
+            }),
+            read_connection: Mutex::new(ScnpConnectionSlot {
+                connection: None,
+                circuit,
+            }),
             connect_timeout: Duration::from_millis(config.connect_timeout_ms.max(1)),
             operation_timeout: Duration::from_millis(config.operation_timeout_ms.max(1)),
             max_retries: config.max_retries,
             retry_backoff: Duration::from_millis(config.retry_backoff_ms.max(1)),
+            auth_token,
+            compression: config.compression,
+            compression_min_value_bytes: config.compression_min_value_bytes,
+            compression_min_savings_percent: config.compression_min_savings_percent,
+            max_value_bytes: config.max_value_bytes,
+            compression_max_expansion_ratio: config.compression_max_expansion_ratio,
+            storage_metrics: OverflowNodeStorageMetrics::default(),
+            #[cfg(feature = "scnp-tls")]
+            tls,
         })
     }
 
     fn connect(&self, path: usize) -> shardcache_client_rs::Result<ScnpTargetConnection> {
+        #[cfg(feature = "scnp-tls")]
+        if let Some(tls) = self.tls.as_deref() {
+            return match self.direct_routers.get(path) {
+                Some(router) => router
+                    .connect_shard_with_timeouts_auth_and_tls(
+                        self.remote_shard,
+                        self.connect_timeout,
+                        self.operation_timeout,
+                        self.auth_token.as_deref(),
+                        tls,
+                    )
+                    .map(ScnpTargetConnection::Direct),
+                None => ShardCacheClient::connect_with_timeouts_auth_and_tls(
+                    self.endpoints[path].as_str(),
+                    self.connect_timeout,
+                    self.operation_timeout,
+                    self.auth_token.as_deref(),
+                    tls,
+                )
+                .map(ScnpTargetConnection::Fanout),
+            };
+        }
         match self.direct_routers.get(path) {
             Some(router) => router
-                .connect_shard_with_timeouts(
+                .connect_shard_with_timeouts_and_auth(
                     self.remote_shard,
                     self.connect_timeout,
                     self.operation_timeout,
+                    self.auth_token.as_deref(),
                 )
                 .map(ScnpTargetConnection::Direct),
-            None => ShardCacheClient::connect_with_timeouts(
+            None => ShardCacheClient::connect_with_timeouts_and_auth(
                 self.endpoints[path].as_str(),
                 self.connect_timeout,
                 self.operation_timeout,
+                self.auth_token.as_deref(),
             )
             .map(ScnpTargetConnection::Fanout),
         }
@@ -461,28 +789,39 @@ impl ScnpKvOverflowNode {
         let total_attempts = self.max_retries.saturating_add(1).max(self.endpoints.len());
         let first_path = primary_shard.wrapping_add(self.remote_shard) % self.endpoints.len();
         for attempt in 0..total_attempts {
-            let mut connection = connection.lock();
-            if connection.is_none() {
+            let mut slot = connection.lock();
+            if !slot.circuit.allow_request() {
+                return Err(ShardCacheError::Protocol(format!(
+                    "kv overflow target {} circuit breaker is open",
+                    self.id
+                )));
+            }
+            if slot.connection.is_none() {
                 let path = first_path.wrapping_add(attempt) % self.endpoints.len();
                 match self.connect(path) {
-                    Ok(client) => *connection = Some(client),
+                    Ok(client) => slot.connection = Some(client),
                     Err(error) => {
+                        slot.circuit.record_failure();
                         last_error = Some(error);
-                        drop(connection);
+                        drop(slot);
                         self.retry_delay(attempt, total_attempts);
                         continue;
                     }
                 }
             }
-            let result = operation(connection.as_mut().expect("connection initialized"));
+            let result = operation(slot.connection.as_mut().expect("connection initialized"));
             match result {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    slot.circuit.record_success();
+                    return Ok(value);
+                }
                 Err(error) => {
-                    *connection = None;
+                    slot.connection = None;
+                    slot.circuit.record_failure();
                     last_error = Some(error);
                 }
             }
-            drop(connection);
+            drop(slot);
             self.retry_delay(attempt, total_attempts);
         }
         Err(client_error(
@@ -515,6 +854,14 @@ impl KvOverflowNode for ScnpKvOverflowNode {
         self.direct_target.clone()
     }
 
+    fn circuit_breaker_health(&self) -> (bool, u64, u64) {
+        self.mutation_connection.lock().circuit.health()
+    }
+
+    fn storage_health(&self) -> (u64, u64, u64) {
+        self.storage_metrics.snapshot()
+    }
+
     fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
         let expire_at_ms = ttl_ms.map(|ttl| now_millis().saturating_add(ttl));
         self.put_until(key, value, expire_at_ms)
@@ -531,10 +878,22 @@ impl KvOverflowNode for ScnpKvOverflowNode {
         value: &[u8],
         expire_at_ms: Option<u64>,
     ) -> Result<()> {
+        if value.len() > self.max_value_bytes {
+            return Err(ShardCacheError::Protocol(
+                "key-value overflow value exceeds configured maximum".into(),
+            ));
+        }
         if expire_at_ms.is_some_and(|deadline| deadline <= now_millis()) {
             return self.delete_on_shard(primary_shard, key);
         }
-        let encoded = encode_overflow_value_until(value, expire_at_ms);
+        let encoded = encode_overflow_value_until(
+            value,
+            expire_at_ms,
+            self.compression,
+            self.compression_min_value_bytes,
+            self.compression_min_savings_percent,
+        );
+        self.storage_metrics.record(value.len(), &encoded);
         self.execute_on_shard(primary_shard, false, |client| client.set(key, &encoded))
     }
 
@@ -544,10 +903,37 @@ impl KvOverflowNode for ScnpKvOverflowNode {
         requests: &[KvOverflowPutRequest<'_>],
         outcomes: &mut Vec<bool>,
     ) {
+        if requests
+            .iter()
+            .any(|request| request.value.len() > self.max_value_bytes)
+        {
+            outcomes.clear();
+            outcomes.extend(requests.iter().map(|request| {
+                self.put_until_on_shard(
+                    primary_shard,
+                    request.key,
+                    request.value,
+                    request.expire_at_ms,
+                )
+                .is_ok()
+            }));
+            return;
+        }
         let encoded = requests
             .iter()
-            .map(|request| encode_overflow_value_until(request.value, request.expire_at_ms))
+            .map(|request| {
+                encode_overflow_value_until(
+                    request.value,
+                    request.expire_at_ms,
+                    self.compression,
+                    self.compression_min_value_bytes,
+                    self.compression_min_savings_percent,
+                )
+            })
             .collect::<Vec<_>>();
+        for (request, encoded) in requests.iter().zip(&encoded) {
+            self.storage_metrics.record(request.value.len(), encoded);
+        }
         let pipeline = self.execute_on_shard(primary_shard, false, |client| {
             let now_ms = now_millis();
             for (request, value) in requests.iter().zip(&encoded) {
@@ -605,8 +991,12 @@ impl KvOverflowNode for ScnpKvOverflowNode {
             if !client.get_into(key, &mut value)? {
                 return Ok(None);
             }
-            decode_overflow_value(&value)
-                .map_err(|message| ShardCacheClientError::Protocol(message.to_string()))
+            decode_overflow_value(
+                &value,
+                self.max_value_bytes,
+                self.compression_max_expansion_ratio,
+            )
+            .map_err(|message| ShardCacheClientError::Protocol(message.to_string()))
         })
     }
 
@@ -627,18 +1017,82 @@ fn resolve_address(endpoint: &str) -> Result<SocketAddr> {
         .ok_or_else(|| ShardCacheError::Config(format!("{endpoint} resolved to no addresses")))
 }
 
+fn read_scnp_auth_token(config: &KvOverflowConfig) -> Result<Option<Arc<[u8]>>> {
+    let Some(name) = config.scnp_auth_token_env.as_deref() else {
+        return Ok(None);
+    };
+    let value = std::env::var(name).map_err(|error| {
+        ShardCacheError::Config(format!(
+            "failed to read SCNP auth token env {name:?}: {error}"
+        ))
+    })?;
+    if value.is_empty() {
+        return Err(ShardCacheError::Config(format!(
+            "SCNP auth token env {name:?} must not be empty"
+        )));
+    }
+    Ok(Some(Arc::from(value.into_bytes())))
+}
+
+#[cfg(feature = "scnp-tls")]
+fn load_scnp_tls_config(
+    config: &KvOverflowConfig,
+    server_name: Option<&str>,
+) -> Result<Option<Arc<RuntimeScnpTlsClientConfig>>> {
+    if !config.scnp_tls.enabled {
+        return Ok(None);
+    }
+    let server_name = server_name.ok_or_else(|| {
+        ShardCacheError::Config("SCNP TLS requires a certificate server name".into())
+    })?;
+    RuntimeScnpTlsClientConfig::from_pem_files(
+        server_name,
+        &config.scnp_tls.ca_path,
+        config.scnp_tls.client_cert_path.as_deref(),
+        config.scnp_tls.client_key_path.as_deref(),
+    )
+    .map(Arc::new)
+    .map(Some)
+    .map_err(|error| ShardCacheError::Config(format!("invalid SCNP TLS config: {error}")))
+}
+
 fn validate_replica_topology(
     replica: &KvOverflowReplica,
     config: &KvOverflowConfig,
 ) -> Result<u16> {
     let mut advertised_base_port = None;
+    let auth_token = read_scnp_auth_token(config)?;
+    #[cfg(feature = "scnp-tls")]
+    let tls = load_scnp_tls_config(
+        config,
+        replica.tls_server_name.as_deref().or(Some(&replica.id)),
+    )?;
     for address in &replica.addresses {
-        let mut client = ShardCacheClient::connect_with_timeouts(
+        #[cfg(feature = "scnp-tls")]
+        let client = if let Some(tls) = tls.as_deref() {
+            ShardCacheClient::connect_with_timeouts_auth_and_tls(
+                address.as_str(),
+                Duration::from_millis(config.connect_timeout_ms.max(1)),
+                Duration::from_millis(config.operation_timeout_ms.max(1)),
+                auth_token.as_deref(),
+                tls,
+            )
+        } else {
+            ShardCacheClient::connect_with_timeouts_and_auth(
+                address.as_str(),
+                Duration::from_millis(config.connect_timeout_ms.max(1)),
+                Duration::from_millis(config.operation_timeout_ms.max(1)),
+                auth_token.as_deref(),
+            )
+        };
+        #[cfg(not(feature = "scnp-tls"))]
+        let client = ShardCacheClient::connect_with_timeouts_and_auth(
             address.as_str(),
             Duration::from_millis(config.connect_timeout_ms.max(1)),
             Duration::from_millis(config.operation_timeout_ms.max(1)),
-        )
-        .map_err(|error| client_error(address, error))?;
+            auth_token.as_deref(),
+        );
+        let mut client = client.map_err(|error| client_error(address, error))?;
         let topology = client
             .topology()
             .map_err(|error| client_error(address, error))?;
@@ -650,6 +1104,11 @@ fn validate_replica_topology(
                 .capabilities
                 .iter()
                 .any(|capability| capability == "overflow_slot_v1")
+            || (config.compression == KvOverflowCompression::Lz4
+                && !topology
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "value_envelope_v2"))
         {
             return Err(ShardCacheError::Config(format!(
                 "overflow replica {} topology mismatch at {}: id={}, shards={}, route={}, capabilities={:?}",
@@ -697,10 +1156,17 @@ pub struct RedisKvOverflowNode {
     key_prefix: Box<[u8]>,
     client: redis_client::Client,
     connections: Box<[Mutex<Option<redis_client::Connection>>]>,
+    circuits: Box<[CircuitBreaker]>,
     connect_timeout: Duration,
     operation_timeout: Duration,
     max_retries: usize,
     retry_backoff: Duration,
+    compression: KvOverflowCompression,
+    compression_min_value_bytes: usize,
+    compression_min_savings_percent: u8,
+    max_value_bytes: usize,
+    compression_max_expansion_ratio: usize,
+    storage_metrics: OverflowNodeStorageMetrics,
 }
 
 #[cfg(feature = "kv-overflow-redis")]
@@ -779,10 +1245,25 @@ impl RedisKvOverflowNode {
                 .map(|_| Mutex::new(None))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
+            circuits: (0..connection_count)
+                .map(|_| {
+                    CircuitBreaker::new(
+                        config.circuit_breaker_failure_threshold,
+                        Duration::from_millis(config.circuit_breaker_cooldown_ms),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             connect_timeout: Duration::from_millis(config.connect_timeout_ms.max(1)),
             operation_timeout: Duration::from_millis(config.operation_timeout_ms.max(1)),
             max_retries: config.max_retries,
             retry_backoff: Duration::from_millis(config.retry_backoff_ms.max(1)),
+            compression: config.compression,
+            compression_min_value_bytes: config.compression_min_value_bytes,
+            compression_min_savings_percent: config.compression_min_savings_percent,
+            max_value_bytes: config.max_value_bytes,
+            compression_max_expansion_ratio: config.compression_max_expansion_ratio,
+            storage_metrics: OverflowNodeStorageMetrics::default(),
         })
     }
 
@@ -806,13 +1287,21 @@ impl RedisKvOverflowNode {
         mut operation: impl FnMut(&mut redis_client::Connection) -> redis_client::RedisResult<T>,
     ) -> Result<T> {
         let slot = primary_shard % self.connections.len();
+        let circuit = &self.circuits[slot];
         let mut last_error = None;
         for attempt in 0..=self.max_retries {
+            if !circuit.allow_request() {
+                return Err(ShardCacheError::Protocol(format!(
+                    "Redis overflow target {} circuit breaker is open",
+                    self.id
+                )));
+            }
             let mut connection = self.connections[slot].lock();
             if connection.is_none() {
                 match self.connect() {
                     Ok(client) => *connection = Some(client),
                     Err(error) => {
+                        circuit.record_failure();
                         last_error = Some(error);
                         drop(connection);
                         self.retry_delay(attempt);
@@ -822,8 +1311,12 @@ impl RedisKvOverflowNode {
             }
             let result = operation(connection.as_mut().expect("connection initialized"));
             match result {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    circuit.record_success();
+                    return Ok(value);
+                }
                 Err(error) => {
+                    circuit.record_failure();
                     *connection = None;
                     last_error = Some(error);
                 }
@@ -866,8 +1359,20 @@ impl RedisKvOverflowNode {
         value: &[u8],
         expire_at_ms: Option<u64>,
     ) -> Result<()> {
+        if value.len() > self.max_value_bytes {
+            return Err(ShardCacheError::Protocol(
+                "key-value overflow value exceeds configured maximum".into(),
+            ));
+        }
         let storage_key = self.storage_key(key);
-        let encoded = encode_overflow_value_until(value, expire_at_ms);
+        let encoded = encode_overflow_value_until(
+            value,
+            expire_at_ms,
+            self.compression,
+            self.compression_min_value_bytes,
+            self.compression_min_savings_percent,
+        );
+        self.storage_metrics.record(value.len(), &encoded);
         self.execute_on_shard(primary_shard, |connection| {
             let ttl_ms = expire_at_ms.map(|deadline| deadline.saturating_sub(now_millis()));
             if ttl_ms == Some(0) {
@@ -890,6 +1395,14 @@ impl RedisKvOverflowNode {
         primary_shard: usize,
         requests: &[KvOverflowPutRequest<'_>],
     ) -> Result<()> {
+        if requests
+            .iter()
+            .any(|request| request.value.len() > self.max_value_bytes)
+        {
+            return Err(ShardCacheError::Protocol(
+                "key-value overflow value exceeds configured maximum".into(),
+            ));
+        }
         struct EncodedPut {
             key: Vec<u8>,
             value: Vec<u8>,
@@ -900,10 +1413,20 @@ impl RedisKvOverflowNode {
             .iter()
             .map(|request| EncodedPut {
                 key: self.storage_key(request.key),
-                value: encode_overflow_value_until(request.value, request.expire_at_ms),
+                value: encode_overflow_value_until(
+                    request.value,
+                    request.expire_at_ms,
+                    self.compression,
+                    self.compression_min_value_bytes,
+                    self.compression_min_savings_percent,
+                ),
                 expire_at_ms: request.expire_at_ms,
             })
             .collect::<Vec<_>>();
+        for (request, encoded) in requests.iter().zip(&encoded) {
+            self.storage_metrics
+                .record(request.value.len(), &encoded.value);
+        }
         self.execute_on_shard(primary_shard, |connection| {
             let now_ms = now_millis();
             let mut pipeline = redis_client::pipe();
@@ -932,7 +1455,12 @@ impl RedisKvOverflowNode {
         })?;
         encoded
             .map(|value| {
-                decode_overflow_value(&value).map_err(|message| {
+                decode_overflow_value(
+                    &value,
+                    self.max_value_bytes,
+                    self.compression_max_expansion_ratio,
+                )
+                .map_err(|message| {
                     ShardCacheError::Protocol(format!(
                         "Redis overflow node {}: {message}",
                         self.endpoint
@@ -966,6 +1494,24 @@ impl KvOverflowNode for RedisKvOverflowNode {
 
     fn remote_shard(&self) -> usize {
         self.remote_shard
+    }
+
+    fn circuit_breaker_health(&self) -> (bool, u64, u64) {
+        self.circuits.iter().fold(
+            (false, 0u64, 0u64),
+            |(open, events, suppressed), circuit| {
+                let (circuit_open, circuit_events, circuit_suppressed) = circuit.health();
+                (
+                    open || circuit_open,
+                    events.saturating_add(circuit_events),
+                    suppressed.saturating_add(circuit_suppressed),
+                )
+            },
+        )
+    }
+
+    fn storage_health(&self) -> (u64, u64, u64) {
+        self.storage_metrics.snapshot()
     }
 
     fn put(&self, key: &[u8], value: &[u8], ttl_ms: Option<u64>) -> Result<()> {
@@ -1070,19 +1616,61 @@ fn client_error(endpoint: &str, error: ShardCacheClientError) -> ShardCacheError
     ShardCacheError::Protocol(format!("kv overflow node {endpoint}: {error}"))
 }
 
-fn encode_overflow_value_until(value: &[u8], expire_at_ms: Option<u64>) -> Vec<u8> {
+fn encode_overflow_value_until(
+    value: &[u8],
+    expire_at_ms: Option<u64>,
+    compression: KvOverflowCompression,
+    compression_min_value_bytes: usize,
+    compression_min_savings_percent: u8,
+) -> Vec<u8> {
     let mut encoded = Vec::new();
-    encode_overflow_value_until_into(value, expire_at_ms, &mut encoded);
+    let mut compressed = Vec::new();
+    encode_overflow_value_until_into(
+        value,
+        expire_at_ms,
+        compression,
+        compression_min_value_bytes,
+        compression_min_savings_percent,
+        &mut encoded,
+        &mut compressed,
+    );
     encoded
 }
 
 fn encode_overflow_value_until_into(
     value: &[u8],
     expire_at_ms: Option<u64>,
+    compression: KvOverflowCompression,
+    compression_min_value_bytes: usize,
+    compression_min_savings_percent: u8,
     encoded: &mut Vec<u8>,
+    compressed: &mut Vec<u8>,
 ) {
     let expire_at_ms = expire_at_ms.unwrap_or(0);
     encoded.clear();
+    if compression == KvOverflowCompression::Lz4 && value.len() >= compression_min_value_bytes {
+        compressed.clear();
+        compressed.resize(lz4_flex::block::get_maximum_output_size(value.len()), 0);
+        let compressed_len = lz4_flex::block::compress_into(value, compressed)
+            .expect("maximum LZ4 output buffer is sufficient");
+        compressed.truncate(compressed_len);
+        let raw_size = KV_OVERFLOW_HEADER_LEN.saturating_add(value.len());
+        let compressed_size = KV_OVERFLOW_COMPRESSED_HEADER_LEN.saturating_add(compressed.len());
+        let savings = raw_size.saturating_sub(compressed_size);
+        if compressed_size < raw_size
+            && savings.saturating_mul(100)
+                >= raw_size.saturating_mul(compression_min_savings_percent as usize)
+        {
+            encoded.reserve(compressed_size);
+            encoded.extend_from_slice(KV_OVERFLOW_COMPRESSED_MAGIC);
+            encoded.extend_from_slice(&expire_at_ms.to_le_bytes());
+            encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            encoded.extend_from_slice(&crc32fast::hash(value).to_le_bytes());
+            encoded.push(KV_OVERFLOW_CODEC_LZ4);
+            encoded.extend_from_slice(compressed);
+            return;
+        }
+    }
     encoded.reserve(KV_OVERFLOW_HEADER_LEN.saturating_add(value.len()));
     encoded.extend_from_slice(KV_OVERFLOW_MAGIC);
     encoded.extend_from_slice(&expire_at_ms.to_le_bytes());
@@ -1093,10 +1681,14 @@ fn encode_overflow_value_until_into(
 
 fn decode_overflow_value(
     value: &[u8],
+    max_value_bytes: usize,
+    compression_max_expansion_ratio: usize,
 ) -> std::result::Result<Option<KvOverflowValue>, &'static str> {
-    if value.len() < KV_OVERFLOW_HEADER_LEN
-        || &value[..KV_OVERFLOW_MAGIC.len()] != KV_OVERFLOW_MAGIC
-    {
+    if value.len() < KV_OVERFLOW_HEADER_LEN {
+        return Err("invalid key-value overflow envelope");
+    }
+    let compressed = &value[..KV_OVERFLOW_MAGIC.len()] == KV_OVERFLOW_COMPRESSED_MAGIC;
+    if !compressed && &value[..KV_OVERFLOW_MAGIC.len()] != KV_OVERFLOW_MAGIC {
         return Err("invalid key-value overflow envelope");
     }
     let expire_at_ms = u64::from_le_bytes(value[8..16].try_into().expect("fixed expiry field"));
@@ -1106,18 +1698,52 @@ fn decode_overflow_value(
             .expect("fixed payload length field"),
     );
     let checksum = u32::from_le_bytes(value[24..28].try_into().expect("fixed checksum field"));
-    let payload = &value[KV_OVERFLOW_HEADER_LEN..];
-    if usize::try_from(payload_len).ok() != Some(payload.len())
-        || crc32fast::hash(payload) != checksum
-    {
-        return Err("invalid key-value overflow payload integrity");
+    let payload_len =
+        usize::try_from(payload_len).map_err(|_| "invalid key-value overflow payload length")?;
+    if payload_len > max_value_bytes {
+        return Err("key-value overflow payload exceeds configured maximum");
     }
+    let payload = if compressed {
+        if value.len() < KV_OVERFLOW_COMPRESSED_HEADER_LEN
+            || value[KV_OVERFLOW_HEADER_LEN] != KV_OVERFLOW_CODEC_LZ4
+        {
+            return Err("invalid key-value overflow compression codec");
+        }
+        let stored_len = value.len() - KV_OVERFLOW_COMPRESSED_HEADER_LEN;
+        if payload_len
+            > stored_len
+                .checked_mul(compression_max_expansion_ratio)
+                .ok_or("invalid key-value overflow expansion ratio")?
+        {
+            return Err("key-value overflow payload exceeds configured expansion ratio");
+        }
+        let mut decoded = Vec::new();
+        decoded
+            .try_reserve_exact(payload_len)
+            .map_err(|_| "key-value overflow payload allocation failed")?;
+        decoded.resize(payload_len, 0);
+        let decoded_len = lz4_flex::block::decompress_into(
+            &value[KV_OVERFLOW_COMPRESSED_HEADER_LEN..],
+            &mut decoded,
+        )
+        .map_err(|_| "invalid key-value overflow compressed payload")?;
+        if decoded_len != payload_len || crc32fast::hash(&decoded) != checksum {
+            return Err("invalid key-value overflow payload integrity");
+        }
+        SharedBytes::from(decoded)
+    } else {
+        let payload = &value[KV_OVERFLOW_HEADER_LEN..];
+        if payload_len != payload.len() || crc32fast::hash(payload) != checksum {
+            return Err("invalid key-value overflow payload integrity");
+        }
+        SharedBytes::copy_from_slice(payload)
+    };
     let now_ms = now_millis();
     if expire_at_ms != 0 && expire_at_ms <= now_ms {
         return Ok(None);
     }
     Ok(Some(KvOverflowValue {
-        value: SharedBytes::copy_from_slice(payload),
+        value: payload,
         ttl_ms: (expire_at_ms != 0).then_some(expire_at_ms.saturating_sub(now_ms)),
     }))
 }
@@ -1163,6 +1789,10 @@ struct KvOverflowWorkerMetrics {
     pipeline_items: AtomicU64,
     pipeline_bytes: AtomicU64,
     pipeline_latency_ns: AtomicU64,
+    adaptive_pipeline_items: AtomicUsize,
+    object_bytes_raw: AtomicU64,
+    object_bytes_stored: AtomicU64,
+    compressed_values: AtomicU64,
     active_workers: AtomicUsize,
 }
 
@@ -1207,6 +1837,14 @@ pub struct KvOverflowPrimaryOwnershipSnapshot {
 pub struct KvOverflowHealthSnapshot {
     pub backend: Option<KvOverflowBackend>,
     pub transport: Option<KvOverflowTransport>,
+    pub tls_enabled: bool,
+    pub compression: KvOverflowCompression,
+    pub adaptive_pipeline: bool,
+    pub max_value_bytes: usize,
+    pub retained_buffer_bytes: usize,
+    pub circuit_open_targets: usize,
+    pub circuit_open_events: u64,
+    pub circuit_suppressed_requests: u64,
     pub node_count: usize,
     pub previous_node_count: usize,
     pub primary_shard_count: usize,
@@ -1246,6 +1884,10 @@ pub struct KvOverflowHealthSnapshot {
     pub pipeline_items: u64,
     pub pipeline_bytes: u64,
     pub pipeline_latency_ns: u64,
+    pub shard_pipeline_item_limits: Vec<usize>,
+    pub object_bytes_raw: u64,
+    pub object_bytes_stored: u64,
+    pub compressed_values: u64,
     pub ownership: Vec<KvOverflowPrimaryOwnershipSnapshot>,
 }
 
@@ -1261,6 +1903,7 @@ pub struct KvOverflowCluster {
     cluster_id: Option<Box<[u8]>>,
     backend: Option<KvOverflowBackend>,
     transport: Option<KvOverflowTransport>,
+    tls_enabled: bool,
     metrics: Arc<KvOverflowMetrics>,
 }
 
@@ -1294,6 +1937,10 @@ impl KvOverflowCluster {
             ));
         }
         if !config.replicas.is_empty() {
+            let scnp_auth_token = (config.backend == KvOverflowBackend::Scnp)
+                .then(|| read_scnp_auth_token(config))
+                .transpose()?
+                .flatten();
             let normalize_replicas =
                 |replicas: &[KvOverflowReplica]| -> Result<Vec<KvOverflowReplica>> {
                     replicas
@@ -1318,12 +1965,20 @@ impl KvOverflowCluster {
                     for replica in replicas {
                         match config.backend {
                             KvOverflowBackend::Scnp => {
+                                #[cfg(feature = "scnp-tls")]
+                                let tls = load_scnp_tls_config(
+                                    config,
+                                    replica.tls_server_name.as_deref().or(Some(&replica.id)),
+                                )?;
                                 for remote_shard in 0..replica.shard_count {
                                     nodes.push(Arc::new(ScnpKvOverflowNode::from_replica_target(
                                         replica,
                                         remote_shard,
                                         config,
                                         primary_shard_count,
+                                        scnp_auth_token.clone(),
+                                        #[cfg(feature = "scnp-tls")]
+                                        tls.clone(),
                                     )?)
                                         as Arc<dyn KvOverflowNode>);
                                 }
@@ -1371,6 +2026,8 @@ impl KvOverflowCluster {
             )?;
             cluster.backend = Some(config.backend);
             cluster.transport = Some(config.transport);
+            cluster.tls_enabled =
+                config.backend == KvOverflowBackend::Scnp && config.scnp_tls.enabled;
             return Ok(cluster);
         }
         let make_nodes = |endpoints: &[String]| -> Result<Vec<Arc<dyn KvOverflowNode>>> {
@@ -1383,7 +2040,7 @@ impl KvOverflowCluster {
                             endpoint,
                             config,
                             primary_shard_count,
-                        ),
+                        )?,
                     ) as Arc<dyn KvOverflowNode>),
                     KvOverflowBackend::Redis => {
                         #[cfg(feature = "kv-overflow-redis")]
@@ -1417,6 +2074,7 @@ impl KvOverflowCluster {
         )?;
         cluster.backend = Some(config.backend);
         cluster.transport = Some(KvOverflowTransport::Fanout);
+        cluster.tls_enabled = config.backend == KvOverflowBackend::Scnp && config.scnp_tls.enabled;
         Ok(cluster)
     }
 
@@ -1539,6 +2197,7 @@ impl KvOverflowCluster {
             cluster_id,
             backend: None,
             transport: None,
+            tls_enabled: false,
             metrics: Arc::new(KvOverflowMetrics::for_primary_shards(primary_shard_count)),
         })
     }
@@ -1774,6 +2433,43 @@ impl KvOverflowCluster {
             metrics.worker.put_failures.fetch_add(1, Ordering::Relaxed);
         }
         result
+    }
+
+    fn handoff_value_on_shard(
+        &self,
+        primary_shard: usize,
+        key_hash: u64,
+        key: &[u8],
+        value: &KvOverflowValue,
+        expire_at_ms: Option<u64>,
+    ) -> Result<()> {
+        let owner_index = self.owner_index_for_hash_on_shard(primary_shard, key_hash);
+        let storage_key = self.storage_key_for(owner_index, primary_shard, key_hash, key);
+        let current = &self.nodes[owner_index];
+        current.put_until_on_shard(primary_shard, &storage_key, &value.value, expire_at_ms)?;
+        let verified = current
+            .get_on_shard(primary_shard, &storage_key)?
+            .is_some_and(|stored| stored.value == value.value);
+        if !verified {
+            self.metrics
+                .handoff_failures
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(ShardCacheError::Protocol(
+                "kv overflow handoff could not verify the new owner".into(),
+            ));
+        }
+        if let Some(previous_index) = self.previous_owner_index(primary_shard, key_hash) {
+            let previous_key =
+                self.previous_storage_key_for(previous_index, primary_shard, key_hash, key);
+            self.previous_nodes[previous_index]
+                .delete_on_shard(primary_shard, &previous_key)
+                .inspect_err(|_| {
+                    self.metrics
+                        .handoff_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                })?;
+        }
+        Ok(())
     }
 
     fn put_batch_until(
@@ -2082,6 +2778,7 @@ struct RemoteKeyMeta {
     primary_shard: usize,
     expire_at_ms: Option<u64>,
     generation: u64,
+    handoff_complete: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -2265,7 +2962,7 @@ struct DirectPutJob {
 struct DirectPipelineBuffers {
     request: Vec<u8>,
     responses: Vec<DirectResponseKind>,
-    encoded_values: Vec<Vec<u8>>,
+    compressed: Vec<u8>,
 }
 
 enum DirectMutationJob {
@@ -2291,20 +2988,60 @@ struct AsyncScnpMutationConnection {
     target: ScnpDirectTarget,
     primary_shard: usize,
     lane: usize,
-    stream: Option<AsyncTcpStream>,
+    stream: Option<AsyncScnpStream>,
+    circuit: Arc<CircuitBreaker>,
+}
+
+trait AsyncScnpIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send {}
+
+impl<T> AsyncScnpIo for T where T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send {}
+
+type AsyncScnpStream = Pin<Box<dyn AsyncScnpIo>>;
+
+async fn wrap_async_scnp_stream(
+    stream: AsyncTcpStream,
+    _target: &ScnpDirectTarget,
+) -> Result<AsyncScnpStream> {
+    #[cfg(feature = "scnp-tls")]
+    if let Some(tls) = _target.tls.as_deref() {
+        let connector = tokio_rustls::TlsConnector::from(tls.rustls_config());
+        let stream = tokio::time::timeout(
+            _target.operation_timeout,
+            connector.connect(tls.server_name(), stream),
+        )
+        .await
+        .map_err(|_| {
+            ShardCacheError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "SCNP TLS handshake deadline exceeded",
+            ))
+        })?
+        .map_err(|error| {
+            ShardCacheError::Protocol(format!("SCNP TLS handshake failed: {error}"))
+        })?;
+        return Ok(Box::pin(stream));
+    }
+    Ok(Box::pin(stream))
 }
 
 impl AsyncScnpMutationConnection {
     fn new(target: ScnpDirectTarget, primary_shard: usize, lane: usize) -> Self {
+        let circuit = Arc::clone(&target.circuit);
         Self {
             target,
             primary_shard,
             lane,
             stream: None,
+            circuit,
         }
     }
 
     async fn execute(&mut self, request: &[u8], responses: &[DirectResponseKind]) -> Result<()> {
+        if !self.circuit.allow_request() {
+            return Err(ShardCacheError::Protocol(
+                "SCNP target circuit breaker is open".into(),
+            ));
+        }
         let attempts = self
             .target
             .max_retries
@@ -2317,6 +3054,9 @@ impl AsyncScnpMutationConnection {
             % self.target.addresses.len();
         let mut last_error = None;
         for attempt in 0..attempts {
+            if attempt > 0 && !self.circuit.allow_request() {
+                break;
+            }
             if self.stream.is_none() {
                 let path = first_path.wrapping_add(attempt) % self.target.addresses.len();
                 let address = self.target.addresses[path];
@@ -2328,6 +3068,55 @@ impl AsyncScnpMutationConnection {
                 {
                     Ok(Ok(stream)) => {
                         stream.set_nodelay(true)?;
+                        let mut stream = match wrap_async_scnp_stream(stream, &self.target).await {
+                            Ok(stream) => stream,
+                            Err(error) => {
+                                last_error = Some(error);
+                                self.circuit.record_failure();
+                                continue;
+                            }
+                        };
+                        if let Some(token) = self.target.auth_token.as_deref() {
+                            let token_len = u16::try_from(token.len()).map_err(|_| {
+                                ShardCacheError::Config(
+                                    "SCNP authentication token exceeds 65535 bytes".into(),
+                                )
+                            })?;
+                            let authentication = async {
+                                stream.write_all(b"SCAUTH01").await?;
+                                stream.write_all(&token_len.to_le_bytes()).await?;
+                                stream.write_all(token).await?;
+                                let mut response = [0u8; 1];
+                                stream.read_exact(&mut response).await?;
+                                if response != [1] {
+                                    return Err(ShardCacheError::Protocol(
+                                        "SCNP authentication rejected".into(),
+                                    ));
+                                }
+                                Ok(())
+                            };
+                            match tokio::time::timeout(
+                                self.target.operation_timeout,
+                                authentication,
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    last_error = Some(error);
+                                    self.circuit.record_failure();
+                                    continue;
+                                }
+                                Err(_) => {
+                                    last_error = Some(ShardCacheError::Io(std::io::Error::new(
+                                        std::io::ErrorKind::TimedOut,
+                                        "SCNP authentication deadline exceeded",
+                                    )));
+                                    self.circuit.record_failure();
+                                    continue;
+                                }
+                            }
+                        }
                         self.stream = Some(stream);
                     }
                     Ok(Err(error)) => last_error = Some(ShardCacheError::Io(error)),
@@ -2348,7 +3137,10 @@ impl AsyncScnpMutationConnection {
                     Result::<()>::Ok(())
                 };
                 match tokio::time::timeout(self.target.operation_timeout, operation).await {
-                    Ok(Ok(())) => return Ok(()),
+                    Ok(Ok(())) => {
+                        self.circuit.record_success();
+                        return Ok(());
+                    }
                     Ok(Err(error)) => last_error = Some(error),
                     Err(_) => {
                         last_error = Some(ShardCacheError::Io(std::io::Error::new(
@@ -2358,6 +3150,10 @@ impl AsyncScnpMutationConnection {
                     }
                 }
                 self.stream = None;
+            }
+            self.circuit.record_failure();
+            if !self.circuit.allow_request() {
+                break;
             }
             if attempt + 1 < attempts {
                 tokio::time::sleep(self.target.retry_backoff).await;
@@ -2370,7 +3166,7 @@ impl AsyncScnpMutationConnection {
 }
 
 async fn read_direct_response(
-    stream: &mut AsyncTcpStream,
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
     expected: DirectResponseKind,
 ) -> Result<()> {
     let mut header = [0u8; 8];
@@ -2424,27 +3220,79 @@ fn write_direct_route(out: &mut Vec<u8>, key: &[u8], remote_shard: usize) -> Res
     Ok(())
 }
 
-fn write_direct_set(
+fn write_direct_set_prefix(
     out: &mut Vec<u8>,
     key: &[u8],
-    value: &[u8],
+    value_len: usize,
     remote_shard: usize,
 ) -> Result<()> {
     let body_len = 28usize
         .checked_add(key.len())
-        .and_then(|size| size.checked_add(value.len()))
+        .and_then(|size| size.checked_add(value_len))
         .ok_or_else(|| ShardCacheError::Protocol("SCNP SET body length overflow".into()))?;
     let key_len = u32::try_from(key.len())
         .map_err(|_| ShardCacheError::Protocol("SCNP SET key exceeds u32".into()))?;
-    let value_len = u32::try_from(value.len())
+    let value_len = u32::try_from(value_len)
         .map_err(|_| ShardCacheError::Protocol("SCNP SET value exceeds u32".into()))?;
     write_direct_header(out, 2, body_len)?;
     write_direct_route(out, key, remote_shard)?;
     out.extend_from_slice(&key_len.to_le_bytes());
     out.extend_from_slice(&value_len.to_le_bytes());
     out.extend_from_slice(key);
-    out.extend_from_slice(value);
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_direct_overflow_set(
+    out: &mut Vec<u8>,
+    key: &[u8],
+    value: &[u8],
+    expire_at_ms: Option<u64>,
+    remote_shard: usize,
+    compression: KvOverflowCompression,
+    compression_min_value_bytes: usize,
+    compression_min_savings_percent: u8,
+    compressed: &mut Vec<u8>,
+) -> Result<(usize, bool)> {
+    let expire_at_ms = expire_at_ms.unwrap_or(0);
+    let use_compressed = if compression == KvOverflowCompression::Lz4
+        && value.len() >= compression_min_value_bytes
+    {
+        compressed.clear();
+        compressed.resize(lz4_flex::block::get_maximum_output_size(value.len()), 0);
+        let compressed_len = lz4_flex::block::compress_into(value, compressed)
+            .expect("maximum LZ4 output buffer is sufficient");
+        compressed.truncate(compressed_len);
+        let raw_size = KV_OVERFLOW_HEADER_LEN.saturating_add(value.len());
+        let compressed_size = KV_OVERFLOW_COMPRESSED_HEADER_LEN.saturating_add(compressed.len());
+        let savings = raw_size.saturating_sub(compressed_size);
+        compressed_size < raw_size
+            && savings.saturating_mul(100)
+                >= raw_size.saturating_mul(compression_min_savings_percent as usize)
+    } else {
+        false
+    };
+    let envelope_len = if use_compressed {
+        KV_OVERFLOW_COMPRESSED_HEADER_LEN.saturating_add(compressed.len())
+    } else {
+        KV_OVERFLOW_HEADER_LEN.saturating_add(value.len())
+    };
+    write_direct_set_prefix(out, key, envelope_len, remote_shard)?;
+    out.extend_from_slice(if use_compressed {
+        KV_OVERFLOW_COMPRESSED_MAGIC
+    } else {
+        KV_OVERFLOW_MAGIC
+    });
+    out.extend_from_slice(&expire_at_ms.to_le_bytes());
+    out.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    out.extend_from_slice(&crc32fast::hash(value).to_le_bytes());
+    if use_compressed {
+        out.push(KV_OVERFLOW_CODEC_LZ4);
+        out.extend_from_slice(compressed);
+    } else {
+        out.extend_from_slice(value);
+    }
+    Ok((envelope_len, use_compressed))
 }
 
 fn write_direct_delete(out: &mut Vec<u8>, key: &[u8], remote_shard: usize) -> Result<()> {
@@ -2599,14 +3447,7 @@ impl KvOverflowStore {
             config,
             inner.shard_count(),
         )?);
-        let primary_shards = inner.shard_count();
-        let mut options = KvOverflowOptions::try_from(config)?;
-        options.queue_capacity = config
-            .queue_capacity_per_shard
-            .checked_mul(primary_shards)
-            .ok_or_else(|| {
-                ShardCacheError::Config("kv overflow queue capacity exceeds platform limits".into())
-            })?;
+        let options = KvOverflowOptions::try_from(config)?;
         Self::new(inner, cluster, options)
     }
 
@@ -2823,9 +3664,15 @@ impl KvOverflowStore {
             return Ok(FaultInOutcome::Retry);
         }
         let Some(remote) = remote else {
-            self.remote_keys[metadata_index]
-                .write()
-                .remove_hashed(key_hash, key);
+            if self.options.forget_remote_misses
+                || expected
+                    .expire_at_ms
+                    .is_some_and(|expiry| expiry <= now_millis())
+            {
+                self.remote_keys[metadata_index]
+                    .write()
+                    .remove_hashed(key_hash, key);
+            }
             return Ok(FaultInOutcome::Return(None));
         };
         let route = self.inner.route_key_prehashed(key_hash, key);
@@ -2985,20 +3832,12 @@ impl KvOverflowStore {
     }
 
     /// Migrates every known cold key whose exact target changed between the
-    /// previous and current memberships. Admissions are paused only for this
-    /// explicit durability boundary; primary writes never perform this scan.
+    /// previous and current memberships. Each key is stabilized independently,
+    /// so unrelated primary writes continue while the handoff runs.
     pub fn synchronize_remote_handoff(&self) -> Result<usize> {
         if self.cluster.previous_nodes.is_empty() {
             return Ok(0);
         }
-        let _admissions = self.lock_all_admissions();
-        let (barriers, enqueue_error) = self.workers.enqueue_barriers();
-        if let Some(error) = enqueue_error {
-            return Err(error);
-        }
-        drain_barriers(barriers)?;
-        self.drain_all_completions();
-
         let candidates = self
             .remote_keys
             .iter()
@@ -3010,16 +3849,76 @@ impl KvOverflowStore {
                     .collect::<Vec<_>>()
             })
             .filter(|(key, meta)| {
-                let key_hash = xxh3_64(key);
-                self.cluster
-                    .previous_owner_index(meta.primary_shard, key_hash)
-                    .is_some()
+                !meta.handoff_complete
+                    && self
+                        .cluster
+                        .previous_owner_index(meta.primary_shard, xxh3_64(key))
+                        .is_some()
             })
             .collect::<Vec<_>>();
 
+        let mut by_primary = (0..self.inner.shard_count())
+            .map(|_| Vec::new())
+            .collect::<Vec<_>>();
+        for candidate @ (_, meta) in candidates {
+            by_primary[meta.primary_shard].push(candidate);
+        }
+        let mut groups = by_primary
+            .into_iter()
+            .filter(|candidates| !candidates.is_empty());
+        let mut migrated = 0usize;
+        loop {
+            let batch = groups
+                .by_ref()
+                .take(self.options.handoff_max_concurrency)
+                .collect::<Vec<_>>();
+            if batch.is_empty() {
+                break;
+            }
+            let results = thread::scope(|scope| {
+                batch
+                    .into_iter()
+                    .map(|candidates| {
+                        scope.spawn(move || self.synchronize_handoff_shard(candidates))
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|handle| {
+                        handle.join().map_err(|_| {
+                            ShardCacheError::Protocol("kv overflow handoff worker panicked".into())
+                        })?
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })?;
+            migrated = migrated.saturating_add(results.into_iter().sum::<usize>());
+        }
+        self.cluster
+            .metrics
+            .handoff_migrated
+            .fetch_add(migrated as u64, Ordering::Relaxed);
+        Ok(migrated)
+    }
+
+    fn synchronize_handoff_shard(
+        &self,
+        candidates: Vec<(SharedBytes, RemoteKeyMeta)>,
+    ) -> Result<usize> {
+        let started = Instant::now();
+        let mut transferred_bytes = 0u64;
         let mut migrated = 0;
         for (key, meta) in candidates {
             let key_hash = xxh3_64(&key);
+            let metadata_index = key_gate_index_for_hash(key_hash, self.remote_keys.len());
+            {
+                let _key_gate = self.key_gate_for_hash(key_hash);
+                let current = self.remote_keys[metadata_index]
+                    .read()
+                    .get_hashed(key_hash, &key)
+                    .copied();
+                if current != Some(meta) {
+                    continue;
+                }
+            }
             let value = self
                 .cluster
                 .get_on_shard(meta.primary_shard, key_hash, &key)?
@@ -3028,19 +3927,39 @@ impl KvOverflowStore {
                         "kv overflow handoff source no longer contains a cold key".into(),
                     )
                 })?;
-            self.cluster.put_until_on_shard(
+            transferred_bytes = transferred_bytes.saturating_add(value.value.len() as u64);
+            if self.options.handoff_max_bytes_per_second > 0 {
+                let budget = Duration::from_secs_f64(
+                    transferred_bytes as f64 / self.options.handoff_max_bytes_per_second as f64,
+                );
+                if let Some(delay) = budget.checked_sub(started.elapsed()) {
+                    thread::sleep(delay);
+                }
+            }
+            let _key_gate = self.key_gate_for_hash(key_hash);
+            let current = self.remote_keys[metadata_index]
+                .read()
+                .get_hashed(key_hash, &key)
+                .copied();
+            if current != Some(meta) {
+                continue;
+            }
+            self.cluster.handoff_value_on_shard(
                 meta.primary_shard,
                 key_hash,
                 &key,
-                &value.value,
+                &value,
                 meta.expire_at_ms,
             )?;
+            if let Some(current) = self.remote_keys[metadata_index]
+                .write()
+                .get_mut_hashed(key_hash, &key)
+                .filter(|current| current.generation == meta.generation)
+            {
+                current.handoff_complete = true;
+            }
             migrated += 1;
         }
-        self.cluster
-            .metrics
-            .handoff_migrated
-            .fetch_add(migrated as u64, Ordering::Relaxed);
         Ok(migrated)
     }
 
@@ -3128,6 +4047,7 @@ impl KvOverflowStore {
                     primary_shard,
                     expire_at_ms: entry.expire_at_ms,
                     generation,
+                    handoff_complete: true,
                 },
             );
         }
@@ -3139,52 +4059,93 @@ impl KvOverflowStore {
 
     /// Materializes resident and remotely offloaded values for persistence.
     pub fn try_entry_snapshot(&self) -> Result<Vec<StoredEntry>> {
-        let _key_gates = self.lock_all_keys();
-        let mut entries = self.inner.try_entry_snapshot()?;
-        let resident = entries
-            .iter()
-            .map(|entry| entry.key.clone())
-            .collect::<HashSet<_>>();
-        let now_ms = now_millis();
-        let remote_entries = self
-            .remote_keys
-            .iter()
-            .flat_map(|shard| {
-                shard
+        for _ in 0..3 {
+            let mut entries = self.inner.try_entry_snapshot()?;
+            let resident = entries
+                .iter()
+                .map(|entry| entry.key.clone())
+                .collect::<HashSet<_>>();
+            let now_ms = now_millis();
+            let remote_entries = self
+                .remote_keys
+                .iter()
+                .flat_map(|shard| {
+                    shard
+                        .read()
+                        .iter()
+                        .map(|(key, meta)| (key.clone(), *meta))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let mut changed = false;
+            for (key, meta) in remote_entries {
+                if resident.contains(key.as_ref())
+                    || meta.expire_at_ms.is_some_and(|expiry| expiry <= now_ms)
+                {
+                    continue;
+                }
+                let key_hash = xxh3_64(&key);
+                let metadata_index = key_gate_index_for_hash(key_hash, self.remote_keys.len());
+                let _key_gate = self.key_gate_for_hash(key_hash);
+                if self.remote_keys[metadata_index]
                     .read()
-                    .iter()
-                    .map(|(key, meta)| (key.clone(), *meta))
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        for (key, meta) in remote_entries {
-            if resident.contains(key.as_ref())
-                || meta.expire_at_ms.is_some_and(|expiry| expiry <= now_ms)
-            {
-                continue;
+                    .get_hashed(key_hash, &key)
+                    .copied()
+                    != Some(meta)
+                {
+                    changed = true;
+                    break;
+                }
+                let remote = self
+                    .cluster
+                    .get_on_shard(meta.primary_shard, key_hash, &key)?
+                    .ok_or_else(|| {
+                        ShardCacheError::Persistence(format!(
+                            "kv overflow snapshot could not materialize key in primary shard {}",
+                            meta.primary_shard
+                        ))
+                    })?;
+                entries.push(StoredEntry {
+                    key: key.as_ref().to_vec(),
+                    value: remote.value.as_ref().to_vec(),
+                    expire_at_ms: meta.expire_at_ms,
+                });
             }
-            let key_hash = xxh3_64(&key);
-            let remote = self
-                .cluster
-                .get_on_shard(meta.primary_shard, key_hash, &key)?
-                .ok_or_else(|| {
-                    ShardCacheError::Persistence(format!(
-                        "kv overflow snapshot could not materialize key in primary shard {}",
-                        meta.primary_shard
-                    ))
-                })?;
-            entries.push(StoredEntry {
-                key: key.as_ref().to_vec(),
-                value: remote.value.as_ref().to_vec(),
-                expire_at_ms: meta.expire_at_ms,
-            });
+            if !changed {
+                entries.sort_by_key(|entry| xxh3_64(&entry.key));
+                return Ok(entries);
+            }
+            thread::yield_now();
         }
-        entries.sort_by_key(|entry| xxh3_64(&entry.key));
-        Ok(entries)
+        Err(ShardCacheError::Persistence(
+            "kv overflow snapshot could not stabilize concurrent remote metadata".into(),
+        ))
     }
 
     pub fn health_snapshot(&self) -> KvOverflowHealthSnapshot {
         let metrics = &self.cluster.metrics;
+        let circuit_health = self.cluster.nodes.iter().fold(
+            (0usize, 0u64, 0u64),
+            |(open, events, suppressed), node| {
+                let (node_open, node_events, node_suppressed) = node.circuit_breaker_health();
+                (
+                    open.saturating_add(usize::from(node_open)),
+                    events.saturating_add(node_events),
+                    suppressed.saturating_add(node_suppressed),
+                )
+            },
+        );
+        let node_storage_health = self.cluster.nodes.iter().fold(
+            (0u64, 0u64, 0u64),
+            |(raw, stored, compressed), node| {
+                let (node_raw, node_stored, node_compressed) = node.storage_health();
+                (
+                    raw.saturating_add(node_raw),
+                    stored.saturating_add(node_stored),
+                    compressed.saturating_add(node_compressed),
+                )
+            },
+        );
         let shard_completion_backlogs = self
             .workers
             .completion_receivers
@@ -3194,6 +4155,14 @@ impl KvOverflowStore {
         KvOverflowHealthSnapshot {
             backend: self.cluster.backend,
             transport: self.cluster.transport,
+            tls_enabled: self.cluster.tls_enabled,
+            compression: self.options.compression,
+            adaptive_pipeline: self.options.adaptive_pipeline,
+            max_value_bytes: self.options.max_value_bytes,
+            retained_buffer_bytes: self.options.retained_buffer_bytes,
+            circuit_open_targets: circuit_health.0,
+            circuit_open_events: circuit_health.1,
+            circuit_suppressed_requests: circuit_health.2,
             node_count: self.cluster.nodes.len(),
             previous_node_count: self.cluster.previous_nodes.len(),
             primary_shard_count: self.cluster.primary_shard_count,
@@ -3271,9 +4240,11 @@ impl KvOverflowStore {
                         .read()
                         .iter()
                         .filter(|(key, meta)| {
-                            self.cluster
-                                .previous_owner_index(meta.primary_shard, xxh3_64(key))
-                                .is_some()
+                            !meta.handoff_complete
+                                && self
+                                    .cluster
+                                    .previous_owner_index(meta.primary_shard, xxh3_64(key))
+                                    .is_some()
                         })
                         .count()
                 })
@@ -3298,6 +4269,34 @@ impl KvOverflowStore {
                 .iter()
                 .map(|metrics| metrics.worker.pipeline_latency_ns.load(Ordering::Relaxed))
                 .sum(),
+            shard_pipeline_item_limits: metrics
+                .shards
+                .iter()
+                .map(|metrics| {
+                    metrics
+                        .worker
+                        .adaptive_pipeline_items
+                        .load(Ordering::Relaxed)
+                })
+                .collect(),
+            object_bytes_raw: metrics
+                .shards
+                .iter()
+                .map(|metrics| metrics.worker.object_bytes_raw.load(Ordering::Relaxed))
+                .sum::<u64>()
+                .saturating_add(node_storage_health.0),
+            object_bytes_stored: metrics
+                .shards
+                .iter()
+                .map(|metrics| metrics.worker.object_bytes_stored.load(Ordering::Relaxed))
+                .sum::<u64>()
+                .saturating_add(node_storage_health.1),
+            compressed_values: metrics
+                .shards
+                .iter()
+                .map(|metrics| metrics.worker.compressed_values.load(Ordering::Relaxed))
+                .sum::<u64>()
+                .saturating_add(node_storage_health.2),
             ownership: self.cluster.ownership_snapshot(),
         }
     }
@@ -3392,13 +4391,17 @@ async fn run_direct_shard_worker(
     completions: Sender<(SharedBytes, KvOverflowCompletion)>,
     in_flight: Arc<AtomicUsize>,
 ) {
+    let lane_count = targets
+        .len()
+        .saturating_mul(options.max_inflight_per_target);
+    let lane_capacity = options.queue_capacity / lane_count.max(1);
     let mut target_lanes = (0..cluster.nodes.len())
         .map(|_| Vec::new())
-        .collect::<Vec<Vec<mpsc::UnboundedSender<DirectMutationJob>>>>();
+        .collect::<Vec<Vec<mpsc::Sender<DirectMutationJob>>>>();
     let mut joins = Vec::new();
     for (owner, target) in targets {
         for lane in 0..options.max_inflight_per_target {
-            let (sender, lane_receiver) = mpsc::unbounded_channel();
+            let (sender, lane_receiver) = mpsc::channel(lane_capacity);
             target_lanes[owner].push(sender);
             joins.push(tokio::spawn(run_direct_target_lane(
                 primary_shard,
@@ -3441,9 +4444,15 @@ async fn run_direct_shard_worker(
                     },
                     storage_key,
                 });
-                if let Err(error) = lanes[lane].send(direct_job)
-                    && let DirectMutationJob::Put(job) = error.0
+                if let Err(error) = lanes[lane].try_send(direct_job)
+                    && let DirectMutationJob::Put(job) = error.into_inner()
                 {
+                    let worker_metrics = &cluster.metrics.shard(primary_shard).worker;
+                    worker_metrics.puts.fetch_add(1, Ordering::Relaxed);
+                    worker_metrics
+                        .replication_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    worker_metrics.put_failures.fetch_add(1, Ordering::Relaxed);
                     complete_direct_put(&completions, job, false);
                 }
             }
@@ -3468,15 +4477,20 @@ async fn run_direct_shard_worker(
                     generation,
                     completion,
                 };
-                if let Err(error) = lanes[lane].send(direct_job)
+                if let Err(error) = lanes[lane].try_send(direct_job)
                     && let DirectMutationJob::Delete {
                         key,
                         key_hash,
                         generation,
                         completion,
                         ..
-                    } = error.0
+                    } = error.into_inner()
                 {
+                    cluster.metrics.deletes.fetch_add(1, Ordering::Relaxed);
+                    cluster
+                        .metrics
+                        .delete_failures
+                        .fetch_add(1, Ordering::Relaxed);
                     complete_direct_delete(
                         &completions,
                         &in_flight,
@@ -3494,7 +4508,7 @@ async fn run_direct_shard_worker(
                 for lanes in &target_lanes {
                     for lane in lanes {
                         let (sender, receiver) = oneshot::channel();
-                        if lane.send(DirectMutationJob::Barrier(sender)).is_ok() {
+                        if lane.send(DirectMutationJob::Barrier(sender)).await.is_ok() {
                             barriers.push(receiver);
                         } else {
                             first_error
@@ -3522,7 +4536,7 @@ async fn run_direct_shard_worker(
     }
     for lanes in target_lanes {
         for lane in lanes {
-            let _ = lane.send(DirectMutationJob::Shutdown);
+            let _ = lane.send(DirectMutationJob::Shutdown).await;
         }
     }
     for join in joins {
@@ -3535,7 +4549,7 @@ async fn run_direct_target_lane(
     primary_shard: usize,
     lane: usize,
     target: ScnpDirectTarget,
-    mut receiver: mpsc::UnboundedReceiver<DirectMutationJob>,
+    mut receiver: mpsc::Receiver<DirectMutationJob>,
     options: KvOverflowOptions,
     metrics: Arc<KvOverflowMetrics>,
     completions: Sender<(SharedBytes, KvOverflowCompletion)>,
@@ -3546,6 +4560,12 @@ async fn run_direct_target_lane(
     let mut buffers = DirectPipelineBuffers::default();
     let mut deferred = None;
     let mut puts = Vec::with_capacity(options.pipeline_max_items);
+    let mut adaptive = AdaptivePipeline::new(&options);
+    metrics
+        .shard(primary_shard)
+        .worker
+        .adaptive_pipeline_items
+        .store(adaptive.item_limit(), Ordering::Relaxed);
     loop {
         let job = match deferred.take() {
             Some(job) => job,
@@ -3560,7 +4580,7 @@ async fn run_direct_target_lane(
                 let mut pipeline_bytes = direct_put_bytes(&put);
                 puts.push(put);
                 let mut waited = false;
-                while puts.len() < options.pipeline_max_items {
+                while puts.len() < adaptive.item_limit() {
                     let next = match receiver.try_recv() {
                         Ok(job) => Some(job),
                         Err(mpsc::error::TryRecvError::Disconnected) => None,
@@ -3595,16 +4615,28 @@ async fn run_direct_target_lane(
                         }
                     }
                 }
-                execute_direct_puts(
+                let (elapsed, succeeded) = execute_direct_puts(
                     primary_shard,
                     remote_shard,
                     &mut connection,
                     &mut puts,
                     &mut buffers,
+                    &options,
                     &metrics,
                     &completions,
                 )
                 .await;
+                adaptive.record(
+                    elapsed,
+                    succeeded,
+                    pipeline_bytes,
+                    options.pipeline_max_bytes,
+                );
+                metrics
+                    .shard(primary_shard)
+                    .worker
+                    .adaptive_pipeline_items
+                    .store(adaptive.item_limit(), Ordering::Relaxed);
             }
             DirectMutationJob::Delete {
                 key,
@@ -3652,15 +4684,18 @@ fn direct_put_bytes(job: &DirectPutJob) -> usize {
         .saturating_add(KV_OVERFLOW_HEADER_LEN)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_direct_puts(
     primary_shard: usize,
     remote_shard: usize,
     connection: &mut AsyncScnpMutationConnection,
     puts: &mut Vec<DirectPutJob>,
     buffers: &mut DirectPipelineBuffers,
+    options: &KvOverflowOptions,
     metrics: &KvOverflowMetrics,
     completions: &Sender<(SharedBytes, KvOverflowCompletion)>,
-) {
+) -> (Duration, bool) {
+    let total_started = Instant::now();
     let shard_metrics = metrics.shard(primary_shard);
     shard_metrics
         .worker
@@ -3668,7 +4703,6 @@ async fn execute_direct_puts(
         .fetch_add(puts.len() as u64, Ordering::Relaxed);
     buffers.request.clear();
     buffers.responses.clear();
-    buffers.encoded_values.resize_with(puts.len(), Vec::new);
     buffers.request.reserve(
         puts.iter()
             .map(direct_put_bytes)
@@ -3677,16 +4711,46 @@ async fn execute_direct_puts(
     buffers.responses.reserve(puts.len());
     let now_ms = now_millis();
     let mut encode_result = Ok(());
-    for (index, job) in puts.iter().enumerate() {
+    for job in puts.iter() {
         let result = if job
             .put
             .expire_at_ms
             .is_none_or(|deadline| deadline > now_ms)
         {
-            let value = &mut buffers.encoded_values[index];
-            encode_overflow_value_until_into(&job.put.value, job.put.expire_at_ms, value);
             buffers.responses.push(DirectResponseKind::Ok);
-            write_direct_set(&mut buffers.request, &job.storage_key, value, remote_shard)
+            if job.put.value.len() > options.max_value_bytes {
+                Err(ShardCacheError::Protocol(
+                    "key-value overflow value exceeds configured maximum".into(),
+                ))
+            } else {
+                write_direct_overflow_set(
+                    &mut buffers.request,
+                    &job.storage_key,
+                    &job.put.value,
+                    job.put.expire_at_ms,
+                    remote_shard,
+                    options.compression,
+                    options.compression_min_value_bytes,
+                    options.compression_min_savings_percent,
+                    &mut buffers.compressed,
+                )
+                .map(|(stored_bytes, compressed)| {
+                    shard_metrics
+                        .worker
+                        .object_bytes_raw
+                        .fetch_add(job.put.value.len() as u64, Ordering::Relaxed);
+                    shard_metrics
+                        .worker
+                        .object_bytes_stored
+                        .fetch_add(stored_bytes as u64, Ordering::Relaxed);
+                    if compressed {
+                        shard_metrics
+                            .worker
+                            .compressed_values
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+            }
         } else {
             buffers.responses.push(DirectResponseKind::Integer);
             write_direct_delete(&mut buffers.request, &job.storage_key, remote_shard)
@@ -3729,23 +4793,79 @@ async fn execute_direct_puts(
         u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
         Ordering::Relaxed,
     );
-    let succeeded = result.is_ok();
-    let item_count = puts.len() as u64;
+    let outcomes = if result.is_ok() {
+        vec![true; puts.len()]
+    } else if puts.len() > 1 {
+        let mut outcomes = Vec::with_capacity(puts.len());
+        for job in puts.iter() {
+            buffers.request.clear();
+            buffers.responses.clear();
+            let result = if job
+                .put
+                .expire_at_ms
+                .is_none_or(|deadline| deadline > now_millis())
+            {
+                buffers.responses.push(DirectResponseKind::Ok);
+                if job.put.value.len() > options.max_value_bytes {
+                    Err(ShardCacheError::Protocol(
+                        "key-value overflow value exceeds configured maximum".into(),
+                    ))
+                } else {
+                    write_direct_overflow_set(
+                        &mut buffers.request,
+                        &job.storage_key,
+                        &job.put.value,
+                        job.put.expire_at_ms,
+                        remote_shard,
+                        options.compression,
+                        options.compression_min_value_bytes,
+                        options.compression_min_savings_percent,
+                        &mut buffers.compressed,
+                    )
+                    .map(|_| ())
+                }
+            } else {
+                buffers.responses.push(DirectResponseKind::Integer);
+                write_direct_delete(&mut buffers.request, &job.storage_key, remote_shard)
+            };
+            outcomes.push(match result {
+                Ok(()) => connection
+                    .execute(&buffers.request, &buffers.responses)
+                    .await
+                    .is_ok(),
+                Err(_) => false,
+            });
+        }
+        outcomes
+    } else {
+        vec![false]
+    };
+    let succeeded = outcomes.iter().filter(|outcome| **outcome).count() as u64;
+    let failed = outcomes.len() as u64 - succeeded;
     shard_metrics
         .worker
         .replicated_puts
-        .fetch_add(if succeeded { item_count } else { 0 }, Ordering::Relaxed);
+        .fetch_add(succeeded, Ordering::Relaxed);
     shard_metrics
         .worker
         .replication_failures
-        .fetch_add(if succeeded { 0 } else { item_count }, Ordering::Relaxed);
+        .fetch_add(failed, Ordering::Relaxed);
     shard_metrics
         .worker
         .put_failures
-        .fetch_add(if succeeded { 0 } else { item_count }, Ordering::Relaxed);
-    for job in puts.drain(..) {
+        .fetch_add(failed, Ordering::Relaxed);
+    for (job, succeeded) in puts.drain(..).zip(outcomes) {
         complete_direct_put(completions, job, succeeded);
     }
+    buffers.request.clear();
+    buffers.compressed.clear();
+    if buffers.request.capacity() > options.retained_buffer_bytes {
+        buffers.request.shrink_to(options.retained_buffer_bytes);
+    }
+    if buffers.compressed.capacity() > options.retained_buffer_bytes {
+        buffers.compressed.shrink_to(options.retained_buffer_bytes);
+    }
+    (total_started.elapsed(), failed == 0)
 }
 
 fn complete_direct_put(
@@ -3821,6 +4941,25 @@ impl KvOverflowWorkerPool {
             .unzip();
         let completion_receivers: Arc<[Receiver<(SharedBytes, KvOverflowCompletion)>]> =
             completion_receivers.into();
+        for primary_shard in 0..primary_shard_count {
+            if let Some(targets) = cluster.direct_targets_for_shard(primary_shard)
+                && (targets.len() > 1 || options.max_inflight_per_target > 1)
+            {
+                let lanes = targets
+                    .len()
+                    .checked_mul(options.max_inflight_per_target)
+                    .ok_or_else(|| {
+                        ShardCacheError::Config(
+                            "kv overflow target lane count exceeds platform limits".into(),
+                        )
+                    })?;
+                if lanes > capacity_per_shard {
+                    return Err(ShardCacheError::Config(format!(
+                        "primary shard {primary_shard} requires {lanes} target lanes but queue_capacity_per_shard is {capacity_per_shard}"
+                    )));
+                }
+            }
+        }
         let mut senders: Vec<KvOverflowJobSender> = Vec::with_capacity(worker_count);
         let mut joins: Vec<JoinHandle<()>> = Vec::with_capacity(worker_count);
         for worker_id in 0..worker_count {
@@ -3884,6 +5023,12 @@ impl KvOverflowWorkerPool {
                     let mut outcomes = Vec::with_capacity(worker_options.pipeline_max_items);
                     let mut key_hashes = Vec::with_capacity(worker_options.pipeline_max_items);
                     let mut by_owner = Vec::with_capacity(worker_options.pipeline_max_items);
+                    let shard_metrics = worker_cluster.metrics.shard(primary_shard);
+                    let mut adaptive = AdaptivePipeline::new(&worker_options);
+                    shard_metrics
+                        .worker
+                        .adaptive_pipeline_items
+                        .store(adaptive.item_limit(), Ordering::Relaxed);
                     loop {
                         let job = match deferred.take() {
                             Some(job) => job,
@@ -3913,7 +5058,7 @@ impl KvOverflowWorkerPool {
                                     generation,
                                 });
                                 for phase in 0..2 {
-                                    while puts.len() < worker_options.pipeline_max_items {
+                                    while puts.len() < adaptive.item_limit() {
                                         let next = match receiver.try_recv() {
                                             Ok(job) => job,
                                             Err(KvOverflowTryRecvError::Empty) => break,
@@ -3961,7 +5106,7 @@ impl KvOverflowWorkerPool {
                                         }
                                     }
                                     if phase == 0
-                                        && puts.len() < worker_options.pipeline_max_items
+                                        && puts.len() < adaptive.item_limit()
                                         && pipeline_bytes < worker_options.pipeline_max_bytes
                                         && deferred.is_none()
                                         && !worker_options.pipeline_flush.is_zero()
@@ -3997,6 +5142,7 @@ impl KvOverflowWorkerPool {
                                     .then_some(first_owner);
                                 key_hashes.clear();
                                 key_hashes.extend(puts.iter().map(|put| put.key_hash));
+                                let batch_started = Instant::now();
                                 worker_cluster.put_batch_until(
                                     primary_shard,
                                     owner_hint,
@@ -4005,6 +5151,7 @@ impl KvOverflowWorkerPool {
                                     &mut outcomes,
                                     &mut by_owner,
                                 );
+                                let batch_elapsed = batch_started.elapsed();
                                 drop(requests);
                                 shard_metrics
                                     .worker
@@ -4029,6 +5176,16 @@ impl KvOverflowWorkerPool {
                                         ))
                                         .expect("primary shard completion receiver remains live");
                                 }
+                                adaptive.record(
+                                    batch_elapsed,
+                                    failed == 0,
+                                    pipeline_bytes,
+                                    worker_options.pipeline_max_bytes,
+                                );
+                                shard_metrics
+                                    .worker
+                                    .adaptive_pipeline_items
+                                    .store(adaptive.item_limit(), Ordering::Relaxed);
                                 shard_metrics
                                     .worker
                                     .replicated_puts
@@ -4398,6 +5555,7 @@ fn apply_put_completion(
                 primary_shard,
                 expire_at_ms,
                 generation,
+                handoff_complete: true,
             },
         );
         true
@@ -4853,22 +6011,30 @@ mod tests {
 
     impl DirectWireServer {
         fn start(response_delay: Duration) -> Self {
+            Self::start_with_failure(response_delay, None)
+        }
+
+        fn start_with_failure(response_delay: Duration, fail_request_once: Option<usize>) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind direct wire server");
             listener
                 .set_nonblocking(true)
                 .expect("set direct wire listener nonblocking");
             let address = listener.local_addr().expect("direct wire address");
             let shutdown = Arc::new(AtomicBool::new(false));
+            let request_count = Arc::new(AtomicUsize::new(0));
             let thread_shutdown = Arc::clone(&shutdown);
             let join = thread::spawn(move || {
                 while !thread_shutdown.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((stream, _)) => {
                             let connection_shutdown = Arc::clone(&thread_shutdown);
+                            let request_count = Arc::clone(&request_count);
                             thread::spawn(move || {
                                 serve_direct_wire_connection(
                                     stream,
                                     response_delay,
+                                    fail_request_once,
+                                    &request_count,
                                     &connection_shutdown,
                                 );
                             });
@@ -4897,6 +6063,10 @@ mod tests {
                     operation_timeout: Duration::from_secs(2),
                     max_retries: 0,
                     retry_backoff: Duration::from_millis(1),
+                    auth_token: None,
+                    circuit: Arc::new(CircuitBreaker::new(8, Duration::from_secs(1))),
+                    #[cfg(feature = "scnp-tls")]
+                    tls: None,
                 },
             })
         }
@@ -4915,6 +6085,8 @@ mod tests {
     fn serve_direct_wire_connection(
         mut stream: std::net::TcpStream,
         response_delay: Duration,
+        fail_request_once: Option<usize>,
+        request_count: &AtomicUsize,
         shutdown: &AtomicBool,
     ) {
         stream
@@ -4940,14 +6112,21 @@ mod tests {
                 break;
             }
             thread::sleep(response_delay);
-            let response = match header[2] {
-                2 => vec![0xFB, 2, 0, 0, 0, 0, 0, 0],
-                5 => {
-                    let mut response = vec![0xFB, 2, 3, 0, 8, 0, 0, 0];
-                    response.extend_from_slice(&1i64.to_le_bytes());
-                    response
+            let request = request_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let response = if fail_request_once == Some(request) {
+                let mut response = vec![0xFB, 2, 1, 0, 8, 0, 0, 0];
+                response.extend_from_slice(b"injected");
+                response
+            } else {
+                match header[2] {
+                    2 => vec![0xFB, 2, 0, 0, 0, 0, 0, 0],
+                    5 => {
+                        let mut response = vec![0xFB, 2, 3, 0, 8, 0, 0, 0];
+                        response.extend_from_slice(&1i64.to_le_bytes());
+                        response
+                    }
+                    opcode => panic!("unexpected direct wire opcode {opcode}"),
                 }
-                opcode => panic!("unexpected direct wire opcode {opcode}"),
             };
             if stream.write_all(&response).is_err() {
                 break;
@@ -5226,7 +6405,122 @@ mod tests {
             pipeline_max_bytes: 256 * 1024,
             pipeline_flush: Duration::ZERO,
             max_inflight_per_target: 1,
+            forget_remote_misses: false,
+            adaptive_pipeline: true,
+            pipeline_target: Duration::from_millis(1),
+            circuit_breaker_failure_threshold: 8,
+            circuit_breaker_cooldown: Duration::from_secs(1),
+            compression: KvOverflowCompression::None,
+            compression_min_value_bytes: 4 * 1024,
+            compression_min_savings_percent: 12,
+            max_value_bytes: 64 * 1024 * 1024,
+            compression_max_expansion_ratio: 256,
+            handoff_max_bytes_per_second: 0,
+            handoff_max_concurrency: 16,
+            retained_buffer_bytes: 16 * 1024,
         }
+    }
+
+    #[test]
+    fn lz4_overflow_envelope_round_trips_and_preserves_v1_compatibility() {
+        let value = vec![b'x'; 32 * 1024];
+        let encoded =
+            encode_overflow_value_until(&value, None, KvOverflowCompression::Lz4, 1024, 12);
+        assert_eq!(
+            &encoded[..KV_OVERFLOW_COMPRESSED_MAGIC.len()],
+            KV_OVERFLOW_COMPRESSED_MAGIC
+        );
+        assert!(encoded.len() < value.len());
+        assert_eq!(
+            decode_overflow_value(&encoded, 64 * 1024 * 1024, 256)
+                .unwrap()
+                .unwrap()
+                .value
+                .as_ref(),
+            value
+        );
+
+        let legacy =
+            encode_overflow_value_until(b"legacy", None, KvOverflowCompression::None, 1024, 12);
+        assert_eq!(&legacy[..KV_OVERFLOW_MAGIC.len()], KV_OVERFLOW_MAGIC);
+        assert_eq!(
+            decode_overflow_value(&legacy, 64 * 1024 * 1024, 256)
+                .unwrap()
+                .unwrap()
+                .value
+                .as_ref(),
+            b"legacy"
+        );
+    }
+
+    #[test]
+    fn compressed_overflow_envelope_rejects_corruption() {
+        let mut encoded =
+            encode_overflow_value_until(&[7; 16 * 1024], None, KvOverflowCompression::Lz4, 1024, 1);
+        *encoded.last_mut().unwrap() ^= 0xff;
+        assert!(decode_overflow_value(&encoded, 64 * 1024 * 1024, 256).is_err());
+    }
+
+    #[test]
+    fn compressed_overflow_envelope_rejects_unbounded_lengths_before_allocation() {
+        let mut encoded =
+            encode_overflow_value_until(&[7; 16 * 1024], None, KvOverflowCompression::Lz4, 1024, 1);
+        encoded[16..24].copy_from_slice(&(128 * 1024 * 1024u64).to_le_bytes());
+        assert_eq!(
+            decode_overflow_value(&encoded, 64 * 1024 * 1024, 256),
+            Err("key-value overflow payload exceeds configured maximum")
+        );
+
+        encoded[16..24].copy_from_slice(&(1024 * 1024u64).to_le_bytes());
+        assert_eq!(
+            decode_overflow_value(&encoded, 2 * 1024 * 1024, 2),
+            Err("key-value overflow payload exceeds configured expansion ratio")
+        );
+    }
+
+    #[test]
+    fn circuit_breaker_opens_and_allows_a_half_open_probe() {
+        let breaker = CircuitBreaker::new(2, Duration::from_millis(5));
+        assert!(breaker.allow_request());
+        breaker.record_failure();
+        assert!(breaker.allow_request());
+        breaker.record_failure();
+        assert!(!breaker.allow_request());
+        thread::sleep(Duration::from_millis(8));
+        assert!(breaker.allow_request());
+        breaker.record_success();
+        assert!(breaker.allow_request());
+    }
+
+    #[test]
+    fn circuit_breaker_allows_only_one_concurrent_half_open_probe() {
+        let breaker = Arc::new(CircuitBreaker::new(1, Duration::from_millis(5)));
+        breaker.record_failure();
+        thread::sleep(Duration::from_millis(8));
+        let allowed = (0..16)
+            .map(|_| {
+                let breaker = Arc::clone(&breaker);
+                thread::spawn(move || usize::from(breaker.allow_request()))
+            })
+            .map(|thread| thread.join().unwrap())
+            .sum::<usize>();
+        assert_eq!(allowed, 1);
+    }
+
+    #[test]
+    fn adaptive_pipeline_reduces_slow_batches_and_recovers() {
+        let mut options = options(1024);
+        options.pipeline_max_items = 64;
+        options.pipeline_target = Duration::from_millis(1);
+        let mut adaptive = AdaptivePipeline::new(&options);
+        adaptive.record(Duration::from_millis(3), true, 1024, 256 * 1024);
+        assert_eq!(adaptive.item_limit(), 32);
+        for _ in 0..4 {
+            adaptive.record(Duration::from_micros(500), true, 1024, 256 * 1024);
+        }
+        assert_eq!(adaptive.item_limit(), 40);
+        adaptive.record(Duration::from_micros(500), false, 1024, 256 * 1024);
+        assert_eq!(adaptive.item_limit(), 20);
     }
 
     fn keys_for_primary_shards(store: &KvOverflowStore, keys_per_shard: usize) -> Vec<Vec<Bytes>> {
@@ -5457,6 +6751,7 @@ mod tests {
                 primary_shard: 0,
                 expire_at_ms: None,
                 generation: 1,
+                handoff_complete: true,
             },
         );
         let gate = key_gate_index(remote_key, store.key_gates.len());
@@ -5488,6 +6783,41 @@ mod tests {
         assert_eq!(second_get.join().unwrap().unwrap(), Some(vec![1; 32]));
         assert_eq!(node.get_calls.load(Ordering::Relaxed), 1);
         set.join().unwrap();
+    }
+
+    #[test]
+    fn snapshot_remote_io_does_not_block_unrelated_key_stripes() {
+        let (started, started_rx) = bounded(1);
+        let (release, release_rx) = bounded(1);
+        let node = Arc::new(BlockingGetNode {
+            id: "node-a".into(),
+            values: RwLock::new(HashMap::new()),
+            block_get: AtomicBool::new(false),
+            get_calls: AtomicUsize::new(0),
+            started,
+            release: release_rx,
+        });
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
+        let store =
+            Arc::new(KvOverflowStore::new(EmbeddedStore::new(1), cluster, options(1)).unwrap());
+        store
+            .set(b"remote".to_vec(), b"value".to_vec(), None)
+            .unwrap();
+        store.flush_remote().unwrap();
+        assert!(!store.inner().exists(b"remote"));
+        let remote_gate = key_gate_index(b"remote", store.key_gates.len());
+        let unrelated = (0..100_000)
+            .map(|index| format!("snapshot-write-{index}").into_bytes())
+            .find(|key| key_gate_index(key, store.key_gates.len()) != remote_gate)
+            .unwrap();
+
+        node.block_get.store(true, Ordering::Relaxed);
+        let snapshot_store = Arc::clone(&store);
+        let snapshot = thread::spawn(move || snapshot_store.try_entry_snapshot());
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        store.set(unrelated, b"new".to_vec(), None).unwrap();
+        release.send(()).unwrap();
+        assert!(snapshot.join().unwrap().is_ok());
     }
 
     #[test]
@@ -5948,6 +7278,7 @@ mod tests {
                 primary_shard: 0,
                 expire_at_ms: None,
                 generation: 1,
+                handoff_complete: false,
             },
         );
 
@@ -5963,6 +7294,76 @@ mod tests {
                 .is_none()
         );
         assert_eq!(store.health_snapshot().handoff_migrated, 1);
+        assert_eq!(store.health_snapshot().handoff_pending, 0);
+        assert_eq!(store.synchronize_remote_handoff().unwrap(), 0);
+        assert_eq!(store.health_snapshot().handoff_migrated, 1);
+    }
+
+    #[test]
+    fn remote_handoff_does_not_pause_unrelated_primary_admissions() {
+        let (started, started_rx) = bounded(1);
+        let (release, release_rx) = bounded(1);
+        let previous = Arc::new(BlockingGetNode {
+            id: "previous".into(),
+            values: RwLock::new(HashMap::new()),
+            block_get: AtomicBool::new(false),
+            get_calls: AtomicUsize::new(0),
+            started,
+            release: release_rx,
+        });
+        let current = Arc::new(MemoryNode::new("current"));
+        let cluster = Arc::new(
+            KvOverflowCluster::with_previous(
+                vec![current],
+                vec![previous.clone()],
+                DEFAULT_KV_OVERFLOW_SLOT_COUNT,
+            )
+            .unwrap(),
+        );
+        let store = Arc::new(
+            KvOverflowStore::new(EmbeddedStore::new(1), cluster, options(usize::MAX)).unwrap(),
+        );
+        let remote_key = b"handoff-key";
+        previous.put(remote_key, b"value", None).unwrap();
+        let key_hash = xxh3_64(remote_key);
+        let metadata_index = key_gate_index_for_hash(key_hash, store.remote_keys.len());
+        store.remote_keys[metadata_index].write().insert_hashed(
+            key_hash,
+            SharedBytes::from_static(remote_key),
+            RemoteKeyMeta {
+                primary_shard: 0,
+                expire_at_ms: None,
+                generation: 1,
+                handoff_complete: false,
+            },
+        );
+        let remote_gate = key_gate_index(remote_key, store.key_gates.len());
+        let unrelated = (0..100_000)
+            .map(|index| format!("handoff-write-{index}").into_bytes())
+            .find(|key| key_gate_index(key, store.key_gates.len()) != remote_gate)
+            .unwrap();
+
+        previous.block_get.store(true, Ordering::Relaxed);
+        let handoff_store = Arc::clone(&store);
+        let handoff = thread::spawn(move || handoff_store.synchronize_remote_handoff());
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        store.set(unrelated, b"new".to_vec(), None).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(handoff.join().unwrap().unwrap(), 1);
+    }
+
+    #[test]
+    fn durable_remote_miss_keeps_metadata_and_fails_snapshot() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, options(1)).unwrap();
+        store.set(b"key".to_vec(), b"value".to_vec(), None).unwrap();
+        store.flush_remote().unwrap();
+        node.values.write().clear();
+
+        assert_eq!(store.get(b"key").unwrap(), None);
+        assert_eq!(store.health_snapshot().remote_keys, 1);
+        assert!(store.try_entry_snapshot().is_err());
     }
 
     #[test]
@@ -6161,6 +7562,87 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(200));
         store.flush_remote().unwrap();
         assert_eq!(store.health_snapshot().replicated_puts, 2);
+    }
+
+    #[test]
+    fn direct_pipeline_retries_items_after_one_response_fails() {
+        let failing = DirectWireServer::start_with_failure(Duration::ZERO, Some(2));
+        let other = DirectWireServer::start(Duration::ZERO);
+        let mut cluster = KvOverflowCluster::new(vec![
+            failing.node("failing-target"),
+            other.node("other-target"),
+        ])
+        .unwrap();
+        cluster.transport = Some(KvOverflowTransport::DirectShard);
+        let cluster = Arc::new(cluster);
+        let keys = (0..100_000)
+            .map(|index| format!("partial-pipeline-{index}").into_bytes())
+            .filter(|key| cluster.owner_id(key) == "failing-target")
+            .take(3)
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 3);
+        let mut pipelined = options(usize::MAX);
+        pipelined.pipeline_flush = Duration::from_millis(10);
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, pipelined).unwrap();
+        for key in keys {
+            store.set(key, b"value".to_vec(), None).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while store.health_snapshot().replicated_puts != 3 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(store.health_snapshot().replicated_puts, 3);
+        store.flush_remote().unwrap();
+    }
+
+    #[test]
+    fn saturated_direct_target_does_not_consume_the_shard_queue() {
+        let slow = DirectWireServer::start(Duration::from_millis(250));
+        let healthy = DirectWireServer::start(Duration::ZERO);
+        let mut cluster = KvOverflowCluster::new(vec![
+            slow.node("slow-target"),
+            healthy.node("healthy-target"),
+        ])
+        .unwrap();
+        cluster.transport = Some(KvOverflowTransport::DirectShard);
+        let cluster = Arc::new(cluster);
+        let mut slow_keys = Vec::new();
+        let mut healthy_key = None;
+        for index in 0..100_000 {
+            let key = format!("target-capacity-{index}").into_bytes();
+            match cluster.owner_id(&key) {
+                "slow-target" if slow_keys.len() < 8 => slow_keys.push(key),
+                "healthy-target" if healthy_key.is_none() => healthy_key = Some(key),
+                _ => {}
+            }
+            if slow_keys.len() == 8 && healthy_key.is_some() {
+                break;
+            }
+        }
+        let mut constrained = options(usize::MAX);
+        constrained.queue_capacity = 8;
+        constrained.pipeline_max_items = 1;
+        constrained.pipeline_flush = Duration::ZERO;
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, constrained).unwrap();
+        for key in slow_keys {
+            store.set(key, b"slow".to_vec(), None).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while store.health_snapshot().replication_failures == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(store.health_snapshot().replication_failures > 0);
+
+        let started = Instant::now();
+        store
+            .set(healthy_key.expect("healthy key"), b"healthy".to_vec(), None)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(150);
+        while store.health_snapshot().replicated_puts == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(store.health_snapshot().replicated_puts, 1);
+        assert!(started.elapsed() < Duration::from_millis(200));
     }
 
     #[test]

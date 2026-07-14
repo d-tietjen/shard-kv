@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
 use std::time::Duration;
 
+#[cfg(feature = "tls")]
+use crate::ScnpTlsClientConfig;
 use crate::commands::del::{self, Del};
 use crate::commands::exists::{self, Exists};
 use crate::commands::expire::{self, Expire};
@@ -64,8 +66,44 @@ impl ShardCacheClient {
         connect_timeout: Duration,
         operation_timeout: Duration,
     ) -> Result<Self> {
+        Self::connect_with_timeouts_and_auth(addr, connect_timeout, operation_timeout, None)
+    }
+
+    /// Connects with deadlines and authenticates before issuing SCNP commands.
+    pub fn connect_with_timeouts_and_auth(
+        addr: impl ToSocketAddrs,
+        connect_timeout: Duration,
+        operation_timeout: Duration,
+        auth_token: Option<&[u8]>,
+    ) -> Result<Self> {
+        let mut conn =
+            ScnpConnection::connect_with_timeouts(addr, connect_timeout, operation_timeout)?;
+        conn.authenticate(auth_token)?;
         Ok(Self {
-            conn: ScnpConnection::connect_with_timeouts(addr, connect_timeout, operation_timeout)?,
+            conn,
+            #[cfg(feature = "redis")]
+            redis_pipeline_responses: VecDeque::new(),
+        })
+    }
+
+    /// Connects with TLS, deadlines, and optional SCNP token authentication.
+    #[cfg(feature = "tls")]
+    pub fn connect_with_timeouts_auth_and_tls(
+        addr: impl ToSocketAddrs,
+        connect_timeout: Duration,
+        operation_timeout: Duration,
+        auth_token: Option<&[u8]>,
+        tls: &ScnpTlsClientConfig,
+    ) -> Result<Self> {
+        let mut conn = ScnpConnection::connect_with_timeouts_and_tls(
+            addr,
+            connect_timeout,
+            operation_timeout,
+            tls,
+        )?;
+        conn.authenticate(auth_token)?;
+        Ok(Self {
+            conn,
             #[cfg(feature = "redis")]
             redis_pipeline_responses: VecDeque::new(),
         })
@@ -424,14 +462,56 @@ impl ShardCacheDirectRouter {
         connect_timeout: Duration,
         operation_timeout: Duration,
     ) -> Result<ShardCacheDirectShardClient> {
+        self.connect_shard_with_timeouts_and_auth(
+            shard_id,
+            connect_timeout,
+            operation_timeout,
+            None,
+        )
+    }
+
+    /// Connects to one shard-owned port with deadlines and SCNP authentication.
+    pub fn connect_shard_with_timeouts_and_auth(
+        &self,
+        shard_id: usize,
+        connect_timeout: Duration,
+        operation_timeout: Duration,
+        auth_token: Option<&[u8]>,
+    ) -> Result<ShardCacheDirectShardClient> {
+        let mut conn = ScnpConnection::connect_with_timeouts(
+            self.shard_addr(shard_id)?,
+            connect_timeout,
+            operation_timeout,
+        )?;
+        conn.authenticate(auth_token)?;
         Ok(ShardCacheDirectShardClient {
             router: *self,
             shard_id,
-            conn: ScnpConnection::connect_with_timeouts(
-                self.shard_addr(shard_id)?,
-                connect_timeout,
-                operation_timeout,
-            )?,
+            conn,
+        })
+    }
+
+    /// Connects directly to one shard-owned TLS port with deadlines and auth.
+    #[cfg(feature = "tls")]
+    pub fn connect_shard_with_timeouts_auth_and_tls(
+        &self,
+        shard_id: usize,
+        connect_timeout: Duration,
+        operation_timeout: Duration,
+        auth_token: Option<&[u8]>,
+        tls: &ScnpTlsClientConfig,
+    ) -> Result<ShardCacheDirectShardClient> {
+        let mut conn = ScnpConnection::connect_with_timeouts_and_tls(
+            self.shard_addr(shard_id)?,
+            connect_timeout,
+            operation_timeout,
+            tls,
+        )?;
+        conn.authenticate(auth_token)?;
+        Ok(ShardCacheDirectShardClient {
+            router: *self,
+            shard_id,
+            conn,
         })
     }
 }
