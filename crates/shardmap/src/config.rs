@@ -113,6 +113,12 @@ pub struct KvOverflowReplicaServerConfig {
     pub node_id: String,
     /// Environment variable containing the SCNP authentication token.
     pub auth_token_env: Option<String>,
+    /// File containing a reloadable SCNP authentication token.
+    pub auth_token_path: Option<PathBuf>,
+    /// Interval between authentication token file reloads.
+    ///
+    /// Zero uses a 30 second default.
+    pub auth_token_reload_interval_ms: u64,
     /// Native TLS and optional client-certificate verification.
     pub tls: ScnpTlsServerConfig,
     /// Permit unauthenticated SCNP on a non-loopback listener.
@@ -391,6 +397,10 @@ pub struct KvOverflowConfig {
     pub redis_password_env: Option<String>,
     /// Environment variable containing the SCNP authentication token.
     pub scnp_auth_token_env: Option<String>,
+    /// File containing a reloadable SCNP authentication token.
+    pub scnp_auth_token_path: Option<PathBuf>,
+    /// Interval between primary-side token file reloads; zero uses 30 seconds.
+    pub scnp_auth_token_reload_interval_ms: u64,
     /// Native SCNP TLS trust and optional mTLS identity.
     pub scnp_tls: ScnpTlsClientConfig,
     /// Permit unauthenticated SCNP connections to non-loopback replicas.
@@ -457,6 +467,8 @@ pub struct KvOverflowConfig {
     pub handoff_max_bytes_per_second: u64,
     /// Maximum primary shards migrated concurrently during a handoff.
     pub handoff_max_concurrency: usize,
+    /// Maximum keys retained in memory per primary shard during handoff.
+    pub handoff_batch_items: usize,
     /// Maximum capacity retained by reusable per-connection buffers.
     pub retained_buffer_bytes: usize,
     /// Legacy pre-0.6 worker setting. Shard-owned overflow always starts
@@ -803,6 +815,8 @@ impl Default for KvOverflowConfig {
             redis_username_env: None,
             redis_password_env: None,
             scnp_auth_token_env: None,
+            scnp_auth_token_path: None,
+            scnp_auth_token_reload_interval_ms: 30_000,
             scnp_tls: ScnpTlsClientConfig::default(),
             allow_insecure_scnp: false,
             max_memory_bytes: 0,
@@ -832,6 +846,7 @@ impl Default for KvOverflowConfig {
             forget_remote_misses: false,
             handoff_max_bytes_per_second: 0,
             handoff_max_concurrency: 16,
+            handoff_batch_items: 1_024,
             retained_buffer_bytes: 16 * 1024,
             worker_threads: 2,
             queue_capacity: 1_024,

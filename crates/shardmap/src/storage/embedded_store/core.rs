@@ -144,10 +144,21 @@ impl EmbeddedStore {
 
     /// Configures an optional connection token for a dedicated overflow replica.
     pub fn configure_overflow_replica_auth(&self, token: Option<Box<[u8]>>) {
-        *self.overflow_replica_auth.write() = token;
+        *self.overflow_replica_auth.write() = token.map(|token| {
+            Arc::new(super::OverflowReplicaAuthRuntime::new_static(Arc::from(
+                token,
+            )))
+        });
     }
 
-    pub(crate) fn overflow_replica_auth(&self) -> Option<Box<[u8]>> {
+    pub(crate) fn configure_overflow_replica_auth_runtime(
+        &self,
+        auth: Option<Arc<super::OverflowReplicaAuthRuntime>>,
+    ) {
+        *self.overflow_replica_auth.write() = auth;
+    }
+
+    pub(crate) fn overflow_replica_auth(&self) -> Option<Arc<super::OverflowReplicaAuthRuntime>> {
         self.overflow_replica_auth.read().clone()
     }
 

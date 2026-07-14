@@ -114,6 +114,22 @@ impl ShardCacheClient {
         self.conn.execute(Get::new(key, out))
     }
 
+    /// Reads `key` while rejecting response bodies larger than `max_body_len`.
+    pub fn get_into_limited(
+        &mut self,
+        key: &[u8],
+        out: &mut Vec<u8>,
+        max_body_len: usize,
+    ) -> Result<bool> {
+        crate::commands::get::write_request(&mut self.conn, None, key)?;
+        self.conn.flush()?;
+        self.conn.read_value_limited(
+            <Get as crate::commands::ScnpCommand>::NAME,
+            out,
+            max_body_len,
+        )
+    }
+
     /// Sets `key` to `value`.
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.conn.execute(Set::new(key, value))
@@ -681,6 +697,23 @@ impl ShardCacheDirectShardClient {
     pub fn get_into(&mut self, key: &[u8], out: &mut Vec<u8>) -> Result<bool> {
         let route = self.checked_route(key)?;
         self.conn.execute(Get::routed(route, key, out))
+    }
+
+    /// Reads `key` while rejecting response bodies larger than `max_body_len`.
+    pub fn get_into_limited(
+        &mut self,
+        key: &[u8],
+        out: &mut Vec<u8>,
+        max_body_len: usize,
+    ) -> Result<bool> {
+        let route = self.checked_route(key)?;
+        crate::commands::get::write_request(&mut self.conn, Some(route), key)?;
+        self.conn.flush()?;
+        self.conn.read_value_limited(
+            <Get as crate::commands::ScnpCommand>::NAME,
+            out,
+            max_body_len,
+        )
     }
 
     /// Sets `key` to `value`.

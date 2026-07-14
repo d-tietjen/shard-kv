@@ -801,7 +801,7 @@ impl ShardCacheServer {
                 ));
             }
             store.configure_overflow_replica(self.overflow_replica_topology(store.shard_count())?);
-            store.configure_overflow_replica_auth(self.overflow_replica_auth_token()?);
+            store.configure_overflow_replica_auth_runtime(self.overflow_replica_auth_runtime()?);
             #[cfg(feature = "scnp-tls")]
             store.configure_overflow_replica_tls(self.overflow_replica_tls_config()?);
             tracing::info!(
@@ -822,7 +822,7 @@ impl ShardCacheServer {
         };
         let store = EmbeddedStore::with_route_mode(self.config.shard_count, route_mode);
         store.configure_overflow_replica(self.overflow_replica_topology(store.shard_count())?);
-        store.configure_overflow_replica_auth(self.overflow_replica_auth_token()?);
+        store.configure_overflow_replica_auth_runtime(self.overflow_replica_auth_runtime()?);
         #[cfg(feature = "scnp-tls")]
         store.configure_overflow_replica_tls(self.overflow_replica_tls_config()?);
         store.configure_memory_policy(
@@ -856,8 +856,26 @@ impl ShardCacheServer {
         )))
     }
 
-    fn overflow_replica_auth_token(&self) -> Result<Option<Box<[u8]>>> {
-        let Some(name) = self.config.kv_overflow_replica.auth_token_env.as_deref() else {
+    fn overflow_replica_auth_runtime(
+        &self,
+    ) -> Result<Option<Arc<crate::storage::OverflowReplicaAuthRuntime>>> {
+        let config = &self.config.kv_overflow_replica;
+        if let Some(path) = config.auth_token_path.as_ref() {
+            let token = read_overflow_replica_auth_file(path)?;
+            let reload_path = path.clone();
+            let reload = Arc::new(move || read_overflow_replica_auth_file(&reload_path));
+            let reload_ms = match config.auth_token_reload_interval_ms {
+                0 => 30_000,
+                configured => configured,
+            };
+            let interval = std::time::Duration::from_millis(reload_ms);
+            return crate::storage::OverflowReplicaAuthRuntime::new_reloadable(
+                token, interval, reload,
+            )
+            .map(Arc::new)
+            .map(Some);
+        }
+        let Some(name) = config.auth_token_env.as_deref() else {
             return Ok(None);
         };
         let value = std::env::var(name).map_err(|error| {
@@ -865,12 +883,10 @@ impl ShardCacheServer {
                 "failed to read kv overflow replica auth token env {name:?}: {error}"
             ))
         })?;
-        if value.is_empty() || value.len() > u16::MAX as usize {
-            return Err(crate::ShardCacheError::Config(format!(
-                "kv overflow replica auth token env {name:?} must contain 1..=65535 bytes"
-            )));
-        }
-        Ok(Some(value.into_bytes().into_boxed_slice()))
+        let token = validate_overflow_replica_auth_token(value.into_bytes(), name)?;
+        Ok(Some(Arc::new(
+            crate::storage::OverflowReplicaAuthRuntime::new_static(token),
+        )))
     }
 
     #[cfg(feature = "scnp-tls")]
@@ -896,6 +912,26 @@ impl ShardCacheServer {
             ),
         )))
     }
+}
+
+fn read_overflow_replica_auth_file(path: &Path) -> Result<Arc<[u8]>> {
+    let mut value = std::fs::read(path)?;
+    while value
+        .last()
+        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+    {
+        value.pop();
+    }
+    validate_overflow_replica_auth_token(value, &path.display().to_string())
+}
+
+fn validate_overflow_replica_auth_token(value: Vec<u8>, source: &str) -> Result<Arc<[u8]>> {
+    if value.is_empty() || value.len() > u16::MAX as usize {
+        return Err(crate::ShardCacheError::Config(format!(
+            "kv overflow replica auth token {source:?} must contain 1..=65535 bytes"
+        )));
+    }
+    Ok(Arc::from(value))
 }
 
 #[cfg(feature = "scnp-tls")]

@@ -20,6 +20,8 @@ pub struct ScnpTlsClientConfig {
     client_cert_path: Option<PathBuf>,
     client_key_path: Option<PathBuf>,
     next_reload_ms: AtomicU64,
+    reload_successes: AtomicU64,
+    reload_failures: AtomicU64,
 }
 
 impl fmt::Debug for ScnpTlsClientConfig {
@@ -59,6 +61,8 @@ impl ScnpTlsClientConfig {
             client_cert_path,
             client_key_path,
             next_reload_ms: AtomicU64::new(now_millis().saturating_add(30_000)),
+            reload_successes: AtomicU64::new(0),
+            reload_failures: AtomicU64::new(0),
         })
     }
 
@@ -76,13 +80,20 @@ impl ScnpTlsClientConfig {
                     Ordering::Acquire,
                 )
                 .is_ok()
-            && let Ok((config, _)) = load_client_config(
+        {
+            match load_client_config(
                 &self.ca_path,
                 self.client_cert_path.as_deref(),
                 self.client_key_path.as_deref(),
-            )
-        {
-            *self.config.write().expect("SCNP TLS config lock poisoned") = config;
+            ) {
+                Ok((config, _)) => {
+                    *self.config.write().expect("SCNP TLS config lock poisoned") = config;
+                    self.reload_successes.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    self.reload_failures.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
         Arc::clone(&self.config.read().expect("SCNP TLS config lock poisoned"))
     }
@@ -90,6 +101,14 @@ impl ScnpTlsClientConfig {
     #[doc(hidden)]
     pub fn server_name(&self) -> ServerName<'static> {
         self.server_name.clone()
+    }
+
+    /// Returns successful and failed certificate reload attempts.
+    pub fn reload_health(&self) -> (u64, u64) {
+        (
+            self.reload_successes.load(Ordering::Relaxed),
+            self.reload_failures.load(Ordering::Relaxed),
+        )
     }
 }
 

@@ -482,7 +482,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     const AUTH_MAGIC: &[u8; 8] = b"SCAUTH01";
-    let Some(expected) = store.overflow_replica_auth() else {
+    let Some(auth) = store.overflow_replica_auth() else {
         return Ok(());
     };
     let authenticate = async {
@@ -494,20 +494,9 @@ where
             ));
         }
         let token_len = u16::from_le_bytes([header[8], header[9]]) as usize;
-        if token_len != expected.len() {
-            stream.write_all(&[0]).await?;
-            return Err(crate::ShardCacheError::Protocol(
-                "SCNP authentication rejected".into(),
-            ));
-        }
         let mut supplied = vec![0u8; token_len];
         stream.read_exact(&mut supplied).await?;
-        let equal = supplied
-            .iter()
-            .zip(expected.iter())
-            .fold(0u8, |difference, (left, right)| difference | (left ^ right))
-            == 0;
-        if !equal {
+        if !auth.authorize(&supplied) {
             stream.write_all(&[0]).await?;
             return Err(crate::ShardCacheError::Protocol(
                 "SCNP authentication rejected".into(),

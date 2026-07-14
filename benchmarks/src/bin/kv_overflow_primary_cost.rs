@@ -392,6 +392,7 @@ fn make_overflow_store(
                     compression_max_expansion_ratio: 256,
                     handoff_max_bytes_per_second: 0,
                     handoff_max_concurrency: 16,
+                    handoff_batch_items: 1_024,
                     retained_buffer_bytes: 16 * 1024,
                 },
             )

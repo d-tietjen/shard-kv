@@ -17,6 +17,8 @@ use crate::tls::ScnpTlsClientConfig;
 
 const SCNP_READ_BUFFER_BYTES: usize = 8 * 1024;
 const SCNP_WRITE_BUFFER_BYTES: usize = 8 * 1024;
+const SCNP_MAX_RESPONSE_BODY_BYTES: usize = 256 * 1024 * 1024;
+const SCNP_MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
 const SCNP_AUTH_MAGIC: &[u8; 8] = b"SCAUTH01";
 
 enum ScnpStream {
@@ -210,10 +212,29 @@ impl ScnpConnection {
     }
 
     pub(crate) fn read_value(&mut self, op: &str, out: &mut Vec<u8>) -> Result<bool> {
+        self.read_value_limited(op, out, SCNP_MAX_RESPONSE_BODY_BYTES)
+    }
+
+    pub(crate) fn read_value_limited(
+        &mut self,
+        op: &str,
+        out: &mut Vec<u8>,
+        max_body_len: usize,
+    ) -> Result<bool> {
         out.clear();
         let (status, body_len) = self.read_response_header()?;
         match status {
             STATUS_VALUE => {
+                if body_len > max_body_len {
+                    return Err(ShardCacheClientError::Protocol(format!(
+                        "{op} response body length {body_len} exceeds configured maximum {max_body_len}"
+                    )));
+                }
+                out.try_reserve_exact(body_len).map_err(|_| {
+                    ShardCacheClientError::Protocol(format!(
+                        "{op} response body allocation of {body_len} bytes failed"
+                    ))
+                })?;
                 out.resize(body_len, 0);
                 self.r.read_exact(out.as_mut_slice())?;
                 Ok(true)
@@ -322,6 +343,16 @@ impl ScnpConnection {
                 Ok(RedisResponse::Integer(i64::from_le_bytes(value)))
             }
             STATUS_VALUE => {
+                if body_len > SCNP_MAX_RESPONSE_BODY_BYTES {
+                    return Err(ShardCacheClientError::Protocol(format!(
+                        "{op} RESP response body length {body_len} exceeds maximum {SCNP_MAX_RESPONSE_BODY_BYTES}"
+                    )));
+                }
+                self.scratch.try_reserve_exact(body_len).map_err(|_| {
+                    ShardCacheClientError::Protocol(format!(
+                        "{op} RESP response allocation of {body_len} bytes failed"
+                    ))
+                })?;
                 self.scratch.resize(body_len, 0);
                 self.r.read_exact(&mut self.scratch[..body_len])?;
                 RedisResponse::from_resp_bytes(&self.scratch[..body_len])
@@ -381,6 +412,16 @@ impl ScnpConnection {
 
     #[cfg(feature = "redis")]
     fn read_array_response(&mut self, op: &str, body_len: usize) -> Result<RedisResponse> {
+        if body_len > SCNP_MAX_RESPONSE_BODY_BYTES {
+            return Err(ShardCacheClientError::Protocol(format!(
+                "{op} array response body length {body_len} exceeds maximum {SCNP_MAX_RESPONSE_BODY_BYTES}"
+            )));
+        }
+        self.scratch.try_reserve_exact(body_len).map_err(|_| {
+            ShardCacheClientError::Protocol(format!(
+                "{op} array response allocation of {body_len} bytes failed"
+            ))
+        })?;
         self.scratch.resize(body_len, 0);
         self.r.read_exact(&mut self.scratch[..body_len])?;
         if body_len < 4 {
@@ -391,7 +432,17 @@ impl ScnpConnection {
 
         let mut cursor = 0usize;
         let count = read_u32(&self.scratch, &mut cursor, op)? as usize;
-        let mut values = Vec::with_capacity(count);
+        if count > self.scratch.len().saturating_sub(cursor) / 4 {
+            return Err(ShardCacheClientError::Protocol(format!(
+                "{op} array item count exceeds response body"
+            )));
+        }
+        let mut values = Vec::new();
+        values.try_reserve_exact(count).map_err(|_| {
+            ShardCacheClientError::Protocol(format!(
+                "{op} array item allocation of {count} entries failed"
+            ))
+        })?;
         for _ in 0..count {
             let len = read_u32(&self.scratch, &mut cursor, op)?;
             if len == u32::MAX {
@@ -419,18 +470,32 @@ impl ScnpConnection {
     }
 
     fn discard(&mut self, n: usize) -> Result<()> {
-        if n == 0 {
-            return Ok(());
+        let mut remaining = n;
+        if self.scratch.len() < SCNP_READ_BUFFER_BYTES {
+            self.scratch.resize(SCNP_READ_BUFFER_BYTES, 0);
         }
-        self.scratch.resize(n, 0);
-        self.r.read_exact(&mut self.scratch[..n])?;
+        while remaining > 0 {
+            let chunk = remaining.min(self.scratch.len());
+            self.r.read_exact(&mut self.scratch[..chunk])?;
+            remaining -= chunk;
+        }
         Ok(())
     }
 
     fn read_error(&mut self, body_len: usize) -> Result<String> {
-        self.scratch.resize(body_len, 0);
-        self.r.read_exact(&mut self.scratch[..body_len])?;
-        Ok(String::from_utf8_lossy(&self.scratch[..body_len]).into_owned())
+        let retained = body_len.min(SCNP_MAX_ERROR_BODY_BYTES);
+        self.scratch.try_reserve_exact(retained).map_err(|_| {
+            ShardCacheClientError::Protocol("SCNP error response allocation failed".into())
+        })?;
+        self.scratch.resize(retained, 0);
+        self.r.read_exact(&mut self.scratch[..retained])?;
+        let message = String::from_utf8_lossy(&self.scratch[..retained]).into_owned();
+        self.discard(body_len - retained)?;
+        if body_len > retained {
+            Ok(format!("{message} [truncated from {body_len} bytes]"))
+        } else {
+            Ok(message)
+        }
     }
 }
 
@@ -482,4 +547,42 @@ fn read_u32(buf: &[u8], cursor: &mut usize, op: &str) -> Result<u32> {
     let value = u32::from_le_bytes(buf[*cursor..end].try_into().unwrap());
     *cursor = end;
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::thread;
+
+    #[test]
+    fn limited_value_rejects_advertised_body_before_allocation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let body_len = 64 * 1024 * 1024u32;
+            stream
+                .write_all(&[
+                    FAST_RESPONSE_MAGIC,
+                    FAST_PROTOCOL_VERSION,
+                    STATUS_VALUE,
+                    0,
+                    body_len as u8,
+                    (body_len >> 8) as u8,
+                    (body_len >> 16) as u8,
+                    (body_len >> 24) as u8,
+                ])
+                .unwrap();
+        });
+        let mut connection = ScnpConnection::connect(address).unwrap();
+        let mut output = Vec::new();
+
+        let error = connection
+            .read_value_limited("GET", &mut output, 1024)
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds configured maximum"));
+        assert!(output.capacity() < 64 * 1024 * 1024);
+        server.join().unwrap();
+    }
 }

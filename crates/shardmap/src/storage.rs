@@ -43,6 +43,7 @@ mod stats;
 mod telemetry;
 
 pub use command::{BorrowedCommand, Command};
+pub(crate) use embedded_store::OverflowReplicaAuthRuntime;
 #[cfg(feature = "scnp-tls")]
 pub(crate) use embedded_store::OverflowReplicaTlsRuntime;
 #[cfg(feature = "sharded")]

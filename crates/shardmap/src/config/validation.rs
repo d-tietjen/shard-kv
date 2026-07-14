@@ -152,6 +152,11 @@ impl ConfigValidationRule {
                     config.kv_overflow_replica.auth_token_env.as_deref(),
                     "kv_overflow_replica.auth_token_env must not be empty",
                 )?;
+                ConfigCheck::require(
+                    config.kv_overflow_replica.auth_token_env.is_none()
+                        || config.kv_overflow_replica.auth_token_path.is_none(),
+                    "configure only one of kv_overflow_replica.auth_token_env or auth_token_path",
+                )?;
                 let tls = &config.kv_overflow_replica.tls;
                 if tls.enabled {
                     #[cfg(not(feature = "scnp-tls"))]
@@ -172,6 +177,10 @@ impl ConfigValidationRule {
                                 && tls.reload_interval_ms > 0
                                 && tls.max_concurrent_handshakes > 0,
                             "kv_overflow_replica TLS handshake and reload intervals must be > 0",
+                        )?;
+                        ConfigCheck::require(
+                            tls.max_concurrent_handshakes < config.max_connections,
+                            "kv_overflow_replica TLS max_concurrent_handshakes must be lower than max_connections",
                         )?;
                         ConfigCheck::require(
                             tls.client_cert_sha256.is_empty() || tls.client_ca_path.is_some(),
@@ -468,6 +477,11 @@ impl<'a> KvOverflowValidation<'a> {
                         self.config.scnp_auth_token_env.as_deref(),
                         "kv_overflow.scnp_auth_token_env must not be empty",
                     )?;
+                    ConfigCheck::require(
+                        self.config.scnp_auth_token_env.is_none()
+                            || self.config.scnp_auth_token_path.is_none(),
+                        "configure only one of kv_overflow.scnp_auth_token_env or scnp_auth_token_path",
+                    )?;
                     let tls = &self.config.scnp_tls;
                     if tls.enabled {
                         #[cfg(not(feature = "scnp-tls"))]
@@ -525,6 +539,7 @@ impl<'a> KvOverflowValidation<'a> {
                     ConfigCheck::require(
                         all_loopback
                             || self.config.scnp_auth_token_env.is_some()
+                            || self.config.scnp_auth_token_path.is_some()
                             || tls.client_cert_path.is_some()
                             || self.config.allow_insecure_scnp,
                         "non-loopback SCNP overflow requires token authentication, mTLS, or allow_insecure_scnp = true",
@@ -532,8 +547,9 @@ impl<'a> KvOverflowValidation<'a> {
                 }
                 KvOverflowBackend::Redis => {
                     ConfigCheck::require(
-                        self.config.scnp_auth_token_env.is_none(),
-                        "kv_overflow.scnp_auth_token_env requires backend = \"scnp\"",
+                        self.config.scnp_auth_token_env.is_none()
+                            && self.config.scnp_auth_token_path.is_none(),
+                        "kv_overflow SCNP authentication requires backend = \"scnp\"",
                     )?;
                     #[cfg(not(feature = "kv-overflow-redis"))]
                     return Err(ShardCacheError::Config(

@@ -73,8 +73,11 @@ let remote = cache.cluster().get(b"model:7")?;
 ## Operational Contract
 
 - Local WAL and snapshots remain authoritative. Use
-  `KvOverflowStore::try_entry_snapshot`, which fails if a remote-only value
-  cannot be materialized.
+  `KvOverflowStore::write_persistence_snapshot`, which atomically streams
+  resident and remote-only values into a bounded-memory snapshot, syncs the
+  directory, and prunes WAL only after the snapshot is durable. It fails if a
+  remote value cannot be materialized. `restore_latest_snapshot` incrementally
+  rebuilds the overflow tier while enforcing the resident target.
 - `KvOverflowStore::from_config` mirrors recovered resident values before it
   starts enforcing the memory target.
 - `KvOverflowStore::set` confirms local application and queue admission, not
@@ -120,13 +123,16 @@ let remote = cache.cluster().get(b"model:7")?;
   Configuring a server client CA and matching primary client certificate/key
   enables mandatory mTLS. CA-valid clients must also match a configured
   `client_cert_sha256` leaf-certificate fingerprint; overlapping fingerprints
-  support rotation. Server certificate, key, and CA files reload atomically at
-  `reload_interval_ms`, while clients reload trust and identity files before a
-  later reconnect. `max_concurrent_handshakes` rejects excess handshakes before
+  support rotation. Server certificate, key, and CA files reload atomically on
+  a dedicated thread at `reload_interval_ms`, while clients reload trust and
+  identity files before a later reconnect. `max_concurrent_handshakes` rejects
+  excess handshakes before
   they can occupy the connection pool. Non-loopback SCNP requires TLS plus token auth or
   mTLS. `allow_insecure_scnp = true` is the explicit private-overlay escape
-  hatch. Tokens are read only from environment variables and redacted from
-  debug output.
+  hatch. Tokens may be read from static environment variables or reloadable
+  mounted files. Replica token rotation accepts the prior token for two reload
+  intervals so primary connections can roll without downtime. Token values are
+  redacted from debug output.
 - Every owned target has one lock-free circuit breaker shared by its read,
   mutation, and pipeline lanes. Consecutive failures open only that target for
   `circuit_breaker_cooldown_ms`; healthy
@@ -158,7 +164,8 @@ let remote = cache.cluster().get(b"model:7")?;
 - Topology changes perform an exact rebalance. This can move ranges between
   existing replicas as well as onto a newly added replica.
   Handoff runs independently across primary shards, with process concurrency
-  bounded by `handoff_max_concurrency` and bandwidth bounded by
+  bounded by `handoff_max_concurrency`, in-memory key batches bounded by
+  `handoff_batch_items` per primary shard, and bandwidth bounded by
   `handoff_max_bytes_per_second` per shard. Source reads and throttling happen
   outside striped generation gates; the gate is reacquired and revalidated
   before writing the new owner.

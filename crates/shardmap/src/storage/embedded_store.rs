@@ -3,7 +3,6 @@ use crossbeam_utils::CachePadded;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(feature = "embedded-read-biased-lock")]
 use rblock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-#[cfg(any(feature = "telemetry", feature = "scnp-tls"))]
 use std::sync::Arc;
 #[cfg(feature = "scnp-tls")]
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -37,19 +36,138 @@ mod core;
 mod key_scan;
 mod lifecycle;
 
+type AuthReloadFn = dyn Fn() -> crate::Result<Arc<[u8]>> + Send + Sync;
+
+struct OverflowReplicaAuthTokens {
+    current: Arc<[u8]>,
+    previous: Option<(Arc<[u8]>, std::time::Instant)>,
+}
+
+/// Reloadable token set with one overlap window for rolling credential changes.
+pub(crate) struct OverflowReplicaAuthRuntime {
+    tokens: Arc<parking_lot::RwLock<OverflowReplicaAuthTokens>>,
+    shutdown: Option<crossbeam_channel::Sender<()>>,
+    reload_thread: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl std::fmt::Debug for OverflowReplicaAuthRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OverflowReplicaAuthRuntime")
+            .field("reloadable", &self.shutdown.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl OverflowReplicaAuthRuntime {
+    pub(crate) fn new_static(token: Arc<[u8]>) -> Self {
+        Self {
+            tokens: Arc::new(parking_lot::RwLock::new(OverflowReplicaAuthTokens {
+                current: token,
+                previous: None,
+            })),
+            shutdown: None,
+            reload_thread: parking_lot::Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn new_reloadable(
+        token: Arc<[u8]>,
+        interval: std::time::Duration,
+        reload: Arc<AuthReloadFn>,
+    ) -> crate::Result<Self> {
+        let tokens = Arc::new(parking_lot::RwLock::new(OverflowReplicaAuthTokens {
+            current: token,
+            previous: None,
+        }));
+        let (shutdown, shutdown_rx) = crossbeam_channel::bounded(1);
+        let reload_tokens = Arc::clone(&tokens);
+        let interval = interval.max(std::time::Duration::from_millis(100));
+        let overlap = interval.saturating_mul(2);
+        let reload_thread = std::thread::Builder::new()
+            .name("shardmap-scnp-auth-reload".into())
+            .spawn(move || {
+                while shutdown_rx.recv_timeout(interval).is_err() {
+                    match reload() {
+                        Ok(next) => {
+                            let mut tokens = reload_tokens.write();
+                            if tokens.current.as_ref() != next.as_ref() {
+                                let previous = std::mem::replace(&mut tokens.current, next);
+                                tokens.previous = Some((previous, std::time::Instant::now() + overlap));
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            "SCNP authentication token reload failed; retaining prior token: {error}"
+                        ),
+                    }
+                }
+            })
+            .map_err(|error| {
+                crate::ShardCacheError::Config(format!(
+                    "failed to start SCNP authentication reload thread: {error}"
+                ))
+            })?;
+        Ok(Self {
+            tokens,
+            shutdown: Some(shutdown),
+            reload_thread: parking_lot::Mutex::new(Some(reload_thread)),
+        })
+    }
+
+    pub(crate) fn authorize(&self, supplied: &[u8]) -> bool {
+        let tokens = self.tokens.read();
+        constant_time_equal(supplied, &tokens.current)
+            || tokens
+                .previous
+                .as_ref()
+                .is_some_and(|(previous, deadline)| {
+                    *deadline > std::time::Instant::now() && constant_time_equal(supplied, previous)
+                })
+    }
+}
+
+impl Drop for OverflowReplicaAuthRuntime {
+    fn drop(&mut self) {
+        if let Some(shutdown) = &self.shutdown {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.reload_thread.lock().take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
 #[cfg(feature = "scnp-tls")]
 type TlsReloadFn = dyn Fn() -> crate::Result<Arc<rustls::ServerConfig>> + Send + Sync;
 
 /// Atomically reloadable TLS identity and client authorization for overflow listeners.
 #[cfg(feature = "scnp-tls")]
 pub(crate) struct OverflowReplicaTlsRuntime {
-    current: parking_lot::RwLock<Arc<rustls::ServerConfig>>,
-    reload: Arc<TlsReloadFn>,
-    next_reload_ms: AtomicU64,
+    state: Arc<OverflowReplicaTlsReloadState>,
+    shutdown: crossbeam_channel::Sender<()>,
+    reload_thread: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
     reload_interval_ms: u64,
     handshake_timeout: std::time::Duration,
     client_cert_sha256: Arc<[[u8; 32]]>,
     handshake_limiter: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(feature = "scnp-tls")]
+struct OverflowReplicaTlsReloadState {
+    current: parking_lot::RwLock<Arc<rustls::ServerConfig>>,
+    reload: Arc<TlsReloadFn>,
+    successes: AtomicU64,
+    failures: AtomicU64,
 }
 
 #[cfg(feature = "scnp-tls")]
@@ -58,6 +176,7 @@ impl std::fmt::Debug for OverflowReplicaTlsRuntime {
         formatter
             .debug_struct("OverflowReplicaTlsRuntime")
             .field("reload_interval_ms", &self.reload_interval_ms)
+            .field("reload_health", &self.reload_health())
             .field("handshake_timeout", &self.handshake_timeout)
             .field("authorized_clients", &self.client_cert_sha256.len())
             .finish_non_exhaustive()
@@ -74,10 +193,38 @@ impl OverflowReplicaTlsRuntime {
         client_cert_sha256: Arc<[[u8; 32]]>,
         max_concurrent_handshakes: usize,
     ) -> Self {
-        Self {
+        let state = Arc::new(OverflowReplicaTlsReloadState {
             current: parking_lot::RwLock::new(current),
             reload,
-            next_reload_ms: AtomicU64::new(now_millis().saturating_add(reload_interval_ms)),
+            successes: AtomicU64::new(0),
+            failures: AtomicU64::new(0),
+        });
+        let (shutdown, shutdown_rx) = crossbeam_channel::bounded(1);
+        let reload_state = Arc::clone(&state);
+        let interval = std::time::Duration::from_millis(reload_interval_ms.max(1));
+        let reload_thread = std::thread::Builder::new()
+            .name("shardmap-scnp-tls-reload".into())
+            .spawn(move || {
+                while shutdown_rx.recv_timeout(interval).is_err() {
+                    match (reload_state.reload)() {
+                        Ok(config) => {
+                            *reload_state.current.write() = config;
+                            reload_state.successes.fetch_add(1, AtomicOrdering::Relaxed);
+                        }
+                        Err(error) => {
+                            reload_state.failures.fetch_add(1, AtomicOrdering::Relaxed);
+                            tracing::warn!(
+                                "SCNP TLS reload failed; retaining prior config: {error}"
+                            );
+                        }
+                    }
+                }
+            })
+            .expect("SCNP TLS reload thread must start");
+        Self {
+            state,
+            shutdown,
+            reload_thread: parking_lot::Mutex::new(Some(reload_thread)),
             reload_interval_ms,
             handshake_timeout,
             client_cert_sha256,
@@ -86,27 +233,14 @@ impl OverflowReplicaTlsRuntime {
     }
 
     pub(crate) fn server_config(&self) -> Arc<rustls::ServerConfig> {
-        let now = now_millis();
-        let next = self.next_reload_ms.load(AtomicOrdering::Acquire);
-        if now >= next
-            && self
-                .next_reload_ms
-                .compare_exchange(
-                    next,
-                    now.saturating_add(self.reload_interval_ms),
-                    AtomicOrdering::AcqRel,
-                    AtomicOrdering::Acquire,
-                )
-                .is_ok()
-        {
-            match (self.reload)() {
-                Ok(config) => *self.current.write() = config,
-                Err(error) => {
-                    tracing::warn!("SCNP TLS reload failed; retaining prior config: {error}")
-                }
-            }
-        }
-        Arc::clone(&self.current.read())
+        Arc::clone(&self.state.current.read())
+    }
+
+    pub(crate) fn reload_health(&self) -> (u64, u64) {
+        (
+            self.state.successes.load(AtomicOrdering::Relaxed),
+            self.state.failures.load(AtomicOrdering::Relaxed),
+        )
     }
 
     pub(crate) fn handshake_timeout(&self) -> std::time::Duration {
@@ -149,6 +283,18 @@ impl OverflowReplicaTlsRuntime {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "scnp-tls")]
+impl Drop for OverflowReplicaTlsRuntime {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(());
+        if let Some(thread) = self.reload_thread.lock().take()
+            && thread.join().is_err()
+        {
+            tracing::warn!("SCNP TLS reload thread panicked during shutdown");
+        }
     }
 }
 #[cfg(feature = "redis-modules")]
@@ -229,7 +375,7 @@ pub struct EmbeddedStore {
     topk: modules::TopKStore,
     route_mode: EmbeddedRouteMode,
     overflow_replica_topology: RwLock<Option<(String, u16)>>,
-    overflow_replica_auth: RwLock<Option<Box<[u8]>>>,
+    overflow_replica_auth: RwLock<Option<Arc<OverflowReplicaAuthRuntime>>>,
     #[cfg(feature = "scnp-tls")]
     overflow_replica_tls: RwLock<Option<Arc<OverflowReplicaTlsRuntime>>>,
     #[cfg(feature = "telemetry")]

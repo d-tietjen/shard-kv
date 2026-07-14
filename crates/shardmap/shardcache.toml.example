@@ -43,8 +43,11 @@ wal_channel_capacity = 16384
 enabled = false
 node_id = "overflow-a"
 # Non-loopback replicas require TLS plus this token or mTLS unless
-# allow_insecure_scnp is explicitly enabled. The token is read from the env.
+# allow_insecure_scnp is explicitly enabled. Use an environment variable for a
+# static token or a mounted file for reloadable rolling rotation.
 # auth_token_env = "SHARDCACHE_OVERFLOW_SCNP_TOKEN"
+# auth_token_path = "/run/secrets/overflow-scnp-token"
+# auth_token_reload_interval_ms = 30000
 allow_insecure_scnp = false
 # Ordinary LRU/LFU eviction without object_overflow is intentionally lossy.
 allow_lossy_eviction = false
@@ -84,6 +87,8 @@ redis_key_prefix = "shardcache:overflow:"
 # redis_password_env = "SHARDCACHE_OVERFLOW_REDIS_PASSWORD"
 # SCNP backend only. Use the same token env value on the replica.
 # scnp_auth_token_env = "SHARDCACHE_OVERFLOW_SCNP_TOKEN"
+# scnp_auth_token_path = "/run/secrets/overflow-scnp-token"
+# scnp_auth_token_reload_interval_ms = 30000
 allow_insecure_scnp = false
 max_memory_bytes = 1073741824
 eviction_policy = "lfu"
@@ -116,6 +121,7 @@ forget_remote_misses = false
 # Aggregate rebalance bandwidth per primary shard. Zero is unlimited.
 handoff_max_bytes_per_second = 0
 handoff_max_concurrency = 16
+handoff_batch_items = 1024
 retained_buffer_bytes = 16384
 
 [kv_overflow.scnp_tls]

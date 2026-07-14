@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -28,6 +29,7 @@ use crate::config::{
     EvictionPolicy, KvOverflowBackend, KvOverflowCompression, KvOverflowConfig, KvOverflowReplica,
     KvOverflowTransport, MAX_KV_OVERFLOW_SLOT_COUNT,
 };
+use crate::persistence::{PersistenceRuntime, SnapshotCompression, SnapshotStore};
 use crate::storage::{Bytes, EmbeddedStore, StoredEntry, now_millis, shift_for, stripe_index};
 use crate::{Result, ShardCacheError};
 
@@ -179,6 +181,7 @@ pub struct KvOverflowOptions {
     pub compression_max_expansion_ratio: usize,
     pub handoff_max_bytes_per_second: u64,
     pub handoff_max_concurrency: usize,
+    pub handoff_batch_items: usize,
     pub retained_buffer_bytes: usize,
 }
 
@@ -206,6 +209,7 @@ impl KvOverflowOptions {
             || self.max_value_bytes == 0
             || self.compression_max_expansion_ratio == 0
             || self.handoff_max_concurrency == 0
+            || self.handoff_batch_items == 0
             || self.retained_buffer_bytes == 0
         {
             return Err(ShardCacheError::Config(
@@ -265,6 +269,7 @@ impl TryFrom<&KvOverflowConfig> for KvOverflowOptions {
             compression_max_expansion_ratio: config.compression_max_expansion_ratio,
             handoff_max_bytes_per_second: config.handoff_max_bytes_per_second,
             handoff_max_concurrency: config.handoff_max_concurrency,
+            handoff_batch_items: config.handoff_batch_items,
             retained_buffer_bytes: config.retained_buffer_bytes,
         };
         options.validate()?;
@@ -282,10 +287,70 @@ pub struct ScnpDirectTarget {
     operation_timeout: Duration,
     max_retries: usize,
     retry_backoff: Duration,
-    auth_token: Option<Arc<[u8]>>,
+    auth_token: Option<Arc<ReloadableScnpAuthToken>>,
     circuit: Arc<CircuitBreaker>,
     #[cfg(feature = "scnp-tls")]
     tls: Option<Arc<RuntimeScnpTlsClientConfig>>,
+}
+
+struct ReloadableScnpAuthToken {
+    current: Arc<RwLock<Arc<[u8]>>>,
+    shutdown: Option<Sender<()>>,
+    reload_thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl ReloadableScnpAuthToken {
+    fn new_static(token: Arc<[u8]>) -> Self {
+        Self {
+            current: Arc::new(RwLock::new(token)),
+            shutdown: None,
+            reload_thread: Mutex::new(None),
+        }
+    }
+
+    fn new_file(path: PathBuf, interval: Duration) -> Result<Self> {
+        let current = Arc::new(RwLock::new(read_scnp_auth_token_file(&path)?));
+        let (shutdown, shutdown_rx) = bounded(1);
+        let reload_current = Arc::clone(&current);
+        let interval = interval.max(Duration::from_millis(100));
+        let reload_thread = thread::Builder::new()
+            .name("shardmap-kv-overflow-auth-reload".into())
+            .spawn(move || {
+                while shutdown_rx.recv_timeout(interval).is_err() {
+                    match read_scnp_auth_token_file(&path) {
+                        Ok(token) => *reload_current.write() = token,
+                        Err(error) => tracing::warn!(
+                            "SCNP primary authentication token reload failed; retaining prior token: {error}"
+                        ),
+                    }
+                }
+            })
+            .map_err(|error| {
+                ShardCacheError::Config(format!(
+                    "failed to start SCNP primary token reload thread: {error}"
+                ))
+            })?;
+        Ok(Self {
+            current,
+            shutdown: Some(shutdown),
+            reload_thread: Mutex::new(Some(reload_thread)),
+        })
+    }
+
+    fn current(&self) -> Arc<[u8]> {
+        Arc::clone(&self.current.read())
+    }
+}
+
+impl Drop for ReloadableScnpAuthToken {
+    fn drop(&mut self) {
+        if let Some(shutdown) = &self.shutdown {
+            let _ = shutdown.send(());
+        }
+        if let Some(thread) = self.reload_thread.lock().take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl std::fmt::Debug for ScnpDirectTarget {
@@ -497,10 +562,15 @@ impl ScnpTargetConnection {
         }
     }
 
-    fn get_into(&mut self, key: &[u8], out: &mut Vec<u8>) -> shardcache_client_rs::Result<bool> {
+    fn get_into_limited(
+        &mut self,
+        key: &[u8],
+        out: &mut Vec<u8>,
+        max_body_len: usize,
+    ) -> shardcache_client_rs::Result<bool> {
         match self {
-            Self::Fanout(client) => client.get_into(key, out),
-            Self::Direct(client) => client.get_into(key, out),
+            Self::Fanout(client) => client.get_into_limited(key, out, max_body_len),
+            Self::Direct(client) => client.get_into_limited(key, out, max_body_len),
         }
     }
 
@@ -561,7 +631,7 @@ pub struct ScnpKvOverflowNode {
     operation_timeout: Duration,
     max_retries: usize,
     retry_backoff: Duration,
-    auth_token: Option<Arc<[u8]>>,
+    auth_token: Option<Arc<ReloadableScnpAuthToken>>,
     compression: KvOverflowCompression,
     compression_min_value_bytes: usize,
     compression_min_savings_percent: u8,
@@ -638,7 +708,7 @@ impl ScnpKvOverflowNode {
         remote_shard: usize,
         config: &KvOverflowConfig,
         _primary_shard_count: usize,
-        auth_token: Option<Arc<[u8]>>,
+        auth_token: Option<Arc<ReloadableScnpAuthToken>>,
         #[cfg(feature = "scnp-tls")] tls: Option<Arc<RuntimeScnpTlsClientConfig>>,
     ) -> Result<Self> {
         replica.addresses.first().ok_or_else(|| {
@@ -733,6 +803,7 @@ impl ScnpKvOverflowNode {
     }
 
     fn connect(&self, path: usize) -> shardcache_client_rs::Result<ScnpTargetConnection> {
+        let auth_token = self.auth_token.as_ref().map(|token| token.current());
         #[cfg(feature = "scnp-tls")]
         if let Some(tls) = self.tls.as_deref() {
             return match self.direct_routers.get(path) {
@@ -741,7 +812,7 @@ impl ScnpKvOverflowNode {
                         self.remote_shard,
                         self.connect_timeout,
                         self.operation_timeout,
-                        self.auth_token.as_deref(),
+                        auth_token.as_deref(),
                         tls,
                     )
                     .map(ScnpTargetConnection::Direct),
@@ -749,7 +820,7 @@ impl ScnpKvOverflowNode {
                     self.endpoints[path].as_str(),
                     self.connect_timeout,
                     self.operation_timeout,
-                    self.auth_token.as_deref(),
+                    auth_token.as_deref(),
                     tls,
                 )
                 .map(ScnpTargetConnection::Fanout),
@@ -761,14 +832,14 @@ impl ScnpKvOverflowNode {
                     self.remote_shard,
                     self.connect_timeout,
                     self.operation_timeout,
-                    self.auth_token.as_deref(),
+                    auth_token.as_deref(),
                 )
                 .map(ScnpTargetConnection::Direct),
             None => ShardCacheClient::connect_with_timeouts_and_auth(
                 self.endpoints[path].as_str(),
                 self.connect_timeout,
                 self.operation_timeout,
-                self.auth_token.as_deref(),
+                auth_token.as_deref(),
             )
             .map(ScnpTargetConnection::Fanout),
         }
@@ -893,8 +964,9 @@ impl KvOverflowNode for ScnpKvOverflowNode {
             self.compression_min_value_bytes,
             self.compression_min_savings_percent,
         );
+        self.execute_on_shard(primary_shard, false, |client| client.set(key, &encoded))?;
         self.storage_metrics.record(value.len(), &encoded);
-        self.execute_on_shard(primary_shard, false, |client| client.set(key, &encoded))
+        Ok(())
     }
 
     fn put_batch_outcomes_until_on_shard(
@@ -931,9 +1003,6 @@ impl KvOverflowNode for ScnpKvOverflowNode {
                 )
             })
             .collect::<Vec<_>>();
-        for (request, encoded) in requests.iter().zip(&encoded) {
-            self.storage_metrics.record(request.value.len(), encoded);
-        }
         let pipeline = self.execute_on_shard(primary_shard, false, |client| {
             let now_ms = now_millis();
             for (request, value) in requests.iter().zip(&encoded) {
@@ -965,6 +1034,13 @@ impl KvOverflowNode for ScnpKvOverflowNode {
             Ok(results) => {
                 outcomes.clear();
                 outcomes.extend(results);
+                for ((request, encoded), succeeded) in
+                    requests.iter().zip(&encoded).zip(outcomes.iter())
+                {
+                    if *succeeded {
+                        self.storage_metrics.record(request.value.len(), encoded);
+                    }
+                }
             }
             Err(_) => {
                 outcomes.clear();
@@ -986,18 +1062,31 @@ impl KvOverflowNode for ScnpKvOverflowNode {
     }
 
     fn get_on_shard(&self, primary_shard: usize, key: &[u8]) -> Result<Option<KvOverflowValue>> {
-        self.execute_on_shard(primary_shard, true, |client| {
+        let encoded = self.execute_on_shard(primary_shard, true, |client| {
             let mut value = Vec::new();
-            if !client.get_into(key, &mut value)? {
-                return Ok(None);
+            if !client.get_into_limited(
+                key,
+                &mut value,
+                self.max_value_bytes
+                    .saturating_add(KV_OVERFLOW_COMPRESSED_HEADER_LEN),
+            )? {
+                return Ok(None::<Vec<u8>>);
             }
-            decode_overflow_value(
-                &value,
-                self.max_value_bytes,
-                self.compression_max_expansion_ratio,
-            )
-            .map_err(|message| ShardCacheClientError::Protocol(message.to_string()))
-        })
+            Ok(Some(value))
+        })?;
+        encoded
+            .map(|value| {
+                decode_overflow_value(
+                    &value,
+                    self.max_value_bytes,
+                    self.compression_max_expansion_ratio,
+                )
+                .map_err(|message| {
+                    ShardCacheError::Protocol(format!("kv overflow node {}: {message}", self.id))
+                })
+            })
+            .transpose()
+            .map(Option::flatten)
     }
 
     fn delete(&self, key: &[u8]) -> Result<()> {
@@ -1017,7 +1106,16 @@ fn resolve_address(endpoint: &str) -> Result<SocketAddr> {
         .ok_or_else(|| ShardCacheError::Config(format!("{endpoint} resolved to no addresses")))
 }
 
-fn read_scnp_auth_token(config: &KvOverflowConfig) -> Result<Option<Arc<[u8]>>> {
+fn read_scnp_auth_token(config: &KvOverflowConfig) -> Result<Option<Arc<ReloadableScnpAuthToken>>> {
+    if let Some(path) = config.scnp_auth_token_path.as_ref() {
+        let reload_ms = match config.scnp_auth_token_reload_interval_ms {
+            0 => 30_000,
+            configured => configured,
+        };
+        return ReloadableScnpAuthToken::new_file(path.clone(), Duration::from_millis(reload_ms))
+            .map(Arc::new)
+            .map(Some);
+    }
     let Some(name) = config.scnp_auth_token_env.as_deref() else {
         return Ok(None);
     };
@@ -1026,12 +1124,28 @@ fn read_scnp_auth_token(config: &KvOverflowConfig) -> Result<Option<Arc<[u8]>>> 
             "failed to read SCNP auth token env {name:?}: {error}"
         ))
     })?;
-    if value.is_empty() {
+    let token = validate_scnp_auth_token(value.into_bytes(), name)?;
+    Ok(Some(Arc::new(ReloadableScnpAuthToken::new_static(token))))
+}
+
+fn read_scnp_auth_token_file(path: &Path) -> Result<Arc<[u8]>> {
+    let mut value = std::fs::read(path)?;
+    while value
+        .last()
+        .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+    {
+        value.pop();
+    }
+    validate_scnp_auth_token(value, &path.display().to_string())
+}
+
+fn validate_scnp_auth_token(value: Vec<u8>, source: &str) -> Result<Arc<[u8]>> {
+    if value.is_empty() || value.len() > u16::MAX as usize {
         return Err(ShardCacheError::Config(format!(
-            "SCNP auth token env {name:?} must not be empty"
+            "SCNP auth token {source:?} must contain 1..=65535 bytes"
         )));
     }
-    Ok(Some(Arc::from(value.into_bytes())))
+    Ok(Arc::from(value))
 }
 
 #[cfg(feature = "scnp-tls")]
@@ -1062,6 +1176,7 @@ fn validate_replica_topology(
 ) -> Result<u16> {
     let mut advertised_base_port = None;
     let auth_token = read_scnp_auth_token(config)?;
+    let auth_token = auth_token.as_ref().map(|token| token.current());
     #[cfg(feature = "scnp-tls")]
     let tls = load_scnp_tls_config(
         config,
@@ -1372,7 +1487,6 @@ impl RedisKvOverflowNode {
             self.compression_min_value_bytes,
             self.compression_min_savings_percent,
         );
-        self.storage_metrics.record(value.len(), &encoded);
         self.execute_on_shard(primary_shard, |connection| {
             let ttl_ms = expire_at_ms.map(|deadline| deadline.saturating_sub(now_millis()));
             if ttl_ms == Some(0) {
@@ -1387,7 +1501,9 @@ impl RedisKvOverflowNode {
                 command.arg("PX").arg(ttl_ms);
             }
             command.query(connection)
-        })
+        })?;
+        self.storage_metrics.record(value.len(), &encoded);
+        Ok(())
     }
 
     fn put_batch_until_for_shard(
@@ -1423,10 +1539,6 @@ impl RedisKvOverflowNode {
                 expire_at_ms: request.expire_at_ms,
             })
             .collect::<Vec<_>>();
-        for (request, encoded) in requests.iter().zip(&encoded) {
-            self.storage_metrics
-                .record(request.value.len(), &encoded.value);
-        }
         self.execute_on_shard(primary_shard, |connection| {
             let now_ms = now_millis();
             let mut pipeline = redis_client::pipe();
@@ -1444,8 +1556,13 @@ impl RedisKvOverflowNode {
                 }
                 command.ignore();
             }
-            pipeline.query(connection)
-        })
+            pipeline.query::<()>(connection)
+        })?;
+        for (request, encoded) in requests.iter().zip(&encoded) {
+            self.storage_metrics
+                .record(request.value.len(), &encoded.value);
+        }
+        Ok(())
     }
 
     fn get_for_shard(&self, primary_shard: usize, key: &[u8]) -> Result<Option<KvOverflowValue>> {
@@ -1761,6 +1878,7 @@ struct KvOverflowMetrics {
     handoff_hits: AtomicU64,
     handoff_failures: AtomicU64,
     handoff_migrated: AtomicU64,
+    oversized_rejections: AtomicU64,
     shards: Box<[KvOverflowShardMetrics]>,
 }
 
@@ -1880,6 +1998,7 @@ pub struct KvOverflowHealthSnapshot {
     pub handoff_failures: u64,
     pub handoff_migrated: u64,
     pub handoff_pending: usize,
+    pub oversized_rejections: u64,
     pub pipeline_batches: u64,
     pub pipeline_items: u64,
     pub pipeline_bytes: u64,
@@ -3076,7 +3195,9 @@ impl AsyncScnpMutationConnection {
                                 continue;
                             }
                         };
-                        if let Some(token) = self.target.auth_token.as_deref() {
+                        if let Some(token) =
+                            self.target.auth_token.as_ref().map(|token| token.current())
+                        {
                             let token_len = u16::try_from(token.len()).map_err(|_| {
                                 ShardCacheError::Config(
                                     "SCNP authentication token exceeds 65535 bytes".into(),
@@ -3085,7 +3206,7 @@ impl AsyncScnpMutationConnection {
                             let authentication = async {
                                 stream.write_all(b"SCAUTH01").await?;
                                 stream.write_all(&token_len.to_le_bytes()).await?;
-                                stream.write_all(token).await?;
+                                stream.write_all(&token).await?;
                                 let mut response = [0u8; 1];
                                 stream.read_exact(&mut response).await?;
                                 if response != [1] {
@@ -3538,6 +3659,18 @@ impl KvOverflowStore {
         K: Into<Bytes>,
         V: Into<Bytes>,
     {
+        let value = SharedBytes::from(value.into());
+        if value.len() > self.options.max_value_bytes {
+            self.cluster
+                .metrics
+                .oversized_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(ShardCacheError::Protocol(format!(
+                "key-value overflow value is {} bytes, exceeding max_value_bytes {}",
+                value.len(),
+                self.options.max_value_bytes
+            )));
+        }
         let key = SharedBytes::from(key.into());
         let key_hash = xxh3_64(&key);
         let route = self.inner.route_key_prehashed(key_hash, &key);
@@ -3545,7 +3678,6 @@ impl KvOverflowStore {
         let lane = self.workers.lane_for_hash(primary_shard, key_hash);
         let _admission = self.admission[lane].read();
         self.reserve_worker_slot(primary_shard)?;
-        let value = SharedBytes::from(value.into());
         let _key_gate = self.key_gate_for_hash(key_hash);
         let metadata_index = key_gate_index_for_hash(key_hash, self.remote_keys.len());
         let generation = self.sequence[primary_shard]
@@ -3838,65 +3970,66 @@ impl KvOverflowStore {
         if self.cluster.previous_nodes.is_empty() {
             return Ok(0);
         }
-        let candidates = self
-            .remote_keys
-            .iter()
-            .flat_map(|shard| {
-                shard
-                    .read()
-                    .iter()
-                    .map(|(key, meta)| (key.clone(), *meta))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|(key, meta)| {
-                !meta.handoff_complete
-                    && self
-                        .cluster
-                        .previous_owner_index(meta.primary_shard, xxh3_64(key))
-                        .is_some()
-            })
-            .collect::<Vec<_>>();
-
-        let mut by_primary = (0..self.inner.shard_count())
-            .map(|_| Vec::new())
-            .collect::<Vec<_>>();
-        for candidate @ (_, meta) in candidates {
-            by_primary[meta.primary_shard].push(candidate);
-        }
-        let mut groups = by_primary
-            .into_iter()
-            .filter(|candidates| !candidates.is_empty());
         let mut migrated = 0usize;
         loop {
-            let batch = groups
-                .by_ref()
-                .take(self.options.handoff_max_concurrency)
-                .collect::<Vec<_>>();
-            if batch.is_empty() {
+            let by_primary = self.collect_handoff_batch();
+            if by_primary.iter().all(Vec::is_empty) {
                 break;
             }
-            let results = thread::scope(|scope| {
-                batch
-                    .into_iter()
-                    .map(|candidates| {
-                        scope.spawn(move || self.synchronize_handoff_shard(candidates))
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|handle| {
-                        handle.join().map_err(|_| {
-                            ShardCacheError::Protocol("kv overflow handoff worker panicked".into())
-                        })?
-                    })
-                    .collect::<Result<Vec<_>>>()
-            })?;
-            migrated = migrated.saturating_add(results.into_iter().sum::<usize>());
+            for group in by_primary
+                .into_iter()
+                .filter(|candidates| !candidates.is_empty())
+                .collect::<Vec<_>>()
+                .chunks_mut(self.options.handoff_max_concurrency)
+            {
+                let results = thread::scope(|scope| {
+                    group
+                        .iter_mut()
+                        .map(std::mem::take)
+                        .map(|candidates| {
+                            scope.spawn(move || self.synchronize_handoff_shard(candidates))
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|handle| {
+                            handle.join().map_err(|_| {
+                                ShardCacheError::Protocol(
+                                    "kv overflow handoff worker panicked".into(),
+                                )
+                            })?
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })?;
+                migrated = migrated.saturating_add(results.into_iter().sum::<usize>());
+            }
         }
         self.cluster
             .metrics
             .handoff_migrated
             .fetch_add(migrated as u64, Ordering::Relaxed);
         Ok(migrated)
+    }
+
+    fn collect_handoff_batch(&self) -> Vec<Vec<(SharedBytes, RemoteKeyMeta)>> {
+        let mut by_primary = (0..self.inner.shard_count())
+            .map(|_| Vec::with_capacity(self.options.handoff_batch_items))
+            .collect::<Vec<_>>();
+        for metadata in self.remote_keys.iter().map(RwLock::read) {
+            for (key, meta) in metadata.iter() {
+                let candidates = &mut by_primary[meta.primary_shard];
+                if candidates.len() >= self.options.handoff_batch_items
+                    || meta.handoff_complete
+                    || self
+                        .cluster
+                        .previous_owner_index(meta.primary_shard, xxh3_64(key))
+                        .is_none()
+                {
+                    continue;
+                }
+                candidates.push((key.clone(), *meta));
+            }
+        }
+        by_primary
     }
 
     fn synchronize_handoff_shard(
@@ -4059,25 +4192,36 @@ impl KvOverflowStore {
 
     /// Materializes resident and remotely offloaded values for persistence.
     pub fn try_entry_snapshot(&self) -> Result<Vec<StoredEntry>> {
-        for _ in 0..3 {
-            let mut entries = self.inner.try_entry_snapshot()?;
-            let resident = entries
+        let mut entries = Vec::new();
+        self.try_visit_entry_snapshot(|entry| {
+            entries.push(entry);
+            Ok(())
+        })?;
+        entries.sort_by_key(|entry| xxh3_64(&entry.key));
+        Ok(entries)
+    }
+
+    /// Visits a persistence snapshot while retaining at most one remote
+    /// metadata stripe and one remote value beyond the bounded resident tier.
+    pub fn try_visit_entry_snapshot(
+        &self,
+        mut visit: impl FnMut(StoredEntry) -> Result<()>,
+    ) -> Result<()> {
+        let resident_entries = self.inner.try_entry_snapshot()?;
+        let resident = resident_entries
+            .iter()
+            .map(|entry| entry.key.clone())
+            .collect::<HashSet<_>>();
+        for entry in resident_entries {
+            visit(entry)?;
+        }
+        let now_ms = now_millis();
+        for metadata in self.remote_keys.iter() {
+            let remote_entries = metadata
+                .read()
                 .iter()
-                .map(|entry| entry.key.clone())
-                .collect::<HashSet<_>>();
-            let now_ms = now_millis();
-            let remote_entries = self
-                .remote_keys
-                .iter()
-                .flat_map(|shard| {
-                    shard
-                        .read()
-                        .iter()
-                        .map(|(key, meta)| (key.clone(), *meta))
-                        .collect::<Vec<_>>()
-                })
+                .map(|(key, meta)| (key.clone(), *meta))
                 .collect::<Vec<_>>();
-            let mut changed = false;
             for (key, meta) in remote_entries {
                 if resident.contains(key.as_ref())
                     || meta.expire_at_ms.is_some_and(|expiry| expiry <= now_ms)
@@ -4093,8 +4237,9 @@ impl KvOverflowStore {
                     .copied()
                     != Some(meta)
                 {
-                    changed = true;
-                    break;
+                    return Err(ShardCacheError::Persistence(
+                        "kv overflow snapshot metadata changed while streaming".into(),
+                    ));
                 }
                 let remote = self
                     .cluster
@@ -4105,21 +4250,64 @@ impl KvOverflowStore {
                             meta.primary_shard
                         ))
                     })?;
-                entries.push(StoredEntry {
+                visit(StoredEntry {
                     key: key.as_ref().to_vec(),
                     value: remote.value.as_ref().to_vec(),
                     expire_at_ms: meta.expire_at_ms,
-                });
+                })?;
             }
-            if !changed {
-                entries.sort_by_key(|entry| xxh3_64(&entry.key));
-                return Ok(entries);
-            }
-            thread::yield_now();
         }
-        Err(ShardCacheError::Persistence(
-            "kv overflow snapshot could not stabilize concurrent remote metadata".into(),
-        ))
+        Ok(())
+    }
+
+    /// Writes a bounded-memory, atomic persistence snapshot.
+    pub fn write_snapshot(
+        &self,
+        snapshots: &SnapshotStore,
+        timestamp_ms: u64,
+        compression: SnapshotCompression,
+    ) -> Result<std::path::PathBuf> {
+        snapshots.write_snapshot_streaming(timestamp_ms, compression, |sink| {
+            self.try_visit_entry_snapshot(sink)
+        })
+    }
+
+    /// Writes through the authoritative persistence runtime and prunes WAL
+    /// only after the streamed snapshot is durable.
+    pub fn write_persistence_snapshot(
+        &self,
+        persistence: &PersistenceRuntime,
+        timestamp_ms: u64,
+    ) -> Result<std::path::PathBuf> {
+        persistence.snapshot_streaming(timestamp_ms, |sink| self.try_visit_entry_snapshot(sink))
+    }
+
+    /// Restores the newest snapshot incrementally and mirrors it to overflow.
+    pub fn restore_latest_snapshot(&self, snapshots: &SnapshotStore) -> Result<Option<u64>> {
+        let mut restored = 0usize;
+        let flush_interval = (self.options.queue_capacity / 2).max(1);
+        let loaded = snapshots.visit_latest_snapshot(|entry| {
+            let now_ms = now_millis();
+            if entry
+                .expire_at_ms
+                .is_some_and(|deadline| deadline <= now_ms)
+            {
+                return Ok(());
+            }
+            let ttl_ms = entry
+                .expire_at_ms
+                .map(|deadline| deadline.saturating_sub(now_ms));
+            self.set(entry.key, entry.value, ttl_ms)?;
+            restored = restored.saturating_add(1);
+            if restored.is_multiple_of(flush_interval) {
+                self.flush_remote()?;
+            }
+            Ok(())
+        })?;
+        if loaded.is_some() {
+            self.flush_remote()?;
+        }
+        Ok(loaded.map(|(_, timestamp_ms)| timestamp_ms))
     }
 
     pub fn health_snapshot(&self) -> KvOverflowHealthSnapshot {
@@ -4249,6 +4437,7 @@ impl KvOverflowStore {
                         .count()
                 })
                 .sum(),
+            oversized_rejections: metrics.oversized_rejections.load(Ordering::Relaxed),
             pipeline_batches: metrics
                 .shards
                 .iter()
@@ -4711,7 +4900,8 @@ async fn execute_direct_puts(
     buffers.responses.reserve(puts.len());
     let now_ms = now_millis();
     let mut encode_result = Ok(());
-    for job in puts.iter() {
+    let mut encoded_metrics = vec![None; puts.len()];
+    for (index, job) in puts.iter().enumerate() {
         let result = if job
             .put
             .expire_at_ms
@@ -4735,20 +4925,7 @@ async fn execute_direct_puts(
                     &mut buffers.compressed,
                 )
                 .map(|(stored_bytes, compressed)| {
-                    shard_metrics
-                        .worker
-                        .object_bytes_raw
-                        .fetch_add(job.put.value.len() as u64, Ordering::Relaxed);
-                    shard_metrics
-                        .worker
-                        .object_bytes_stored
-                        .fetch_add(stored_bytes as u64, Ordering::Relaxed);
-                    if compressed {
-                        shard_metrics
-                            .worker
-                            .compressed_values
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
+                    encoded_metrics[index] = Some((job.put.value.len(), stored_bytes, compressed));
                 })
             }
         } else {
@@ -4797,7 +4974,7 @@ async fn execute_direct_puts(
         vec![true; puts.len()]
     } else if puts.len() > 1 {
         let mut outcomes = Vec::with_capacity(puts.len());
-        for job in puts.iter() {
+        for (index, job) in puts.iter().enumerate() {
             buffers.request.clear();
             buffers.responses.clear();
             let result = if job
@@ -4822,7 +4999,10 @@ async fn execute_direct_puts(
                         options.compression_min_savings_percent,
                         &mut buffers.compressed,
                     )
-                    .map(|_| ())
+                    .map(|(stored_bytes, compressed)| {
+                        encoded_metrics[index] =
+                            Some((job.put.value.len(), stored_bytes, compressed));
+                    })
                 }
             } else {
                 buffers.responses.push(DirectResponseKind::Integer);
@@ -4850,6 +5030,27 @@ async fn execute_direct_puts(
         .worker
         .replication_failures
         .fetch_add(failed, Ordering::Relaxed);
+    for (succeeded, encoded) in outcomes.iter().zip(encoded_metrics) {
+        if !succeeded {
+            continue;
+        }
+        if let Some((raw_bytes, stored_bytes, compressed)) = encoded {
+            shard_metrics
+                .worker
+                .object_bytes_raw
+                .fetch_add(raw_bytes as u64, Ordering::Relaxed);
+            shard_metrics
+                .worker
+                .object_bytes_stored
+                .fetch_add(stored_bytes as u64, Ordering::Relaxed);
+            if compressed {
+                shard_metrics
+                    .worker
+                    .compressed_values
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
     shard_metrics
         .worker
         .put_failures
@@ -5892,6 +6093,7 @@ impl KvOverflowCleanupTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence::SnapshotRepository;
     use crossbeam_channel::Receiver;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -6417,6 +6619,7 @@ mod tests {
             compression_max_expansion_ratio: 256,
             handoff_max_bytes_per_second: 0,
             handoff_max_concurrency: 16,
+            handoff_batch_items: 1_024,
             retained_buffer_bytes: 16 * 1024,
         }
     }
@@ -7937,5 +8140,94 @@ mod tests {
         node.values.write().clear();
 
         assert!(store.try_entry_snapshot().is_err());
+    }
+
+    #[test]
+    fn oversized_value_is_rejected_before_admission_or_retry() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
+        let mut constrained = options(1);
+        constrained.max_value_bytes = 4;
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, constrained).unwrap();
+
+        assert!(store.set(b"large", b"12345", None).is_err());
+        let health = store.health_snapshot();
+        assert_eq!(health.oversized_rejections, 1);
+        assert_eq!(health.pending_keys, 0);
+        assert_eq!(health.queue_depth, 0);
+        assert!(!store.inner().exists(b"large"));
+        assert!(!node.values.read().contains_key(b"large".as_slice()));
+    }
+
+    #[test]
+    fn streaming_snapshot_persists_resident_and_remote_values() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node]).unwrap());
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, options(16)).unwrap();
+        store.set(b"cold", vec![1; 32], None).unwrap();
+        store.set(b"resident", vec![2; 4], None).unwrap();
+        store.flush_remote().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let snapshots = SnapshotStore::new(directory.path());
+
+        store
+            .write_snapshot(&snapshots, 11, SnapshotCompression::Lz4)
+            .unwrap();
+        let mut entries = snapshots.load_latest_snapshot().unwrap().unwrap().entries;
+        entries.sort_by(|left, right| left.key.cmp(&right.key));
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key.as_slice(), b"cold");
+        assert_eq!(entries[0].value.as_slice(), &[1; 32]);
+        assert_eq!(entries[1].key.as_slice(), b"resident");
+        assert_eq!(entries[1].value.as_slice(), &[2; 4]);
+    }
+
+    #[test]
+    fn streaming_snapshot_restore_rebuilds_overflow_incrementally() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshots = SnapshotStore::new(directory.path());
+        snapshots
+            .write_snapshot_streaming(12, SnapshotCompression::Lz4, |sink| {
+                for index in 0..32u8 {
+                    sink(StoredEntry {
+                        key: vec![index],
+                        value: vec![index; 8],
+                        expire_at_ms: None,
+                    })?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, options(16)).unwrap();
+
+        assert_eq!(store.restore_latest_snapshot(&snapshots).unwrap(), Some(12));
+        assert_eq!(node.values.read().len(), 32);
+        assert!(store.inner().stored_bytes() <= 16);
+        for index in 0..32u8 {
+            assert_eq!(
+                store.get_remote(&[index]).unwrap().unwrap().value,
+                vec![index; 8]
+            );
+        }
+    }
+
+    #[test]
+    fn primary_auth_token_file_reloads_without_exposing_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("token");
+        std::fs::write(&path, b"first\n").unwrap();
+        let token =
+            ReloadableScnpAuthToken::new_file(path.clone(), Duration::from_millis(100)).unwrap();
+        assert_eq!(token.current().as_ref(), b"first");
+
+        std::fs::write(path, b"second\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while token.current().as_ref() != b"second" && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(token.current().as_ref(), b"second");
     }
 }

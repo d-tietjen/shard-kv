@@ -1,4 +1,7 @@
-use super::{EmbeddedRouteMode, EmbeddedStore, PackedSessionWrite, ShardArcEmbeddedStore};
+use super::{
+    EmbeddedRouteMode, EmbeddedStore, OverflowReplicaAuthRuntime, PackedSessionWrite,
+    ShardArcEmbeddedStore,
+};
 use crate::config::EvictionPolicy;
 #[cfg(feature = "redis")]
 use crate::storage::RedisZSetStore;
@@ -10,9 +13,7 @@ use crate::storage::{
 #[cfg(feature = "redis")]
 use crate::storage::{RedisObjectResult, RedisStringLookup};
 use std::collections::BTreeMap;
-#[cfg(feature = "telemetry")]
 use std::sync::Arc;
-#[cfg(feature = "telemetry")]
 use std::time::Duration;
 
 #[test]
@@ -1042,4 +1043,30 @@ fn telemetry_full_latency_sampling_records_every_set_for_each_clock() {
         assert_eq!(snapshot.sets, 3);
         assert_eq!(snapshot.set_latency_ns.count, 3);
     }
+}
+
+#[test]
+fn overflow_auth_rotation_accepts_overlap_then_expires_previous_token() {
+    let source = Arc::new(parking_lot::RwLock::new(Arc::<[u8]>::from(
+        b"first".as_slice(),
+    )));
+    let reload_source = Arc::clone(&source);
+    let runtime = OverflowReplicaAuthRuntime::new_reloadable(
+        Arc::from(b"first".as_slice()),
+        Duration::from_millis(100),
+        Arc::new(move || Ok(Arc::clone(&reload_source.read()))),
+    )
+    .unwrap();
+    *source.write() = Arc::from(b"second".as_slice());
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while !runtime.authorize(b"second") && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(runtime.authorize(b"first"));
+    assert!(runtime.authorize(b"second"));
+
+    std::thread::sleep(Duration::from_millis(250));
+    assert!(!runtime.authorize(b"first"));
+    assert!(runtime.authorize(b"second"));
 }
