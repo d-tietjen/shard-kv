@@ -43,3 +43,11 @@ contract is documented in [`docs/KV_OVERFLOW.md`](docs/KV_OVERFLOW.md).
 Reports involving resource exhaustion, malformed frames, authentication
 bypass, stale topology placement, or unintended memory disclosure should be
 treated as security reports.
+
+## Dependency inventory
+
+The complete locked all-feature workspace inventory, including transitive,
+build, development, optional, and target-specific packages, is published in
+[`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md). CI regenerates the inventory
+from Cargo metadata and fails when the checked-in document is stale. The same
+release gate enforces the Rustls-only TLS dependency policy.

@@ -38,8 +38,10 @@ this repository for now.
 | vLLM/direct runtime | [`crates/shardcache-runtime/README.md`](crates/shardcache-runtime/README.md) | You want the experimental host/GPU restore path, including CUDA direct-DMA scaffolding. |
 | shardcache Docker/server | [`docs/SHARDCACHE_DOCKER.md`](docs/SHARDCACHE_DOCKER.md) | You want to build and run the server locally or in a private container registry. |
 | Benchmarks | [`benchmarks/README.md`](benchmarks/README.md) | You want reproducible head-to-head and hardware-ceiling artifacts. |
+| 0.6 feature guide | [`docs/RELEASE_0_6.md`](docs/RELEASE_0_6.md) | You want the new overflow, topology, security, migration, and release-boundary summary. |
 | Prefix-aware eviction | [`docs/PREFIX_AWARE_EVICTION.md`](docs/PREFIX_AWARE_EVICTION.md) | You want the feature-gated KV-cache hit-rate policy boundary beyond LRU/LFU. |
 | Partitioned KV overflow | [`docs/KV_OVERFLOW.md`](docs/KV_OVERFLOW.md) | You want an in-memory primary whose acknowledged cold data and read traffic can scale across shard-owned SCNP or Redis/Valkey overflow capacity. |
+| Dependency inventory | [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) | You want the complete locked all-feature workspace dependency and license list. |
 
 ## Quick Starts
 

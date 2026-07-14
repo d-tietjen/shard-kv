@@ -13,7 +13,7 @@ compatibility surface, and benchmark claims evolve.
 
 | Gate | Purpose |
 | --- | --- |
-| `quick` | Formatting, benchmark harness unit tests, compatibility manifest freshness, feature-flag compile matrix, crates.io package artifact checks, and whitespace diff checks. |
+| `quick` | Formatting, dependency and compatibility document freshness, benchmark harness unit tests, feature-flag compile matrix, crates.io package artifact checks, and whitespace diff checks. |
 | `redis` | Everything in `quick`, plus Redis compatibility tests, raw RESP server tests, and the live differential test against `SHARDCACHE_COMPAT_SERVER_BIN` or `redis-server`. |
 | `release` | Everything in `redis`, plus the workspace test suite, formal support tests, and rustdoc for all publishable crates. |
 
@@ -25,6 +25,7 @@ before tagging or publishing.
 
 ```bash
 ./scripts/check-feature-matrix.sh
+./scripts/generate-dependency-docs.sh --check
 ./scripts/check-redis-compatibility-doc.sh
 ./scripts/check-publish-artifacts.sh
 ```
@@ -32,6 +33,11 @@ before tagging or publishing.
 `check-feature-matrix.sh` compiles the current public feature contract for
 `shardcache` and `shardmap`, including the Redis-compatible server and module
 feature flags.
+
+`generate-dependency-docs.sh --check` verifies that
+`docs/DEPENDENCIES.md` contains every package and exact version in the locked
+all-feature workspace graph. Run it without `--check` after an intentional
+dependency change.
 
 `check-redis-compatibility-doc.sh` regenerates
 `docs/REDIS_COMPATIBILITY.md` from `benchmarks/src/redis_command_cases.rs` and

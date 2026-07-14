@@ -73,6 +73,8 @@
   RESP, SCNP, FCRP, and client response collection decoding.
 - Added filesystem-backed cascading-tier, restart, TLS, topology, stalled
   target, malformed-frame, and memory-amplification tests.
+- Added a public 0.6 feature and migration guide plus a CI-verified inventory
+  of every locked workspace and third-party dependency.
 
 ### Changed
 
