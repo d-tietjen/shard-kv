@@ -22,9 +22,9 @@
 - Added bounded asynchronous replication with per-key ordered worker lanes,
   generation-safe acknowledgments, queue backpressure, explicit remote flush,
   and queue/worker health counters so primary writes do not wait on SCNP I/O.
-- Added endpoint-affine worker lanes, ordered 64-write Redis pipelines, O(1)
-  fixed-slot owner lookup, and striped acknowledgment metadata to keep primary
-  overhead bounded while overflow endpoints scale horizontally.
+- Added ordered 64-write Redis pipelines, O(1) fixed-slot owner lookup, and
+  striped acknowledgment metadata to keep primary overhead bounded while
+  overflow endpoints scale horizontally.
 - Isolated every network drain from primary storage and metadata locks. Remote
   acknowledgements return through bounded per-shard completion lanes, discard
   successful value payloads, and are applied by the primary under admission or
