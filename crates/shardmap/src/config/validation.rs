@@ -565,6 +565,14 @@ impl<'a> KvOverflowValidation<'a> {
                 "kv_overflow.max_memory_bytes must be > 0",
             )?;
             ConfigCheck::require(
+                self.config.max_key_bytes > 0,
+                "kv_overflow.max_key_bytes must be > 0",
+            )?;
+            ConfigCheck::require(
+                self.config.max_metadata_bytes == 0 || self.config.max_metadata_bytes > 128,
+                "kv_overflow.max_metadata_bytes must be zero or greater than per-key overhead",
+            )?;
+            ConfigCheck::require(
                 matches!(
                     self.config.eviction_policy,
                     EvictionPolicy::Lru | EvictionPolicy::Lfu

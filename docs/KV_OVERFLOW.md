@@ -52,6 +52,8 @@ let config = KvOverflowConfig {
     }],
     slot_count: 16_384,
     max_memory_bytes: 1024 * 1024 * 1024,
+    max_metadata_bytes: 256 * 1024 * 1024,
+    max_key_bytes: 1024 * 1024,
     eviction_policy: EvictionPolicy::Lfu,
     ..KvOverflowConfig::default()
 };
@@ -160,6 +162,22 @@ let remote = cache.cluster().get(b"model:7")?;
 - Remote values are rejected before allocation when their decoded length exceeds
   `max_value_bytes` or their compression expansion exceeds
   `compression_max_expansion_ratio`.
+- Primary key tracking is independently bounded by `max_metadata_bytes` and
+  `max_key_bytes`. A zero metadata limit derives the larger of 25% of
+  `max_memory_bytes` or one maximum-size key charge.
+  New unique keys receive backpressure when the metadata budget is full;
+  overwrites remain admitted, and confirmed deletes release their charge.
+  Health snapshots expose the configured limits, current `metadata_bytes`, and
+  `metadata_rejections`. Failed-mutation and expiry cleanup uses fixed-size
+  stripe batches so maintenance cannot duplicate the complete key index.
+- Resident admission is isolated per primary shard. Growth is rejected above
+  the shard's share of `max_memory_bytes` plus one `max_key_bytes` and
+  `max_value_bytes` envelope; non-growing overwrites remain admitted. This
+  bounds replica-outage and stalled-pipeline memory without forcing healthy
+  asynchronous writes to wait for each remote acknowledgement.
+  Cold reads still return their remote value when the ceiling is full, but
+  skip promotion into primary memory. `resident_backpressure` reports rejected
+  or bypassed growth.
 - `slot_count` is a persistent routing invariant and must not change while
   overflow data exists. It defaults to 16,384, must be at least the shard
   count, and is divided evenly into power-of-two shard ranges. Logical slots
@@ -252,6 +270,8 @@ redis_key_prefix = "my-service:overflow:"
 redis_username_env = "OVERFLOW_REDIS_USERNAME"
 redis_password_env = "OVERFLOW_REDIS_PASSWORD"
 max_memory_bytes = 1073741824
+max_metadata_bytes = 268435456
+max_key_bytes = 1048576
 eviction_policy = "lfu"
 
 [[kv_overflow.replicas]]

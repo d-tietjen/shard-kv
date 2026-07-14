@@ -6,6 +6,10 @@ use crate::error::{Result, ShardCacheClientError};
 use crate::protocol::{FAST_FLAG_REDIS_COMMAND_ARGS, ROUTED_FLAGS};
 use crate::routing::ShardCacheRoute;
 
+const RESP_MAX_CONTAINER_ITEMS: usize = 65_536;
+const RESP_MAX_NESTING_DEPTH: usize = 128;
+const RESP_MIN_FRAME_BYTES: usize = 3;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RedisResponse {
     Ok,
@@ -24,7 +28,7 @@ impl RedisResponse {
     /// Decodes a RESP2/RESP3 payload returned by the generic SCNP Redis wrapper.
     pub fn from_resp_bytes(bytes: &[u8]) -> Result<Self> {
         let mut cursor = 0usize;
-        let response = parse_resp_value(bytes, &mut cursor)?;
+        let response = parse_resp_value(bytes, &mut cursor, 0)?;
         if cursor != bytes.len() {
             return Err(ShardCacheClientError::Protocol(
                 "RESP response has trailing bytes".into(),
@@ -566,7 +570,12 @@ fn write_var_u32<W: Write>(w: &mut W, mut value: u32) -> Result<()> {
     Ok(())
 }
 
-fn parse_resp_value(buf: &[u8], cursor: &mut usize) -> Result<RedisResponse> {
+fn parse_resp_value(buf: &[u8], cursor: &mut usize, depth: usize) -> Result<RedisResponse> {
+    if depth > RESP_MAX_NESTING_DEPTH {
+        return Err(ShardCacheClientError::Protocol(format!(
+            "RESP nesting exceeds maximum depth {RESP_MAX_NESTING_DEPTH}"
+        )));
+    }
     let Some(prefix) = buf.get(*cursor).copied() else {
         return Err(ShardCacheClientError::Protocol(
             "truncated RESP response".into(),
@@ -617,10 +626,10 @@ fn parse_resp_value(buf: &[u8], cursor: &mut usize) -> Result<RedisResponse> {
         b'$' => parse_resp_bulk(buf, cursor, false),
         b'!' => parse_resp_bulk(buf, cursor, true),
         b'=' => parse_resp_verbatim(buf, cursor),
-        b'*' => parse_resp_sequence(buf, cursor, RedisSequenceKind::Array),
-        b'~' => parse_resp_sequence(buf, cursor, RedisSequenceKind::Set),
-        b'>' => parse_resp_sequence(buf, cursor, RedisSequenceKind::Push),
-        b'%' => parse_resp_map(buf, cursor),
+        b'*' => parse_resp_sequence(buf, cursor, RedisSequenceKind::Array, depth),
+        b'~' => parse_resp_sequence(buf, cursor, RedisSequenceKind::Set, depth),
+        b'>' => parse_resp_sequence(buf, cursor, RedisSequenceKind::Push, depth),
+        b'%' => parse_resp_map(buf, cursor, depth),
         b'(' => {
             let line = read_resp_line(buf, cursor, "big number")?;
             Ok(RedisResponse::Value(line.to_vec()))
@@ -642,15 +651,20 @@ fn parse_resp_sequence(
     buf: &[u8],
     cursor: &mut usize,
     kind: RedisSequenceKind,
+    depth: usize,
 ) -> Result<RedisResponse> {
     let line = read_resp_line(buf, cursor, "array length")?;
     let len = parse_resp_i64(line, "array length")?;
     if len < 0 {
         return Ok(RedisResponse::Null);
     }
-    let mut values = Vec::with_capacity(len as usize);
-    for _ in 0..len {
-        values.push(parse_resp_value(buf, cursor)?);
+    let count = validate_resp_container_count(buf, *cursor, len, 1, "array")?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheClientError::Protocol("RESP array allocation failed".into()))?;
+    for _ in 0..count {
+        values.push(parse_resp_value(buf, cursor, depth + 1)?);
     }
     match kind {
         RedisSequenceKind::Array => Ok(RedisResponse::Array(values)),
@@ -659,19 +673,50 @@ fn parse_resp_sequence(
     }
 }
 
-fn parse_resp_map(buf: &[u8], cursor: &mut usize) -> Result<RedisResponse> {
+fn parse_resp_map(buf: &[u8], cursor: &mut usize, depth: usize) -> Result<RedisResponse> {
     let line = read_resp_line(buf, cursor, "map length")?;
     let len = parse_resp_i64(line, "map length")?;
     if len < 0 {
         return Ok(RedisResponse::Null);
     }
-    let mut entries = Vec::with_capacity(len as usize);
-    for _ in 0..len {
-        let key = parse_resp_value(buf, cursor)?;
-        let value = parse_resp_value(buf, cursor)?;
+    let count = validate_resp_container_count(buf, *cursor, len, 2, "map")?;
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheClientError::Protocol("RESP map allocation failed".into()))?;
+    for _ in 0..count {
+        let key = parse_resp_value(buf, cursor, depth + 1)?;
+        let value = parse_resp_value(buf, cursor, depth + 1)?;
         entries.push((key, value));
     }
     Ok(RedisResponse::Map(entries))
+}
+
+fn validate_resp_container_count(
+    buf: &[u8],
+    cursor: usize,
+    count: i64,
+    frames_per_item: usize,
+    label: &str,
+) -> Result<usize> {
+    let count = usize::try_from(count).map_err(|_| {
+        ShardCacheClientError::Protocol(format!("RESP {label} count cannot be negative"))
+    })?;
+    if count > RESP_MAX_CONTAINER_ITEMS {
+        return Err(ShardCacheClientError::Protocol(format!(
+            "RESP {label} count {count} exceeds maximum {RESP_MAX_CONTAINER_ITEMS}"
+        )));
+    }
+    let minimum = count
+        .checked_mul(frames_per_item)
+        .and_then(|value| value.checked_mul(RESP_MIN_FRAME_BYTES))
+        .ok_or_else(|| ShardCacheClientError::Protocol(format!("RESP {label} count overflow")))?;
+    if minimum > buf.len().saturating_sub(cursor) {
+        return Err(ShardCacheClientError::Protocol(format!(
+            "truncated RESP {label}"
+        )));
+    }
+    Ok(count)
 }
 
 fn parse_resp_bulk(buf: &[u8], cursor: &mut usize, is_error: bool) -> Result<RedisResponse> {
@@ -819,6 +864,19 @@ mod tests {
                 ]),
             )])
         );
+    }
+
+    #[test]
+    fn rejects_resp_allocation_and_nesting_amplification() {
+        let oversized = format!("*{}\r\n", RESP_MAX_CONTAINER_ITEMS + 1);
+        assert!(RedisResponse::from_resp_bytes(oversized.as_bytes()).is_err());
+
+        let mut nested = Vec::new();
+        for _ in 0..=RESP_MAX_NESTING_DEPTH {
+            nested.extend_from_slice(b"*1\r\n");
+        }
+        nested.extend_from_slice(b"_\r\n");
+        assert!(RedisResponse::from_resp_bytes(&nested).is_err());
     }
 
     #[test]

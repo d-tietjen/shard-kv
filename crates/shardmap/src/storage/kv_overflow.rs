@@ -40,6 +40,8 @@ const KV_OVERFLOW_COMPRESSED_HEADER_LEN: usize = KV_OVERFLOW_HEADER_LEN + 1;
 const KV_OVERFLOW_CODEC_LZ4: u8 = 1;
 const KV_OVERFLOW_KEY_GATES: usize = 64;
 const KV_OVERFLOW_EVICTION_BATCH_PER_SHARD: usize = 16;
+const KV_OVERFLOW_CLEANUP_BATCH_PER_STRIPE: usize = 256;
+const KV_OVERFLOW_METADATA_ENTRY_OVERHEAD: usize = 128;
 const KV_OVERFLOW_STORAGE_KEY_MAGIC: &[u8; 8] = b"SCKVKEY1";
 pub const DEFAULT_KV_OVERFLOW_SLOT_COUNT: u32 = 16_384;
 
@@ -161,6 +163,8 @@ pub trait KvOverflowNode: Send + Sync + 'static {
 #[derive(Debug, Clone)]
 pub struct KvOverflowOptions {
     pub max_memory_bytes: usize,
+    pub max_metadata_bytes: usize,
+    pub max_key_bytes: usize,
     pub eviction_policy: EvictionPolicy,
     pub fetch_on_miss: bool,
     pub cleanup_interval: Duration,
@@ -188,6 +192,8 @@ pub struct KvOverflowOptions {
 impl KvOverflowOptions {
     fn validate(&self) -> Result<()> {
         if self.max_memory_bytes == 0
+            || self.max_metadata_bytes <= KV_OVERFLOW_METADATA_ENTRY_OVERHEAD
+            || self.max_key_bytes == 0
             || !matches!(
                 self.eviction_policy,
                 EvictionPolicy::Lru | EvictionPolicy::Lfu
@@ -239,6 +245,21 @@ impl TryFrom<&KvOverflowConfig> for KvOverflowOptions {
                 "kv_overflow.max_memory_bytes must be > 0".into(),
             ));
         }
+        let configured_metadata_bytes =
+            usize::try_from(config.max_metadata_bytes).map_err(|_| {
+                ShardCacheError::Config(
+                    "kv_overflow.max_metadata_bytes exceeds platform addressable size".into(),
+                )
+            })?;
+        let max_metadata_bytes = if configured_metadata_bytes == 0 {
+            max_memory_bytes.saturating_div(4).max(
+                config
+                    .max_key_bytes
+                    .saturating_add(KV_OVERFLOW_METADATA_ENTRY_OVERHEAD),
+            )
+        } else {
+            configured_metadata_bytes
+        };
         if !matches!(
             config.eviction_policy,
             EvictionPolicy::Lru | EvictionPolicy::Lfu
@@ -249,6 +270,8 @@ impl TryFrom<&KvOverflowConfig> for KvOverflowOptions {
         }
         let options = Self {
             max_memory_bytes,
+            max_metadata_bytes,
+            max_key_bytes: config.max_key_bytes,
             eviction_policy: config.eviction_policy,
             fetch_on_miss: config.fetch_on_miss,
             cleanup_interval: Duration::from_millis(config.cleanup_interval_ms),
@@ -1879,6 +1902,8 @@ struct KvOverflowMetrics {
     handoff_failures: AtomicU64,
     handoff_migrated: AtomicU64,
     oversized_rejections: AtomicU64,
+    metadata_rejections: AtomicU64,
+    resident_backpressure: AtomicU64,
     shards: Box<[KvOverflowShardMetrics]>,
 }
 
@@ -1959,6 +1984,11 @@ pub struct KvOverflowHealthSnapshot {
     pub compression: KvOverflowCompression,
     pub adaptive_pipeline: bool,
     pub max_value_bytes: usize,
+    pub max_key_bytes: usize,
+    pub max_metadata_bytes: usize,
+    pub metadata_bytes: usize,
+    pub metadata_rejections: u64,
+    pub resident_backpressure: u64,
     pub retained_buffer_bytes: usize,
     pub circuit_open_targets: usize,
     pub circuit_open_events: u64,
@@ -2916,7 +2946,53 @@ struct PendingKeyMeta {
     primary_shard: usize,
     generation: u64,
     queued: bool,
+    tracks_key: bool,
     mutation: PendingMutation,
+}
+
+#[derive(Debug)]
+struct KvOverflowMetadataBudget {
+    used: AtomicUsize,
+    limit: usize,
+}
+
+impl KvOverflowMetadataBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            used: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    fn charge(key_len: usize) -> Option<usize> {
+        key_len.checked_add(KV_OVERFLOW_METADATA_ENTRY_OVERHEAD)
+    }
+
+    fn try_reserve(&self, key_len: usize) -> bool {
+        let Some(charge) = Self::charge(key_len) else {
+            return false;
+        };
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(charge).filter(|next| *next <= self.limit)
+            })
+            .is_ok()
+    }
+
+    fn release(&self, key_len: usize) {
+        let Some(charge) = Self::charge(key_len) else {
+            return;
+        };
+        let _ = self
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                Some(used.saturating_sub(charge))
+            });
+    }
+
+    fn used(&self) -> usize {
+        self.used.load(Ordering::Acquire)
+    }
 }
 
 struct MetadataMap<V> {
@@ -3531,6 +3607,7 @@ pub struct KvOverflowStore {
     inner: Arc<EmbeddedStore>,
     cluster: Arc<KvOverflowCluster>,
     options: KvOverflowOptions,
+    metadata_budget: Arc<KvOverflowMetadataBudget>,
     remote_keys: RemoteKeyShards,
     pending_keys: PendingKeyShards,
     key_gates: Arc<[Mutex<()>]>,
@@ -3597,6 +3674,7 @@ impl KvOverflowStore {
             .map(|_| Mutex::new(()))
             .collect::<Vec<_>>()
             .into();
+        let metadata_budget = Arc::new(KvOverflowMetadataBudget::new(options.max_metadata_bytes));
         let maintenance: Arc<[Mutex<()>]> = (0..inner.shard_count())
             .map(|_| Mutex::new(()))
             .collect::<Vec<_>>()
@@ -3625,12 +3703,14 @@ impl KvOverflowStore {
             options.clone(),
             Arc::clone(&admission),
             Arc::clone(&sequence),
+            Arc::clone(&metadata_budget),
             options.cleanup_interval,
         )?;
         let store = Self {
             inner,
             cluster,
             options,
+            metadata_budget,
             remote_keys,
             pending_keys,
             key_gates,
@@ -3672,19 +3752,71 @@ impl KvOverflowStore {
             )));
         }
         let key = SharedBytes::from(key.into());
+        self.validate_key_len(&key)?;
         let key_hash = xxh3_64(&key);
         let route = self.inner.route_key_prehashed(key_hash, &key);
         let primary_shard = route.shard_id;
+        let shard_target =
+            shard_memory_target(&self.options, self.inner.shard_count(), primary_shard);
+        if self.inner.stored_bytes_in_shard(primary_shard) > shard_target {
+            self.drain_completions(primary_shard, self.options.pipeline_max_items);
+        }
         let lane = self.workers.lane_for_hash(primary_shard, key_hash);
         let _admission = self.admission[lane].read();
         self.reserve_worker_slot(primary_shard)?;
         let _key_gate = self.key_gate_for_hash(key_hash);
         let metadata_index = key_gate_index_for_hash(key_hash, self.remote_keys.len());
+        let already_tracked = self.inner.exists(&key)
+            || self.remote_keys[metadata_index]
+                .read()
+                .get_hashed(key_hash, &key)
+                .is_some()
+            || self.pending_keys[metadata_index]
+                .read()
+                .get_hashed(key_hash, &key)
+                .is_some_and(|meta| meta.tracks_key);
+        let newly_tracked = !already_tracked;
+        if newly_tracked && !self.metadata_budget.try_reserve(key.len()) {
+            self.workers.shard_in_flight[primary_shard].fetch_sub(1, Ordering::Release);
+            self.cluster
+                .metrics
+                .metadata_rejections
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(ShardCacheError::Backpressure(
+                "kv overflow metadata budget exhausted",
+            ));
+        }
         let generation = self.sequence[primary_shard]
             .0
             .fetch_add(1, Ordering::Relaxed);
         let now_ms = ttl_ms.map(|_| now_millis());
         let expire_at_ms = ttl_ms.zip(now_ms).map(|(ttl, now)| now.saturating_add(ttl));
+        let _maintenance = self.maintenance[primary_shard].lock();
+        let current_bytes = self.inner.stored_bytes_in_shard(primary_shard);
+        let previous_bytes = self
+            .inner
+            .get(&key)
+            .map_or(0, |previous| key.len().saturating_add(previous.len()));
+        let projected_bytes = current_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(key.len())
+            .saturating_add(value.len());
+        let hard_limit = shard_target
+            .saturating_add(self.options.max_key_bytes)
+            .saturating_add(self.options.max_value_bytes);
+        if projected_bytes > hard_limit && projected_bytes > current_bytes {
+            if newly_tracked {
+                self.metadata_budget.release(key.len());
+            }
+            self.workers.shard_in_flight[primary_shard].fetch_sub(1, Ordering::Release);
+            self.cluster
+                .metrics
+                .resident_backpressure
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(ShardCacheError::Backpressure(
+                "kv overflow resident memory hard limit is exceeded",
+            ));
+        }
         self.remote_keys[metadata_index]
             .write()
             .remove_hashed(key_hash, key.as_ref());
@@ -3696,6 +3828,7 @@ impl KvOverflowStore {
             now_ms.unwrap_or(0),
             generation,
         );
+        drop(_maintenance);
         if self.workers.enqueue_reserved_to_lane(
             lane,
             KvOverflowJob::Put {
@@ -3722,6 +3855,7 @@ impl KvOverflowStore {
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        self.validate_key_len(key)?;
         if let Some(value) = self.inner.get(key) {
             return Ok(Some(value));
         }
@@ -3801,13 +3935,36 @@ impl KvOverflowStore {
                     .expire_at_ms
                     .is_some_and(|expiry| expiry <= now_millis())
             {
-                self.remote_keys[metadata_index]
+                let removed = self.remote_keys[metadata_index]
                     .write()
                     .remove_hashed(key_hash, key);
+                if removed.is_some() {
+                    self.metadata_budget.release(key.len());
+                }
             }
             return Ok(FaultInOutcome::Return(None));
         };
         let route = self.inner.route_key_prehashed(key_hash, key);
+        let _maintenance = self.maintenance[expected.primary_shard].lock();
+        let current_bytes = self.inner.stored_bytes_in_shard(expected.primary_shard);
+        let shard_target = shard_memory_target(
+            &self.options,
+            self.inner.shard_count(),
+            expected.primary_shard,
+        );
+        let hard_limit = shard_target
+            .saturating_add(self.options.max_key_bytes)
+            .saturating_add(self.options.max_value_bytes);
+        let projected_bytes = current_bytes
+            .saturating_add(key.len())
+            .saturating_add(remote.value.len());
+        if projected_bytes > hard_limit {
+            self.cluster
+                .metrics
+                .resident_backpressure
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(FaultInOutcome::Return(Some(remote.value.to_vec())));
+        }
         self.inner.set_value_bytes_routed_overflow(
             route,
             key,
@@ -3816,6 +3973,7 @@ impl KvOverflowStore {
             now_millis(),
             expected.generation,
         );
+        drop(_maintenance);
         self.cluster
             .metrics
             .fault_ins
@@ -3836,12 +3994,14 @@ impl KvOverflowStore {
 
     /// Reads the deterministic overflow owner without touching primary memory.
     pub fn get_remote(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
+        self.validate_key_len(key)?;
         let key_hash = xxh3_64(key);
         let primary_shard = self.inner.route_key_prehashed(key_hash, key).shard_id;
         self.cluster.get_on_shard(primary_shard, key_hash, key)
     }
 
     pub fn delete(&self, key: &[u8]) -> Result<bool> {
+        self.validate_key_len(key)?;
         let key_hash = xxh3_64(key);
         let primary_shard = self.inner.route_key_prehashed(key_hash, key).shard_id;
         let lane = self.workers.lane_for_hash(primary_shard, key_hash);
@@ -3861,7 +4021,7 @@ impl KvOverflowStore {
             || self.pending_keys[metadata_index]
                 .read()
                 .get_hashed(key_hash, key)
-                .is_some();
+                .is_some_and(|meta| meta.tracks_key);
         self.pending_keys[metadata_index].write().insert_hashed(
             key_hash,
             SharedBytes::copy_from_slice(key),
@@ -3869,6 +4029,7 @@ impl KvOverflowStore {
                 primary_shard,
                 generation,
                 queued: true,
+                tracks_key: present,
                 mutation: PendingMutation::Delete {
                     retry_on_failure: false,
                 },
@@ -3899,6 +4060,7 @@ impl KvOverflowStore {
             &self.remote_keys,
             &self.pending_keys,
             &self.key_gates,
+            &self.metadata_budget,
             SharedBytes::copy_from_slice(key),
             key_hash,
             generation,
@@ -3906,6 +4068,21 @@ impl KvOverflowStore {
         );
         remote_result?;
         Ok(present)
+    }
+
+    fn validate_key_len(&self, key: &[u8]) -> Result<()> {
+        if key.len() <= self.options.max_key_bytes {
+            return Ok(());
+        }
+        self.cluster
+            .metrics
+            .metadata_rejections
+            .fetch_add(1, Ordering::Relaxed);
+        Err(ShardCacheError::Protocol(format!(
+            "key-value overflow key is {} bytes, exceeding max_key_bytes {}",
+            key.len(),
+            self.options.max_key_bytes
+        )))
     }
 
     /// Waits until all remote mutations admitted before this call are complete.
@@ -4159,21 +4336,46 @@ impl KvOverflowStore {
         let _key_gates = self.lock_all_keys();
         for entry in self.inner.try_entry_snapshot()? {
             let key_hash = xxh3_64(&entry.key);
+            let metadata_index = key_gate_index_for_hash(key_hash, self.remote_keys.len());
+            if entry.key.len() > self.options.max_key_bytes {
+                return Err(ShardCacheError::Persistence(format!(
+                    "recovered key is {} bytes, exceeding kv_overflow.max_key_bytes {}",
+                    entry.key.len(),
+                    self.options.max_key_bytes
+                )));
+            }
+            let already_tracked = self.remote_keys[metadata_index]
+                .read()
+                .get_hashed(key_hash, &entry.key)
+                .is_some();
+            if !already_tracked && !self.metadata_budget.try_reserve(entry.key.len()) {
+                self.cluster
+                    .metrics
+                    .metadata_rejections
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(ShardCacheError::Persistence(
+                    "recovered keyspace exceeds kv_overflow.max_metadata_bytes".into(),
+                ));
+            }
             let primary_shard = self
                 .inner
                 .route_key_prehashed(key_hash, &entry.key)
                 .shard_id;
-            self.cluster.put_until_on_shard(
+            if let Err(error) = self.cluster.put_until_on_shard(
                 primary_shard,
                 key_hash,
                 &entry.key,
                 &entry.value,
                 entry.expire_at_ms,
-            )?;
+            ) {
+                if !already_tracked {
+                    self.metadata_budget.release(entry.key.len());
+                }
+                return Err(error);
+            }
             let generation = self.sequence[primary_shard]
                 .0
                 .fetch_add(1, Ordering::Relaxed);
-            let metadata_index = key_gate_index(&entry.key, self.remote_keys.len());
             self.remote_keys[metadata_index].write().insert(
                 SharedBytes::from(entry.key),
                 RemoteKeyMeta {
@@ -4347,6 +4549,11 @@ impl KvOverflowStore {
             compression: self.options.compression,
             adaptive_pipeline: self.options.adaptive_pipeline,
             max_value_bytes: self.options.max_value_bytes,
+            max_key_bytes: self.options.max_key_bytes,
+            max_metadata_bytes: self.options.max_metadata_bytes,
+            metadata_bytes: self.metadata_budget.used(),
+            metadata_rejections: metrics.metadata_rejections.load(Ordering::Relaxed),
+            resident_backpressure: metrics.resident_backpressure.load(Ordering::Relaxed),
             retained_buffer_bytes: self.options.retained_buffer_bytes,
             circuit_open_targets: circuit_health.0,
             circuit_open_events: circuit_health.1,
@@ -4509,6 +4716,7 @@ impl KvOverflowStore {
             &self.remote_keys,
             &self.pending_keys,
             &self.key_gates,
+            &self.metadata_budget,
             max_items,
         ) {
             self.enforce_memory_target(primary_shard);
@@ -5666,6 +5874,7 @@ fn drain_barriers(completions: Vec<crossbeam_channel::Receiver<Result<()>>>) -> 
     first_error.map_or(Ok(()), Err)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drain_completion_queue(
     completion_receiver: &Receiver<(SharedBytes, KvOverflowCompletion)>,
     in_flight: &AtomicUsize,
@@ -5673,6 +5882,7 @@ fn drain_completion_queue(
     remote_keys: &[RwLock<MetadataMap<RemoteKeyMeta>>],
     pending_keys: &[RwLock<MetadataMap<PendingKeyMeta>>],
     key_gates: &[Mutex<()>],
+    metadata_budget: &KvOverflowMetadataBudget,
     max_items: usize,
 ) -> bool {
     let mut enforce_memory = false;
@@ -5714,6 +5924,7 @@ fn drain_completion_queue(
                 remote_keys,
                 pending_keys,
                 key_gates,
+                metadata_budget,
                 key,
                 key_hash,
                 generation,
@@ -5769,6 +5980,7 @@ fn apply_put_completion(
                     primary_shard,
                     generation,
                     queued: false,
+                    tracks_key: true,
                     mutation: PendingMutation::Put {
                         value: Some(value),
                         expire_at_ms,
@@ -5786,6 +5998,7 @@ fn apply_delete_completion(
     remote_keys: &[RwLock<MetadataMap<RemoteKeyMeta>>],
     pending_keys: &[RwLock<MetadataMap<PendingKeyMeta>>],
     key_gates: &[Mutex<()>],
+    metadata_budget: &KvOverflowMetadataBudget,
     key: SharedBytes,
     key_hash: u64,
     generation: u64,
@@ -5801,13 +6014,17 @@ fn apply_delete_completion(
         return;
     }
     if succeeded {
-        pending_keys[gate_index]
+        let tracks_key = pending_keys[gate_index]
             .write()
-            .remove_hashed(key_hash, key.as_ref());
+            .remove_hashed(key_hash, key.as_ref())
+            .is_some_and(|meta| meta.tracks_key);
         remote_keys[gate_index]
             .write()
             .remove_hashed(key_hash, key.as_ref());
         inner.delete(&key);
+        if tracks_key {
+            metadata_budget.release(key.len());
+        }
         return;
     }
     let mut pending = pending_keys[gate_index].write();
@@ -5907,6 +6124,7 @@ impl KvOverflowCleanupTask {
         options: KvOverflowOptions,
         admission: Arc<[RwLock<()>]>,
         sequence: Arc<[KvOverflowSequence]>,
+        metadata_budget: Arc<KvOverflowMetadataBudget>,
         interval: Duration,
     ) -> Result<Self> {
         let senders = workers.senders.iter().cloned().collect::<Box<[_]>>();
@@ -5935,6 +6153,7 @@ impl KvOverflowCleanupTask {
                                 .read()
                                 .iter()
                                 .filter(|(_, meta)| !meta.queued)
+                                .take(KV_OVERFLOW_CLEANUP_BATCH_PER_STRIPE)
                                 .map(|(key, meta)| (key.clone(), meta.clone()))
                                 .collect::<Vec<_>>()
                         })
@@ -5963,6 +6182,7 @@ impl KvOverflowCleanupTask {
                                 .filter(|(_key, meta)| {
                                     meta.expire_at_ms.is_some_and(|expiry| expiry <= now_ms)
                                 })
+                                .take(KV_OVERFLOW_CLEANUP_BATCH_PER_STRIPE)
                                 .map(|(key, meta)| (key.clone(), *meta))
                                 .collect::<Vec<_>>()
                         })
@@ -6021,6 +6241,7 @@ impl KvOverflowCleanupTask {
                                     primary_shard,
                                     generation,
                                     queued: true,
+                                    tracks_key: true,
                                     mutation: PendingMutation::Delete {
                                         retry_on_failure: true,
                                     },
@@ -6055,6 +6276,7 @@ impl KvOverflowCleanupTask {
                             &remote_keys,
                             &pending_keys,
                             &key_gates,
+                            &metadata_budget,
                             usize::MAX,
                         ) {
                             enforce_memory_target(
@@ -6599,6 +6821,8 @@ mod tests {
     fn options(max_memory_bytes: usize) -> KvOverflowOptions {
         KvOverflowOptions {
             max_memory_bytes,
+            max_metadata_bytes: usize::MAX,
+            max_key_bytes: usize::MAX - KV_OVERFLOW_METADATA_ENTRY_OVERHEAD,
             eviction_policy: EvictionPolicy::Lfu,
             fetch_on_miss: true,
             cleanup_interval: Duration::from_secs(60),
@@ -7946,6 +8170,54 @@ mod tests {
     }
 
     #[test]
+    fn metadata_budget_bounds_unique_keys_and_is_reusable_after_delete() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node]).unwrap());
+        let mut constrained = options(usize::MAX);
+        constrained.max_metadata_bytes = KV_OVERFLOW_METADATA_ENTRY_OVERHEAD + b"a".len();
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, constrained).unwrap();
+
+        store.set(b"a", b"one", None).unwrap();
+        store.set(b"a", b"updated", None).unwrap();
+        let error = store
+            .set(b"b", b"two", None)
+            .expect_err("a second unique key must exceed the metadata budget");
+        assert!(matches!(error, ShardCacheError::Backpressure(_)));
+        assert!(!store.inner().exists(b"b"));
+        assert_eq!(
+            store.health_snapshot().metadata_bytes,
+            KV_OVERFLOW_METADATA_ENTRY_OVERHEAD + 1
+        );
+
+        store.flush_remote().unwrap();
+        assert!(store.delete(b"a").unwrap());
+        assert_eq!(store.health_snapshot().metadata_bytes, 0);
+        store.set(b"b", b"two", None).unwrap();
+        store.flush_remote().unwrap();
+        assert_eq!(store.get(b"b").unwrap().as_deref(), Some(b"two".as_slice()));
+        assert_eq!(store.health_snapshot().metadata_rejections, 1);
+    }
+
+    #[test]
+    fn oversized_keys_are_rejected_before_primary_mutation() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node]).unwrap());
+        let mut constrained = options(usize::MAX);
+        constrained.max_key_bytes = 3;
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, constrained).unwrap();
+
+        assert!(matches!(
+            store.set(b"four", b"value", None),
+            Err(ShardCacheError::Protocol(_))
+        ));
+        assert!(store.get(b"four").is_err());
+        assert!(store.get_remote(b"four").is_err());
+        assert!(store.delete(b"four").is_err());
+        assert!(!store.inner().exists(b"four"));
+        assert_eq!(store.health_snapshot().metadata_rejections, 4);
+    }
+
+    #[test]
     fn completed_acknowledgement_reclaims_its_shard_admission_slot() {
         let node = Arc::new(MemoryNode::new("node-a"));
         let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
@@ -8080,6 +8352,53 @@ mod tests {
         assert_eq!(store.inner().get(b"key"), Some(b"value".to_vec()));
         assert_eq!(store.health_snapshot().offloads, 0);
         assert_eq!(store.health_snapshot().replication_failures, 2);
+    }
+
+    #[test]
+    fn failed_replica_backpressures_resident_growth_above_target() {
+        let node = MemoryNode::new("node-a");
+        node.fail_puts.store(true, Ordering::Relaxed);
+        let cluster = Arc::new(KvOverflowCluster::new(vec![Arc::new(node)]).unwrap());
+        let mut constrained = options(4);
+        constrained.max_key_bytes = 1;
+        constrained.max_value_bytes = 5;
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, constrained).unwrap();
+
+        store.set(b"a", b"value", None).unwrap();
+        assert!(store.flush_remote().is_err());
+        let retained_bytes = store.inner().stored_bytes();
+        let error = store
+            .set(b"b", b"value", None)
+            .expect_err("unavailable overflow must not permit unbounded resident growth");
+
+        assert!(matches!(error, ShardCacheError::Backpressure(_)));
+        assert_eq!(store.inner().stored_bytes(), retained_bytes);
+        assert!(!store.inner().exists(b"b"));
+        assert_eq!(store.health_snapshot().resident_backpressure, 1);
+    }
+
+    #[test]
+    fn fault_in_bypasses_primary_when_resident_hard_limit_is_full() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
+        let mut constrained = options(4);
+        constrained.max_key_bytes = 1;
+        constrained.max_value_bytes = 5;
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, constrained).unwrap();
+
+        store.set(b"a", b"value", None).unwrap();
+        store.flush_remote().unwrap();
+        assert!(!store.inner().exists(b"a"));
+
+        node.fail_puts.store(true, Ordering::Relaxed);
+        store.set(b"b", b"value", None).unwrap();
+        assert!(store.flush_remote().is_err());
+        assert_eq!(
+            store.get(b"a").unwrap().as_deref(),
+            Some(b"value".as_slice())
+        );
+        assert!(!store.inner().exists(b"a"));
+        assert_eq!(store.health_snapshot().resident_backpressure, 1);
     }
 
     #[test]

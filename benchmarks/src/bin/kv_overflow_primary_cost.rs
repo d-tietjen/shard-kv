@@ -369,6 +369,8 @@ fn make_overflow_store(
                 cluster,
                 KvOverflowOptions {
                     max_memory_bytes: usize::MAX,
+                    max_metadata_bytes: usize::MAX,
+                    max_key_bytes: 1024 * 1024,
                     eviction_policy: EvictionPolicy::Lru,
                     fetch_on_miss: true,
                     cleanup_interval: Duration::from_secs(60),

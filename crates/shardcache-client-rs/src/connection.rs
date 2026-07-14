@@ -19,6 +19,8 @@ const SCNP_READ_BUFFER_BYTES: usize = 8 * 1024;
 const SCNP_WRITE_BUFFER_BYTES: usize = 8 * 1024;
 const SCNP_MAX_RESPONSE_BODY_BYTES: usize = 256 * 1024 * 1024;
 const SCNP_MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
+#[cfg(feature = "redis")]
+const SCNP_MAX_ARRAY_ITEMS: usize = 65_536;
 const SCNP_AUTH_MAGIC: &[u8; 8] = b"SCAUTH01";
 
 enum ScnpStream {
@@ -435,7 +437,7 @@ impl ScnpConnection {
 
         let mut cursor = 0usize;
         let count = read_u32(&self.scratch, &mut cursor, op)? as usize;
-        if count > self.scratch.len().saturating_sub(cursor) / 4 {
+        if count > SCNP_MAX_ARRAY_ITEMS || count > self.scratch.len().saturating_sub(cursor) / 4 {
             return Err(ShardCacheClientError::Protocol(format!(
                 "{op} array item count exceeds response body"
             )));

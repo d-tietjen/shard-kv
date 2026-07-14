@@ -3,6 +3,10 @@ use std::ops::Range;
 
 use crate::{Result, ShardCacheError};
 
+const RESP_MAX_CONTAINER_ITEMS: usize = 65_536;
+const RESP_MAX_NESTING_DEPTH: usize = 128;
+const RESP_MIN_FRAME_BYTES: usize = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     SimpleString(String),
@@ -225,9 +229,16 @@ fn parse_command_frame(buffer: &[u8], offset: usize) -> Result<RespCommandDecode
         ));
     }
 
-    let mut cursor = offset + 1 + header_consumed;
-    let mut parts: BorrowedCommandParts<'_> = smallvec::SmallVec::with_capacity(count as usize);
-    for _ in 0..count as usize {
+    let cursor = offset + 1 + header_consumed;
+    let Some(count) = validate_container_count(buffer, cursor, count, 1, "command array")? else {
+        return Ok(None);
+    };
+    let mut cursor = cursor;
+    let mut parts: BorrowedCommandParts<'_> = smallvec::SmallVec::new();
+    parts
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("RESP command part allocation failed".into()))?;
+    for _ in 0..count {
         let Some((part, consumed)) = parse_command_part(buffer, cursor)? else {
             return Ok(None);
         };
@@ -256,9 +267,16 @@ fn parse_command_span_frame(buffer: &[u8], offset: usize) -> Result<RespCommandS
         ));
     }
 
-    let mut cursor = offset + 1 + header_consumed;
-    let mut parts = CommandPartSpans::with_capacity(count as usize);
-    for _ in 0..count as usize {
+    let cursor = offset + 1 + header_consumed;
+    let Some(count) = validate_container_count(buffer, cursor, count, 1, "command array")? else {
+        return Ok(None);
+    };
+    let mut cursor = cursor;
+    let mut parts = CommandPartSpans::new();
+    parts
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("RESP command span allocation failed".into()))?;
+    for _ in 0..count {
         let Some((part, consumed)) = parse_command_part_span(buffer, cursor)? else {
             return Ok(None);
         };
@@ -308,18 +326,22 @@ fn parse_command_blob_string(buffer: &[u8], offset: usize) -> Result<Option<(&[u
             "null bulk strings are not supported in command frames".into(),
         ));
     }
-    let length = length as usize;
-    let start = offset + 1 + header_consumed;
-    let end = start + length;
-    if buffer.len() < end + 2 {
+    let Some((start, end, frame_end)) = payload_bounds(
+        buffer,
+        offset,
+        header_consumed,
+        length,
+        "command blob string",
+    )?
+    else {
         return Ok(None);
-    }
+    };
     if &buffer[end..end + 2] != b"\r\n" {
         return Err(ShardCacheError::Protocol(
             "blob string missing CRLF terminator".into(),
         ));
     }
-    Ok(Some((&buffer[start..end], (end + 2) - offset)))
+    Ok(Some((&buffer[start..end], frame_end - offset)))
 }
 
 fn parse_command_blob_string_span(
@@ -334,18 +356,22 @@ fn parse_command_blob_string_span(
             "null bulk strings are not supported in command frames".into(),
         ));
     }
-    let length = length as usize;
-    let start = offset + 1 + header_consumed;
-    let end = start + length;
-    if buffer.len() < end + 2 {
+    let Some((start, end, frame_end)) = payload_bounds(
+        buffer,
+        offset,
+        header_consumed,
+        length,
+        "command blob string",
+    )?
+    else {
         return Ok(None);
-    }
+    };
     if &buffer[end..end + 2] != b"\r\n" {
         return Err(ShardCacheError::Protocol(
             "blob string missing CRLF terminator".into(),
         ));
     }
-    Ok(Some((start..end, (end + 2) - offset)))
+    Ok(Some((start..end, frame_end - offset)))
 }
 
 fn parse_command_simple_string(buffer: &[u8], offset: usize) -> Result<Option<(&[u8], usize)>> {
@@ -376,8 +402,17 @@ fn parse_command_integer(buffer: &[u8], offset: usize) -> Result<Option<(&[u8], 
 }
 
 fn parse_frame(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+    parse_frame_at_depth(buffer, offset, 0)
+}
+
+fn parse_frame_at_depth(buffer: &[u8], offset: usize, depth: usize) -> Result<RespDecodeResult> {
     if offset >= buffer.len() {
         return Ok(None);
+    }
+    if depth > RESP_MAX_NESTING_DEPTH {
+        return Err(ShardCacheError::Protocol(format!(
+            "RESP nesting exceeds maximum depth {RESP_MAX_NESTING_DEPTH}"
+        )));
     }
     match buffer[offset] {
         b'+' => parse_simple_string(buffer, offset),
@@ -385,16 +420,16 @@ fn parse_frame(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
         b'!' => parse_blob_error(buffer, offset),
         b':' => parse_integer(buffer, offset),
         b'$' => parse_blob_string(buffer, offset),
-        b'*' => parse_array(buffer, offset),
-        b'%' => parse_map(buffer, offset),
-        b'~' => parse_set(buffer, offset),
-        b'>' => parse_push(buffer, offset),
+        b'*' => parse_array(buffer, offset, depth),
+        b'%' => parse_map(buffer, offset, depth),
+        b'~' => parse_set(buffer, offset, depth),
+        b'>' => parse_push(buffer, offset, depth),
         b'_' => parse_null(buffer, offset),
         b'#' => parse_boolean(buffer, offset),
         b',' => parse_double(buffer, offset),
         b'(' => parse_big_number(buffer, offset),
         b'=' => parse_verbatim_string(buffer, offset),
-        b'|' => parse_attribute(buffer, offset),
+        b'|' => parse_attribute(buffer, offset, depth),
         other => Err(ShardCacheError::Protocol(format!(
             "unsupported RESP prefix byte: {other:#x}"
         ))),
@@ -424,12 +459,11 @@ fn parse_blob_error(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
             "RESP3 blob errors cannot be null".into(),
         ));
     }
-    let length = length as usize;
-    let start = offset + 1 + header_consumed;
-    let end = start + length;
-    if buffer.len() < end + 2 {
+    let Some((start, end, frame_end)) =
+        payload_bounds(buffer, offset, header_consumed, length, "blob error")?
+    else {
         return Ok(None);
-    }
+    };
     if &buffer[end..end + 2] != b"\r\n" {
         return Err(ShardCacheError::Protocol(
             "blob error missing CRLF terminator".into(),
@@ -438,7 +472,7 @@ fn parse_blob_error(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
     let message = std::str::from_utf8(&buffer[start..end])
         .map_err(|error| ShardCacheError::Protocol(format!("invalid utf8 in RESP error: {error}")))?
         .to_string();
-    Ok(Some((Frame::Error(message), (end + 2) - offset)))
+    Ok(Some((Frame::Error(message), frame_end - offset)))
 }
 
 fn parse_integer(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
@@ -455,12 +489,11 @@ fn parse_blob_string(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
     if length < 0 {
         return Ok(Some((Frame::Null, header_consumed + 1)));
     }
-    let length = length as usize;
-    let start = offset + 1 + header_consumed;
-    let end = start + length;
-    if buffer.len() < end + 2 {
+    let Some((start, end, frame_end)) =
+        payload_bounds(buffer, offset, header_consumed, length, "blob string")?
+    else {
         return Ok(None);
-    }
+    };
     if &buffer[end..end + 2] != b"\r\n" {
         return Err(ShardCacheError::Protocol(
             "blob string missing CRLF terminator".into(),
@@ -468,22 +501,28 @@ fn parse_blob_string(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
     }
     Ok(Some((
         Frame::BlobString(buffer[start..end].to_vec()),
-        (end + 2) - offset,
+        frame_end - offset,
     )))
 }
 
-fn parse_array(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+fn parse_array(buffer: &[u8], offset: usize, depth: usize) -> Result<RespDecodeResult> {
     let Some((count, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
         return Ok(None);
     };
     if count < 0 {
         return Ok(Some((Frame::Null, header_consumed + 1)));
     }
-    let count = count as usize;
-    let mut cursor = offset + 1 + header_consumed;
-    let mut items = Vec::with_capacity(count);
+    let cursor = offset + 1 + header_consumed;
+    let Some(count) = validate_container_count(buffer, cursor, count, 1, "array")? else {
+        return Ok(None);
+    };
+    let mut cursor = cursor;
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("RESP array allocation failed".into()))?;
     for _ in 0..count {
-        let Some((frame, consumed)) = parse_frame(buffer, cursor)? else {
+        let Some((frame, consumed)) = parse_frame_at_depth(buffer, cursor, depth + 1)? else {
             return Ok(None);
         };
         items.push(frame);
@@ -492,7 +531,7 @@ fn parse_array(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
     Ok(Some((Frame::Array(items), cursor - offset)))
 }
 
-fn parse_map(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+fn parse_map(buffer: &[u8], offset: usize, depth: usize) -> Result<RespDecodeResult> {
     let Some((count, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
         return Ok(None);
     };
@@ -501,15 +540,21 @@ fn parse_map(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
             "RESP3 maps cannot be null".into(),
         ));
     }
-    let count = count as usize;
-    let mut cursor = offset + 1 + header_consumed;
-    let mut items = Vec::with_capacity(count);
+    let cursor = offset + 1 + header_consumed;
+    let Some(count) = validate_container_count(buffer, cursor, count, 2, "map")? else {
+        return Ok(None);
+    };
+    let mut cursor = cursor;
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("RESP map allocation failed".into()))?;
     for _ in 0..count {
-        let Some((key, consumed)) = parse_frame(buffer, cursor)? else {
+        let Some((key, consumed)) = parse_frame_at_depth(buffer, cursor, depth + 1)? else {
             return Ok(None);
         };
         cursor += consumed;
-        let Some((value, consumed)) = parse_frame(buffer, cursor)? else {
+        let Some((value, consumed)) = parse_frame_at_depth(buffer, cursor, depth + 1)? else {
             return Ok(None);
         };
         cursor += consumed;
@@ -518,7 +563,7 @@ fn parse_map(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
     Ok(Some((Frame::Map(items), cursor - offset)))
 }
 
-fn parse_set(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+fn parse_set(buffer: &[u8], offset: usize, depth: usize) -> Result<RespDecodeResult> {
     let Some((count, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
         return Ok(None);
     };
@@ -527,11 +572,17 @@ fn parse_set(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
             "RESP3 sets cannot be null".into(),
         ));
     }
-    let count = count as usize;
-    let mut cursor = offset + 1 + header_consumed;
-    let mut items = Vec::with_capacity(count);
+    let cursor = offset + 1 + header_consumed;
+    let Some(count) = validate_container_count(buffer, cursor, count, 1, "set")? else {
+        return Ok(None);
+    };
+    let mut cursor = cursor;
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("RESP set allocation failed".into()))?;
     for _ in 0..count {
-        let Some((frame, consumed)) = parse_frame(buffer, cursor)? else {
+        let Some((frame, consumed)) = parse_frame_at_depth(buffer, cursor, depth + 1)? else {
             return Ok(None);
         };
         items.push(frame);
@@ -540,7 +591,7 @@ fn parse_set(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
     Ok(Some((Frame::Set(items), cursor - offset)))
 }
 
-fn parse_push(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
+fn parse_push(buffer: &[u8], offset: usize, depth: usize) -> Result<RespDecodeResult> {
     let Some((count, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
         return Ok(None);
     };
@@ -549,11 +600,17 @@ fn parse_push(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
             "RESP3 pushes cannot be null".into(),
         ));
     }
-    let count = count as usize;
-    let mut cursor = offset + 1 + header_consumed;
-    let mut items = Vec::with_capacity(count);
+    let cursor = offset + 1 + header_consumed;
+    let Some(count) = validate_container_count(buffer, cursor, count, 1, "push")? else {
+        return Ok(None);
+    };
+    let mut cursor = cursor;
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("RESP push allocation failed".into()))?;
     for _ in 0..count {
-        let Some((frame, consumed)) = parse_frame(buffer, cursor)? else {
+        let Some((frame, consumed)) = parse_frame_at_depth(buffer, cursor, depth + 1)? else {
             return Ok(None);
         };
         items.push(frame);
@@ -628,12 +685,11 @@ fn parse_verbatim_string(buffer: &[u8], offset: usize) -> Result<RespDecodeResul
             "RESP3 verbatim string must include a format prefix".into(),
         ));
     }
-    let length = length as usize;
-    let start = offset + 1 + header_consumed;
-    let end = start + length;
-    if buffer.len() < end + 2 {
+    let Some((start, end, frame_end)) =
+        payload_bounds(buffer, offset, header_consumed, length, "verbatim string")?
+    else {
         return Ok(None);
-    }
+    };
     if &buffer[end..end + 2] != b"\r\n" {
         return Err(ShardCacheError::Protocol(
             "verbatim string missing CRLF terminator".into(),
@@ -661,17 +717,18 @@ fn parse_verbatim_string(buffer: &[u8], offset: usize) -> Result<RespDecodeResul
             format,
             value: payload[colon + 1..].to_vec(),
         },
-        (end + 2) - offset,
+        frame_end - offset,
     )))
 }
 
-fn parse_attribute(buffer: &[u8], offset: usize) -> Result<RespDecodeResult> {
-    let Some((Frame::Map(attributes), consumed)) = parse_map_with_prefix(buffer, offset, b'|')?
+fn parse_attribute(buffer: &[u8], offset: usize, depth: usize) -> Result<RespDecodeResult> {
+    let Some((Frame::Map(attributes), consumed)) =
+        parse_map_with_prefix(buffer, offset, b'|', depth)?
     else {
         return Ok(None);
     };
     let cursor = offset + consumed;
-    let Some((data, data_consumed)) = parse_frame(buffer, cursor)? else {
+    let Some((data, data_consumed)) = parse_frame_at_depth(buffer, cursor, depth + 1)? else {
         return Ok(None);
     };
     Ok(Some((
@@ -687,6 +744,7 @@ fn parse_map_with_prefix(
     buffer: &[u8],
     offset: usize,
     prefix: u8,
+    depth: usize,
 ) -> Result<Option<(Frame, usize)>> {
     debug_assert_eq!(buffer[offset], prefix);
     let Some((count, header_consumed)) = parse_isize_line(&buffer[offset + 1..])? else {
@@ -697,21 +755,77 @@ fn parse_map_with_prefix(
             "RESP3 attributes cannot be null".into(),
         ));
     }
-    let count = count as usize;
-    let mut cursor = offset + 1 + header_consumed;
-    let mut items = Vec::with_capacity(count);
+    let cursor = offset + 1 + header_consumed;
+    let Some(count) = validate_container_count(buffer, cursor, count, 2, "attribute")? else {
+        return Ok(None);
+    };
+    let mut cursor = cursor;
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("RESP attribute allocation failed".into()))?;
     for _ in 0..count {
-        let Some((key, consumed)) = parse_frame(buffer, cursor)? else {
+        let Some((key, consumed)) = parse_frame_at_depth(buffer, cursor, depth + 1)? else {
             return Ok(None);
         };
         cursor += consumed;
-        let Some((value, consumed)) = parse_frame(buffer, cursor)? else {
+        let Some((value, consumed)) = parse_frame_at_depth(buffer, cursor, depth + 1)? else {
             return Ok(None);
         };
         cursor += consumed;
         items.push((key, value));
     }
     Ok(Some((Frame::Map(items), cursor - offset)))
+}
+
+fn validate_container_count(
+    buffer: &[u8],
+    cursor: usize,
+    count: isize,
+    frames_per_item: usize,
+    label: &str,
+) -> Result<Option<usize>> {
+    let count = usize::try_from(count)
+        .map_err(|_| ShardCacheError::Protocol(format!("RESP {label} count cannot be negative")))?;
+    if count > RESP_MAX_CONTAINER_ITEMS {
+        return Err(ShardCacheError::Protocol(format!(
+            "RESP {label} count {count} exceeds maximum {RESP_MAX_CONTAINER_ITEMS}"
+        )));
+    }
+    let minimum = count
+        .checked_mul(frames_per_item)
+        .and_then(|count| count.checked_mul(RESP_MIN_FRAME_BYTES))
+        .ok_or_else(|| ShardCacheError::Protocol(format!("RESP {label} count overflow")))?;
+    if buffer.len().saturating_sub(cursor) < minimum {
+        return Ok(None);
+    }
+    Ok(Some(count))
+}
+
+fn payload_bounds(
+    buffer: &[u8],
+    offset: usize,
+    header_consumed: usize,
+    length: isize,
+    label: &str,
+) -> Result<Option<(usize, usize, usize)>> {
+    let length = usize::try_from(length).map_err(|_| {
+        ShardCacheError::Protocol(format!("RESP {label} length cannot be negative"))
+    })?;
+    let start = offset
+        .checked_add(1)
+        .and_then(|value| value.checked_add(header_consumed))
+        .ok_or_else(|| ShardCacheError::Protocol(format!("RESP {label} offset overflow")))?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| ShardCacheError::Protocol(format!("RESP {label} length overflow")))?;
+    let frame_end = end
+        .checked_add(2)
+        .ok_or_else(|| ShardCacheError::Protocol(format!("RESP {label} length overflow")))?;
+    if buffer.len() < frame_end {
+        return Ok(None);
+    }
+    Ok(Some((start, end, frame_end)))
 }
 
 fn parse_line(buffer: &[u8]) -> Result<Option<(&str, usize)>> {
@@ -890,7 +1004,7 @@ impl fmt::Display for Frame {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, RespCodec};
+    use super::{Frame, RESP_MAX_CONTAINER_ITEMS, RESP_MAX_NESTING_DEPTH, RespCodec};
 
     #[test]
     fn round_trips_array() {
@@ -921,5 +1035,33 @@ mod tests {
         assert_eq!(&encoded[spans.parts[0].clone()], b"MSET");
         assert_eq!(&encoded[spans.parts[1].clone()], b"long-key-name");
         assert_eq!(&encoded[spans.parts[2].clone()], b"value-body");
+    }
+
+    #[test]
+    fn rejects_peer_controlled_container_allocation_amplification() {
+        let encoded = format!("*{}\r\n", RESP_MAX_CONTAINER_ITEMS + 1);
+        assert!(RespCodec::decode(encoded.as_bytes()).is_err());
+        assert!(RespCodec::decode_command(encoded.as_bytes()).is_err());
+        assert!(RespCodec::decode_command_spans(encoded.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn rejects_excessive_aggregate_nesting() {
+        let mut encoded = Vec::new();
+        for _ in 0..=RESP_MAX_NESTING_DEPTH {
+            encoded.extend_from_slice(b"*1\r\n");
+        }
+        encoded.extend_from_slice(b"_\r\n");
+
+        assert!(RespCodec::decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn huge_blob_length_does_not_allocate_or_overflow() {
+        let encoded = b"$9223372036854775807\r\n";
+        match RespCodec::decode(encoded) {
+            Ok(None) | Err(_) => {}
+            other => panic!("unexpected huge-length decode result: {other:?}"),
+        }
     }
 }

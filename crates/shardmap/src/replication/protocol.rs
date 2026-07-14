@@ -13,10 +13,13 @@ pub const FCRP_VERSION: u8 = 1;
 const HEADER_LEN: usize = 16;
 pub(crate) const FRAME_HEADER_LEN: usize = HEADER_LEN;
 const FLAG_COMPRESSED: u8 = 0x01;
+const MAX_FCRP_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 // u64::MAX is reserved as the wire sentinel for "no expiry". A legitimate
 // `expire_at_ms` of u64::MAX would map to year ~584,942,417, so it is safe to
 // reserve.
 const EXPIRE_NONE: u64 = u64::MAX;
+const MUTATION_RECORD_MIN_BYTES: usize = 53;
+const SNAPSHOT_ENTRY_MIN_BYTES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -253,6 +256,11 @@ pub fn encode_frame(
     zstd_level: i32,
     payload: &[u8],
 ) -> Result<Vec<u8>> {
+    if payload.len() > MAX_FCRP_PAYLOAD_BYTES {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP payload exceeds maximum {MAX_FCRP_PAYLOAD_BYTES}"
+        )));
+    }
     match compression {
         ReplicationCompressionMode::None => {
             let mut out = Vec::with_capacity(HEADER_LEN + payload.len());
@@ -270,6 +278,11 @@ pub fn encode_frame(
             let compressed = zstd::bulk::compress(payload, zstd_level).map_err(|error| {
                 ShardCacheError::Protocol(format!("FCRP zstd compression failed: {error}"))
             })?;
+            if compressed.len() > MAX_FCRP_PAYLOAD_BYTES {
+                return Err(ShardCacheError::Protocol(format!(
+                    "FCRP compressed payload exceeds maximum {MAX_FCRP_PAYLOAD_BYTES}"
+                )));
+            }
             let mut out = Vec::with_capacity(HEADER_LEN + compressed.len());
             write_header(
                 &mut out,
@@ -339,9 +352,11 @@ pub fn decode_frame_payload(bytes: &[u8]) -> Result<ReplicationFramePayload<'_>>
     }
     let kind = FrameKind::from_u8(bytes[5])?;
     let flags = bytes[6];
+    validate_frame_flags(bytes[7], flags)?;
     let payload_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let uncompressed_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    if HEADER_LEN + payload_len != bytes.len() {
+    validate_frame_lengths(payload_len, uncompressed_len, flags)?;
+    if HEADER_LEN.checked_add(payload_len) != Some(bytes.len()) {
         return Err(ShardCacheError::Protocol(
             "FCRP frame length mismatch".into(),
         ));
@@ -380,9 +395,11 @@ pub fn decode_frame_payload_bytes(bytes: SharedBytes) -> Result<ReplicationFrame
 
     let kind = FrameKind::from_u8(bytes[5])?;
     let flags = bytes[6];
+    validate_frame_flags(bytes[7], flags)?;
     let payload_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let uncompressed_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
-    if HEADER_LEN + payload_len != bytes.len() {
+    validate_frame_lengths(payload_len, uncompressed_len, flags)?;
+    if HEADER_LEN.checked_add(payload_len) != Some(bytes.len()) {
         return Err(ShardCacheError::Protocol(
             "FCRP frame length mismatch".into(),
         ));
@@ -405,6 +422,29 @@ pub fn decode_frame_payload_bytes(bytes: SharedBytes) -> Result<ReplicationFrame
         compressed,
         payload,
     })
+}
+
+fn validate_frame_flags(reserved: u8, flags: u8) -> Result<()> {
+    if reserved != 0 || flags & !FLAG_COMPRESSED != 0 {
+        return Err(ShardCacheError::Protocol(
+            "FCRP frame contains unsupported flags".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_frame_lengths(payload_len: usize, uncompressed_len: usize, flags: u8) -> Result<()> {
+    if payload_len > MAX_FCRP_PAYLOAD_BYTES || uncompressed_len > MAX_FCRP_PAYLOAD_BYTES {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP frame payload exceeds maximum {MAX_FCRP_PAYLOAD_BYTES}"
+        )));
+    }
+    if flags & FLAG_COMPRESSED == 0 && uncompressed_len != payload_len {
+        return Err(ShardCacheError::Protocol(
+            "FCRP uncompressed frame length mismatch".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub fn encode_mutation_batch(mutations: &[ReplicationMutation]) -> Vec<u8> {
@@ -547,7 +587,11 @@ fn write_mutation_batch_payload(out: &mut Vec<u8>, mutations: &[ReplicationMutat
 pub fn decode_mutation_batch(bytes: &[u8]) -> Result<Vec<ReplicationMutation>> {
     let mut cursor = Cursor::new(bytes);
     let count = cursor.u32()? as usize;
-    let mut mutations = Vec::with_capacity(count);
+    cursor.validate_count(count, MUTATION_RECORD_MIN_BYTES, "mutation batch")?;
+    let mut mutations = Vec::new();
+    mutations
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("FCRP mutation batch allocation failed".into()))?;
     for _ in 0..count {
         let shard_id = cursor.u32()? as usize;
         let sequence = cursor.u64()?;
@@ -582,6 +626,7 @@ where
 {
     let mut cursor = Cursor::new(bytes);
     let count = cursor.u32()? as usize;
+    cursor.validate_count(count, MUTATION_RECORD_MIN_BYTES, "mutation batch")?;
     for _ in 0..count {
         let shard_id = cursor.u32()? as usize;
         let sequence = cursor.u64()?;
@@ -615,6 +660,7 @@ where
 {
     let mut cursor = Cursor::new(bytes.as_ref());
     let count = cursor.u32()? as usize;
+    cursor.validate_count(count, MUTATION_RECORD_MIN_BYTES, "mutation batch")?;
     for _ in 0..count {
         let shard_id = cursor.u32()? as usize;
         let sequence = cursor.u64()?;
@@ -714,7 +760,11 @@ pub fn decode_hello(bytes: &[u8]) -> Result<ReplicationHello> {
     let has_since = cursor.u8()? != 0;
     let since = if has_since {
         let count = cursor.u32()? as usize;
-        let mut values = Vec::with_capacity(count);
+        cursor.validate_count(count, 8, "hello watermarks")?;
+        let mut values = Vec::new();
+        values.try_reserve_exact(count).map_err(|_| {
+            ShardCacheError::Protocol("FCRP hello watermark allocation failed".into())
+        })?;
         for _ in 0..count {
             values.push(cursor.u64()?);
         }
@@ -762,7 +812,11 @@ pub fn encode_ack(watermarks: &ShardWatermarks) -> Vec<u8> {
 pub fn decode_ack(bytes: &[u8]) -> Result<ShardWatermarks> {
     let mut cursor = Cursor::new(bytes);
     let count = cursor.u32()? as usize;
-    let mut values = Vec::with_capacity(count);
+    cursor.validate_count(count, 8, "ack watermarks")?;
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("FCRP ack watermark allocation failed".into()))?;
     for _ in 0..count {
         values.push(cursor.u64()?);
     }
@@ -794,12 +848,20 @@ pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
     let chunk_index = cursor.u64()?;
     let is_last = cursor.u8()? != 0;
     let watermark_count = cursor.u32()? as usize;
-    let mut watermarks = Vec::with_capacity(watermark_count);
+    cursor.validate_count(watermark_count, 8, "snapshot watermarks")?;
+    let mut watermarks = Vec::new();
+    watermarks.try_reserve_exact(watermark_count).map_err(|_| {
+        ShardCacheError::Protocol("FCRP snapshot watermark allocation failed".into())
+    })?;
     for _ in 0..watermark_count {
         watermarks.push(cursor.u64()?);
     }
     let entry_count = cursor.u32()? as usize;
-    let mut entries = Vec::with_capacity(entry_count);
+    cursor.validate_count(entry_count, SNAPSHOT_ENTRY_MIN_BYTES, "snapshot entries")?;
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(entry_count)
+        .map_err(|_| ShardCacheError::Protocol("FCRP snapshot entry allocation failed".into()))?;
     for _ in 0..entry_count {
         let key_len = cursor.u32()? as usize;
         let value_len = cursor.u32()? as usize;
@@ -852,14 +914,31 @@ impl<'a> Cursor<'a> {
     }
 
     fn bytes(&mut self, len: usize) -> Result<&'a [u8]> {
-        if self.pos + len > self.bytes.len() {
+        let Some(end) = self.pos.checked_add(len) else {
+            return Err(ShardCacheError::Protocol(
+                "FCRP payload length overflow".into(),
+            ));
+        };
+        if end > self.bytes.len() {
             return Err(ShardCacheError::Protocol(
                 "FCRP payload is truncated".into(),
             ));
         }
-        let bytes = &self.bytes[self.pos..self.pos + len];
-        self.pos += len;
+        let bytes = &self.bytes[self.pos..end];
+        self.pos = end;
         Ok(bytes)
+    }
+
+    fn validate_count(&self, count: usize, min_item_bytes: usize, label: &str) -> Result<()> {
+        let required = count
+            .checked_mul(min_item_bytes)
+            .ok_or_else(|| ShardCacheError::Protocol(format!("FCRP {label} count overflow")))?;
+        if required > self.bytes.len().saturating_sub(self.pos) {
+            return Err(ShardCacheError::Protocol(format!(
+                "FCRP {label} count exceeds remaining payload"
+            )));
+        }
+        Ok(())
     }
 
     fn finish(&self) -> Result<()> {
@@ -986,5 +1065,35 @@ mod tests {
         let encoded = encode_snapshot_chunk(&chunk);
         let decoded = decode_snapshot_chunk(&encoded).expect("decode");
         assert_eq!(decoded, chunk);
+    }
+
+    #[test]
+    fn rejects_count_allocation_amplification() {
+        let count_only = u32::MAX.to_le_bytes();
+        assert!(decode_mutation_batch(&count_only).is_err());
+        assert!(decode_ack(&count_only).is_err());
+
+        let mut snapshot = Vec::new();
+        snapshot.extend_from_slice(&0u64.to_le_bytes());
+        snapshot.push(0);
+        snapshot.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(decode_snapshot_chunk(&snapshot).is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_decompression_and_unknown_flags() {
+        let mut frame = Vec::new();
+        write_header(
+            &mut frame,
+            FrameKind::Ack,
+            FLAG_COMPRESSED,
+            0,
+            (MAX_FCRP_PAYLOAD_BYTES as u32) + 1,
+        );
+        assert!(decode_frame(&frame).is_err());
+
+        frame[6] = 0x80;
+        frame[12..16].copy_from_slice(&0u32.to_le_bytes());
+        assert!(decode_frame(&frame).is_err());
     }
 }

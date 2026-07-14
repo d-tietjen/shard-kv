@@ -21,6 +21,7 @@ pub const FAST_FLAG_REDIS_COMMAND_ARGS: u8 = 0x08;
 
 const REQUEST_HEADER_LEN: usize = 8;
 const RESPONSE_HEADER_LEN: usize = 8;
+const FAST_MAX_COLLECTION_ITEMS: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -1866,11 +1867,14 @@ impl FastCodec {
         }
 
         let body_len = u32::from_le_bytes(buffer[4..8].try_into().unwrap()) as usize;
-        if buffer.len() < REQUEST_HEADER_LEN + body_len {
+        let frame_len = REQUEST_HEADER_LEN.checked_add(body_len).ok_or_else(|| {
+            ShardCacheError::Protocol("fast request frame length overflow".into())
+        })?;
+        if buffer.len() < frame_len {
             return Ok(None);
         }
 
-        let body = &buffer[REQUEST_HEADER_LEN..REQUEST_HEADER_LEN + body_len];
+        let body = &buffer[REQUEST_HEADER_LEN..frame_len];
         let mut cursor = 0usize;
         let key_hash = if flags & FAST_FLAG_KEY_HASH != 0 {
             Some(take_u64(body, &mut cursor, "fast key hash")?)
@@ -1911,7 +1915,7 @@ impl FastCodec {
                     key_tag,
                     command,
                 },
-                REQUEST_HEADER_LEN + body_len,
+                frame_len,
             )));
         }
 
@@ -2117,7 +2121,7 @@ impl FastCodec {
                 key_tag,
                 command,
             },
-            REQUEST_HEADER_LEN + body_len,
+            frame_len,
         )))
     }
 
@@ -2323,11 +2327,14 @@ impl FastCodec {
         let status = buffer[2];
         let _flags = buffer[3];
         let body_len = u32::from_le_bytes(buffer[4..8].try_into().unwrap()) as usize;
-        if buffer.len() < RESPONSE_HEADER_LEN + body_len {
+        let frame_len = RESPONSE_HEADER_LEN.checked_add(body_len).ok_or_else(|| {
+            ShardCacheError::Protocol("fast response frame length overflow".into())
+        })?;
+        if buffer.len() < frame_len {
             return Ok(None);
         }
 
-        let body = &buffer[RESPONSE_HEADER_LEN..RESPONSE_HEADER_LEN + body_len];
+        let body = &buffer[RESPONSE_HEADER_LEN..frame_len];
         let response = match status {
             0 => FastResponse::Ok,
             1 => FastResponse::Null,
@@ -2365,7 +2372,7 @@ impl FastCodec {
             }
         };
 
-        Ok(Some((response, RESPONSE_HEADER_LEN + body_len)))
+        Ok(Some((response, frame_len)))
     }
 }
 
@@ -2474,7 +2481,15 @@ fn take_len_prefixed_list<'a>(
     field: &str,
 ) -> Result<Vec<&'a [u8]>> {
     let count = take_u32(body, cursor, field)? as usize;
-    let mut values = Vec::with_capacity(count);
+    if count > FAST_MAX_COLLECTION_ITEMS || count > body.len().saturating_sub(*cursor) / 4 {
+        return Err(ShardCacheError::Protocol(format!(
+            "{field} count exceeds remaining body"
+        )));
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol(format!("{field} item allocation failed")))?;
     for _ in 0..count {
         values.push(take_len_prefixed_slice(body, cursor, field)?);
     }
@@ -2518,12 +2533,15 @@ fn take_compact_len_prefixed_list<'a>(
     field: &str,
 ) -> Result<Vec<&'a [u8]>> {
     let count = take_var_u32(body, cursor, field)? as usize;
-    if count > body.len().saturating_sub(*cursor) {
+    if count > FAST_MAX_COLLECTION_ITEMS || count > body.len().saturating_sub(*cursor) {
         return Err(ShardCacheError::Protocol(format!(
             "{field} count exceeds remaining body"
         )));
     }
-    let mut values = Vec::with_capacity(count);
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol(format!("{field} item allocation failed")))?;
     for _ in 0..count {
         values.push(take_compact_len_prefixed_slice(body, cursor, field)?);
     }
@@ -2546,7 +2564,15 @@ fn take_key_value_list<'a>(
     field: &str,
 ) -> Result<Vec<(&'a [u8], &'a [u8])>> {
     let count = take_u32(body, cursor, field)? as usize;
-    let mut items = Vec::with_capacity(count);
+    if count > FAST_MAX_COLLECTION_ITEMS || count > body.len().saturating_sub(*cursor) / 8 {
+        return Err(ShardCacheError::Protocol(format!(
+            "{field} count exceeds remaining body"
+        )));
+    }
+    let mut items = Vec::new();
+    items
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol(format!("{field} item allocation failed")))?;
     for _ in 0..count {
         items.push(take_key_value(body, cursor, field)?);
     }
@@ -2646,7 +2672,15 @@ fn encode_array_body<'a>(values: impl IntoIterator<Item = Option<&'a [u8]>>, out
 fn decode_array_body(body: &[u8]) -> Result<Vec<Option<Vec<u8>>>> {
     let mut cursor = 0usize;
     let count = take_u32(body, &mut cursor, "fast array count")? as usize;
-    let mut values = Vec::with_capacity(count);
+    if count > FAST_MAX_COLLECTION_ITEMS || count > body.len().saturating_sub(cursor) / 4 {
+        return Err(ShardCacheError::Protocol(
+            "fast array count exceeds remaining body".into(),
+        ));
+    }
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(count)
+        .map_err(|_| ShardCacheError::Protocol("fast array item allocation failed".into()))?;
     for _ in 0..count {
         let len = take_u32(body, &mut cursor, "fast array item")?;
         if len == u32::MAX {
@@ -2666,10 +2700,23 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        FAST_FLAG_REDIS_COMMAND_ARGS, FAST_PROTOCOL_VERSION, FAST_REDIS_COMMAND_OPCODES, FastCodec,
-        FastCommand, FastCommandKind, FastRedisRouteKeys, FastRequest, FastResponse,
-        REQUEST_HEADER_LEN,
+        FAST_FLAG_REDIS_COMMAND_ARGS, FAST_MAX_COLLECTION_ITEMS, FAST_PROTOCOL_VERSION,
+        FAST_REDIS_COMMAND_OPCODES, FastCodec, FastCommand, FastCommandKind, FastRedisRouteKeys,
+        FastRequest, FastResponse, REQUEST_HEADER_LEN, decode_array_body, take_key_value_list,
+        take_len_prefixed_list,
     };
+
+    #[test]
+    fn rejects_peer_controlled_collection_allocation_amplification() {
+        let count = u32::try_from(FAST_MAX_COLLECTION_ITEMS + 1).unwrap();
+        let body = count.to_le_bytes();
+
+        assert!(decode_array_body(&body).is_err());
+        let mut cursor = 0;
+        assert!(take_len_prefixed_list(&body, &mut cursor, "test list").is_err());
+        let mut cursor = 0;
+        assert!(take_key_value_list(&body, &mut cursor, "test map").is_err());
+    }
 
     #[test]
     fn redis_opcode_table_has_unique_names_and_values() {

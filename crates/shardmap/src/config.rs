@@ -410,6 +410,11 @@ pub struct KvOverflowConfig {
     pub allow_insecure_scnp: bool,
     /// Total resident-byte target for the in-memory primary.
     pub max_memory_bytes: u64,
+    /// Maximum primary memory reserved for tracking logical overflow keys.
+    /// Zero derives a limit equal to 25% of `max_memory_bytes`.
+    pub max_metadata_bytes: u64,
+    /// Maximum key length admitted into the overflow metadata index.
+    pub max_key_bytes: usize,
     /// Policy used to choose acknowledged resident values for offload.
     pub eviction_policy: EvictionPolicy,
     /// TCP connections retained per overflow node.
@@ -820,6 +825,8 @@ impl Default for KvOverflowConfig {
             scnp_tls: ScnpTlsClientConfig::default(),
             allow_insecure_scnp: false,
             max_memory_bytes: 0,
+            max_metadata_bytes: 0,
+            max_key_bytes: 1024 * 1024,
             eviction_policy: EvictionPolicy::Lru,
             connections_per_endpoint: 2,
             queue_capacity_per_shard: 1_024,
