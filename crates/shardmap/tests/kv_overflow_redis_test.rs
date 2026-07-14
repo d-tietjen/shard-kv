@@ -65,6 +65,54 @@ fn redis_backend_round_trips_binary_values_ttl_integrity_and_delete() {
         .unwrap();
     assert!(unprefixed.is_none());
 
+    let governed_key = b"governed:\0\xff:key".to_vec();
+    let governed_value = b"private-model-state".repeat(64);
+    let governance = b"tenant-a/repo-private".to_vec();
+    store
+        .set_with_governance(
+            governed_key.clone(),
+            governed_value.clone(),
+            None,
+            governance.clone(),
+        )
+        .unwrap();
+    store.flush_remote().unwrap();
+    assert_eq!(store.get(&governed_key).unwrap(), None);
+    assert_eq!(store.get_remote(&governed_key).unwrap(), None);
+    assert_eq!(
+        store
+            .get_remote_with_governance_filter(&governed_key, |_| false)
+            .unwrap(),
+        None
+    );
+    let governed = store
+        .get_remote_with_governance_filter(&governed_key, |metadata| {
+            metadata == Some(governance.as_slice())
+        })
+        .unwrap()
+        .expect("authorized Redis overflow read");
+    assert_eq!(governed.value.as_ref(), governed_value);
+    assert_eq!(governed.governance.as_deref(), Some(governance.as_slice()));
+    assert_eq!(
+        store
+            .get_with_governance_filter(&governed_key, |metadata| {
+                metadata == Some(governance.as_slice())
+            })
+            .unwrap()
+            .as_deref(),
+        Some(governed_value.as_slice())
+    );
+    assert_eq!(store.get(&governed_key).unwrap(), None);
+
+    let governed_storage_key = redis_storage_key(&mut connection, &config, &governed_key);
+    let governed_envelope: Vec<u8> = redis_client::cmd("GET")
+        .arg(&governed_storage_key)
+        .query(&mut connection)
+        .unwrap();
+    assert!(
+        governed_envelope.starts_with(b"SCKVOV03") || governed_envelope.starts_with(b"SCKVOV04")
+    );
+
     let ttl_key = b"ttl-key".to_vec();
     store
         .set(ttl_key.clone(), b"expires".to_vec(), Some(200))
@@ -104,6 +152,12 @@ fn redis_backend_round_trips_binary_values_ttl_integrity_and_delete() {
     assert!(store.delete(&key).unwrap());
     let exists: bool = redis_client::cmd("EXISTS")
         .arg(&storage_key)
+        .query(&mut connection)
+        .unwrap();
+    assert!(!exists);
+    assert!(store.delete(&governed_key).unwrap());
+    let exists: bool = redis_client::cmd("EXISTS")
+        .arg(&governed_storage_key)
         .query(&mut connection)
         .unwrap();
     assert!(!exists);

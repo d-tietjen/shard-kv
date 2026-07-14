@@ -277,12 +277,31 @@ fn s3_backend_smoke_offloads_faults_and_deletes_remote_values() {
     store.configure_object_overflow(Some(runtime));
 
     let value = vec![3u8; 16 * 1024];
-    store.set(b"s3-alpha".to_vec(), value.clone(), None);
+    let governance = b"tenant-a/repo-private";
+    store.set_value_bytes_with_governance(
+        b"s3-alpha",
+        value.clone().into(),
+        None,
+        governance.as_slice().into(),
+    );
 
     let stats = store.shard_stats_snapshot();
     assert_eq!(stats[0].object_overflow.remote_entries, 1);
     assert_eq!(stats[0].object_overflow.offload_successes, 1);
-    assert_eq!(store.get(b"s3-alpha"), Some(value));
+    assert_eq!(store.get(b"s3-alpha"), None);
+    assert_eq!(
+        store.get_value_bytes_with_governance_filter(b"s3-alpha", |_| false),
+        None
+    );
+    assert_eq!(
+        store
+            .get_value_bytes_with_governance_filter(b"s3-alpha", |metadata| {
+                metadata == Some(governance.as_slice())
+            })
+            .as_deref(),
+        Some(value.as_slice())
+    );
+    assert_eq!(store.get(b"s3-alpha"), None);
 
     assert!(store.delete(b"s3-alpha"));
     let stats = store.shard_stats_snapshot();
