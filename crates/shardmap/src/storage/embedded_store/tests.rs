@@ -17,6 +17,181 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[test]
+fn exact_governance_is_fail_closed_and_replacement_is_atomic() {
+    let store = EmbeddedStore::new(4);
+    store.set_value_bytes_with_governance(
+        b"private",
+        bytes::Bytes::from_static(b"value-a"),
+        None,
+        bytes::Bytes::from_static(b"tenant=a"),
+    );
+
+    assert_eq!(store.get(b"private"), None);
+    assert_eq!(store.get_value_bytes(b"private"), None);
+    assert!(store.get_mut(b"private").is_none());
+    let mut visited = Vec::new();
+    store.visit_string_entries(|key, _, _| {
+        visited.push(key.to_vec());
+        true
+    });
+    assert!(!visited.iter().any(|key| key == b"private"));
+    assert_eq!(
+        store.get_value_bytes_with_governance_filter(b"private", |metadata| {
+            metadata == Some(b"tenant=a".as_slice())
+        }),
+        Some(bytes::Bytes::from_static(b"value-a"))
+    );
+    assert_eq!(
+        store.get_value_bytes_with_governance_filter(b"private", |_| false),
+        None
+    );
+
+    store.set_value_bytes_with_governance(
+        b"private",
+        bytes::Bytes::from_static(b"value-b"),
+        None,
+        bytes::Bytes::from_static(b"tenant=b"),
+    );
+    assert_eq!(
+        store.get_value_bytes_with_governance_filter(b"private", |metadata| {
+            metadata == Some(b"tenant=b".as_slice())
+        }),
+        Some(bytes::Bytes::from_static(b"value-b"))
+    );
+
+    store.set_value_bytes(b"private", bytes::Bytes::from_static(b"public"), None);
+    assert_eq!(
+        store.get_value_bytes(b"private"),
+        Some(bytes::Bytes::from_static(b"public"))
+    );
+}
+
+#[test]
+fn exact_governance_snapshot_restore_remains_fail_closed() {
+    let store = EmbeddedStore::new(1);
+    store.set_value_bytes_with_governance(
+        b"private",
+        bytes::Bytes::from_static(b"model-state"),
+        None,
+        bytes::Bytes::from_static(b"tenant-a/repo-private"),
+    );
+    let entries = store.try_entry_snapshot().unwrap();
+    let restored = EmbeddedStore::new(1);
+    restored.restore_entries(entries);
+
+    assert_eq!(restored.get(b"private"), None);
+    assert_eq!(
+        restored
+            .get_value_bytes_with_governance_filter(b"private", |metadata| {
+                metadata == Some(b"tenant-a/repo-private".as_slice())
+            })
+            .as_deref(),
+        Some(b"model-state".as_slice())
+    );
+}
+
+#[test]
+fn concurrent_governance_replacement_never_mixes_policy_and_value_versions() {
+    let store = Arc::new(EmbeddedStore::new(1));
+    store.set_value_bytes_with_governance(
+        b"private",
+        bytes::Bytes::from_static(b"value-a"),
+        None,
+        bytes::Bytes::from_static(b"policy-a"),
+    );
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer_store = Arc::clone(&store);
+    let writer_stop = Arc::clone(&stop);
+    let writer = std::thread::spawn(move || {
+        while !writer_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            writer_store.set_value_bytes_with_governance(
+                b"private",
+                bytes::Bytes::from_static(b"value-b"),
+                None,
+                bytes::Bytes::from_static(b"policy-b"),
+            );
+            writer_store.set_value_bytes_with_governance(
+                b"private",
+                bytes::Bytes::from_static(b"value-a"),
+                None,
+                bytes::Bytes::from_static(b"policy-a"),
+            );
+        }
+    });
+
+    for _ in 0..10_000 {
+        let mut policy = None;
+        let value = store
+            .get_value_bytes_with_governance_filter(b"private", |metadata| {
+                policy = metadata.map(<[u8]>::to_vec);
+                true
+            })
+            .unwrap();
+        match policy.as_deref() {
+            Some(b"policy-a") => assert_eq!(value.as_ref(), b"value-a"),
+            Some(b"policy-b") => assert_eq!(value.as_ref(), b"value-b"),
+            other => panic!("unexpected policy: {other:?}"),
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
+}
+
+#[test]
+fn exact_governance_can_reject_unlabelled_entries_and_is_memory_accounted() {
+    let store = EmbeddedStore::new(1);
+    store.set_value_bytes(b"public", bytes::Bytes::from_static(b"value"), None);
+    let public_bytes = store.stored_bytes();
+    assert_eq!(
+        store.get_value_bytes_with_governance_filter(b"public", |metadata| metadata.is_none()),
+        Some(bytes::Bytes::from_static(b"value"))
+    );
+    assert_eq!(
+        store.get_value_bytes_with_governance_filter(b"public", |_| false),
+        None
+    );
+
+    store.set_value_bytes_with_governance(
+        b"private",
+        bytes::Bytes::from_static(b"value"),
+        None,
+        bytes::Bytes::from_static(b"policy-bytes"),
+    );
+    assert!(
+        store.stored_bytes()
+            >= public_bytes + b"private".len() + b"value".len() + b"policy-bytes".len()
+    );
+}
+
+#[test]
+fn exact_governance_expires_and_deletes_with_the_value() {
+    let store = EmbeddedStore::new(1);
+    store.set_value_bytes_with_governance(
+        b"expiring",
+        bytes::Bytes::from_static(b"value"),
+        Some(1),
+        bytes::Bytes::from_static(b"policy"),
+    );
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(
+        store.get_value_bytes_with_governance_filter(b"expiring", |_| true),
+        None
+    );
+
+    store.set_value_bytes_with_governance(
+        b"deleted",
+        bytes::Bytes::from_static(b"value"),
+        None,
+        bytes::Bytes::from_static(b"policy"),
+    );
+    assert!(store.delete(b"deleted"));
+    assert_eq!(
+        store.get_value_bytes_with_governance_filter(b"deleted", |_| true),
+        None
+    );
+}
+
+#[test]
 fn shard_arc_store_routes_and_serves_blob_reads() {
     let store = ShardArcEmbeddedStore::new(4);
     let key = b"shard-arc-key";

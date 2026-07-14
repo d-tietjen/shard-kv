@@ -30,13 +30,19 @@ use crate::config::{
     KvOverflowTransport, MAX_KV_OVERFLOW_SLOT_COUNT,
 };
 use crate::persistence::{PersistenceRuntime, SnapshotCompression, SnapshotStore};
-use crate::storage::{Bytes, EmbeddedStore, StoredEntry, now_millis, shift_for, stripe_index};
+use crate::storage::{
+    Bytes, EmbeddedStore, GovernedRead, StoredEntry, now_millis, shift_for, stripe_index,
+};
 use crate::{Result, ShardCacheError};
 
 const KV_OVERFLOW_MAGIC: &[u8; 8] = b"SCKVOV01";
 const KV_OVERFLOW_COMPRESSED_MAGIC: &[u8; 8] = b"SCKVOV02";
+const KV_OVERFLOW_GOVERNED_MAGIC: &[u8; 8] = b"SCKVOV03";
+const KV_OVERFLOW_GOVERNED_COMPRESSED_MAGIC: &[u8; 8] = b"SCKVOV04";
 const KV_OVERFLOW_HEADER_LEN: usize = KV_OVERFLOW_MAGIC.len() + 8 + 8 + 4;
 const KV_OVERFLOW_COMPRESSED_HEADER_LEN: usize = KV_OVERFLOW_HEADER_LEN + 1;
+const KV_OVERFLOW_GOVERNED_HEADER_LEN: usize = KV_OVERFLOW_HEADER_LEN + 4;
+const KV_OVERFLOW_GOVERNED_COMPRESSED_HEADER_LEN: usize = KV_OVERFLOW_GOVERNED_HEADER_LEN + 1;
 const KV_OVERFLOW_CODEC_LZ4: u8 = 1;
 const KV_OVERFLOW_KEY_GATES: usize = 64;
 const KV_OVERFLOW_EVICTION_BATCH_PER_SHARD: usize = 16;
@@ -50,6 +56,8 @@ pub const DEFAULT_KV_OVERFLOW_SLOT_COUNT: u32 = 16_384;
 pub struct KvOverflowValue {
     pub value: SharedBytes,
     pub ttl_ms: Option<u64>,
+    /// Opaque policy metadata. Presence marks the value as protected.
+    pub governance: Option<SharedBytes>,
 }
 
 /// One absolute-expiry write in an overflow-node batch.
@@ -58,6 +66,7 @@ pub struct KvOverflowPutRequest<'a> {
     pub key: &'a [u8],
     pub value: &'a [u8],
     pub expire_at_ms: Option<u64>,
+    pub governance: Option<&'a [u8]>,
 }
 
 /// One independently addressable member of a partitioned overflow cluster.
@@ -101,11 +110,31 @@ pub trait KvOverflowNode: Send + Sync + 'static {
             self.put(key, value, ttl_ms)
         }
     }
+    /// Stores a value and its opaque governance metadata atomically.
+    fn put_until_with_governance(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        governance: Option<&[u8]>,
+        expire_at_ms: Option<u64>,
+    ) -> Result<()> {
+        if governance.is_some() {
+            return Err(ShardCacheError::Protocol(
+                "key-value overflow node does not support governance metadata".into(),
+            ));
+        }
+        self.put_until(key, value, expire_at_ms)
+    }
     /// Stores an ordered group of writes. Remote adapters can override this
     /// to pipeline a worker batch without changing per-key ordering.
     fn put_batch_until(&self, requests: &[KvOverflowPutRequest<'_>]) -> Result<()> {
         for request in requests {
-            self.put_until(request.key, request.value, request.expire_at_ms)?;
+            self.put_until_with_governance(
+                request.key,
+                request.value,
+                request.governance,
+                request.expire_at_ms,
+            )?;
         }
         Ok(())
     }
@@ -124,8 +153,13 @@ pub trait KvOverflowNode: Send + Sync + 'static {
             return;
         }
         outcomes.extend(requests.iter().map(|request| {
-            self.put_until(request.key, request.value, request.expire_at_ms)
-                .is_ok()
+            self.put_until_with_governance(
+                request.key,
+                request.value,
+                request.governance,
+                request.expire_at_ms,
+            )
+            .is_ok()
         }));
     }
     /// Stores a value on the connection dedicated to `primary_shard`.
@@ -137,6 +171,17 @@ pub trait KvOverflowNode: Send + Sync + 'static {
         expire_at_ms: Option<u64>,
     ) -> Result<()> {
         self.put_until(key, value, expire_at_ms)
+    }
+    /// Stores a governed value on the connection dedicated to `primary_shard`.
+    fn put_until_with_governance_on_shard(
+        &self,
+        _primary_shard: usize,
+        key: &[u8],
+        value: &[u8],
+        governance: Option<&[u8]>,
+        expire_at_ms: Option<u64>,
+    ) -> Result<()> {
+        self.put_until_with_governance(key, value, governance, expire_at_ms)
     }
     /// Stores a batch on the connection dedicated to `primary_shard`.
     fn put_batch_outcomes_until_on_shard(
@@ -972,6 +1017,17 @@ impl KvOverflowNode for ScnpKvOverflowNode {
         value: &[u8],
         expire_at_ms: Option<u64>,
     ) -> Result<()> {
+        self.put_until_with_governance_on_shard(primary_shard, key, value, None, expire_at_ms)
+    }
+
+    fn put_until_with_governance_on_shard(
+        &self,
+        primary_shard: usize,
+        key: &[u8],
+        value: &[u8],
+        governance: Option<&[u8]>,
+        expire_at_ms: Option<u64>,
+    ) -> Result<()> {
         if value.len() > self.max_value_bytes {
             return Err(ShardCacheError::Protocol(
                 "key-value overflow value exceeds configured maximum".into(),
@@ -982,6 +1038,7 @@ impl KvOverflowNode for ScnpKvOverflowNode {
         }
         let encoded = encode_overflow_value_until(
             value,
+            governance,
             expire_at_ms,
             self.compression,
             self.compression_min_value_bytes,
@@ -1019,6 +1076,7 @@ impl KvOverflowNode for ScnpKvOverflowNode {
             .map(|request| {
                 encode_overflow_value_until(
                     request.value,
+                    request.governance,
                     request.expire_at_ms,
                     self.compression,
                     self.compression_min_value_bytes,
@@ -1495,6 +1553,7 @@ impl RedisKvOverflowNode {
         primary_shard: usize,
         key: &[u8],
         value: &[u8],
+        governance: Option<&[u8]>,
         expire_at_ms: Option<u64>,
     ) -> Result<()> {
         if value.len() > self.max_value_bytes {
@@ -1505,6 +1564,7 @@ impl RedisKvOverflowNode {
         let storage_key = self.storage_key(key);
         let encoded = encode_overflow_value_until(
             value,
+            governance,
             expire_at_ms,
             self.compression,
             self.compression_min_value_bytes,
@@ -1554,6 +1614,7 @@ impl RedisKvOverflowNode {
                 key: self.storage_key(request.key),
                 value: encode_overflow_value_until(
                     request.value,
+                    request.governance,
                     request.expire_at_ms,
                     self.compression,
                     self.compression_min_value_bytes,
@@ -1660,7 +1721,7 @@ impl KvOverflowNode for RedisKvOverflowNode {
     }
 
     fn put_until(&self, key: &[u8], value: &[u8], expire_at_ms: Option<u64>) -> Result<()> {
-        self.put_until_for_shard(0, key, value, expire_at_ms)
+        self.put_until_for_shard(0, key, value, None, expire_at_ms)
     }
 
     fn put_until_on_shard(
@@ -1670,7 +1731,18 @@ impl KvOverflowNode for RedisKvOverflowNode {
         value: &[u8],
         expire_at_ms: Option<u64>,
     ) -> Result<()> {
-        self.put_until_for_shard(primary_shard, key, value, expire_at_ms)
+        self.put_until_for_shard(primary_shard, key, value, None, expire_at_ms)
+    }
+
+    fn put_until_with_governance_on_shard(
+        &self,
+        primary_shard: usize,
+        key: &[u8],
+        value: &[u8],
+        governance: Option<&[u8]>,
+        expire_at_ms: Option<u64>,
+    ) -> Result<()> {
+        self.put_until_for_shard(primary_shard, key, value, governance, expire_at_ms)
     }
 
     fn put_batch_until(&self, requests: &[KvOverflowPutRequest<'_>]) -> Result<()> {
@@ -1696,6 +1768,7 @@ impl KvOverflowNode for RedisKvOverflowNode {
                 primary_shard,
                 request.key,
                 request.value,
+                request.governance,
                 request.expire_at_ms,
             )
             .is_ok()
@@ -1758,6 +1831,7 @@ fn client_error(endpoint: &str, error: ShardCacheClientError) -> ShardCacheError
 
 fn encode_overflow_value_until(
     value: &[u8],
+    governance: Option<&[u8]>,
     expire_at_ms: Option<u64>,
     compression: KvOverflowCompression,
     compression_min_value_bytes: usize,
@@ -1767,6 +1841,7 @@ fn encode_overflow_value_until(
     let mut compressed = Vec::new();
     encode_overflow_value_until_into(
         value,
+        governance,
         expire_at_ms,
         compression,
         compression_min_value_bytes,
@@ -1777,8 +1852,10 @@ fn encode_overflow_value_until(
     encoded
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_overflow_value_until_into(
     value: &[u8],
+    governance: Option<&[u8]>,
     expire_at_ms: Option<u64>,
     compression: KvOverflowCompression,
     compression_min_value_bytes: usize,
@@ -1787,6 +1864,18 @@ fn encode_overflow_value_until_into(
     compressed: &mut Vec<u8>,
 ) {
     let expire_at_ms = expire_at_ms.unwrap_or(0);
+    let governance_len = governance.map_or(0, <[u8]>::len);
+    let governed = governance.is_some();
+    let raw_header_len = if governed {
+        KV_OVERFLOW_GOVERNED_HEADER_LEN
+    } else {
+        KV_OVERFLOW_HEADER_LEN
+    };
+    let compressed_header_len = if governed {
+        KV_OVERFLOW_GOVERNED_COMPRESSED_HEADER_LEN
+    } else {
+        KV_OVERFLOW_COMPRESSED_HEADER_LEN
+    };
     encoded.clear();
     if compression == KvOverflowCompression::Lz4 && value.len() >= compression_min_value_bytes {
         compressed.clear();
@@ -1794,29 +1883,66 @@ fn encode_overflow_value_until_into(
         let compressed_len = lz4_flex::block::compress_into(value, compressed)
             .expect("maximum LZ4 output buffer is sufficient");
         compressed.truncate(compressed_len);
-        let raw_size = KV_OVERFLOW_HEADER_LEN.saturating_add(value.len());
-        let compressed_size = KV_OVERFLOW_COMPRESSED_HEADER_LEN.saturating_add(compressed.len());
+        let raw_size = raw_header_len
+            .saturating_add(value.len())
+            .saturating_add(governance_len);
+        let compressed_size = compressed_header_len
+            .saturating_add(compressed.len())
+            .saturating_add(governance_len);
         let savings = raw_size.saturating_sub(compressed_size);
         if compressed_size < raw_size
             && savings.saturating_mul(100)
                 >= raw_size.saturating_mul(compression_min_savings_percent as usize)
         {
             encoded.reserve(compressed_size);
-            encoded.extend_from_slice(KV_OVERFLOW_COMPRESSED_MAGIC);
+            encoded.extend_from_slice(if governed {
+                KV_OVERFLOW_GOVERNED_COMPRESSED_MAGIC
+            } else {
+                KV_OVERFLOW_COMPRESSED_MAGIC
+            });
             encoded.extend_from_slice(&expire_at_ms.to_le_bytes());
             encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
-            encoded.extend_from_slice(&crc32fast::hash(value).to_le_bytes());
+            encoded.extend_from_slice(&overflow_checksum(value, governance).to_le_bytes());
+            if governed {
+                encoded.extend_from_slice(&(governance_len as u32).to_le_bytes());
+            }
             encoded.push(KV_OVERFLOW_CODEC_LZ4);
             encoded.extend_from_slice(compressed);
+            if let Some(governance) = governance {
+                encoded.extend_from_slice(governance);
+            }
             return;
         }
     }
-    encoded.reserve(KV_OVERFLOW_HEADER_LEN.saturating_add(value.len()));
-    encoded.extend_from_slice(KV_OVERFLOW_MAGIC);
+    encoded.reserve(
+        raw_header_len
+            .saturating_add(value.len())
+            .saturating_add(governance_len),
+    );
+    encoded.extend_from_slice(if governed {
+        KV_OVERFLOW_GOVERNED_MAGIC
+    } else {
+        KV_OVERFLOW_MAGIC
+    });
     encoded.extend_from_slice(&expire_at_ms.to_le_bytes());
     encoded.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    encoded.extend_from_slice(&crc32fast::hash(value).to_le_bytes());
+    encoded.extend_from_slice(&overflow_checksum(value, governance).to_le_bytes());
+    if governed {
+        encoded.extend_from_slice(&(governance_len as u32).to_le_bytes());
+    }
     encoded.extend_from_slice(value);
+    if let Some(governance) = governance {
+        encoded.extend_from_slice(governance);
+    }
+}
+
+fn overflow_checksum(value: &[u8], governance: Option<&[u8]>) -> u32 {
+    let mut checksum = crc32fast::Hasher::new();
+    checksum.update(value);
+    if let Some(governance) = governance {
+        checksum.update(governance);
+    }
+    checksum.finalize()
 }
 
 fn decode_overflow_value(
@@ -1827,8 +1953,16 @@ fn decode_overflow_value(
     if value.len() < KV_OVERFLOW_HEADER_LEN {
         return Err("invalid key-value overflow envelope");
     }
-    let compressed = &value[..KV_OVERFLOW_MAGIC.len()] == KV_OVERFLOW_COMPRESSED_MAGIC;
-    if !compressed && &value[..KV_OVERFLOW_MAGIC.len()] != KV_OVERFLOW_MAGIC {
+    let magic = &value[..KV_OVERFLOW_MAGIC.len()];
+    let compressed =
+        magic == KV_OVERFLOW_COMPRESSED_MAGIC || magic == KV_OVERFLOW_GOVERNED_COMPRESSED_MAGIC;
+    let governed =
+        magic == KV_OVERFLOW_GOVERNED_MAGIC || magic == KV_OVERFLOW_GOVERNED_COMPRESSED_MAGIC;
+    if magic != KV_OVERFLOW_MAGIC
+        && magic != KV_OVERFLOW_COMPRESSED_MAGIC
+        && magic != KV_OVERFLOW_GOVERNED_MAGIC
+        && magic != KV_OVERFLOW_GOVERNED_COMPRESSED_MAGIC
+    {
         return Err("invalid key-value overflow envelope");
     }
     let expire_at_ms = u64::from_le_bytes(value[8..16].try_into().expect("fixed expiry field"));
@@ -1843,13 +1977,39 @@ fn decode_overflow_value(
     if payload_len > max_value_bytes {
         return Err("key-value overflow payload exceeds configured maximum");
     }
+    let governance_len = if governed {
+        if value.len() < KV_OVERFLOW_GOVERNED_HEADER_LEN {
+            return Err("invalid key-value overflow governance envelope");
+        }
+        let len = u32::from_le_bytes(
+            value[28..32]
+                .try_into()
+                .expect("fixed governance length field"),
+        ) as usize;
+        if len > max_value_bytes {
+            return Err("key-value overflow governance exceeds configured maximum");
+        }
+        len
+    } else {
+        0
+    };
+    let raw_header_len = if governed {
+        KV_OVERFLOW_GOVERNED_HEADER_LEN
+    } else {
+        KV_OVERFLOW_HEADER_LEN
+    };
+    let compressed_header_len = if governed {
+        KV_OVERFLOW_GOVERNED_COMPRESSED_HEADER_LEN
+    } else {
+        KV_OVERFLOW_COMPRESSED_HEADER_LEN
+    };
     let payload = if compressed {
-        if value.len() < KV_OVERFLOW_COMPRESSED_HEADER_LEN
-            || value[KV_OVERFLOW_HEADER_LEN] != KV_OVERFLOW_CODEC_LZ4
+        if value.len() < compressed_header_len.saturating_add(governance_len)
+            || value[raw_header_len] != KV_OVERFLOW_CODEC_LZ4
         {
             return Err("invalid key-value overflow compression codec");
         }
-        let stored_len = value.len() - KV_OVERFLOW_COMPRESSED_HEADER_LEN;
+        let stored_len = value.len() - compressed_header_len - governance_len;
         if payload_len
             > stored_len
                 .checked_mul(compression_max_expansion_ratio)
@@ -1863,21 +2023,33 @@ fn decode_overflow_value(
             .map_err(|_| "key-value overflow payload allocation failed")?;
         decoded.resize(payload_len, 0);
         let decoded_len = lz4_flex::block::decompress_into(
-            &value[KV_OVERFLOW_COMPRESSED_HEADER_LEN..],
+            &value[compressed_header_len..compressed_header_len + stored_len],
             &mut decoded,
         )
         .map_err(|_| "invalid key-value overflow compressed payload")?;
-        if decoded_len != payload_len || crc32fast::hash(&decoded) != checksum {
+        let governance = governed.then(|| &value[value.len() - governance_len..]);
+        if decoded_len != payload_len || overflow_checksum(&decoded, governance) != checksum {
             return Err("invalid key-value overflow payload integrity");
         }
         SharedBytes::from(decoded)
     } else {
-        let payload = &value[KV_OVERFLOW_HEADER_LEN..];
-        if payload_len != payload.len() || crc32fast::hash(payload) != checksum {
+        let expected_len = raw_header_len
+            .checked_add(payload_len)
+            .and_then(|len| len.checked_add(governance_len))
+            .ok_or("invalid key-value overflow payload length")?;
+        if value.len() != expected_len {
+            return Err("invalid key-value overflow payload integrity");
+        }
+        let payload = &value[raw_header_len..raw_header_len + payload_len];
+        let governance = governed.then(|| &value[raw_header_len + payload_len..]);
+        if overflow_checksum(payload, governance) != checksum {
             return Err("invalid key-value overflow payload integrity");
         }
         SharedBytes::copy_from_slice(payload)
     };
+    let governance = governed.then(|| {
+        SharedBytes::copy_from_slice(&value[value.len().saturating_sub(governance_len)..])
+    });
     let now_ms = now_millis();
     if expire_at_ms != 0 && expire_at_ms <= now_ms {
         return Ok(None);
@@ -1885,6 +2057,7 @@ fn decode_overflow_value(
     Ok(Some(KvOverflowValue {
         value: payload,
         ttl_ms: (expire_at_ms != 0).then_some(expire_at_ms.saturating_sub(now_ms)),
+        governance,
     }))
 }
 
@@ -2545,6 +2718,7 @@ impl KvOverflowCluster {
             key_hash,
             key,
             value,
+            None,
             expire_at_ms,
         )
     }
@@ -2555,6 +2729,7 @@ impl KvOverflowCluster {
         key_hash: u64,
         key: &[u8],
         value: &[u8],
+        governance: Option<&[u8]>,
         expire_at_ms: Option<u64>,
     ) -> Result<()> {
         let metrics = self.metrics.shard(primary_shard);
@@ -2562,7 +2737,13 @@ impl KvOverflowCluster {
         let owner_index = self.owner_index_for_hash_on_shard(primary_shard, key_hash);
         let storage_key = self.storage_key_for(owner_index, primary_shard, key_hash, key);
         let result = self.nodes[owner_index]
-            .put_until_on_shard(primary_shard, &storage_key, value, expire_at_ms)
+            .put_until_with_governance_on_shard(
+                primary_shard,
+                &storage_key,
+                value,
+                governance,
+                expire_at_ms,
+            )
             .and_then(|()| {
                 let Some(previous_index) = self.previous_owner_index(primary_shard, key_hash)
                 else {
@@ -2595,10 +2776,18 @@ impl KvOverflowCluster {
         let owner_index = self.owner_index_for_hash_on_shard(primary_shard, key_hash);
         let storage_key = self.storage_key_for(owner_index, primary_shard, key_hash, key);
         let current = &self.nodes[owner_index];
-        current.put_until_on_shard(primary_shard, &storage_key, &value.value, expire_at_ms)?;
+        current.put_until_with_governance_on_shard(
+            primary_shard,
+            &storage_key,
+            &value.value,
+            value.governance.as_deref(),
+            expire_at_ms,
+        )?;
         let verified = current
             .get_on_shard(primary_shard, &storage_key)?
-            .is_some_and(|stored| stored.value == value.value);
+            .is_some_and(|stored| {
+                stored.value == value.value && stored.governance == value.governance
+            });
         if !verified {
             self.metrics
                 .handoff_failures
@@ -2675,6 +2864,7 @@ impl KvOverflowCluster {
                     key,
                     value: requests[*index].value,
                     expire_at_ms: requests[*index].expire_at_ms,
+                    governance: requests[*index].governance,
                 })
                 .collect::<Vec<_>>();
             let pipeline_bytes = owner_requests.iter().fold(0usize, |total, request| {
@@ -2748,6 +2938,21 @@ impl KvOverflowCluster {
     pub fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
         let key_hash = xxh3_64(key);
         self.get_on_shard(self.primary_shard_for_hash(key_hash), key_hash, key)
+            .map(|value| value.filter(|value| value.governance.is_none()))
+    }
+
+    /// Reads a value only when `authorize` accepts its borrowed metadata.
+    pub fn get_with_governance_filter<F>(
+        &self,
+        key: &[u8],
+        authorize: F,
+    ) -> Result<Option<KvOverflowValue>>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        let key_hash = xxh3_64(key);
+        let value = self.get_on_shard(self.primary_shard_for_hash(key_hash), key_hash, key)?;
+        Ok(value.filter(|value| authorize(value.governance.as_deref())))
     }
 
     fn get_on_shard(
@@ -2928,12 +3133,14 @@ struct RemoteKeyMeta {
     expire_at_ms: Option<u64>,
     generation: u64,
     handoff_complete: bool,
+    protected: bool,
 }
 
 #[derive(Debug, Clone)]
 enum PendingMutation {
     Put {
         value: Option<SharedBytes>,
+        governance: Option<SharedBytes>,
         expire_at_ms: Option<u64>,
     },
     Delete {
@@ -3109,6 +3316,7 @@ enum KvOverflowJob {
         key: SharedBytes,
         key_hash: u64,
         value: SharedBytes,
+        governance: Option<SharedBytes>,
         expire_at_ms: Option<u64>,
         generation: u64,
     },
@@ -3128,6 +3336,7 @@ struct PendingPutJob {
     key: SharedBytes,
     key_hash: u64,
     value: SharedBytes,
+    governance: Option<SharedBytes>,
     expire_at_ms: Option<u64>,
     generation: u64,
 }
@@ -3137,6 +3346,8 @@ enum KvOverflowCompletion {
         primary_shard: usize,
         key_hash: u64,
         retry_value: Option<SharedBytes>,
+        retry_governance: Option<SharedBytes>,
+        protected: bool,
         expire_at_ms: Option<u64>,
         generation: u64,
         succeeded: bool,
@@ -3444,6 +3655,7 @@ fn write_direct_overflow_set(
     out: &mut Vec<u8>,
     key: &[u8],
     value: &[u8],
+    governance: Option<&[u8]>,
     expire_at_ms: Option<u64>,
     remote_shard: usize,
     compression: KvOverflowCompression,
@@ -3452,6 +3664,18 @@ fn write_direct_overflow_set(
     compressed: &mut Vec<u8>,
 ) -> Result<(usize, bool)> {
     let expire_at_ms = expire_at_ms.unwrap_or(0);
+    let governance_len = governance.map_or(0, <[u8]>::len);
+    let governed = governance.is_some();
+    let raw_header_len = if governed {
+        KV_OVERFLOW_GOVERNED_HEADER_LEN
+    } else {
+        KV_OVERFLOW_HEADER_LEN
+    };
+    let compressed_header_len = if governed {
+        KV_OVERFLOW_GOVERNED_COMPRESSED_HEADER_LEN
+    } else {
+        KV_OVERFLOW_COMPRESSED_HEADER_LEN
+    };
     let use_compressed = if compression == KvOverflowCompression::Lz4
         && value.len() >= compression_min_value_bytes
     {
@@ -3460,8 +3684,12 @@ fn write_direct_overflow_set(
         let compressed_len = lz4_flex::block::compress_into(value, compressed)
             .expect("maximum LZ4 output buffer is sufficient");
         compressed.truncate(compressed_len);
-        let raw_size = KV_OVERFLOW_HEADER_LEN.saturating_add(value.len());
-        let compressed_size = KV_OVERFLOW_COMPRESSED_HEADER_LEN.saturating_add(compressed.len());
+        let raw_size = raw_header_len
+            .saturating_add(value.len())
+            .saturating_add(governance_len);
+        let compressed_size = compressed_header_len
+            .saturating_add(compressed.len())
+            .saturating_add(governance_len);
         let savings = raw_size.saturating_sub(compressed_size);
         compressed_size < raw_size
             && savings.saturating_mul(100)
@@ -3470,24 +3698,38 @@ fn write_direct_overflow_set(
         false
     };
     let envelope_len = if use_compressed {
-        KV_OVERFLOW_COMPRESSED_HEADER_LEN.saturating_add(compressed.len())
+        compressed_header_len
+            .saturating_add(compressed.len())
+            .saturating_add(governance_len)
     } else {
-        KV_OVERFLOW_HEADER_LEN.saturating_add(value.len())
+        raw_header_len
+            .saturating_add(value.len())
+            .saturating_add(governance_len)
     };
     write_direct_set_prefix(out, key, envelope_len, remote_shard)?;
-    out.extend_from_slice(if use_compressed {
+    out.extend_from_slice(if use_compressed && governed {
+        KV_OVERFLOW_GOVERNED_COMPRESSED_MAGIC
+    } else if use_compressed {
         KV_OVERFLOW_COMPRESSED_MAGIC
+    } else if governed {
+        KV_OVERFLOW_GOVERNED_MAGIC
     } else {
         KV_OVERFLOW_MAGIC
     });
     out.extend_from_slice(&expire_at_ms.to_le_bytes());
     out.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    out.extend_from_slice(&crc32fast::hash(value).to_le_bytes());
+    out.extend_from_slice(&overflow_checksum(value, governance).to_le_bytes());
+    if governed {
+        out.extend_from_slice(&(governance_len as u32).to_le_bytes());
+    }
     if use_compressed {
         out.push(KV_OVERFLOW_CODEC_LZ4);
         out.extend_from_slice(compressed);
     } else {
         out.extend_from_slice(value);
+    }
+    if let Some(governance) = governance {
+        out.extend_from_slice(governance);
     }
     Ok((envelope_len, use_compressed))
 }
@@ -3507,6 +3749,7 @@ fn write_direct_delete(out: &mut Vec<u8>, key: &[u8], remote_shard: usize) -> Re
 
 enum FaultInOutcome {
     Retry,
+    Denied,
     Return(Option<Bytes>),
     Loaded(Bytes),
 }
@@ -3739,7 +3982,39 @@ impl KvOverflowStore {
         K: Into<Bytes>,
         V: Into<Bytes>,
     {
-        let value = SharedBytes::from(value.into());
+        self.set_with_optional_governance(key.into(), value.into(), ttl_ms, None)
+    }
+
+    /// Stores an exact value with opaque governance metadata. Ordinary
+    /// [`Self::get`] calls cannot return the protected value.
+    pub fn set_with_governance<K, V, G>(
+        &self,
+        key: K,
+        value: V,
+        ttl_ms: Option<u64>,
+        governance: G,
+    ) -> Result<()>
+    where
+        K: Into<Bytes>,
+        V: Into<Bytes>,
+        G: Into<Bytes>,
+    {
+        self.set_with_optional_governance(
+            key.into(),
+            value.into(),
+            ttl_ms,
+            Some(SharedBytes::from(governance.into())),
+        )
+    }
+
+    fn set_with_optional_governance(
+        &self,
+        key: Bytes,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+        governance: Option<SharedBytes>,
+    ) -> Result<()> {
+        let value = SharedBytes::from(value);
         if value.len() > self.options.max_value_bytes {
             self.cluster
                 .metrics
@@ -3751,7 +4026,16 @@ impl KvOverflowStore {
                 self.options.max_value_bytes
             )));
         }
-        let key = SharedBytes::from(key.into());
+        if governance
+            .as_ref()
+            .is_some_and(|metadata| metadata.len() > self.options.max_value_bytes)
+        {
+            return Err(ShardCacheError::Protocol(format!(
+                "key-value overflow governance exceeds max_value_bytes {}",
+                self.options.max_value_bytes
+            )));
+        }
+        let key = SharedBytes::from(key);
         self.validate_key_len(&key)?;
         let key_hash = xxh3_64(&key);
         let route = self.inner.route_key_prehashed(key_hash, &key);
@@ -3765,6 +4049,9 @@ impl KvOverflowStore {
         let metadata_index = key_gate_index_for_hash(key_hash, self.remote_keys.len());
         let newly_tracked = self.options.max_metadata_bytes != usize::MAX
             && !(self.inner.exists(&key)
+                || self
+                    .inner
+                    .is_value_protected_routed(route, &key, now_millis())
                 || self.remote_keys[metadata_index]
                     .read()
                     .get_hashed(key_hash, &key)
@@ -3792,11 +4079,13 @@ impl KvOverflowStore {
             shard_target
                 .saturating_add(self.options.max_key_bytes)
                 .saturating_add(self.options.max_value_bytes)
+                .saturating_add(governance.as_ref().map_or(0, SharedBytes::len))
         });
         let inserted = self.inner.try_set_value_bytes_routed_overflow(
             route,
             &key,
             value.clone(),
+            governance.clone(),
             expire_at_ms,
             generation,
             hard_limit,
@@ -3824,6 +4113,7 @@ impl KvOverflowStore {
                 key: key.clone(),
                 key_hash,
                 value,
+                governance,
                 expire_at_ms,
                 generation,
             },
@@ -3860,6 +4150,9 @@ impl KvOverflowStore {
             else {
                 return Ok(None);
             };
+            if expected.protected {
+                return Ok(None);
+            }
             let fault_gate = {
                 let mut gates = self.fault_gates.lock();
                 Arc::clone(
@@ -3875,6 +4168,7 @@ impl KvOverflowStore {
             self.release_fault_gate(key, &fault_gate);
             match outcome? {
                 FaultInOutcome::Retry => continue,
+                FaultInOutcome::Denied => return Ok(None),
                 FaultInOutcome::Return(value) => return Ok(value),
                 FaultInOutcome::Loaded(value) => {
                     self.enforce_memory_target(expected.primary_shard);
@@ -3882,6 +4176,186 @@ impl KvOverflowStore {
                 }
             }
         }
+    }
+
+    /// Returns a resident or overflow value only after `authorize` accepts
+    /// its borrowed opaque metadata. Rejection is indistinguishable from miss.
+    pub fn get_with_governance_filter<F>(&self, key: &[u8], authorize: F) -> Result<Option<Bytes>>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        self.validate_key_len(key)?;
+        let key_hash = xxh3_64(key);
+        let route = self.inner.route_key_prehashed(key_hash, key);
+        let mut authorize = Some(authorize);
+        match self.inner.get_value_bytes_routed_with_governance_filter(
+            route,
+            key,
+            now_millis(),
+            |metadata| {
+                authorize
+                    .take()
+                    .expect("authorization filter is called at most once")(metadata)
+            },
+        ) {
+            GovernedRead::Authorized(value) => return Ok(Some(value.to_vec())),
+            GovernedRead::Denied => return Ok(None),
+            GovernedRead::Missing => {}
+        }
+        if !self.options.fetch_on_miss {
+            return Ok(None);
+        }
+        let metadata_index = key_gate_index_for_hash(key_hash, self.remote_keys.len());
+        loop {
+            let Some(expected) = self.remote_keys[metadata_index]
+                .read()
+                .get_hashed(key_hash, key)
+                .copied()
+            else {
+                return Ok(None);
+            };
+            let fault_gate = {
+                let mut gates = self.fault_gates.lock();
+                Arc::clone(
+                    gates
+                        .entry(SharedBytes::copy_from_slice(key))
+                        .or_insert_with(|| Arc::new(Mutex::new(()))),
+                )
+            };
+            let outcome = {
+                let _fault_gate = fault_gate.lock();
+                self.fault_in_once_with_governance(
+                    key,
+                    key_hash,
+                    metadata_index,
+                    expected,
+                    &mut authorize,
+                )
+            };
+            self.release_fault_gate(key, &fault_gate);
+            match outcome? {
+                FaultInOutcome::Retry => continue,
+                FaultInOutcome::Denied | FaultInOutcome::Return(None) => return Ok(None),
+                FaultInOutcome::Return(value) => return Ok(value),
+                FaultInOutcome::Loaded(value) => {
+                    self.enforce_memory_target(expected.primary_shard);
+                    return Ok(Some(value));
+                }
+            }
+        }
+    }
+
+    fn fault_in_once_with_governance<F>(
+        &self,
+        key: &[u8],
+        key_hash: u64,
+        metadata_index: usize,
+        expected: RemoteKeyMeta,
+        authorize: &mut Option<F>,
+    ) -> Result<FaultInOutcome>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        let route = self.inner.route_key_prehashed(key_hash, key);
+        let check_resident = |authorize: &mut Option<F>| {
+            self.inner.get_value_bytes_routed_with_governance_filter(
+                route,
+                key,
+                now_millis(),
+                |metadata| {
+                    authorize
+                        .take()
+                        .expect("authorization filter is called at most once")(
+                        metadata
+                    )
+                },
+            )
+        };
+        match check_resident(authorize) {
+            GovernedRead::Authorized(value) => {
+                return Ok(FaultInOutcome::Return(Some(value.to_vec())));
+            }
+            GovernedRead::Denied => return Ok(FaultInOutcome::Denied),
+            GovernedRead::Missing => {}
+        }
+        if self.remote_keys[metadata_index]
+            .read()
+            .get_hashed(key_hash, key)
+            .copied()
+            != Some(expected)
+        {
+            return Ok(FaultInOutcome::Retry);
+        }
+        let remote = self
+            .cluster
+            .get_on_shard(expected.primary_shard, key_hash, key)?;
+        let _key_gate = self.key_gate_for_hash(key_hash);
+        match check_resident(authorize) {
+            GovernedRead::Authorized(value) => {
+                return Ok(FaultInOutcome::Return(Some(value.to_vec())));
+            }
+            GovernedRead::Denied => return Ok(FaultInOutcome::Denied),
+            GovernedRead::Missing => {}
+        }
+        if self.remote_keys[metadata_index]
+            .read()
+            .get_hashed(key_hash, key)
+            .copied()
+            != Some(expected)
+        {
+            return Ok(FaultInOutcome::Retry);
+        }
+        let Some(remote) = remote else {
+            if self.options.forget_remote_misses
+                || expected
+                    .expire_at_ms
+                    .is_some_and(|expiry| expiry <= now_millis())
+            {
+                let removed = self.remote_keys[metadata_index]
+                    .write()
+                    .remove_hashed(key_hash, key);
+                if removed.is_some() {
+                    self.metadata_budget.release(key.len());
+                }
+            }
+            return Ok(FaultInOutcome::Return(None));
+        };
+        if !authorize
+            .take()
+            .expect("authorization filter is called at most once")(
+            remote.governance.as_deref()
+        ) {
+            return Ok(FaultInOutcome::Denied);
+        }
+        let shard_target = shard_memory_target(
+            &self.options,
+            self.inner.shard_count(),
+            expected.primary_shard,
+        );
+        let hard_limit = shard_target
+            .saturating_add(self.options.max_key_bytes)
+            .saturating_add(self.options.max_value_bytes)
+            .saturating_add(remote.governance.as_ref().map_or(0, SharedBytes::len));
+        if !self.inner.try_set_value_bytes_routed_overflow(
+            route,
+            key,
+            remote.value.clone(),
+            remote.governance.clone(),
+            expected.expire_at_ms,
+            expected.generation,
+            hard_limit,
+        ) {
+            self.cluster
+                .metrics
+                .resident_backpressure
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(FaultInOutcome::Return(Some(remote.value.to_vec())));
+        }
+        self.cluster
+            .metrics
+            .fault_ins
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(FaultInOutcome::Loaded(remote.value.to_vec()))
     }
 
     fn fault_in_once(
@@ -3932,6 +4406,16 @@ impl KvOverflowStore {
             }
             return Ok(FaultInOutcome::Return(None));
         };
+        if remote.governance.is_some() {
+            if let Some(meta) = self.remote_keys[metadata_index]
+                .write()
+                .get_mut_hashed(key_hash, key)
+                .filter(|meta| **meta == expected)
+            {
+                meta.protected = true;
+            }
+            return Ok(FaultInOutcome::Return(None));
+        }
         let route = self.inner.route_key_prehashed(key_hash, key);
         let shard_target = shard_memory_target(
             &self.options,
@@ -3945,6 +4429,7 @@ impl KvOverflowStore {
             route,
             key,
             remote.value.clone(),
+            remote.governance.clone(),
             expected.expire_at_ms,
             expected.generation,
             hard_limit,
@@ -3978,7 +4463,26 @@ impl KvOverflowStore {
         self.validate_key_len(key)?;
         let key_hash = xxh3_64(key);
         let primary_shard = self.inner.route_key_prehashed(key_hash, key).shard_id;
-        self.cluster.get_on_shard(primary_shard, key_hash, key)
+        self.cluster
+            .get_on_shard(primary_shard, key_hash, key)
+            .map(|value| value.filter(|value| value.governance.is_none()))
+    }
+
+    /// Reads the deterministic overflow owner after applying `authorize`,
+    /// without promoting the value into primary memory.
+    pub fn get_remote_with_governance_filter<F>(
+        &self,
+        key: &[u8],
+        authorize: F,
+    ) -> Result<Option<KvOverflowValue>>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        self.validate_key_len(key)?;
+        let key_hash = xxh3_64(key);
+        let primary_shard = self.inner.route_key_prehashed(key_hash, key).shard_id;
+        let value = self.cluster.get_on_shard(primary_shard, key_hash, key)?;
+        Ok(value.filter(|value| authorize(value.governance.as_deref())))
     }
 
     pub fn delete(&self, key: &[u8]) -> Result<bool> {
@@ -4347,6 +4851,7 @@ impl KvOverflowStore {
                 key_hash,
                 &entry.key,
                 &entry.value,
+                entry.governance.as_deref(),
                 entry.expire_at_ms,
             ) {
                 if !already_tracked {
@@ -4364,6 +4869,7 @@ impl KvOverflowStore {
                     expire_at_ms: entry.expire_at_ms,
                     generation,
                     handoff_complete: true,
+                    protected: entry.governance.is_some(),
                 },
             );
         }
@@ -4437,6 +4943,7 @@ impl KvOverflowStore {
                     key: key.as_ref().to_vec(),
                     value: remote.value.as_ref().to_vec(),
                     expire_at_ms: meta.expire_at_ms,
+                    governance: remote.governance.as_deref().map(<[u8]>::to_vec),
                 })?;
             }
         }
@@ -4801,6 +5308,7 @@ async fn run_direct_shard_worker(
                 key,
                 key_hash,
                 value,
+                governance,
                 expire_at_ms,
                 generation,
             } => {
@@ -4817,6 +5325,7 @@ async fn run_direct_shard_worker(
                         key,
                         key_hash,
                         value,
+                        governance,
                         expire_at_ms,
                         generation,
                     },
@@ -5059,7 +5568,12 @@ fn direct_put_bytes(job: &DirectPutJob) -> usize {
     job.storage_key
         .len()
         .saturating_add(job.put.value.len())
-        .saturating_add(KV_OVERFLOW_HEADER_LEN)
+        .saturating_add(job.put.governance.as_ref().map_or(0, SharedBytes::len))
+        .saturating_add(if job.put.governance.is_some() {
+            KV_OVERFLOW_GOVERNED_HEADER_LEN
+        } else {
+            KV_OVERFLOW_HEADER_LEN
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5106,6 +5620,7 @@ async fn execute_direct_puts(
                     &mut buffers.request,
                     &job.storage_key,
                     &job.put.value,
+                    job.put.governance.as_deref(),
                     job.put.expire_at_ms,
                     remote_shard,
                     options.compression,
@@ -5181,6 +5696,7 @@ async fn execute_direct_puts(
                         &mut buffers.request,
                         &job.storage_key,
                         &job.put.value,
+                        job.put.governance.as_deref(),
                         job.put.expire_at_ms,
                         remote_shard,
                         options.compression,
@@ -5263,6 +5779,7 @@ fn complete_direct_put(
     job: DirectPutJob,
     succeeded: bool,
 ) {
+    let protected = job.put.governance.is_some();
     completions
         .send((
             job.put.key,
@@ -5270,6 +5787,8 @@ fn complete_direct_put(
                 primary_shard: job.put.primary_shard,
                 key_hash: job.put.key_hash,
                 retry_value: (!succeeded).then_some(job.put.value),
+                retry_governance: (!succeeded).then_some(job.put.governance).flatten(),
+                protected,
                 expire_at_ms: job.put.expire_at_ms,
                 generation: job.put.generation,
                 succeeded,
@@ -5433,6 +5952,7 @@ impl KvOverflowWorkerPool {
                                 key,
                                 key_hash,
                                 value,
+                                governance,
                                 expire_at_ms,
                                 generation,
                             } => {
@@ -5444,6 +5964,7 @@ impl KvOverflowWorkerPool {
                                     key,
                                     key_hash,
                                     value,
+                                    governance,
                                     expire_at_ms,
                                     generation,
                                 });
@@ -5460,6 +5981,7 @@ impl KvOverflowWorkerPool {
                                                 key,
                                                 key_hash,
                                                 value,
+                                                governance,
                                                 expire_at_ms,
                                                 generation,
                                             } if job_primary_shard == primary_shard => {
@@ -5473,6 +5995,7 @@ impl KvOverflowWorkerPool {
                                                         key,
                                                         key_hash,
                                                         value,
+                                                        governance,
                                                         expire_at_ms,
                                                         generation,
                                                     });
@@ -5485,6 +6008,7 @@ impl KvOverflowWorkerPool {
                                                     key,
                                                     key_hash,
                                                     value,
+                                                    governance,
                                                     expire_at_ms,
                                                     generation,
                                                 });
@@ -5512,6 +6036,7 @@ impl KvOverflowWorkerPool {
                                         key: &put.key,
                                         value: &put.value,
                                         expire_at_ms: put.expire_at_ms,
+                                        governance: put.governance.as_deref(),
                                     })
                                     .collect::<Vec<_>>();
                                 let shard_metrics = worker_cluster.metrics.shard(primary_shard);
@@ -5550,6 +6075,7 @@ impl KvOverflowWorkerPool {
                                 let mut replicated = 0u64;
                                 let mut failed = 0u64;
                                 for (put, succeeded) in puts.drain(..).zip(outcomes.drain(..)) {
+                                    let protected = put.governance.is_some();
                                     replicated += u64::from(succeeded);
                                     failed += u64::from(!succeeded);
                                     worker_completions
@@ -5559,6 +6085,10 @@ impl KvOverflowWorkerPool {
                                                 primary_shard: put.primary_shard,
                                                 key_hash: put.key_hash,
                                                 retry_value: (!succeeded).then_some(put.value),
+                                                retry_governance: (!succeeded)
+                                                    .then_some(put.governance)
+                                                    .flatten(),
+                                                protected,
                                                 expire_at_ms: put.expire_at_ms,
                                                 generation: put.generation,
                                                 succeeded,
@@ -5792,12 +6322,14 @@ fn enqueue_pending_retry(
     let job = match candidate.mutation {
         PendingMutation::Put {
             value: Some(value),
+            governance,
             expire_at_ms,
         } => KvOverflowJob::Put {
             primary_shard,
             key: key.clone(),
             key_hash,
             value,
+            governance,
             expire_at_ms,
             generation: candidate.generation,
         },
@@ -5878,6 +6410,8 @@ fn drain_completion_queue(
                 primary_shard,
                 key_hash,
                 retry_value,
+                retry_governance,
+                protected,
                 expire_at_ms,
                 generation,
                 succeeded,
@@ -5891,6 +6425,8 @@ fn drain_completion_queue(
                     key,
                     key_hash,
                     retry_value,
+                    retry_governance,
+                    protected,
                     expire_at_ms,
                     generation,
                     succeeded,
@@ -5926,6 +6462,8 @@ fn apply_put_completion(
     key: SharedBytes,
     key_hash: u64,
     retry_value: Option<SharedBytes>,
+    retry_governance: Option<SharedBytes>,
+    protected: bool,
     expire_at_ms: Option<u64>,
     generation: u64,
     succeeded: bool,
@@ -5949,6 +6487,7 @@ fn apply_put_completion(
                 expire_at_ms,
                 generation,
                 handoff_complete: true,
+                protected,
             },
         );
         true
@@ -5964,6 +6503,7 @@ fn apply_put_completion(
                     tracks_key: true,
                     mutation: PendingMutation::Put {
                         value: Some(value),
+                        governance: retry_governance,
                         expire_at_ms,
                     },
                 },
@@ -6356,9 +6896,42 @@ mod tests {
                 KvOverflowValue {
                     value: SharedBytes::copy_from_slice(value),
                     ttl_ms,
+                    governance: None,
                 },
             );
             Ok(())
+        }
+
+        fn put_until_with_governance_on_shard(
+            &self,
+            _primary_shard: usize,
+            key: &[u8],
+            value: &[u8],
+            governance: Option<&[u8]>,
+            expire_at_ms: Option<u64>,
+        ) -> Result<()> {
+            if self.fail_puts.load(Ordering::Relaxed) {
+                return Err(ShardCacheError::Protocol("injected put failure".into()));
+            }
+            self.values.write().insert(
+                key.to_vec(),
+                KvOverflowValue {
+                    value: SharedBytes::copy_from_slice(value),
+                    ttl_ms: expire_at_ms.map(|deadline| deadline.saturating_sub(now_millis())),
+                    governance: governance.map(SharedBytes::copy_from_slice),
+                },
+            );
+            Ok(())
+        }
+
+        fn put_until_with_governance(
+            &self,
+            key: &[u8],
+            value: &[u8],
+            governance: Option<&[u8]>,
+            expire_at_ms: Option<u64>,
+        ) -> Result<()> {
+            self.put_until_with_governance_on_shard(0, key, value, governance, expire_at_ms)
         }
 
         fn get(&self, key: &[u8]) -> Result<Option<KvOverflowValue>> {
@@ -6584,6 +7157,7 @@ mod tests {
                 KvOverflowValue {
                     value: SharedBytes::copy_from_slice(value),
                     ttl_ms,
+                    governance: None,
                 },
             );
             Ok(())
@@ -6639,6 +7213,7 @@ mod tests {
                 KvOverflowValue {
                     value: SharedBytes::copy_from_slice(value),
                     ttl_ms,
+                    governance: None,
                 },
             );
             Ok(())
@@ -6678,6 +7253,7 @@ mod tests {
                 KvOverflowValue {
                     value: SharedBytes::copy_from_slice(value),
                     ttl_ms,
+                    governance: None,
                 },
             );
             Ok(())
@@ -6719,6 +7295,7 @@ mod tests {
                 KvOverflowValue {
                     value: SharedBytes::copy_from_slice(value),
                     ttl_ms,
+                    governance: None,
                 },
             );
             Ok(())
@@ -6768,6 +7345,7 @@ mod tests {
                 KvOverflowValue {
                     value: SharedBytes::copy_from_slice(value),
                     ttl_ms,
+                    governance: None,
                 },
             );
             Ok(())
@@ -6833,7 +7411,7 @@ mod tests {
     fn lz4_overflow_envelope_round_trips_and_preserves_v1_compatibility() {
         let value = vec![b'x'; 32 * 1024];
         let encoded =
-            encode_overflow_value_until(&value, None, KvOverflowCompression::Lz4, 1024, 12);
+            encode_overflow_value_until(&value, None, None, KvOverflowCompression::Lz4, 1024, 12);
         assert_eq!(
             &encoded[..KV_OVERFLOW_COMPRESSED_MAGIC.len()],
             KV_OVERFLOW_COMPRESSED_MAGIC
@@ -6848,8 +7426,14 @@ mod tests {
             value
         );
 
-        let legacy =
-            encode_overflow_value_until(b"legacy", None, KvOverflowCompression::None, 1024, 12);
+        let legacy = encode_overflow_value_until(
+            b"legacy",
+            None,
+            None,
+            KvOverflowCompression::None,
+            1024,
+            12,
+        );
         assert_eq!(&legacy[..KV_OVERFLOW_MAGIC.len()], KV_OVERFLOW_MAGIC);
         assert_eq!(
             decode_overflow_value(&legacy, 64 * 1024 * 1024, 256)
@@ -6862,17 +7446,64 @@ mod tests {
     }
 
     #[test]
+    fn governed_overflow_envelopes_preserve_metadata_and_integrity() {
+        let value = vec![b'x'; 32 * 1024];
+        let governance = b"tenant-a/repo-private";
+        for compression in [KvOverflowCompression::None, KvOverflowCompression::Lz4] {
+            let encoded =
+                encode_overflow_value_until(&value, Some(governance), None, compression, 1024, 1);
+            let decoded = decode_overflow_value(&encoded, 64 * 1024 * 1024, 256)
+                .unwrap()
+                .unwrap();
+            assert_eq!(decoded.value.as_ref(), value);
+            assert_eq!(decoded.governance.as_deref(), Some(governance.as_slice()));
+
+            let mut corrupted = encoded;
+            *corrupted.last_mut().unwrap() ^= 1;
+            assert!(decode_overflow_value(&corrupted, 64 * 1024 * 1024, 256).is_err());
+        }
+
+        let empty = encode_overflow_value_until(
+            b"value",
+            Some(b""),
+            None,
+            KvOverflowCompression::None,
+            1024,
+            1,
+        );
+        assert_eq!(
+            decode_overflow_value(&empty, 1024, 256)
+                .unwrap()
+                .unwrap()
+                .governance,
+            Some(SharedBytes::new())
+        );
+    }
+
+    #[test]
     fn compressed_overflow_envelope_rejects_corruption() {
-        let mut encoded =
-            encode_overflow_value_until(&[7; 16 * 1024], None, KvOverflowCompression::Lz4, 1024, 1);
+        let mut encoded = encode_overflow_value_until(
+            &[7; 16 * 1024],
+            None,
+            None,
+            KvOverflowCompression::Lz4,
+            1024,
+            1,
+        );
         *encoded.last_mut().unwrap() ^= 0xff;
         assert!(decode_overflow_value(&encoded, 64 * 1024 * 1024, 256).is_err());
     }
 
     #[test]
     fn compressed_overflow_envelope_rejects_unbounded_lengths_before_allocation() {
-        let mut encoded =
-            encode_overflow_value_until(&[7; 16 * 1024], None, KvOverflowCompression::Lz4, 1024, 1);
+        let mut encoded = encode_overflow_value_until(
+            &[7; 16 * 1024],
+            None,
+            None,
+            KvOverflowCompression::Lz4,
+            1024,
+            1,
+        );
         encoded[16..24].copy_from_slice(&(128 * 1024 * 1024u64).to_le_bytes());
         assert_eq!(
             decode_overflow_value(&encoded, 64 * 1024 * 1024, 256),
@@ -7018,11 +7649,13 @@ mod tests {
                 key: b"first",
                 value: b"one",
                 expire_at_ms: None,
+                governance: None,
             },
             KvOverflowPutRequest {
                 key: b"second",
                 value: b"two",
                 expire_at_ms: None,
+                governance: None,
             },
         ];
         let mut outcomes = Vec::new();
@@ -7160,6 +7793,7 @@ mod tests {
                 expire_at_ms: None,
                 generation: 1,
                 handoff_complete: true,
+                protected: false,
             },
         );
         let gate = key_gate_index(remote_key, store.key_gates.len());
@@ -7540,6 +8174,7 @@ mod tests {
             key: key.clone(),
             value: b"value".to_vec(),
             expire_at_ms: None,
+            governance: None,
         }]);
         assert_eq!(store.get(&key).unwrap(), b"value");
     }
@@ -7687,6 +8322,7 @@ mod tests {
                 expire_at_ms: None,
                 generation: 1,
                 handoff_complete: false,
+                protected: false,
             },
         );
 
@@ -7743,6 +8379,7 @@ mod tests {
                 expire_at_ms: None,
                 generation: 1,
                 handoff_complete: false,
+                protected: false,
             },
         );
         let remote_gate = key_gate_index(remote_key, store.key_gates.len());
@@ -8382,6 +9019,77 @@ mod tests {
     }
 
     #[test]
+    fn resident_hard_limit_accounts_for_governance_bytes() {
+        let node = MemoryNode::new("node-a");
+        node.fail_puts.store(true, Ordering::Relaxed);
+        let cluster = Arc::new(KvOverflowCluster::new(vec![Arc::new(node)]).unwrap());
+        let mut constrained = options(4);
+        constrained.max_key_bytes = 1;
+        constrained.max_value_bytes = 5;
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, constrained).unwrap();
+
+        store
+            .set_with_governance(b"a", b"value", None, b"rules")
+            .unwrap();
+        let retained_bytes = store.inner().stored_bytes();
+        assert_eq!(retained_bytes, b"a".len() + b"value".len() + b"rules".len());
+
+        assert!(matches!(
+            store.set_with_governance(b"b", b"value", None, b"rules"),
+            Err(ShardCacheError::Backpressure(_))
+        ));
+        assert_eq!(store.inner().stored_bytes(), retained_bytes);
+        assert_eq!(
+            store.get_with_governance_filter(b"b", |_| true).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn governed_cold_value_is_fail_closed_and_stays_protected_after_promotion() {
+        let node = Arc::new(MemoryNode::new("node-a"));
+        let cluster = Arc::new(KvOverflowCluster::new(vec![node]).unwrap());
+        let store = KvOverflowStore::new(EmbeddedStore::new(1), cluster, options(1)).unwrap();
+        store
+            .set_with_governance(
+                b"known-prefix",
+                b"private-model-state",
+                None,
+                b"tenant-a/repo-private",
+            )
+            .unwrap();
+        store.flush_remote().unwrap();
+
+        assert_eq!(store.get(b"known-prefix").unwrap(), None);
+        assert_eq!(store.get_remote(b"known-prefix").unwrap(), None);
+        assert_eq!(
+            store
+                .get_with_governance_filter(b"known-prefix", |metadata| {
+                    metadata == Some(b"tenant-b/repo-public".as_slice())
+                })
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .get_with_governance_filter(b"known-prefix", |metadata| {
+                    metadata == Some(b"tenant-a/repo-private".as_slice())
+                })
+                .unwrap()
+                .as_deref(),
+            Some(b"private-model-state".as_slice())
+        );
+        assert_eq!(store.get(b"known-prefix").unwrap(), None);
+
+        let snapshot = store.try_entry_snapshot().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            snapshot[0].governance.as_deref(),
+            Some(b"tenant-a/repo-private".as_slice())
+        );
+    }
+
+    #[test]
     fn fault_in_bypasses_primary_when_resident_hard_limit_is_full() {
         let node = Arc::new(MemoryNode::new("node-a"));
         let cluster = Arc::new(KvOverflowCluster::new(vec![node.clone()]).unwrap());
@@ -8420,6 +9128,7 @@ mod tests {
                 key: b"key".to_vec(),
                 value: b"value".to_vec(),
                 expire_at_ms: None,
+                governance: None,
             }]
         );
     }
@@ -8517,6 +9226,7 @@ mod tests {
                         key: vec![index],
                         value: vec![index; 8],
                         expire_at_ms: None,
+                        governance: None,
                     })?;
                 }
                 Ok(())

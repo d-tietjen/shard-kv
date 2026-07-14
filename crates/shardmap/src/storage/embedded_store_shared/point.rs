@@ -64,6 +64,33 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             .point_value_bytes(route.key_hash, key)
     }
 
+    /// Returns an exact point value only when `authorize` accepts its borrowed
+    /// opaque governance metadata. Rejection is indistinguishable from a miss
+    /// and occurs before the value handle is cloned.
+    pub fn get_value_bytes_with_governance_filter<F>(
+        &self,
+        key: &[u8],
+        authorize: F,
+    ) -> Option<SharedBytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        let route = self.route_key(key);
+        let now_ms = if cfg!(feature = "no-ttl") {
+            0
+        } else {
+            ttl_now_millis()
+        };
+        match self
+            .stripe(route.shard_id)
+            .write()
+            .get_value_bytes_hashed_with_governance_filter(route.key_hash, key, now_ms, authorize)
+        {
+            GovernedRead::Authorized(value) => Some(value),
+            GovernedRead::Missing | GovernedRead::Denied => None,
+        }
+    }
+
     /// Returns a refcount-only clone of the stored bytes for a prepared key.
     ///
     /// Prepared keys must be created by a store with the same shard count and
@@ -80,6 +107,9 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     pub fn get_mut(&self, key: &[u8]) -> Option<RefMut<'_>> {
         let route = self.route_key(key);
         let mut guard = self.stripe(route.shard_id).write();
+        if guard.is_value_protected_hashed(route.key_hash, key, ttl_now_millis()) {
+            return None;
+        }
         #[cfg(feature = "no-ttl")]
         let expire_at_ms = guard.entry_expire_at_hashed_no_ttl(route.key_hash, key)?;
         #[cfg(not(feature = "no-ttl"))]
@@ -180,6 +210,40 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
             self.invalidate_semantic_shadow(route, key.as_ref(), now_ms);
             self.bump_semantic_generation_if_active();
         }
+    }
+
+    /// Atomically inserts or replaces a protected point value, TTL, and opaque
+    /// governance metadata.
+    pub fn insert_with_ttl_and_governance(
+        &self,
+        key: SharedBytes,
+        value: SharedBytes,
+        ttl_ms: Option<u64>,
+        governance: SharedBytes,
+    ) {
+        #[cfg(feature = "no-ttl")]
+        assert!(
+            ttl_ms.is_none(),
+            "shardcache/no-ttl builds do not support shared-store TTL writes"
+        );
+        let now_ms = ttl_ms.map_or(0, |_| ttl_now_millis());
+        let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        let route = self.route_key(key.as_ref());
+        {
+            self.stripe(route.shard_id)
+                .write()
+                .set_value_bytes_hashed_with_governance(
+                    self.inner.route_mode,
+                    route.key_hash,
+                    key.as_ref(),
+                    value,
+                    governance,
+                    expire_at_ms,
+                    now_ms,
+                );
+        }
+        self.invalidate_semantic_shadow(route, key.as_ref(), now_ms);
+        self.bump_semantic_generation_if_active();
     }
 
     /// Inserts a point-key value only when the key is absent or expired.
@@ -409,28 +473,28 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
         let route = self.route_key(key);
         #[cfg(feature = "no-ttl")]
         {
-            let removed =
-                self.stripe(route.shard_id)
-                    .write()
-                    .remove_value_hashed(route.key_hash, key, 0);
+            let mut guard = self.stripe(route.shard_id).write();
+            let protected = guard.is_value_protected_hashed(route.key_hash, key, 0);
+            let removed = guard.remove_value_hashed(route.key_hash, key, 0);
+            drop(guard);
             let semantic_removed = self.invalidate_semantic_shadow(route, key, 0);
             if removed.is_some() || semantic_removed.is_some() {
                 self.bump_semantic_generation_if_active();
             }
-            removed.or(semantic_removed)
+            (!protected).then(|| removed.or(semantic_removed)).flatten()
         }
         #[cfg(not(feature = "no-ttl"))]
         {
-            let removed = self.stripe(route.shard_id).write().remove_value_hashed(
-                route.key_hash,
-                key,
-                ttl_now_millis(),
-            );
-            let semantic_removed = self.invalidate_semantic_shadow(route, key, ttl_now_millis());
+            let now_ms = ttl_now_millis();
+            let mut guard = self.stripe(route.shard_id).write();
+            let protected = guard.is_value_protected_hashed(route.key_hash, key, now_ms);
+            let removed = guard.remove_value_hashed(route.key_hash, key, now_ms);
+            drop(guard);
+            let semantic_removed = self.invalidate_semantic_shadow(route, key, now_ms);
             if removed.is_some() || semantic_removed.is_some() {
                 self.bump_semantic_generation_if_active();
             }
-            removed.or(semantic_removed)
+            (!protected).then(|| removed.or(semantic_removed)).flatten()
         }
     }
 

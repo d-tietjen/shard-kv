@@ -239,6 +239,7 @@ mod tests {
             key: SharedBytes::from(key),
             value: SharedBytes::from_static(b"v"),
             expire_at_ms: None,
+            governance: None,
         }
     }
 

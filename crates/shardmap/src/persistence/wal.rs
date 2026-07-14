@@ -252,9 +252,11 @@ impl WalRecordCodec {
     }
 
     fn encode_legacy(record: &MutationRecord) -> Vec<u8> {
-        let mut bytes =
-            Vec::with_capacity(1 + 4 + 4 + 8 + 8 + record.key.len() + record.value.len() + 4);
-        bytes.push(Self::encode_op(&record.op));
+        let governance_len = record.governance.as_ref().map_or(0, bytes::Bytes::len);
+        let mut bytes = Vec::with_capacity(
+            1 + 4 + 4 + 8 + 8 + record.key.len() + record.value.len() + governance_len + 8,
+        );
+        bytes.push(Self::encode_op(record));
         bytes.extend_from_slice(&(record.key.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&(record.value.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&record.timestamp_ms.to_le_bytes());
@@ -263,22 +265,27 @@ impl WalRecordCodec {
         );
         bytes.extend_from_slice(record.key.as_ref());
         bytes.extend_from_slice(record.value.as_ref());
+        if let Some(governance) = &record.governance {
+            bytes.extend_from_slice(&(governance.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(governance.as_ref());
+        }
         let crc = crc32fast::hash(&bytes);
         bytes.extend_from_slice(&crc.to_le_bytes());
         bytes
     }
 
-    fn encode_op(op: &MutationOp) -> u8 {
-        match op {
-            MutationOp::Set => 1,
-            MutationOp::Del => 2,
-            MutationOp::Expire => 3,
+    fn encode_op(record: &MutationRecord) -> u8 {
+        match (&record.op, record.governance.is_some()) {
+            (MutationOp::Set, true) => 4,
+            (MutationOp::Set, false) => 1,
+            (MutationOp::Del, _) => 2,
+            (MutationOp::Expire, _) => 3,
         }
     }
 
     fn decode_op(value: u8) -> Result<MutationOp> {
         match value {
-            1 => Ok(MutationOp::Set),
+            1 | 4 => Ok(MutationOp::Set),
             2 => Ok(MutationOp::Del),
             3 => Ok(MutationOp::Expire),
             other => Err(ShardCacheError::Persistence(format!(
@@ -478,13 +485,24 @@ impl<'a> LegacyRecordCursor<'a> {
         record_start: usize,
         header: LegacyRecordHeader,
     ) -> Result<Option<MutationRecord>> {
-        let body_len = header
+        let minimum_body_len = header
             .key_len
             .saturating_add(header.value_len)
+            .saturating_add(usize::from(header.has_governance()).saturating_mul(4))
             .saturating_add(WAL_CRC_LEN);
+        if self.owner.len().saturating_sub(self.cursor) < minimum_body_len {
+            return Ok(None);
+        }
+        let governance_len = if header.has_governance() {
+            let offset = self.cursor + header.key_len + header.value_len;
+            WalBytes::read_u32_at(self.owner.as_ref(), offset) as usize
+        } else {
+            0
+        };
+        let body_len = minimum_body_len.saturating_add(governance_len);
         match self.owner.len().saturating_sub(self.cursor) < body_len {
             true => Ok(None),
-            false => self.read_complete_body(record_start, header),
+            false => self.read_complete_body(record_start, header, governance_len),
         }
     }
 
@@ -492,23 +510,35 @@ impl<'a> LegacyRecordCursor<'a> {
         &mut self,
         record_start: usize,
         header: LegacyRecordHeader,
+        governance_len: usize,
     ) -> Result<Option<MutationRecord>> {
         let key_start = self.cursor;
         let key_end = key_start + header.key_len;
         let value_start = key_end;
         let value_end = value_start + header.value_len;
-        self.cursor = value_end;
+        let governance_start = value_end + usize::from(header.has_governance()).saturating_mul(4);
+        let governance_end = governance_start + governance_len;
+        self.cursor = governance_end;
 
         let expected_crc = WalBytes::read_u32_at(self.owner.as_ref(), self.cursor);
         let actual_crc = crc32fast::hash(&self.owner[record_start..self.cursor]);
         self.cursor += WAL_CRC_LEN;
 
         match expected_crc == actual_crc {
-            true => self.build_record(header, key_start, key_end, value_start, value_end),
+            true => self.build_record(
+                header,
+                key_start,
+                key_end,
+                value_start,
+                value_end,
+                governance_start,
+                governance_end,
+            ),
             false => Ok(None),
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_record(
         &self,
         header: LegacyRecordHeader,
@@ -516,6 +546,8 @@ impl<'a> LegacyRecordCursor<'a> {
         key_end: usize,
         value_start: usize,
         value_end: usize,
+        governance_start: usize,
+        governance_end: usize,
     ) -> Result<Option<MutationRecord>> {
         let op = WalRecordCodec::decode_op(header.op_byte)?;
         Ok(Some(MutationRecord {
@@ -526,11 +558,18 @@ impl<'a> LegacyRecordCursor<'a> {
             key: self.owner.slice(key_start..key_end),
             value: self.owner.slice(value_start..value_end),
             expire_at_ms: header.expire_at_ms(),
+            governance: header
+                .has_governance()
+                .then(|| self.owner.slice(governance_start..governance_end)),
         }))
     }
 }
 
 impl LegacyRecordHeader {
+    fn has_governance(&self) -> bool {
+        self.op_byte == 4
+    }
+
     fn expire_at_ms(&self) -> Option<u64> {
         match self.expire_raw {
             value if value < 0 => None,
@@ -612,6 +651,7 @@ mod tests {
             key: MutationBytes::from_static(b"alpha"),
             value: MutationBytes::from(vec![b'x'; value_len]),
             expire_at_ms: Some(99),
+            governance: None,
         }
     }
 
@@ -629,6 +669,23 @@ mod tests {
     }
 
     #[test]
+    fn governed_set_round_trips_without_changing_legacy_set_format() {
+        let ordinary = sample_record(32);
+        let ordinary_bytes = WalRecordCodec::encode_legacy(&ordinary);
+        assert_eq!(ordinary_bytes[0], 1);
+
+        let mut governed = ordinary.clone();
+        governed.governance = Some(MutationBytes::from_static(b"tenant-a/repo-private"));
+        let governed_bytes = WalRecordCodec::encode_legacy(&governed);
+        assert_eq!(governed_bytes[0], 4);
+        let decoded = WalRecordCodec::decode_records(MutationBytes::from(governed_bytes))
+            .expect("decode governed WAL");
+        assert_eq!(decoded[0].key, governed.key);
+        assert_eq!(decoded[0].value, governed.value);
+        assert_eq!(decoded[0].governance, governed.governance);
+    }
+
+    #[test]
     fn legacy_segments_still_decode() {
         let first = sample_record(128);
         let second = MutationRecord {
@@ -639,6 +696,7 @@ mod tests {
             key: MutationBytes::from_static(b"beta"),
             value: MutationBytes::new(),
             expire_at_ms: None,
+            governance: None,
         };
         let mut bytes = WalRecordCodec::encode_legacy(&first);
         bytes.extend_from_slice(&WalRecordCodec::encode_legacy(&second));

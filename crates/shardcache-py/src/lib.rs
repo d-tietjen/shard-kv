@@ -941,6 +941,7 @@ impl ThreadedStoreCore {
                     key: key.into(),
                     value: value.into(),
                     expire_at_ms,
+                    governance: None,
                 })
                 .expect("shardcache WAL append failed");
         }
@@ -976,6 +977,7 @@ impl SharedStoreCore {
                     key: key.into(),
                     value: value.into(),
                     expire_at_ms,
+                    governance: None,
                 })
                 .expect("shardcache WAL append failed");
         }

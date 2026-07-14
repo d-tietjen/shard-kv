@@ -600,10 +600,11 @@ impl EmbeddedStore {
                     .session_slots
                     .delete_hashed(&session_prefix, route.key_hash, &entry.key);
             }
-            shard.map.set_hashed(
+            shard.map.set_bytes_hashed_with_governance_option(
                 route.key_hash,
-                entry.key,
-                entry.value,
+                &entry.key,
+                bytes::Bytes::from(entry.value),
+                entry.governance.map(bytes::Bytes::from),
                 entry.expire_at_ms,
                 now_ms,
             );

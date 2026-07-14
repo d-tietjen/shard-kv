@@ -7,6 +7,8 @@ pub struct StoredEntry {
     pub key: Bytes,
     pub value: Bytes,
     pub expire_at_ms: Option<u64>,
+    /// Opaque metadata whose presence marks this point value as protected.
+    pub governance: Option<Bytes>,
 }
 
 #[derive(Debug, Clone)]
@@ -25,4 +27,6 @@ pub struct MutationRecord {
     pub key: MutationBytes,
     pub value: MutationBytes,
     pub expire_at_ms: Option<u64>,
+    /// Opaque metadata atomically associated with `Set` mutations.
+    pub governance: Option<MutationBytes>,
 }

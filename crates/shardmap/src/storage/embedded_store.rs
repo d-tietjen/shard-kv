@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::config::EvictionPolicy;
 use crate::storage::{
-    Bytes, ObjectOverflowRuntime, PackedBatch, PreparedPointKey, SemanticCacheError,
+    Bytes, GovernedRead, ObjectOverflowRuntime, PackedBatch, PreparedPointKey, SemanticCacheError,
     SemanticEmbedding, SemanticMatch, StoredEntry, hash_key, hash_key_tag_from_hash, now_millis,
     validate_similarity_threshold,
 };

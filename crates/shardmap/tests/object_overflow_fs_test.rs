@@ -95,6 +95,44 @@ fn filesystem_backend_offloads_materializes_snapshots_and_deletes_remote_files()
 }
 
 #[test]
+fn filesystem_backend_preserves_governance_across_offload_and_fault_in() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = file_overflow_config(temp.path(), "governed-bucket", "governed-node");
+    let runtime = ObjectOverflowRuntime::from_config(&config)
+        .expect("runtime")
+        .expect("enabled runtime");
+    let store = EmbeddedStore::new(1);
+    store.configure_memory_policy(Some(8), EvictionPolicy::Lru);
+    store.configure_object_overflow(Some(runtime));
+    let value = bytes::Bytes::from(vec![7u8; 64 * 1024]);
+
+    store.set_value_bytes_with_governance(
+        b"private",
+        value.clone(),
+        None,
+        bytes::Bytes::from_static(b"tenant-a/repo-private"),
+    );
+    assert_eq!(store.get(b"private"), None);
+    assert_eq!(overflow_bin_files(temp.path()).len(), 1);
+
+    let snapshot = store.try_entry_snapshot().expect("materialize snapshot");
+    assert_eq!(snapshot[0].value, value.as_ref());
+    assert_eq!(
+        snapshot[0].governance.as_deref(),
+        Some(b"tenant-a/repo-private".as_slice())
+    );
+    assert_eq!(
+        store
+            .get_value_bytes_with_governance_filter(b"private", |metadata| {
+                metadata == Some(b"tenant-a/repo-private".as_slice())
+            })
+            .as_deref(),
+        Some(value.as_ref())
+    );
+    assert_eq!(store.get(b"private"), None);
+}
+
+#[test]
 fn filesystem_backend_snapshot_fails_when_remote_payload_is_missing() {
     let temp = tempfile::tempdir().expect("tempdir");
     let config = file_overflow_config(temp.path(), "bucket", "node-b");
