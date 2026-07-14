@@ -6,6 +6,17 @@ impl WorkerLocalEmbeddedStore {
             .expect("worker-local embedded store key does not belong to this thread");
     }
 
+    pub fn set_with_governance(
+        &mut self,
+        key: Bytes,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+        governance: Bytes,
+    ) {
+        self.set_with_governance_if_local(key, value, ttl_ms, governance)
+            .expect("worker-local embedded store key does not belong to this thread");
+    }
+
     pub fn set_slice_no_ttl(&mut self, key: &[u8], value: &[u8]) {
         self.set_slice_no_ttl_if_local(key, value)
             .expect("worker-local embedded store key does not belong to this thread");
@@ -74,6 +85,19 @@ impl WorkerLocalEmbeddedStore {
     ) -> Result<(), LocalRouteError> {
         self.local_key_route(&key)?;
         self.inner.local_set(key, value, ttl_ms);
+        Ok(())
+    }
+
+    pub fn set_with_governance_if_local(
+        &mut self,
+        key: Bytes,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+        governance: Bytes,
+    ) -> Result<(), LocalRouteError> {
+        self.local_key_route(&key)?;
+        self.inner
+            .local_set_with_governance(key, value, ttl_ms, governance);
         Ok(())
     }
 

@@ -337,6 +337,7 @@ mod tests {
                     key: b"key".to_vec(),
                     value: b"value".to_vec(),
                     expire_at_ms: None,
+                    governance: None,
                 })
             })
             .expect("streaming snapshot");
@@ -394,6 +395,7 @@ mod tests {
                 key: SharedBytes::from_static(b"alpha"),
                 value: SharedBytes::from_static(b"one"),
                 expire_at_ms: None,
+                governance: None,
             })
             .expect("append");
 
@@ -445,6 +447,7 @@ mod tests {
                 key: SharedBytes::from_static(b"alpha"),
                 value: SharedBytes::from_static(b"one"),
                 expire_at_ms: None,
+                governance: None,
             })
             .expect("append");
 

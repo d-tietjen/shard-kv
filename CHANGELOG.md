@@ -4,6 +4,15 @@
 
 ### Added
 
+- Added fail-closed governance metadata for exact point values through
+  `EmbeddedStore`, shared and worker-local stores, native replication, WAL and
+  snapshots, object overflow, and partitioned KV overflow. Protected entries
+  require a governed filter and cannot be released by ordinary GET, mutable,
+  visitor, removal-return, or Redis paths.
+- Added versioned governed KV-overflow envelopes for SCNP and Redis/Valkey,
+  including metadata integrity checks, retry and handoff preservation, remote
+  read filtering, and protected promotion back into resident memory.
+
 - Added the `kv-overflow` feature and `KvOverflowStore`, a bounded embedded
   primary backed by disjoint, fixed-slot shardcache server partitions with
   previous-membership handoff for horizontal expansion.

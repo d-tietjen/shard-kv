@@ -47,7 +47,15 @@ impl FlatMap {
             {
                 continue;
             }
-            map.set(entry.key, entry.value, entry.expire_at_ms, now_ms);
+            let hash = hash_key(&entry.key);
+            map.set_bytes_hashed_with_governance_option(
+                hash,
+                &entry.key,
+                SharedBytes::from(entry.value),
+                entry.governance.map(SharedBytes::from),
+                entry.expire_at_ms,
+                now_ms,
+            );
         }
         map
     }
@@ -203,14 +211,14 @@ impl FlatMap {
         if self.should_sample_read() {
             let tick = self.next_access_tick();
             self.entries
-                .find_mut(hash, |entry| entry.matches(hash, key))
+                .find_mut(hash, |entry| entry.matches_readable(hash, key))
                 .map(|entry| {
                     entry.access.record_access(tick);
                     entry.value.as_ref()
                 })
         } else {
             self.entries
-                .find(hash, |entry| entry.matches(hash, key))
+                .find(hash, |entry| entry.matches_readable(hash, key))
                 .map(|entry| entry.value.as_ref())
         }
     }
@@ -229,14 +237,18 @@ impl FlatMap {
         if self.should_sample_read() {
             let tick = self.next_access_tick();
             self.entries
-                .find_mut(hash, |entry| entry.matches_prepared(hash, key, key_tag))
+                .find_mut(hash, |entry| {
+                    entry.matches_readable_prepared(hash, key, key_tag)
+                })
                 .map(|entry| {
                     entry.access.record_access(tick);
                     entry.value.as_ref()
                 })
         } else {
             self.entries
-                .find(hash, |entry| entry.matches_prepared(hash, key, key_tag))
+                .find(hash, |entry| {
+                    entry.matches_readable_prepared(hash, key, key_tag)
+                })
                 .map(|entry| entry.value.as_ref())
         }
     }

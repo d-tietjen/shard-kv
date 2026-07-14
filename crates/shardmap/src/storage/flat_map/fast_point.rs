@@ -62,7 +62,7 @@ impl FastPointEntry {
             value: self.value,
             expire_at_ms: None,
             semantic_index_token: None,
-            semantic_governance: None,
+            governance: None,
             #[cfg(feature = "kv-overflow")]
             overflow_generation: 0,
             access: EntryAccessMeta {
@@ -85,6 +85,7 @@ impl FastPointEntry {
             key,
             value: self.value.as_ref().to_vec(),
             expire_at_ms: None,
+            governance: None,
         }
     }
 

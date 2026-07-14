@@ -394,6 +394,33 @@ impl EmbeddedStore {
         self.get_value_bytes_routed(route, key, now_ms)
     }
 
+    /// Returns an exact point value only when `authorize` accepts its borrowed
+    /// opaque governance metadata. Protected values are never cloned before
+    /// authorization, and rejection is returned as an ordinary cache miss.
+    ///
+    /// Ungoverned entries pass `None`. Keep the callback bounded and
+    /// nonblocking, and do not re-enter this store from the callback because it
+    /// executes while the routed shard read lock is held.
+    pub fn get_value_bytes_with_governance_filter<F>(
+        &self,
+        key: &[u8],
+        authorize: F,
+    ) -> Option<bytes::Bytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        let route = self.route_key(key);
+        match self.get_value_bytes_routed_with_governance_filter(
+            route,
+            key,
+            now_millis(),
+            authorize,
+        ) {
+            GovernedRead::Authorized(value) => Some(value),
+            GovernedRead::Missing | GovernedRead::Denied => None,
+        }
+    }
+
     /// FastCodec GET path. The wire header carries a route hash so the server
     /// can usually skip hashing the key again. For session-prefixed keys in
     /// session route mode, the route hash is intentionally the session prefix
@@ -1402,6 +1429,61 @@ impl EmbeddedStore {
             .get_value_bytes_hashed(route.key_hash, key, now_ms)
     }
 
+    pub(crate) fn get_value_bytes_routed_with_governance_filter<F>(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+        authorize: F,
+    ) -> GovernedRead<bytes::Bytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        if uses_flat_key_storage(self.route_mode, key) {
+            return self.shards[route.shard_id]
+                .write()
+                .map
+                .get_value_bytes_hashed_with_governance_filter(
+                    route.key_hash,
+                    key,
+                    now_ms,
+                    authorize,
+                );
+        }
+
+        let mut shard = self.shards[route.shard_id].write();
+        if let Some(session_prefix) = derived_session_storage_prefix(key)
+            && let Some(value) =
+                shard
+                    .session_slots
+                    .get_ref_hashed(&session_prefix, route.key_hash, key)
+        {
+            return if authorize(None) {
+                GovernedRead::Authorized(bytes::Bytes::copy_from_slice(value))
+            } else {
+                GovernedRead::Denied
+            };
+        }
+        shard.map.get_value_bytes_hashed_with_governance_filter(
+            route.key_hash,
+            key,
+            now_ms,
+            authorize,
+        )
+    }
+
+    #[cfg(feature = "kv-overflow")]
+    pub(crate) fn is_value_protected_routed(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> bool {
+        self.shards[route.shard_id]
+            .read()
+            .is_value_protected_hashed(route.key_hash, key, now_ms)
+    }
+
     fn with_value_bytes_routed<F>(&self, route: EmbeddedKeyRoute, key: &[u8], write: &mut F) -> bool
     where
         F: FnMut(&[u8]),
@@ -1608,6 +1690,10 @@ impl EmbeddedStore {
             && let Some(session_prefix) = derived_session_storage_prefix(key)
             && guard.session_slots.has_session(&session_prefix)
         {
+            return None;
+        }
+
+        if guard.is_value_protected_hashed(route.key_hash, key, now_ms) {
             return None;
         }
 

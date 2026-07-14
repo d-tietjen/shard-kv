@@ -759,6 +759,7 @@ impl ShardState {
                 key,
                 value,
                 expire_at_ms,
+                governance: None,
             };
             if let Some(wal) = &self.wal {
                 wal.append(record.clone())?;
@@ -809,6 +810,7 @@ impl ShardState {
                 key,
                 value: SharedBytes::new(),
                 expire_at_ms: None,
+                governance: None,
             };
             if let Some(wal) = &self.wal {
                 wal.append(record.clone())?;
@@ -850,6 +852,7 @@ impl ShardState {
                 key,
                 value: SharedBytes::new(),
                 expire_at_ms: expiration.expire_at_ms(),
+                governance: None,
             };
             if let Some(wal) = &self.wal {
                 wal.append(record.clone())?;

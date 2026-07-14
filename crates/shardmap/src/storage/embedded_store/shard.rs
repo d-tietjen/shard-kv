@@ -1,7 +1,7 @@
 use crate::config::EvictionPolicy;
 #[cfg(feature = "redis")]
 use crate::storage::Bytes;
-use crate::storage::{FlatMap, SemanticCacheError, SemanticEmbedding, SemanticMatch};
+use crate::storage::{FlatMap, GovernedRead, SemanticCacheError, SemanticEmbedding, SemanticMatch};
 
 use super::{EmbeddedRouteMode, SessionSlotMap, derived_session_storage_prefix};
 
@@ -91,6 +91,26 @@ impl EmbeddedShard {
         key: &[u8],
     ) -> Option<&bytes::Bytes> {
         self.map.get_shared_value_bytes_hashed_no_ttl(hash, key)
+    }
+
+    #[inline(always)]
+    pub(crate) fn get_value_bytes_hashed_with_governance_filter<F>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        authorize: F,
+    ) -> GovernedRead<bytes::Bytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        self.map
+            .get_value_bytes_hashed_with_governance_filter(hash, key, now_ms, authorize)
+    }
+
+    #[inline(always)]
+    pub(crate) fn is_value_protected_hashed(&self, hash: u64, key: &[u8], now_ms: u64) -> bool {
+        self.map.is_value_protected_hashed(hash, key, now_ms)
     }
 
     #[inline(always)]
@@ -270,6 +290,35 @@ impl EmbeddedShard {
         }
         self.map
             .set_bytes_hashed(key_hash, key, value, expire_at_ms, now_ms);
+        self.enforce_memory_limit(now_ms);
+    }
+
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn set_value_bytes_hashed_with_governance(
+        &mut self,
+        route_mode: EmbeddedRouteMode,
+        key_hash: u64,
+        key: &[u8],
+        value: bytes::Bytes,
+        governance: bytes::Bytes,
+        expire_at_ms: Option<u64>,
+        now_ms: u64,
+    ) {
+        if route_mode == EmbeddedRouteMode::SessionPrefix
+            && let Some(session_prefix) = derived_session_storage_prefix(key)
+        {
+            self.session_slots
+                .delete_hashed(&session_prefix, key_hash, key);
+        }
+        self.map.set_bytes_hashed_with_governance(
+            key_hash,
+            key,
+            value,
+            governance,
+            expire_at_ms,
+            now_ms,
+        );
         self.enforce_memory_limit(now_ms);
     }
 

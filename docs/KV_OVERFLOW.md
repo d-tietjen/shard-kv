@@ -32,6 +32,14 @@ promotes the value back into memory. Other services can call
 `KvOverflowCluster::get` to read the same owner directly without sending read
 traffic through the in-memory primary.
 
+Protected exact values use `KvOverflowStore::set_with_governance`. Ordinary
+primary and cluster GETs fail closed before network I/O when the primary knows
+the remote entry is protected. `get_with_governance_filter` authorizes and may
+promote a value; `get_remote_with_governance_filter` authorizes without
+touching primary memory. Metadata is part of the versioned overflow envelope,
+CRC32 integrity check, retry payload, handoff verification, snapshot, and
+promotion. See [`EXACT_GOVERNANCE.md`](EXACT_GOVERNANCE.md).
+
 ```toml
 [dependencies]
 shardmap = { version = "0.6.0", features = ["kv-overflow"] }

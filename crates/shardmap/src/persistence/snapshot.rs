@@ -10,9 +10,12 @@ use crate::storage::{Bytes, StoredEntry, hash_key};
 use crate::{Result, ShardCacheError};
 
 const SNAPSHOT_MAGIC: &[u8; 8] = b"FCSNAP1\0";
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION_V1: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 const SNAPSHOT_HEADER_LEN: usize = 8 + 4 + 8 + 8;
-const SNAPSHOT_ENTRY_HEADER_LEN: usize = 4 + 4 + 8;
+const SNAPSHOT_ENTRY_HEADER_V1_LEN: usize = 4 + 4 + 8;
+const SNAPSHOT_ENTRY_HEADER_LEN: usize = 4 + 4 + 4 + 8;
+const GOVERNANCE_NONE: u32 = u32::MAX;
 const SNAPSHOT_COMPRESSED_EXT: &str = "lz4";
 const SNAPSHOT_FRAMED_COMPRESSED_EXT: &str = "lz4f";
 static SNAPSHOT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -360,11 +363,21 @@ impl SnapshotCodec {
     fn write_entry(output: &mut impl Write, entry: &StoredEntry) -> Result<()> {
         let key_len = Self::encoded_len(entry.key.len(), "snapshot key is too large")?;
         let value_len = Self::encoded_len(entry.value.len(), "snapshot value is too large")?;
+        let governance_len = entry
+            .governance
+            .as_ref()
+            .map(|metadata| Self::encoded_len(metadata.len(), "snapshot governance is too large"))
+            .transpose()?
+            .unwrap_or(GOVERNANCE_NONE);
         output.write_all(&key_len.to_le_bytes())?;
         output.write_all(&value_len.to_le_bytes())?;
+        output.write_all(&governance_len.to_le_bytes())?;
         output.write_all(&entry.expire_at_ms.unwrap_or(u64::MAX).to_le_bytes())?;
         output.write_all(entry.key.as_ref())?;
         output.write_all(entry.value.as_ref())?;
+        if let Some(governance) = &entry.governance {
+            output.write_all(governance.as_ref())?;
+        }
         Ok(())
     }
 
@@ -398,7 +411,7 @@ impl SnapshotCodec {
             ));
         }
         let version = u32::from_le_bytes(header[8..12].try_into().expect("fixed version"));
-        if version != SNAPSHOT_VERSION {
+        if !matches!(version, SNAPSHOT_VERSION_V1 | SNAPSHOT_VERSION) {
             return Err(ShardCacheError::Persistence(format!(
                 "unsupported snapshot version: {version}"
             )));
@@ -406,7 +419,7 @@ impl SnapshotCodec {
         let timestamp_ms = u64::from_le_bytes(header[12..20].try_into().expect("fixed timestamp"));
         let entry_count = u64::from_le_bytes(header[20..28].try_into().expect("fixed entry count"));
         for _ in 0..entry_count {
-            visit(Self::decode_stream_entry(&mut input)?)?;
+            visit(Self::decode_stream_entry(&mut input, version)?)?;
         }
         let mut trailing = [0u8; 1];
         if input.read(&mut trailing)? != 0 {
@@ -417,20 +430,45 @@ impl SnapshotCodec {
         Ok(timestamp_ms)
     }
 
-    fn decode_stream_entry(input: &mut impl Read) -> Result<StoredEntry> {
+    fn decode_stream_entry(input: &mut impl Read, version: u32) -> Result<StoredEntry> {
+        let header_len = if version == SNAPSHOT_VERSION_V1 {
+            SNAPSHOT_ENTRY_HEADER_V1_LEN
+        } else {
+            SNAPSHOT_ENTRY_HEADER_LEN
+        };
         let mut header = [0u8; SNAPSHOT_ENTRY_HEADER_LEN];
-        input.read_exact(&mut header).map_err(|error| {
-            ShardCacheError::Persistence(format!("could not read snapshot entry header: {error}"))
-        })?;
+        input
+            .read_exact(&mut header[..header_len])
+            .map_err(|error| {
+                ShardCacheError::Persistence(format!(
+                    "could not read snapshot entry header: {error}"
+                ))
+            })?;
         let key_len = u32::from_le_bytes(header[0..4].try_into().expect("fixed key length"));
         let value_len = u32::from_le_bytes(header[4..8].try_into().expect("fixed value length"));
-        let expire_raw = u64::from_le_bytes(header[8..16].try_into().expect("fixed expiration"));
+        let (governance_len, expire_offset) = if version == SNAPSHOT_VERSION_V1 {
+            (GOVERNANCE_NONE, 8)
+        } else {
+            (
+                u32::from_le_bytes(header[8..12].try_into().expect("fixed governance length")),
+                12,
+            )
+        };
+        let expire_raw = u64::from_le_bytes(
+            header[expire_offset..expire_offset + 8]
+                .try_into()
+                .expect("fixed expiration"),
+        );
         let key = Self::read_stream_bytes(input, key_len as usize, "key")?;
         let value = Self::read_stream_bytes(input, value_len as usize, "value")?;
+        let governance = (governance_len != GOVERNANCE_NONE)
+            .then(|| Self::read_stream_bytes(input, governance_len as usize, "governance"))
+            .transpose()?;
         Ok(StoredEntry {
             key,
             value,
             expire_at_ms: (expire_raw != u64::MAX).then_some(expire_raw),
+            governance,
         })
     }
 
@@ -451,20 +489,26 @@ impl SnapshotCodec {
     fn decode_validated(raw: &[u8]) -> Result<(u64, Vec<StoredEntry>)> {
         let mut cursor = SNAPSHOT_MAGIC.len();
         match Self::read_u32(raw, &mut cursor, "snapshot version")? {
-            SNAPSHOT_VERSION => Self::decode_body(raw, &mut cursor),
+            version @ (SNAPSHOT_VERSION_V1 | SNAPSHOT_VERSION) => {
+                Self::decode_body(raw, &mut cursor, version)
+            }
             version => Err(ShardCacheError::Persistence(format!(
                 "unsupported snapshot version: {version}"
             ))),
         }
     }
 
-    fn decode_body(raw: &[u8], cursor: &mut usize) -> Result<(u64, Vec<StoredEntry>)> {
+    fn decode_body(
+        raw: &[u8],
+        cursor: &mut usize,
+        version: u32,
+    ) -> Result<(u64, Vec<StoredEntry>)> {
         let timestamp_ms = Self::read_u64(raw, cursor, "snapshot timestamp")?;
         let entry_count = usize::try_from(Self::read_u64(raw, cursor, "snapshot entry count")?)
             .map_err(|_| {
                 ShardCacheError::Persistence("snapshot entry count is too large".into())
             })?;
-        if entry_count > raw.len().saturating_sub(*cursor) / SNAPSHOT_ENTRY_HEADER_LEN {
+        if entry_count > raw.len().saturating_sub(*cursor) / SNAPSHOT_ENTRY_HEADER_V1_LEN {
             return Err(ShardCacheError::Persistence(
                 "snapshot entry count exceeds the remaining body".into(),
             ));
@@ -474,13 +518,18 @@ impl SnapshotCodec {
             .try_reserve_exact(entry_count)
             .map_err(|_| ShardCacheError::Persistence("snapshot entry allocation failed".into()))?;
         for _ in 0..entry_count {
-            entries.push(Self::decode_entry(raw, cursor)?);
+            entries.push(Self::decode_entry(raw, cursor, version)?);
         }
         Ok((timestamp_ms, entries))
     }
 
-    fn decode_entry(raw: &[u8], cursor: &mut usize) -> Result<StoredEntry> {
-        if raw.len().saturating_sub(*cursor) < SNAPSHOT_ENTRY_HEADER_LEN {
+    fn decode_entry(raw: &[u8], cursor: &mut usize, version: u32) -> Result<StoredEntry> {
+        let header_len = if version == SNAPSHOT_VERSION_V1 {
+            SNAPSHOT_ENTRY_HEADER_V1_LEN
+        } else {
+            SNAPSHOT_ENTRY_HEADER_LEN
+        };
+        if raw.len().saturating_sub(*cursor) < header_len {
             return Err(ShardCacheError::Persistence(
                 "snapshot entry header is truncated".into(),
             ));
@@ -488,8 +537,20 @@ impl SnapshotCodec {
 
         let key_len = Self::read_u32(raw, cursor, "snapshot key length")? as usize;
         let value_len = Self::read_u32(raw, cursor, "snapshot value length")? as usize;
+        let governance_len = if version == SNAPSHOT_VERSION_V1 {
+            GOVERNANCE_NONE
+        } else {
+            Self::read_u32(raw, cursor, "snapshot governance length")?
+        };
         let expire_raw = Self::read_u64(raw, cursor, "snapshot expiration")?;
-        let body_len = key_len.saturating_add(value_len);
+        let governance_body_len = if governance_len == GOVERNANCE_NONE {
+            0
+        } else {
+            governance_len as usize
+        };
+        let body_len = key_len
+            .saturating_add(value_len)
+            .saturating_add(governance_body_len);
         if raw.len().saturating_sub(*cursor) < body_len {
             return Err(ShardCacheError::Persistence(
                 "snapshot entry body is truncated".into(),
@@ -500,6 +561,13 @@ impl SnapshotCodec {
         *cursor += key_len;
         let value = raw[*cursor..*cursor + value_len].to_vec();
         *cursor += value_len;
+        let governance = if governance_len == GOVERNANCE_NONE {
+            None
+        } else {
+            let governance = raw[*cursor..*cursor + governance_body_len].to_vec();
+            *cursor += governance_body_len;
+            Some(governance)
+        };
         Ok(StoredEntry {
             key: Bytes::from(key),
             value: Bytes::from(value),
@@ -508,6 +576,7 @@ impl SnapshotCodec {
             } else {
                 Some(expire_raw)
             },
+            governance,
         })
     }
 
@@ -582,13 +651,32 @@ mod tests {
                 key: b"alpha".to_vec(),
                 value: vec![1; 128],
                 expire_at_ms: None,
+                governance: None,
             },
             StoredEntry {
                 key: b"beta".to_vec(),
                 value: vec![2; 256],
                 expire_at_ms: Some(42),
+                governance: Some(b"policy".to_vec()),
             },
         ]
+    }
+
+    fn v1_snapshot(entries: &[StoredEntry], timestamp_ms: u64) -> Vec<u8> {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(SNAPSHOT_MAGIC);
+        raw.extend_from_slice(&SNAPSHOT_VERSION_V1.to_le_bytes());
+        raw.extend_from_slice(&timestamp_ms.to_le_bytes());
+        raw.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        for entry in entries {
+            assert!(entry.governance.is_none());
+            raw.extend_from_slice(&(entry.key.len() as u32).to_le_bytes());
+            raw.extend_from_slice(&(entry.value.len() as u32).to_le_bytes());
+            raw.extend_from_slice(&entry.expire_at_ms.unwrap_or(u64::MAX).to_le_bytes());
+            raw.extend_from_slice(&entry.key);
+            raw.extend_from_slice(&entry.value);
+        }
+        raw
     }
 
     #[test]
@@ -620,6 +708,30 @@ mod tests {
             assert_eq!(timestamp_ms, 7);
             assert_eq!(visited, expected);
         }
+    }
+
+    #[test]
+    fn version_one_snapshots_remain_readable() {
+        let expected = vec![StoredEntry {
+            key: b"legacy".to_vec(),
+            value: b"value".to_vec(),
+            expire_at_ms: Some(42),
+            governance: None,
+        }];
+        let raw = v1_snapshot(&expected, 7);
+
+        let (timestamp_ms, decoded) = SnapshotCodec::decode(&raw).unwrap();
+        assert_eq!(timestamp_ms, 7);
+        assert_eq!(decoded, expected);
+
+        let mut streamed = Vec::new();
+        let timestamp_ms = SnapshotCodec::decode_stream(&raw[..], &mut |entry| {
+            streamed.push(entry);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(timestamp_ms, 7);
+        assert_eq!(streamed, expected);
     }
 
     #[test]

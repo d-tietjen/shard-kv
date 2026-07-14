@@ -20,6 +20,9 @@ const MAX_FCRP_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 const EXPIRE_NONE: u64 = u64::MAX;
 const MUTATION_RECORD_MIN_BYTES: usize = 53;
 const SNAPSHOT_ENTRY_MIN_BYTES: usize = 16;
+const GOVERNED_SET_OP: u8 = 4;
+const SNAPSHOT_GOVERNANCE_MAGIC: u32 = u32::from_le_bytes(*b"GOV2");
+const GOVERNANCE_NONE: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -171,6 +174,7 @@ pub struct ReplicationMutation {
     pub key: SharedBytes,
     pub value: SharedBytes,
     pub expire_at_ms: Option<u64>,
+    pub governance: Option<SharedBytes>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -184,6 +188,7 @@ pub struct BorrowedReplicationMutation<'a> {
     pub key: &'a [u8],
     pub value: &'a [u8],
     pub expire_at_ms: Option<u64>,
+    pub governance: Option<&'a [u8]>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +200,7 @@ pub struct FrameBackedReplicationMutation<'a> {
     pub key: &'a [u8],
     pub value: SharedBytes,
     pub expire_at_ms: Option<u64>,
+    pub governance: Option<SharedBytes>,
 }
 
 impl ReplicationMutation {
@@ -214,11 +220,16 @@ impl ReplicationMutation {
             key: record.key.clone(),
             value: record.value.clone(),
             expire_at_ms: record.expire_at_ms,
+            governance: record.governance.clone(),
         }
     }
 
     pub fn estimated_uncompressed_len(&self) -> usize {
-        mutation_record_payload_len(self.key.len(), self.value.len())
+        mutation_record_payload_len(
+            self.key.len(),
+            self.value.len(),
+            self.governance.as_ref().map_or(0, |value| 4 + value.len()),
+        )
     }
 
     pub(crate) fn as_borrowed(&self) -> BorrowedReplicationMutation<'_> {
@@ -232,6 +243,7 @@ impl ReplicationMutation {
             key: self.key.as_ref(),
             value: self.value.as_ref(),
             expire_at_ms: self.expire_at_ms,
+            governance: self.governance.as_deref(),
         }
     }
 }
@@ -489,14 +501,22 @@ fn mutation_batch_payload_len(mutations: &[ReplicationMutation]) -> usize {
         .sum::<usize>()
 }
 
-pub(crate) fn mutation_record_payload_len(key_len: usize, value_len: usize) -> usize {
-    4 + 8 + 8 + 1 + 8 + 8 + 8 + 4 + 4 + key_len + value_len
+pub(crate) fn mutation_record_payload_len(
+    key_len: usize,
+    value_len: usize,
+    governance_record_len: usize,
+) -> usize {
+    4 + 8 + 8 + 1 + 8 + 8 + 8 + 4 + 4 + key_len + value_len + governance_record_len
 }
 
 pub(crate) fn borrowed_mutation_record_payload_len(
     mutation: BorrowedReplicationMutation<'_>,
 ) -> usize {
-    mutation_record_payload_len(mutation.key.len(), mutation.value.len())
+    mutation_record_payload_len(
+        mutation.key.len(),
+        mutation.value.len(),
+        mutation.governance.map_or(0, |value| 4 + value.len()),
+    )
 }
 
 pub(crate) fn mutation_batch_record_count(bytes: &[u8]) -> Result<usize> {
@@ -523,7 +543,12 @@ pub(crate) fn write_borrowed_mutation_payload_record(
         write_u32_le(&mut cursor, mutation.shard_id as u32);
         write_u64_le(&mut cursor, mutation.sequence);
         write_u64_le(&mut cursor, mutation.timestamp_ms);
-        write_u8(&mut cursor, mutation.op.to_byte());
+        let op = if mutation.op == ReplicationMutationOp::Set && mutation.governance.is_some() {
+            GOVERNED_SET_OP
+        } else {
+            mutation.op.to_byte()
+        };
+        write_u8(&mut cursor, op);
         write_u64_le(&mut cursor, mutation.key_hash);
         write_u64_le(&mut cursor, mutation.key_tag);
         write_u64_le(&mut cursor, mutation.expire_at_ms.unwrap_or(EXPIRE_NONE));
@@ -531,6 +556,10 @@ pub(crate) fn write_borrowed_mutation_payload_record(
         write_u32_le(&mut cursor, mutation.value.len() as u32);
         write_bytes(&mut cursor, mutation.key);
         write_bytes(&mut cursor, mutation.value);
+        if let Some(governance) = mutation.governance {
+            write_u32_le(&mut cursor, governance.len() as u32);
+            write_bytes(&mut cursor, governance);
+        }
         debug_assert_eq!(
             cursor.offset_from(out.as_ptr().add(start)),
             record_len as isize
@@ -596,7 +625,12 @@ pub fn decode_mutation_batch(bytes: &[u8]) -> Result<Vec<ReplicationMutation>> {
         let shard_id = cursor.u32()? as usize;
         let sequence = cursor.u64()?;
         let timestamp_ms = cursor.u64()?;
-        let op = ReplicationMutationOp::from_byte(cursor.u8()?)?;
+        let raw_op = cursor.u8()?;
+        let op = if raw_op == GOVERNED_SET_OP {
+            ReplicationMutationOp::Set
+        } else {
+            ReplicationMutationOp::from_byte(raw_op)?
+        };
         let key_hash = cursor.u64()?;
         let key_tag = cursor.u64()?;
         let expire_raw = cursor.u64()?;
@@ -604,6 +638,12 @@ pub fn decode_mutation_batch(bytes: &[u8]) -> Result<Vec<ReplicationMutation>> {
         let value_len = cursor.u32()? as usize;
         let key = SharedBytes::from(cursor.bytes(key_len)?.to_vec());
         let value = SharedBytes::from(cursor.bytes(value_len)?.to_vec());
+        let governance = if raw_op == GOVERNED_SET_OP {
+            let len = cursor.u32()? as usize;
+            Some(SharedBytes::copy_from_slice(cursor.bytes(len)?))
+        } else {
+            None
+        };
         mutations.push(ReplicationMutation {
             shard_id,
             sequence,
@@ -614,6 +654,7 @@ pub fn decode_mutation_batch(bytes: &[u8]) -> Result<Vec<ReplicationMutation>> {
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
+            governance,
         });
     }
     cursor.finish()?;
@@ -631,7 +672,12 @@ where
         let shard_id = cursor.u32()? as usize;
         let sequence = cursor.u64()?;
         let timestamp_ms = cursor.u64()?;
-        let op = ReplicationMutationOp::from_byte(cursor.u8()?)?;
+        let raw_op = cursor.u8()?;
+        let op = if raw_op == GOVERNED_SET_OP {
+            ReplicationMutationOp::Set
+        } else {
+            ReplicationMutationOp::from_byte(raw_op)?
+        };
         let key_hash = cursor.u64()?;
         let key_tag = cursor.u64()?;
         let expire_raw = cursor.u64()?;
@@ -639,6 +685,12 @@ where
         let value_len = cursor.u32()? as usize;
         let key = cursor.bytes(key_len)?;
         let value = cursor.bytes(value_len)?;
+        let governance = if raw_op == GOVERNED_SET_OP {
+            let len = cursor.u32()? as usize;
+            Some(cursor.bytes(len)?)
+        } else {
+            None
+        };
         visit(BorrowedReplicationMutation {
             shard_id,
             sequence,
@@ -649,6 +701,7 @@ where
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
+            governance,
         })?;
     }
     cursor.finish()
@@ -665,7 +718,12 @@ where
         let shard_id = cursor.u32()? as usize;
         let sequence = cursor.u64()?;
         let _timestamp_ms = cursor.u64()?;
-        let op = ReplicationMutationOp::from_byte(cursor.u8()?)?;
+        let raw_op = cursor.u8()?;
+        let op = if raw_op == GOVERNED_SET_OP {
+            ReplicationMutationOp::Set
+        } else {
+            ReplicationMutationOp::from_byte(raw_op)?
+        };
         let key_hash = cursor.u64()?;
         let _key_tag = cursor.u64()?;
         let expire_raw = cursor.u64()?;
@@ -675,6 +733,14 @@ where
         let value_start = cursor.pos;
         let _ = cursor.bytes(value_len)?;
         let value = bytes.slice(value_start..value_start + value_len);
+        let governance = if raw_op == GOVERNED_SET_OP {
+            let len = cursor.u32()? as usize;
+            let start = cursor.pos;
+            let _ = cursor.bytes(len)?;
+            Some(bytes.slice(start..start + len))
+        } else {
+            None
+        };
         visit(FrameBackedReplicationMutation {
             shard_id,
             sequence,
@@ -683,6 +749,7 @@ where
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
+            governance,
         })?;
     }
     cursor.finish()
@@ -833,12 +900,23 @@ pub fn encode_snapshot_chunk(chunk: &ReplicationSnapshotChunk) -> Vec<u8> {
         out.extend_from_slice(&watermark.to_le_bytes());
     }
     out.extend_from_slice(&(chunk.entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&SNAPSHOT_GOVERNANCE_MAGIC.to_le_bytes());
     for entry in &chunk.entries {
         out.extend_from_slice(&(entry.key.len() as u32).to_le_bytes());
         out.extend_from_slice(&(entry.value.len() as u32).to_le_bytes());
+        out.extend_from_slice(
+            &entry
+                .governance
+                .as_ref()
+                .map_or(GOVERNANCE_NONE, |value| value.len() as u32)
+                .to_le_bytes(),
+        );
         out.extend_from_slice(&entry.expire_at_ms.unwrap_or(EXPIRE_NONE).to_le_bytes());
         out.extend_from_slice(entry.key.as_ref());
         out.extend_from_slice(entry.value.as_ref());
+        if let Some(governance) = &entry.governance {
+            out.extend_from_slice(governance.as_ref());
+        }
     }
     out
 }
@@ -857,6 +935,10 @@ pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
         watermarks.push(cursor.u64()?);
     }
     let entry_count = cursor.u32()? as usize;
+    let has_governance = cursor.peek_u32() == Some(SNAPSHOT_GOVERNANCE_MAGIC);
+    if has_governance {
+        let _ = cursor.u32()?;
+    }
     cursor.validate_count(entry_count, SNAPSHOT_ENTRY_MIN_BYTES, "snapshot entries")?;
     let mut entries = Vec::new();
     entries
@@ -865,13 +947,23 @@ pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
     for _ in 0..entry_count {
         let key_len = cursor.u32()? as usize;
         let value_len = cursor.u32()? as usize;
+        let governance_len = if has_governance {
+            Some(cursor.u32()?)
+        } else {
+            None
+        };
         let expire_raw = cursor.u64()?;
         let key = cursor.bytes(key_len)?.to_vec();
         let value = cursor.bytes(value_len)?.to_vec();
+        let governance = match governance_len {
+            Some(GOVERNANCE_NONE) | None => None,
+            Some(len) => Some(cursor.bytes(len as usize)?.to_vec()),
+        };
         entries.push(StoredEntry {
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
+            governance,
         });
     }
     cursor.finish()?;
@@ -889,6 +981,11 @@ struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
+    fn peek_u32(&self) -> Option<u32> {
+        self.bytes
+            .get(self.pos..self.pos + 4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+    }
     fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, pos: 0 }
     }
@@ -969,6 +1066,7 @@ mod tests {
             key: SharedBytes::from(key),
             value: SharedBytes::from_static(b"value"),
             expire_at_ms: Some(99),
+            governance: None,
         }
     }
 
@@ -978,6 +1076,27 @@ mod tests {
         let encoded = encode_mutation_batch(&mutations);
         let decoded = decode_mutation_batch(&encoded).expect("decode");
         assert_eq!(decoded, mutations);
+    }
+
+    #[test]
+    fn governed_mutation_round_trips_through_owned_and_frame_backed_decoders() {
+        let mut mutation = sample_mutation(7);
+        mutation.governance = Some(SharedBytes::from_static(b"tenant-a/repo-private"));
+        let payload = encode_mutation_batch(&[mutation.clone()]);
+        assert_eq!(
+            decode_mutation_batch(&payload).unwrap(),
+            vec![mutation.clone()]
+        );
+
+        let mut visited = None;
+        visit_mutation_batch_payload_bytes(SharedBytes::from(payload), |decoded| {
+            visited = Some((decoded.value, decoded.governance));
+            Ok(())
+        })
+        .unwrap();
+        let (value, governance) = visited.expect("visited mutation");
+        assert_eq!(value, mutation.value);
+        assert_eq!(governance, mutation.governance);
     }
 
     #[test]
@@ -1060,6 +1179,7 @@ mod tests {
                 key: b"k".to_vec(),
                 value: b"v".to_vec(),
                 expire_at_ms: None,
+                governance: Some(b"acl".to_vec()),
             }],
         };
         let encoded = encode_snapshot_chunk(&chunk);

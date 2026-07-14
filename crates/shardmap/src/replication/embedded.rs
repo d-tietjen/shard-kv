@@ -79,6 +79,7 @@ struct BorrowedSetReplication<'a> {
     key: &'a [u8],
     value: &'a [u8],
     expire_at_ms: Option<u64>,
+    governance: Option<&'a [u8]>,
 }
 
 impl ReplicatedEmbeddedStore {
@@ -111,6 +112,15 @@ impl ReplicatedEmbeddedStore {
         self.store.get(key)
     }
 
+    pub fn get_with_governance_filter<F>(&self, key: &[u8], authorize: F) -> Option<Bytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        self.store
+            .get_value_bytes_with_governance_filter(key, authorize)
+            .map(|value| value.to_vec())
+    }
+
     pub fn set(&self, key: Bytes, value: Bytes, ttl_ms: Option<u64>) {
         let route = self.store.route_key(&key);
         let key = bytes::Bytes::from(key);
@@ -135,6 +145,7 @@ impl ReplicatedEmbeddedStore {
                             key: key.as_ref(),
                             value: value.as_ref(),
                             expire_at_ms,
+                            governance: None,
                         }),
                         false => self.emitters.emit(
                             route.shard_id,
@@ -148,6 +159,7 @@ impl ReplicatedEmbeddedStore {
                                 key: key.clone(),
                                 value: value.clone(),
                                 expire_at_ms,
+                                governance: None,
                             },
                         ),
                     },
@@ -168,6 +180,7 @@ impl ReplicatedEmbeddedStore {
                             key: key.as_ref(),
                             value: value.as_ref(),
                             expire_at_ms: None,
+                            governance: None,
                         }),
                         false => self.emitters.emit(
                             route.shard_id,
@@ -181,12 +194,64 @@ impl ReplicatedEmbeddedStore {
                                 key: key.clone(),
                                 value: value.clone(),
                                 expire_at_ms: None,
+                                governance: None,
                             },
                         ),
                     },
                 );
             }
         }
+    }
+
+    pub fn set_with_governance(
+        &self,
+        key: Bytes,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+        governance: Bytes,
+    ) {
+        let route = self.store.route_key(&key);
+        let key = bytes::Bytes::from(key);
+        let value = bytes::Bytes::from(value);
+        let governance = bytes::Bytes::from(governance);
+        let direct_encode = direct_encoded_set_enabled(value.len());
+        let now_ms = ttl_now_millis();
+        let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        self.store.set_value_bytes_routed_with_governance_then(
+            route,
+            key.as_ref(),
+            value.clone(),
+            Some(governance.clone()),
+            expire_at_ms,
+            now_ms,
+            || match direct_encode {
+                true => self.emitters.emit_borrowed_set(BorrowedSetReplication {
+                    shard_id: route.shard_id,
+                    timestamp_ms: now_ms,
+                    key_hash: route.key_hash,
+                    key_tag: hash_key_tag_from_hash(route.key_hash),
+                    key: key.as_ref(),
+                    value: value.as_ref(),
+                    expire_at_ms,
+                    governance: Some(governance.as_ref()),
+                }),
+                false => self.emitters.emit(
+                    route.shard_id,
+                    ReplicationMutation {
+                        shard_id: route.shard_id,
+                        sequence: 0,
+                        timestamp_ms: now_ms,
+                        op: ReplicationMutationOp::Set,
+                        key_hash: route.key_hash,
+                        key_tag: hash_key_tag_from_hash(route.key_hash),
+                        key: key.clone(),
+                        value: value.clone(),
+                        expire_at_ms,
+                        governance: Some(governance.clone()),
+                    },
+                ),
+            },
+        );
     }
 
     pub fn delete(&self, key: &[u8]) -> bool {
@@ -205,6 +270,7 @@ impl ReplicatedEmbeddedStore {
                     key: bytes::Bytes::copy_from_slice(key),
                     value: bytes::Bytes::new(),
                     expire_at_ms: None,
+                    governance: None,
                 },
             );
         })
@@ -227,6 +293,7 @@ impl ReplicatedEmbeddedStore {
                         key: bytes::Bytes::copy_from_slice(key),
                         value: bytes::Bytes::new(),
                         expire_at_ms: Some(expire_at_ms),
+                        governance: None,
                     },
                 );
             })
@@ -392,6 +459,7 @@ impl ReplicatedEmbeddedEmitters {
                 key: bytes::Bytes::copy_from_slice(set.key),
                 value: bytes::Bytes::copy_from_slice(set.value),
                 expire_at_ms: set.expire_at_ms,
+                governance: set.governance.map(bytes::Bytes::copy_from_slice),
             });
             return;
         };
@@ -476,6 +544,7 @@ impl ReplicatedEmbeddedShardEmitter {
             key: set.key,
             value: set.value,
             expire_at_ms: set.expire_at_ms,
+            governance: set.governance,
         };
         if let Some(batch) = self.encoded_batch.push(mutation) {
             self.send_encoded_batch(batch);
@@ -724,6 +793,7 @@ impl ReplicationReplica {
                     mutation.key.as_ref(),
                     mutation.value,
                     mutation.expire_at_ms,
+                    mutation.governance,
                     now_ms,
                 );
             }
@@ -760,6 +830,7 @@ impl ReplicationReplica {
                     mutation.key,
                     mutation.value,
                     mutation.expire_at_ms,
+                    mutation.governance,
                     now_ms,
                 );
             }
@@ -796,6 +867,7 @@ impl ReplicationReplica {
                     mutation.key,
                     bytes::Bytes::copy_from_slice(mutation.value),
                     mutation.expire_at_ms,
+                    mutation.governance.map(bytes::Bytes::copy_from_slice),
                     now_ms,
                 );
             }
@@ -822,6 +894,7 @@ impl ReplicationReplica {
         key: &[u8],
         value: bytes::Bytes,
         expire_at_ms: Option<u64>,
+        governance: Option<bytes::Bytes>,
         now_ms: &mut Option<u64>,
     ) {
         let route = self.store.route_key_prehashed(key_hash, key);
@@ -831,17 +904,24 @@ impl ReplicationReplica {
                 if expire_at_ms <= now_ms {
                     return;
                 }
-                self.store.set_value_bytes_routed_expire_at(
+                self.store.set_value_bytes_routed_expire_at_with_governance(
                     route,
                     key,
                     value,
+                    governance,
                     Some(expire_at_ms),
                     now_ms,
                 );
             }
-            None => self
-                .store
-                .set_value_bytes_routed_no_ttl_then(route, key, value, || {}),
+            None => self.store.set_value_bytes_routed_with_governance_then(
+                route,
+                key,
+                value,
+                governance,
+                None,
+                now_millis(),
+                || {},
+            ),
         }
     }
 
@@ -906,6 +986,36 @@ mod tests {
             .get_value_bytes(b"alpha")
             .expect("stored value");
         assert!(bytes_points_inside(&stored, &frame));
+    }
+
+    #[test]
+    fn embedded_replica_preserves_governance_and_fails_closed() {
+        let primary = ReplicatedEmbeddedStore::new(4, config(ReplicationSendPolicy::Immediate))
+            .expect("primary");
+        let mut replica = ReplicationReplica::new(4);
+        let subscriber = primary.primary().subscribe(8);
+        primary.set_with_governance(
+            b"private".to_vec(),
+            b"model-state".to_vec(),
+            None,
+            b"tenant-a/repo-private".to_vec(),
+        );
+        let frame = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("replication frame");
+        replica.apply_frame(frame).expect("apply");
+
+        assert_eq!(primary.get(b"private"), None);
+        assert_eq!(replica.get(b"private"), None);
+        assert_eq!(
+            replica
+                .inner()
+                .get_value_bytes_with_governance_filter(b"private", |metadata| {
+                    metadata == Some(b"tenant-a/repo-private".as_slice())
+                })
+                .as_deref(),
+            Some(b"model-state".as_slice())
+        );
     }
 
     #[test]

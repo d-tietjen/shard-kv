@@ -50,7 +50,7 @@ guard is enough.
 | Parent telemetry runtime | Record shardmap metrics into a parent-owned fast-telemetry runtime, or fall back to shardmap-owned metrics. | Enable the `parent-telemetry-runtime` feature |
 | Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
 | Semantic TTL | Combine semantic reuse with freshness windows. | [`semantic_ttl.rs`](examples/semantic_ttl.rs) |
-| Governance metadata | Attach application-owned authorization context to semantic hits. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
+| Governance metadata | Enforce application-owned authorization context on semantic and exact point hits. | [`semantic_cache.rs`](examples/semantic_cache.rs), [`EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) |
 | Mini app | A small feature-flag cache combining TTL, prepared keys, and locks. | [`mini_feature_flags.rs`](examples/mini_feature_flags.rs) |
 
 Run any example with:
@@ -515,6 +515,14 @@ semantic queries use an internal query-result cache; call
 `disable_semantic_query_cache` when benchmarking the cold vector path.
 
 ## Governance Metadata
+
+Exact byte-key values can also carry opaque governance metadata. Protected
+entries fail closed through ordinary GET, mutable, visitor, removal-return, and
+Redis paths; use `EmbeddedStore::get_value_bytes_with_governance_filter` to
+authorize borrowed metadata before the value handle is cloned. Governance is
+preserved through persistence, replication, object overflow, and KV overflow.
+See [`docs/EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) for the full
+security and compatibility contract.
 
 Cross-user semantic cache entries can carry opaque governance metadata. Entries
 written through the default semantic APIs return `None`; applications that need

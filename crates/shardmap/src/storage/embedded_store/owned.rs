@@ -611,6 +611,36 @@ impl OwnedEmbeddedWorkerShards {
             .map(<[u8]>::to_vec)
     }
 
+    pub(crate) fn local_get_with_governance_filter<F>(
+        &mut self,
+        key: &[u8],
+        authorize: F,
+    ) -> Option<Bytes>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        let route = self.route_key(key);
+        let now_ms = now_millis();
+        let shard = self.shard_for_route_mut(route.shard_id);
+        if let Some(session_prefix) = derived_session_storage_prefix(key)
+            && let Some(value) =
+                shard
+                    .session_slots
+                    .get_ref_hashed(&session_prefix, route.key_hash, key)
+        {
+            return authorize(None).then(|| value.to_vec());
+        }
+        match shard.map.get_value_bytes_hashed_with_governance_filter(
+            route.key_hash,
+            key,
+            now_ms,
+            authorize,
+        ) {
+            GovernedRead::Authorized(value) => Some(value.to_vec()),
+            GovernedRead::Missing | GovernedRead::Denied => None,
+        }
+    }
+
     #[cfg(feature = "embedded")]
     pub(crate) fn local_set(&mut self, key: Bytes, value: Bytes, ttl_ms: Option<u64>) {
         let now_ms = now_millis();
@@ -625,6 +655,33 @@ impl OwnedEmbeddedWorkerShards {
         shard
             .map
             .set_hashed_local(route.key_hash, key, value, expire_at_ms, now_ms);
+        shard.enforce_memory_limit(now_ms);
+    }
+
+    pub(crate) fn local_set_with_governance(
+        &mut self,
+        key: Bytes,
+        value: Bytes,
+        ttl_ms: Option<u64>,
+        governance: Bytes,
+    ) {
+        let now_ms = ttl_ms.map_or(0, |_| now_millis());
+        let route = self.route_key(&key);
+        let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        let shard = self.shard_for_route_mut(route.shard_id);
+        if let Some(session_prefix) = point_write_session_storage_prefix(&key) {
+            shard
+                .session_slots
+                .delete_hashed_local(&session_prefix, route.key_hash, &key);
+        }
+        shard.map.set_bytes_hashed_with_governance(
+            route.key_hash,
+            &key,
+            bytes::Bytes::from(value),
+            bytes::Bytes::from(governance),
+            expire_at_ms,
+            now_ms,
+        );
         shard.enforce_memory_limit(now_ms);
     }
 
@@ -1120,10 +1177,11 @@ impl OwnedEmbeddedWorkerShards {
                     .session_slots
                     .delete_hashed(&session_prefix, route.key_hash, &entry.key);
             }
-            shard.map.set_hashed(
+            shard.map.set_bytes_hashed_with_governance_option(
                 route.key_hash,
-                entry.key,
-                entry.value,
+                &entry.key,
+                bytes::Bytes::from(entry.value),
+                entry.governance.map(bytes::Bytes::from),
                 entry.expire_at_ms,
                 now_ms,
             );
@@ -1187,6 +1245,12 @@ impl OwnedEmbeddedWorkerShards {
             let shard = self.shard_for_route_mut(route.shard_id);
             if let Some(session_prefix) = derived_session_storage_prefix(key)
                 && shard.session_slots.has_session(&session_prefix)
+            {
+                return None;
+            }
+            if shard
+                .map
+                .is_value_protected_hashed(route.key_hash, key, now_ms)
             {
                 return None;
             }

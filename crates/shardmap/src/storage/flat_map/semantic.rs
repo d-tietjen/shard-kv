@@ -69,7 +69,7 @@ impl FlatMap {
         };
         let previous_entry_bytes = entry.stored_bytes();
         entry.semantic_index_token = Some(token);
-        entry.semantic_governance = governance;
+        entry.governance = governance;
         let new_entry_bytes = entry.stored_bytes();
         #[cfg(feature = "telemetry")]
         let memory_delta = new_entry_bytes as isize - previous_entry_bytes as isize;
@@ -162,13 +162,13 @@ impl FlatMap {
         if token.id() != candidate.id {
             return None;
         }
-        if !governance_filter(entry.semantic_governance.as_deref()) {
+        if !governance_filter(entry.governance.as_deref()) {
             return None;
         }
         Some(SemanticMatch {
             key: entry.key.as_ref().to_vec(),
             value: entry.value.clone(),
-            governance: entry.semantic_governance.clone(),
+            governance: entry.governance.clone(),
             score: candidate.score,
         })
     }

@@ -23,8 +23,8 @@ use crate::storage::embedded_store::{
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetry, CacheTelemetryHandle, TelemetryRuntime};
 use crate::storage::{
-    FastHashMap, PreparedPointKey, SemanticCacheError, SemanticEmbedding, SemanticMatch, hash_key,
-    hash_key_tag_from_hash, ttl_now_millis, validate_similarity_threshold,
+    FastHashMap, GovernedRead, PreparedPointKey, SemanticCacheError, SemanticEmbedding,
+    SemanticMatch, hash_key, hash_key_tag_from_hash, ttl_now_millis, validate_similarity_threshold,
 };
 
 /// Lock policy for [`SharedEmbeddedStore`] stripes.

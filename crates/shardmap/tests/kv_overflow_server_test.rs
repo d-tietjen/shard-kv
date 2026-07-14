@@ -227,15 +227,21 @@ fn shard_owned_direct_replica_validates_topology_and_uses_every_remote_shard() {
             )
             .unwrap();
     }
+    let governed_key = b"direct-private";
+    let governed_value = b"private-model-state".repeat(8);
+    let governance = b"tenant-a/repo-private";
+    primary
+        .set_with_governance(governed_key, governed_value.clone(), None, governance)
+        .unwrap();
     primary
         .flush_remote()
         .unwrap_or_else(|error| panic!("{error}; health={:?}", primary.health_snapshot()));
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    while replica.len() != 256 && Instant::now() < deadline {
+    while replica.len() != 257 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(replica.len(), 256, "health={:?}", primary.health_snapshot());
+    assert_eq!(replica.len(), 257, "health={:?}", primary.health_snapshot());
     let occupied = replica
         .shard_stats_snapshot()
         .into_iter()
@@ -252,6 +258,34 @@ fn shard_owned_direct_replica_validates_topology_and_uses_every_remote_shard() {
             .len(),
         32
     );
+    assert_eq!(primary.get(governed_key).unwrap(), None);
+    assert_eq!(primary.cluster().get(governed_key).unwrap(), None);
+    assert_eq!(
+        primary
+            .cluster()
+            .get_with_governance_filter(governed_key, |_| false)
+            .unwrap(),
+        None
+    );
+    let governed = primary
+        .cluster()
+        .get_with_governance_filter(governed_key, |metadata| {
+            metadata == Some(governance.as_slice())
+        })
+        .unwrap()
+        .expect("authorized SCNP overflow read");
+    assert_eq!(governed.value.as_ref(), governed_value);
+    assert_eq!(governed.governance.as_deref(), Some(governance.as_slice()));
+    assert_eq!(
+        primary
+            .get_with_governance_filter(governed_key, |metadata| {
+                metadata == Some(governance.as_slice())
+            })
+            .unwrap()
+            .as_deref(),
+        Some(governed_value.as_slice())
+    );
+    assert_eq!(primary.get(governed_key).unwrap(), None);
 }
 
 #[test]

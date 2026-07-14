@@ -26,6 +26,7 @@ surface and the decisions an adopter needs to make.
 | Failure isolation | Gives each target a circuit breaker, retry state, adaptive pipeline limit, and independent task when one shard owns multiple targets. A delayed target does not stall unrelated targets. | Included with `kv-overflow` |
 | Fallible persistence | Materializes remote-only values into the authoritative local snapshot and fails loudly if a remote value cannot be fetched. Restore mirrors recovered values before enforcing the resident target. | Included with `kv-overflow` |
 | Overflow health | Reports per-shard ownership, queue and completion depth, sockets, pipeline size and RTT, retries, circuit state, handoff progress, compression, TLS, resident bytes, and metadata bytes. | Included with `kv-overflow` |
+| Exact point governance | Atomically attaches opaque policy metadata to exact values and fails closed across resident reads, persistence, replication, object overflow, and KV overflow. | Embedded Rust API; see [`EXACT_GOVERNANCE.md`](EXACT_GOVERNANCE.md) |
 
 ## Topology Examples
 
@@ -57,6 +58,12 @@ remote owner on a local miss. Services that should not load the primary can use
 `KvOverflowCluster::get` to read that owner directly. TTL starts when the
 primary accepts the write and does not restart while a mutation waits or
 retries.
+
+Governed exact values use `set_value_bytes_with_governance` or
+`KvOverflowStore::set_with_governance`. Ordinary GET cannot return a protected
+entry. The governed filter receives borrowed opaque metadata and must approve
+it before the value is cloned or promoted. KV overflow v3/v4 envelopes include
+metadata in their integrity check and handoff verification.
 
 ## Topology Migration
 

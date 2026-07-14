@@ -323,6 +323,30 @@ fn per_stripe_memory_limit_evicts_independently() {
 }
 
 #[test]
+fn shared_exact_governance_is_fail_closed() {
+    let store = SharedEmbeddedStore::<4>::new(SharedEmbeddedConfig::default());
+    store.insert_with_ttl_and_governance(
+        bytes::Bytes::from_static(b"private"),
+        bytes::Bytes::from_static(b"value"),
+        None,
+        bytes::Bytes::from_static(b"tenant=a"),
+    );
+
+    assert!(store.get_value_bytes(b"private").is_none());
+    assert_eq!(
+        store.get_value_bytes_with_governance_filter(b"private", |metadata| {
+            metadata == Some(b"tenant=a".as_slice())
+        }),
+        Some(bytes::Bytes::from_static(b"value"))
+    );
+    assert!(
+        store
+            .get_value_bytes_with_governance_filter(b"private", |_| false)
+            .is_none()
+    );
+}
+
+#[test]
 fn semantic_shard_uses_total_memory_budget() {
     let per_stripe_limit = 64usize;
     let total_limit = per_stripe_limit * 4;
