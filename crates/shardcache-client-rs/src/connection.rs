@@ -178,7 +178,10 @@ impl ScnpConnection {
     }
 
     pub(crate) fn execute<C: ScnpCommand>(&mut self, command: C) -> Result<C::Output> {
-        self.write_header(command.opcode(), command.flags(), command.body_len() as u32)?;
+        let body_len = u32::try_from(command.body_len()).map_err(|_| {
+            ShardCacheClientError::Protocol("SCNP request body exceeds the protocol limit".into())
+        })?;
+        self.write_header(command.opcode(), command.flags(), body_len)?;
         command.write_body(&mut self.w)?;
         self.flush()?;
         command.read_response(self)
@@ -583,6 +586,43 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("exceeds configured maximum"));
         assert!(output.capacity() < 64 * 1024 * 1024);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn truncated_value_body_returns_error_without_uninitialized_output() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(&[
+                    FAST_RESPONSE_MAGIC,
+                    FAST_PROTOCOL_VERSION,
+                    STATUS_VALUE,
+                    0,
+                    8,
+                    0,
+                    0,
+                    0,
+                    b'a',
+                    b'b',
+                ])
+                .unwrap();
+        });
+        let mut connection = ScnpConnection::connect(address).unwrap();
+        let mut output = Vec::new();
+
+        let error = connection
+            .read_value_limited("GET", &mut output, 8)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ShardCacheClientError::Io(ref error)
+                if error.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+        assert_eq!(&output[..2], b"ab");
+        assert!(output[2..].iter().all(|byte| *byte == 0));
         server.join().unwrap();
     }
 }

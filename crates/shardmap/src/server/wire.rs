@@ -353,9 +353,14 @@ impl ServerWire {
 
     #[inline(always)]
     pub(super) fn write_fast_value_64(out: &mut BytesMut, payload: &[u8]) {
+        // Keep the fixed-size unsafe copy safe even if a future caller violates
+        // its optimization precondition in a release build.
+        if payload.len() != 64 {
+            ServerWire::write_fast_value(out, payload);
+            return;
+        }
         #[cfg(not(feature = "unsafe"))]
         {
-            debug_assert_eq!(payload.len(), 64);
             out.extend_from_slice(&ServerWire::fast_value_header(64));
             out.extend_from_slice(payload);
         }
@@ -364,7 +369,6 @@ impl ServerWire {
             const TOTAL: usize = 72;
             const VALUE_64_HEADER_U64: u64 = 0x0000_0040_0004_02fb;
 
-            debug_assert_eq!(payload.len(), 64);
             out.reserve(TOTAL);
             // SAFETY: reserve(TOTAL) ensures enough spare capacity for header + value,
             // and the caller only reaches this function for 64-byte payloads.
@@ -801,5 +805,31 @@ impl ServerWire {
         }
         let value = value as f64;
         Some(if negative { -value } else { value })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_size_fast_value_writer_falls_back_for_short_slice() {
+        let mut encoded = BytesMut::new();
+        ServerWire::write_fast_value_64(&mut encoded, b"short");
+
+        assert_eq!(
+            &encoded[..8],
+            &[
+                FAST_RESPONSE_MAGIC,
+                FAST_PROTOCOL_VERSION,
+                FAST_STATUS_VALUE,
+                0,
+                5,
+                0,
+                0,
+                0,
+            ]
+        );
+        assert_eq!(&encoded[8..], b"short");
     }
 }

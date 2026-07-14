@@ -120,6 +120,12 @@ let remote = cache.cluster().get(b"model:7")?;
   mutation/read socket terminates its own Rustls session; there is no shared
   TLS proxy or connection lock. Replica certificates are verified against the
   configured CA and `tls_server_name` (the stable replica ID by default).
+  The workspace disables default TLS features and selects Rustls with the
+  `ring` provider; SCNP accepts TLS 1.3 only. CI rejects OpenSSL, native-tls,
+  and OpenSSL-backed Rustls providers from the all-features dependency graph.
+  Application frame decoders require the complete declared body before
+  dispatch and response writers derive their lengths from initialized slices,
+  preventing Heartbleed-style peer-length memory disclosure.
   Configuring a server client CA and matching primary client certificate/key
   enables mandatory mTLS. CA-valid clients must also match a configured
   `client_cert_sha256` leaf-certificate fingerprint; overlapping fingerprints
