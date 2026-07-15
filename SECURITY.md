@@ -27,6 +27,12 @@ unsafe are opt-in through `--features unsafe` and documented in
 
 ## Network and overflow hardening
 
+The general Redis-compatible RESP/SCNP listener defaults to loopback and is not
+the authenticated transport used by dedicated overflow or proposed active-sync
+peers. Do not bind the general listener to an untrusted interface without an
+external authenticated TLS boundary and firewall policy. The dedicated KV
+overflow listener described below has separate enforced authentication.
+
 SCNP overflow TLS uses Rustls with the `ring` provider and TLS 1.3. The
 workspace does not use OpenSSL or native-tls for this path. Non-loopback SCNP
 overflow requires certificate verification plus token authentication or mTLS,
@@ -43,6 +49,11 @@ contract is documented in [`docs/KV_OVERFLOW.md`](docs/KV_OVERFLOW.md).
 Reports involving resource exhaustion, malformed frames, authentication
 bypass, stale topology placement, or unintended memory disclosure should be
 treated as security reports.
+
+The proposed 0.7 active-active transport does not reuse the general client
+listener. Its mandatory mTLS, peer authorization, bounded credential rotation,
+revocation, and signing-key contract is documented in
+[`docs/ACTIVE_ACTIVE_REPLICATION.md`](docs/ACTIVE_ACTIVE_REPLICATION.md).
 
 ## Dependency inventory
 
