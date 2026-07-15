@@ -27,12 +27,13 @@ adds one background in-process peer exchange.
 | 80% GET / 20% SET | active-local | 5.29M | 51.0% | 6.6us | 3.00x |
 | 80% GET / 20% SET | active-sync | 6.88M | 66.2% | 4.9us | 2.23x |
 
-These short local rows are diagnostic, not release claims. Read throughput with
-one synchronized peer reaches the 90% throughput target, but local causal write
-admission and mixed tails do not meet the release gates. The current
-implementation creates causal records and retains value payloads synchronously;
-moving block construction to durable WAL-offset descriptors remains required
-before active sync should be enabled on a write-heavy production primary.
+These short local rows are diagnostic, not release claims. One local GET row
+reached the 90% throughput target, but the canonical Adam run below did not;
+causal write admission and mixed tails also do not meet the release gates. The
+current implementation creates causal records and retains value payloads
+synchronously; moving block construction to durable WAL-offset descriptors
+remains required before active sync should be enabled on a write-heavy
+production primary.
 
 Command shape:
 
@@ -42,6 +43,42 @@ target/release/active_sync_cost \
   --shards 4 --clients 4 --key-count 10000 --value-size 1024 \
   --read-percent MIX --warmup 1 --duration 3 \
   --sync-interval-ms 100 --latency-sample-rate 1000
+```
+
+## Implemented ActiveShardMap On Adam
+
+Commit `e835105` was built natively in release mode and run on CPUs `0-7` with
+eight shards, eight clients, 100,000 keys, 1 KiB values, a two-second warmup,
+a ten-second measured phase, one latency sample per 10,000 operations, and a
+100 ms explicit sync interval.
+
+| Workload | Mode | Ops/s | Baseline retained | p99 | Baseline p99 ratio |
+| --- | --- | ---: | ---: | ---: | ---: |
+| GET | baseline | 18.47M | 100.0% | 2.1us | 1.00x |
+| GET | active-local | 15.99M | 86.6% | 2.2us | 1.05x |
+| GET | active-sync | 15.11M | 81.8% | 2.3us | 1.10x |
+| SET | baseline | 7.97M | 100.0% | 5.4us | 1.00x |
+| SET | active-local | 1.64M | 20.5% | 33.3us | 6.17x |
+| SET | active-sync | 1.34M | 16.8% | 59.8us | 11.07x |
+| 80% GET / 20% SET | baseline | 14.66M | 100.0% | 2.8us | 1.00x |
+| 80% GET / 20% SET | active-local | 6.63M | 45.2% | 5.2us | 1.86x |
+| 80% GET / 20% SET | active-sync | 5.36M | 36.6% | 6.3us | 2.25x |
+
+The active-active read path remains close in p99, but neither throughput mode
+meets the 90% gate on Adam. Write admission is the dominant limit, and the
+synchronized write-heavy p999 reached `496.6us`. This is not a production-ready
+performance result for write-heavy primaries. The feature remains explicit and
+off by default while WAL-offset block construction and shard-owned background
+drains are implemented and remeasured.
+
+Command shape:
+
+```bash
+taskset -c 0-7 target/release/active_sync_cost \
+  --modes baseline,active-local,active-sync \
+  --shards 8 --clients 8 --key-count 100000 --value-size 1024 \
+  --read-percent MIX --warmup 2 --duration 10 \
+  --sync-interval-ms 100 --latency-sample-rate 10000
 ```
 
 ## Pre-Implementation Adam Baseline
