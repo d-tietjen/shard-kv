@@ -53,10 +53,10 @@ declared compatible version ranges.
 | --- | --- | --- |
 | `object_store` | `object-overflow-s3` | S3/RustFS-compatible object transport. |
 | `redis` | `kv-overflow-redis` | Redis/Valkey overflow transport with Rustls-backed TLS URLs. |
-| `rustls`, `tokio-rustls`, `rustls-pemfile`, `ring` | `scnp-tls` | TLS 1.3, mTLS, certificate parsing, and cryptography for SCNP overflow. |
+| `rustls`, `tokio-rustls`, `rustls-pemfile`, `ring` | `scnp-tls`, `active-sync-tls` | TLS 1.3, mTLS, certificate parsing, and cryptography for SCNP overflow and active-active peer sync. |
 | `shardcache-client-rs` | `kv-overflow` | SCNP framing and direct replica communication. |
 | `lz4_flex`, `zstd` | Overflow features | Optional value and object compression. |
-| `crc32fast`, `sha2` | Overflow integrity and TLS identity | Envelope integrity and certificate fingerprints. |
+| `crc32fast`, `sha2` | Overflow and active-sync integrity, TLS identity | Envelope and sync-block integrity plus certificate fingerprints. |
 | `tokio`, `flume` | Server and asynchronous overflow paths | Event loops, sockets, timers, bounded asynchronous lanes, and shutdown. |
 | `bytes-handoff`, `monoio` | Optional server transport | Buffer handoff and Linux transport experiments. |
 | `fast-telemetry` | `telemetry` | Metrics integration. |

@@ -36,6 +36,7 @@ object-overflow = ["shardmap/object-overflow"]
 kv-overflow = ["shardmap/kv-overflow"]
 kv-overflow-redis = ["kv-overflow", "shardmap/kv-overflow-redis"]
 scnp-tls = ["kv-overflow", "shardmap/scnp-tls", "shardcache-client-rs/tls"]
+active-sync = ["shardmap/active-sync"]
 # Build the benchmark-only server that exposes a caller-owned shardmap store
 # through the shardcache RESP/SCNP server path.
 embedded-server = ["shardmap/redis-server"]
@@ -77,6 +78,11 @@ path = "src/bin/curve.rs"
 [[bin]]
 name = "replication_cost"
 path = "src/bin/replication_cost.rs"
+
+[[bin]]
+name = "active_sync_cost"
+path = "src/bin/active_sync_cost.rs"
+required-features = ["active-sync"]
 
 [[bin]]
 name = "replication_tcp_cost"

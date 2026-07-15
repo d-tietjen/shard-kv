@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.6.0"
+shardmap = "0.7.0"
 ```
 
 ## Quick Start
@@ -51,12 +51,14 @@ guard is enough.
 | Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
 | Semantic TTL | Combine semantic reuse with freshness windows. | [`semantic_ttl.rs`](examples/semantic_ttl.rs) |
 | Governance metadata | Enforce application-owned authorization context on semantic and exact point hits. | [`semantic_cache.rs`](examples/semantic_cache.rs), [`EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) |
+| Active-active point values | Exchange bounded causal blocks, converge SET/DEL/expiry conflicts, and evict local payloads independently. | Enable `active-sync`; see [`active_sync.rs`](examples/active_sync.rs) |
 | Mini app | A small feature-flag cache combining TTL, prepared keys, and locks. | [`mini_feature_flags.rs`](examples/mini_feature_flags.rs) |
 
 Run any example with:
 
 ```bash
 cargo run -p shardmap --example basic_map
+cargo run -p shardmap --example active_sync --features active-sync
 ```
 
 ## Typed Map Operations

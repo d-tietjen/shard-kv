@@ -185,3 +185,20 @@ EOF
 write_patch_table >>"$scnp_tls_consumer/Cargo.toml"
 
 check_consumer scnp-tls-consumer
+
+active_sync_consumer="$tmp/active-sync-consumer"
+mkdir -p "$active_sync_consumer"
+write_consumer_main "$active_sync_consumer"
+cat >"$active_sync_consumer/Cargo.toml" <<EOF
+[package]
+name = "shard-kv-publish-active-sync-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shardmap = { version = "$shardmap_version", default-features = false, features = ["active-sync-tls"] }
+EOF
+write_patch_table >>"$active_sync_consumer/Cargo.toml"
+
+check_consumer active-sync-consumer

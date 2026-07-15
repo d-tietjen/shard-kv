@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.7.0 - Unreleased
+
+### Added
+
+- Added the feature-gated `ActiveShardMap` exact point-value API with per-shard
+  causal mutation dots, hybrid logical clocks, remove-wins deletion and expiry,
+  deterministic concurrent SET resolution, governance conflict protection, and
+  exact cluster-eviction commits.
+- Added bounded interval sync blocks, SHA-256 integrity, duplicate and reordered
+  delivery handling, compacted-history state transfer, atomic checksummed
+  snapshots, explicit bidirectional synchronization, and health snapshots.
+- Added independent exact-version local eviction and peer fault-in. Residency
+  changes do not create replicated logical deletes, and payloads remain resident
+  until an exact recovery source is known.
+- Added a dedicated direct-shard Rustls transport behind `active-sync-tls` with
+  mandatory mTLS 1.3, ALPN, certificate-fingerprint authorization, cluster and
+  shard identity validation, bounded frames and deadlines, credential overlap,
+  and immediate node revocation.
+- Added convergence, conflict, compaction, corruption, resource-bound, live
+  mTLS, credential-rotation, and revocation tests plus an active-sync cost
+  benchmark and runnable embedded example.
+
+### Changed
+
+- Bumped workspace and publishable crate versions to `0.7.0`.
+
 ## 0.6.0 - Unreleased
 
 ### Added

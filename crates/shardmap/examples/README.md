@@ -12,6 +12,7 @@ cargo run -p shardmap --example route_inspection
 cargo run -p shardmap --example ttl_and_locks
 cargo run -p shardmap --example semantic_cache
 cargo run -p shardmap --example semantic_ttl
+cargo run -p shardmap --example active_sync --features active-sync
 ```
 
 These examples are intentionally small. They are meant to show the embedded API

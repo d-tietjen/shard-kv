@@ -1,12 +1,50 @@
-# Shardcache 0.7 Active-Active Performance Baseline
+# Shardcache 0.7 Active-Active Performance
 
 Measured: 2026-07-15
 
-This note establishes the pre-implementation performance budget for the 0.7
-active-active work. It is not an active-active benchmark result. Commit
-`2cf9518` contains the design, but does not contain `ActiveShardMap`, causal
-mutation records, eviction stubs, cold nominations, or interval WAL-block
-exchange.
+This note preserves the pre-implementation Adam budget and records the first
+`ActiveShardMap` measurements. Results distinguish local causal admission from
+caller-driven synchronization; neither mode is enabled in the default build.
+
+## Initial ActiveShardMap Measurement
+
+The following release-build smoke measurement ran on the Apple M5 Max
+development host with four shards, four clients, 10,000 keys, 1 KiB values, a
+one-second warmup, a three-second measured phase, and a 100 ms explicit sync
+interval. `baseline` is the same `EmbeddedStore` byte API. `active-local` keeps
+causal metadata and interval blocks but performs no peer sync. `active-sync`
+adds one background in-process peer exchange.
+
+| Workload | Mode | Ops/s | Baseline retained | p99 | Baseline p99 ratio |
+| --- | --- | ---: | ---: | ---: | ---: |
+| GET | baseline | 14.58M | 100.0% | 1.4us | 1.00x |
+| GET | active-local | 11.30M | 77.5% | 2.3us | 1.64x |
+| GET | active-sync | 13.12M | 90.0% | 1.6us | 1.14x |
+| SET | baseline | 5.58M | 100.0% | 8.5us | 1.00x |
+| SET | active-local | 1.90M | 34.0% | 20.7us | 2.44x |
+| SET | active-sync | 1.27M | 22.8% | 32.0us | 3.76x |
+| 80% GET / 20% SET | baseline | 10.38M | 100.0% | 2.2us | 1.00x |
+| 80% GET / 20% SET | active-local | 5.29M | 51.0% | 6.6us | 3.00x |
+| 80% GET / 20% SET | active-sync | 6.88M | 66.2% | 4.9us | 2.23x |
+
+These short local rows are diagnostic, not release claims. Read throughput with
+one synchronized peer reaches the 90% throughput target, but local causal write
+admission and mixed tails do not meet the release gates. The current
+implementation creates causal records and retains value payloads synchronously;
+moving block construction to durable WAL-offset descriptors remains required
+before active sync should be enabled on a write-heavy production primary.
+
+Command shape:
+
+```bash
+target/release/active_sync_cost \
+  --modes baseline,active-local,active-sync \
+  --shards 4 --clients 4 --key-count 10000 --value-size 1024 \
+  --read-percent MIX --warmup 1 --duration 3 \
+  --sync-interval-ms 100 --latency-sample-rate 1000
+```
+
+## Pre-Implementation Adam Baseline
 
 ## Host And Method
 

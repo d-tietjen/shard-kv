@@ -1,16 +1,50 @@
-# Shardcache 0.7 Active-Active Replication Plan
+# Shardcache 0.7 Active-Active Replication
 
 ## Release Target
 
 Active-active synchronization, causal conflict handling, independent residency
-eviction, and distributed cluster eviction are targeted for Shardcache `0.7.0`.
-They are not part of the published `0.6.x` API or compatibility contract. The
-workspace crate versions remain at `0.6.0` until the implementation reaches the
-0.7 release gate.
+eviction, and exact cluster-eviction primitives are feature-gated for
+Shardcache `0.7.0`. They are not part of the `0.6.x` API or compatibility
+contract and do not affect the default `ShardMap` layout or hot path.
+
+## Implementation Status
+
+The `active-sync` feature currently provides `ActiveShardMap` for exact byte
+keys and values. It includes:
+
+- per-shard mutation dots, hybrid logical clocks, compact causal contexts, and
+  deterministic convergence for SET, DEL, expiry, and governed SET;
+- remove-wins tombstones, exact-version cluster-eviction commits, independent
+  local residency eviction, and exact peer fault-in;
+- bounded immutable interval blocks, digests, retained-block frontiers,
+  duplicate and out-of-order handling, and bounded state-transfer fallback;
+- checksummed atomic snapshots that preserve values, tombstones, governance,
+  TTLs, and causal state and fail when an evicted payload cannot be
+  materialized;
+- explicit in-process synchronization through `sync_with`;
+- an `active-sync-tls` direct-shard transport with mandatory mutual TLS 1.3,
+  ALPN, certificate-fingerprint authorization, deadlines, bounded frames,
+  credential overlap, and immediate node revocation; and
+- focused fault, convergence, snapshot, compaction, mTLS, credential-rotation,
+  and resource-bound tests plus the `active_sync_cost` benchmark.
+
+The first 0.7 implementation is caller-driven. Applications seal or synchronize
+at their selected interval; there is no implicit networking on local reads or
+writes. Peer fanout accepts only blocks whose origin is the authenticated peer,
+so unsigned multi-hop forwarding is deliberately rejected.
+
+The following design items remain release gates rather than implemented
+claims: building sync blocks from durable WAL offsets instead of retaining
+mutation payloads in memory, automatic membership/topology scheduling,
+multi-hop origin signatures, quorum cold nominations, tombstone garbage
+collection, stronger acknowledgement modes, Redis command-family semantics,
+and online overlapping replica-group reconfiguration. The current local write
+benchmark also does not meet the 90% throughput target; see
+[`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md).
 
 ## Summary
 
-Build active-active shardmap synchronization in which every member of a slot's
+The complete target is active-active shardmap synchronization in which every member of a slot's
 replica group may accept local reads and writes while managing its resident
 cache independently. Local LRU/LFU eviction drops payload residency without
 deleting the logical version, and exact-version fault-in restores cold data from

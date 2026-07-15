@@ -23,12 +23,17 @@ Use this checklist before publishing the repository or the crates.io crates.
 For full release confidence, also run any Redis compatibility or performance
 validation suites that support the release announcement. Keep raw artifacts
 outside the public repository unless they have been intentionally curated.
-For the 0.6.0 feature catalog and upgrade notes, see
+For the 0.6.0 overflow feature catalog and upgrade notes, see
 `docs/RELEASE_0_6.md`. The complete overflow architecture, operating contract,
 known limits, security requirements, and benchmark commands are in
 `docs/KV_OVERFLOW.md`.
 
-The 0.6.0 release gate also includes:
+The feature-gated 0.7 active-active API, consistency semantics, security
+contract, benchmark results, and remaining production gates are documented in
+`docs/ACTIVE_ACTIVE_REPLICATION.md` and
+`benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md`.
+
+The release gate also includes:
 
 ```bash
 cargo fmt --check

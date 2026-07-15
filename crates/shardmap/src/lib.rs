@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(not(feature = "server"), allow(dead_code, unused_imports))]
 
+#[cfg(feature = "active-sync")]
+pub mod active_sync;
 #[cfg(feature = "embedded")]
 pub mod cache;
 #[cfg(feature = "codec")]
@@ -38,6 +40,17 @@ mod error;
 #[cfg(all(target_os = "linux", feature = "monoio"))]
 mod monoio_runtime;
 
+#[cfg(feature = "active-sync")]
+pub use active_sync::{
+    ActiveShardMap, ActiveSyncConfig, ActiveSyncHealthSnapshot, BidirectionalSyncReport,
+    EvictionOutcome, HybridLogicalClock, IncarnationId, MutationDot, NodeId, SyncOptions,
+    SyncToken,
+};
+#[cfg(feature = "active-sync-tls")]
+pub use active_sync::{
+    ActiveSyncAuthorizedPeer, ActiveSyncTlsClientCredentials, ActiveSyncTlsPeer,
+    ActiveSyncTlsServer, ActiveSyncTlsServerCredentials, ActiveSyncTlsServerOptions,
+};
 #[cfg(feature = "embedded")]
 pub use cache::{
     CacheOptions, CacheSemanticError, CacheSemanticMatch, RawShardMap, RawShardMapWithShards,

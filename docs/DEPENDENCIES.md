@@ -22,10 +22,10 @@ declared compatible version ranges.
 | --- | --- | --- |
 | `object_store` | `object-overflow-s3` | S3/RustFS-compatible object transport. |
 | `redis` | `kv-overflow-redis` | Redis/Valkey overflow transport with Rustls-backed TLS URLs. |
-| `rustls`, `tokio-rustls`, `rustls-pemfile`, `ring` | `scnp-tls` | TLS 1.3, mTLS, certificate parsing, and cryptography for SCNP overflow. |
+| `rustls`, `tokio-rustls`, `rustls-pemfile`, `ring` | `scnp-tls`, `active-sync-tls` | TLS 1.3, mTLS, certificate parsing, and cryptography for SCNP overflow and active-active peer sync. |
 | `shardcache-client-rs` | `kv-overflow` | SCNP framing and direct replica communication. |
 | `lz4_flex`, `zstd` | Overflow features | Optional value and object compression. |
-| `crc32fast`, `sha2` | Overflow integrity and TLS identity | Envelope integrity and certificate fingerprints. |
+| `crc32fast`, `sha2` | Overflow and active-sync integrity, TLS identity | Envelope and sync-block integrity plus certificate fingerprints. |
 | `tokio`, `flume` | Server and asynchronous overflow paths | Event loops, sockets, timers, bounded asynchronous lanes, and shutdown. |
 | `bytes-handoff`, `monoio` | Optional server transport | Buffer handoff and Linux transport experiments. |
 | `fast-telemetry` | `telemetry` | Metrics integration. |
@@ -42,14 +42,14 @@ OpenSSL-backed Rustls provider.
 
 | Package | Version | License | Manifest |
 | --- | --- | --- | --- |
-| `shardcache-benchmarks` | `0.6.0` | Apache-2.0 | `benchmarks/Cargo.toml` |
-| `shardcache-c` | `0.6.0` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
-| `shardcache-client-rs` | `0.6.0` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
-| `shardcache-formal` | `0.6.0` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
-| `shardcache-py` | `0.6.0` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
-| `shardcache-runtime` | `0.6.0` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
-| `shardcache` | `0.6.0` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
-| `shardmap` | `0.6.0` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
+| `shardcache-benchmarks` | `0.7.0` | Apache-2.0 | `benchmarks/Cargo.toml` |
+| `shardcache-c` | `0.7.0` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
+| `shardcache-client-rs` | `0.7.0` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
+| `shardcache-formal` | `0.7.0` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
+| `shardcache-py` | `0.7.0` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
+| `shardcache-runtime` | `0.7.0` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
+| `shardcache` | `0.7.0` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
+| `shardmap` | `0.7.0` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
 
 ## Third-Party Packages (380)
 

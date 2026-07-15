@@ -17,7 +17,7 @@ Use the published crate from crates.io:
 
 ```toml
 [dependencies]
-shardcache-client-rs = "0.6.0"
+shardcache-client-rs = "0.7.0"
 ```
 
 From a workspace checkout, use a path dependency:
@@ -203,7 +203,7 @@ building RESP request frames in user code.
 
 ```toml
 [dependencies]
-shardcache-client-rs = { version = "0.6.0", features = ["redis"] }
+shardcache-client-rs = { version = "0.7.0", features = ["redis"] }
 ```
 
 The primary API is the first-party Redis namespace on the client. Common

@@ -10,9 +10,9 @@ For the container-specific runbook, see
 
 | Build | Command | Use When |
 | --- | --- | --- |
-| Embedded crate | `shardmap = "0.6.0"` | In-process Rust cache use. |
-| Server crate | `shardcache = "0.6.0"` | Install or depend on the RESP/SCNP server package. |
-| Native client crate | `shardcache-client-rs = "0.6.0"` | SCNP client access from Rust applications. |
+| Embedded crate | `shardmap = "0.7.0"` | In-process Rust cache use. |
+| Server crate | `shardcache = "0.7.0"` | Install or depend on the RESP/SCNP server package. |
+| Native client crate | `shardcache-client-rs = "0.7.0"` | SCNP client access from Rust applications. |
 | Server | `cargo run -p shardcache --features server --bin shardcache -- ...` | RESP/SCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo run -p shardcache --features redis-server --bin shardcache -- ...` | Redis/Valkey-compatible command and object behavior. |
 
