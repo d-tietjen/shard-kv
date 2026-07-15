@@ -3,9 +3,12 @@
 ## Summary
 
 Build active-active shardmap synchronization in which every member of a slot's
-replica group may accept local reads and writes. Writes commit to the local WAL
-and map first. At a configured sync interval, each storage shard atomically
-seals its current WAL interval into immutable blocks and starts a new interval.
+replica group may accept local reads and writes while managing its resident
+cache independently. Local LRU/LFU eviction drops payload residency without
+deleting the logical version, and exact-version fault-in restores cold data from
+local overflow, durable state, or a peer. Writes commit to the local WAL and map
+first. At a configured sync interval, each storage shard atomically seals its
+current WAL interval into immutable blocks and starts a new interval.
 Replica-group peers exchange block manifests, circulate missing blocks, and
 replay each verified block idempotently. Network partitions do not stop local
 writes. When peers reconnect, retained WAL blocks or a bounded state snapshot
@@ -32,6 +35,12 @@ documentation.
 - Repair missing blocks from any peer that retained them.
 - Fall back to bounded range snapshots after required blocks are compacted.
 - Converge concurrent point SET, DEL, EXPIRE, and governed SET operations.
+- Let each node evict resident payloads independently without creating a logical
+  delete or forcing synchronized eviction storms.
+- Support version-targeted cluster eviction when enough replica-group members
+  independently classify the same version as cold.
+- Fault evicted values back from local overflow, durable state, or a peer without
+  accepting a stale version.
 - Preserve stable slot identities while nodes and local shards are added.
 - Keep one networking runtime, queue set, and sync state owner per local shard.
 - Preserve WAL, snapshot, TTL, governance, and overflow behavior.
@@ -46,6 +55,7 @@ documentation.
 - Silently selecting a conflict policy for protected or application-specific
   values.
 - Counting LRU overflow copies toward the active replica count.
+- Replicating every LRU/LFU access event across the cluster.
 - Depending on a global worker, endpoint mutex, or per-operation `Arc` churn.
 - Replacing a production membership system with a new consensus algorithm.
 
@@ -196,6 +206,96 @@ previous member has acknowledged a causal summary that dominates it, and after
 `tombstone_grace_seconds`. Offline members older than the configured retention
 window require a full state sync before rejoining.
 
+## Cache Eviction Semantics
+
+Cache eviction is not equivalent to DEL. The system distinguishes local
+residency eviction from cluster value eviction.
+
+### Local Residency Eviction
+
+Each shard runs its existing LRU or LFU policy using local access observations.
+Access heat is not replicated on every read. When a version is cold under local
+memory pressure, the shard may replace its resident payload with an
+`EvictedVersionStub` containing:
+
+- key identity and hash;
+- winning mutation dot, HLC, and causal context;
+- TTL and governance-presence state;
+- local overflow reference when one exists;
+- known peer or durable-source availability for that exact version; and
+- an eviction generation used to reject stale completion races.
+
+Local residency eviction emits no causal mutation, tombstone, or WAL sync
+record. Other replicas keep their independent residency decisions. Before
+dropping payload bytes, the shard revalidates that the candidate version and
+eviction generation are still current and that one of these recovery conditions
+holds:
+
+- the exact version is durably available in local WAL/snapshot state;
+- local KV or object overflow acknowledged the exact generation; or
+- the configured peer-availability floor durably acknowledged the exact version.
+
+Pending, dirty, conflicted, unacknowledged, or faulting versions remain resident.
+A local eviction failure leaves the value resident. Stub and source-tracking
+memory are separately bounded; exceeding the metadata budget applies
+backpressure or skips eviction rather than forgetting causal state.
+
+### Fault-In
+
+`get_local` never performs I/O and reports an evicted value as nonresident. A
+materializing read or explicit `fault_in` with an eviction stub tries sources in
+configured order:
+
+1. local KV or object overflow;
+2. local durable WAL/snapshot materialization;
+3. a peer advertising the exact version dot; and
+4. bounded block or state synchronization when the local causal frontier is
+   behind.
+
+Peer requests include the expected dot or conflict set. A response for another
+version is applied through causal resolution and is never returned merely
+because the key matches. Governance authorization runs before returning or
+promoting payload bytes. Concurrent writes revalidate the stub generation before
+promotion, so a slow fault-in cannot overwrite newer local state.
+
+### Cluster Value Eviction
+
+Cluster eviction is optional and is represented by a version-targeted
+`EVICT_COMMIT`, not by DEL. It suppresses only the exact value dots named by the
+record. Its conflict rules are:
+
+- an exact or causally older targeted value is evicted;
+- a concurrent or causally newer SET wins over capacity eviction;
+- a later arrival of the targeted value remains suppressed by the retained
+  eviction marker;
+- explicit DEL and expiry remain remove-wins under the normal causal policy; and
+- duplicate eviction records merge idempotently.
+
+This update-wins rule prevents a node evicting an old cold version from deleting
+a concurrent refreshed value. Eviction markers retain joined causal context
+until every retained peer dominates them, using the same bounded safety rules as
+tombstones.
+
+### Distributed Cold Nomination
+
+A key can be cold on one replica and hot on another. One node's memory pressure
+must not purge a cluster-wide hot value by default. A node therefore writes a
+bounded `EVICT_NOMINATE` record for the exact candidate version after locally
+evicting or skipping it. Nominations carry no value bytes and expire after
+`eviction_nomination_window_ms`.
+
+When the configured number of distinct current group members nominate the same
+version within the window, any member may emit the deterministic
+`EVICT_COMMIT`. The default threshold is a majority of the replica group.
+Concurrent commits for the same target converge to one eviction marker. A
+single-member threshold is available only as an explicit ephemeral-cache mode.
+
+Nominations and commits travel in the normal interval WAL blocks. Nomination
+state is bounded per shard and may be discarded without correctness loss; losing
+a nomination delays cluster eviction but never deletes data. Cluster eviction
+does not wait on the mutation path and does not synchronize raw LRU/LFU access
+events.
+
 ## Synchronization
 
 ### Interval WAL Checkpoints
@@ -257,6 +357,11 @@ then replays records through the normal causal conflict engine. Duplicate block
 digests and mutation dots are idempotent. Receipt and applied acknowledgements
 are separate frontiers so operators can distinguish durable lag from replay lag.
 
+Versioned block opcodes include SET, DEL, EXPIRE, `EVICT_NOMINATE`, and
+`EVICT_COMMIT`. Local residency eviction is deliberately absent because it is
+not shared logical state. Eviction commit replay validates the targeted dots
+through the same causal engine even if the commit arrives before the value block.
+
 ### Circulation And Repair
 
 At each interval, peers exchange compact manifests of per-origin contiguous
@@ -308,6 +413,17 @@ pub struct SyncOptions {
 }
 
 impl ActiveShardMap {
+    pub fn evict_local_exact(
+        &self,
+        key: &[u8],
+        expected: &MutationDot,
+    ) -> Result<EvictionOutcome>;
+    pub fn nominate_cluster_eviction(
+        &self,
+        key: &[u8],
+        expected: &MutationDot,
+    ) -> Result<EvictionNomination>;
+    pub fn fault_in(&self, key: &[u8], deadline: Instant) -> Result<Option<Bytes>>;
     pub fn sync_with(
         &self,
         peer: &ActiveShardMap,
@@ -326,6 +442,10 @@ impl ActiveShardMap {
     pub fn convergence_snapshot(&self) -> ConvergenceSnapshot;
 }
 ```
+
+Exact eviction APIs require the expected winning dot. They return `Stale` rather
+than evicting when a concurrent write changed the version. Automatic LRU/LFU
+maintenance uses the same exact operations.
 
 Explicit sync first seals each selected shard's nonempty current interval, then
 exchanges manifests and blocks without waiting for the next background tick.
@@ -400,6 +520,7 @@ Extend these components instead of creating parallel implementations:
 - FCRP WAL-block manifest, block transfer, acknowledgement, snapshot, and error
   frames
 - WAL records, fallible snapshots, and backlog catch-up
+- shard-local LRU/LFU candidates and exact generation-checked eviction
 - exact governance encoding and fail-closed reads
 - KV overflow generations and acknowledged cold eviction
 - topology identity validation and multi-address failover
@@ -428,6 +549,14 @@ concurrent_delete = "remove_wins"
 governance_conflict = "fail_closed"
 max_clock_skew_ms = 5000
 max_causal_origins_per_group = 16
+eviction_scope = "local_then_cluster"
+eviction_policy = "lru"
+eviction_peer_availability_floor = 1
+cluster_eviction_confirmations = "majority"
+eviction_nomination_window_ms = 30000
+max_eviction_nominations_per_shard = 65536
+max_eviction_stub_bytes_per_shard = 67108864
+fault_in_timeout_ms = 1000
 block_queue_capacity_per_shard = 1024
 max_replica_groups_per_shard = 1024
 max_pending_block_materializations_per_shard = 4
@@ -475,6 +604,13 @@ private_key_path = "/run/secrets/sync-signing.key"
 `replica_count` counts the complete current group, including the local member.
 Static configuration validation requires every member to derive the same group
 for every slot.
+
+`eviction_scope = "local"` permits independent residency eviction only.
+`local_then_cluster` also nominates exact cold versions for distributed
+eviction. `cluster` is an explicit ephemeral-cache mode that may use one-member
+confirmation, but local pressure still cannot turn a stale candidate into an
+unconditional delete. Durable deployments require a nonzero recovery-source
+floor before dropping resident payload bytes.
 
 An external topology block may load credentials from configured environment
 variables. Credentials, keys, values, governance metadata, and secret or
@@ -571,12 +707,23 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
 - block queue depth, in-flight blocks, RTT, retries, reconnects, and circuit state
 - retained block bytes, compaction frontier, and oldest retained block
 - tombstone count, bytes, and oldest age
+- resident payload and eviction-stub bytes, metadata-budget utilization, and
+  values protected from eviction because no recovery source is available
+- local eviction candidates, attempts, completions, stale-generation rejects,
+  source-floor skips, dirty/conflicted skips, and retained-on-failure counts
+- fault-in requests, bytes, latency, source selection, source failures,
+  stale-response rejects, and promotion-race rejects
+- active and expired cold nominations, confirmation distribution, quorum
+  completions, and nomination-budget drops
+- cluster eviction commits, idempotent replays, targeted versions suppressed,
+  and commits ignored because a concurrent or newer value won
+- exact-version peer availability and recovery-source-floor violations
 - explicit sync partial completions and deadline failures
 - reconfiguration seeding and convergence progress
 
 ## Implementation Phases
 
-### Phase 1: Versioned Point State
+### Phase 1: Versioned Point State And Eviction
 
 - Add dots, HLC, causal context, tombstones, and conflict-policy identifiers.
 - Extend WAL and snapshots with backward-readable versioned records.
@@ -584,6 +731,12 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
   and joined causal contexts for exact point SET, DEL, and EXPIRE.
 - Preserve governance as part of each atomic version and fail closed on
   concurrent governance disagreement.
+- Implement exact local residency eviction with bounded version stubs,
+  generation revalidation, and a required exact-version recovery source.
+- Implement exact-version fault-in without allowing stale payload promotion or
+  hidden read-path synchronization.
+- Add bounded `EVICT_NOMINATE` and `EVICT_COMMIT` state with update-wins SET
+  semantics and remove-wins DEL/expiry semantics.
 
 ### Phase 2: Shard-Owned WAL Block Exchange
 
@@ -627,6 +780,10 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
 - Synchronize resident and remote-only values through fallible materialization.
 - Verify replica members using filesystem, S3/RustFS, or KV overflow retain the
   history required for repair.
+- Verify sustained local eviction cannot strand values, exceed stub budgets, or
+  convert an unavailable recovery source into logical deletion.
+- Verify cluster eviction remains version-targeted through partitions, delayed
+  blocks, membership changes, and restart.
 - Add rolling upgrades, fault injection, production benchmarks, and runbooks.
 
 ## Test Plan
@@ -650,6 +807,29 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
 - Delete and expiry tombstones cannot resurrect older values.
 - Safe tombstone and WAL-block garbage collection.
 - Governance, TTL, and value remain one atomic conflict unit.
+- Local residency eviction emits no causal mutation or sync block and does not
+  change payload residency on another replica.
+- Exact local eviction returns stale when overwrite, delete, expiry, fault-in,
+  or another eviction changes the version or eviction generation.
+- Dirty, pending, conflicted, unacknowledged, and faulting values remain
+  resident, and failed overflow acknowledgement retains the payload.
+- A payload is not dropped when its exact version lacks the configured number
+  of durable local or peer recovery sources.
+- Fault-in from KV overflow, object overflow, local durable state, and a peer
+  accepts only the expected dot or conflict set and rejects a stale response.
+- A concurrent write during fault-in prevents the old payload from being
+  promoted over the new version.
+- One cold nomination cannot commit cluster eviction under the default majority
+  policy; distinct in-window nominations at quorum produce one deterministic
+  commit.
+- Nomination expiry and capacity limits never delete a value, and duplicate or
+  reordered nominations converge without unbounded state.
+- `EVICT_COMMIT` arriving before its targeted SET suppresses that exact late
+  value, while a concurrent or newer SET survives.
+- Explicit DEL and expiry remain remove-wins when concurrent with capacity
+  eviction.
+- Governed fault-in and conflicted eviction fail closed before payload return or
+  promotion.
 - Digest equality implies equal version summaries for the covered range.
 - Hard bounds for causal context, conflicts, digests, gaps, and sync chunks.
 
@@ -666,6 +846,14 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
 - Node and shard additions use overlapping membership without slot reordering.
 - Removed nodes reconcile retained writes before retirement.
 - Governed values remain protected through conflicts and sync.
+- Independently hot and cold replicas retain local payloads according to their
+  own access history without exchanging per-read heat events.
+- A cold replica faults in an exact version from a hot peer, then rejects that
+  response when an overwrite races the transfer.
+- Majority cold nomination evicts the targeted cluster version, after which a
+  later write recreates the key and remains visible on every replica.
+- Loss of one recovery source never strands an evicted version while the
+  configured source floor still reports healthy.
 - Filesystem, S3/RustFS, SCNP, and Redis/Valkey overflow materialize correctly
   during block replay and state-snapshot fallback.
 
@@ -696,6 +884,16 @@ skew. Validate final state on every peer, not only request return codes.
 - Explicit retained-block catch-up and one-percent state-snapshot repair
   throughput.
 - Digest maintenance overhead and memory per key, origin, and slot range.
+- LRU/LFU candidate tracking overhead with active sync enabled, including proof
+  that cache hits enqueue no network or synchronization work.
+- Local exact-eviction throughput, stale-candidate rate, fault-in p50/p99, and
+  bytes retained when recovery sources are unavailable.
+- Eviction-stub bytes per key and hard-cap behavior under key churn and tiny
+  values.
+- Nomination and commit WAL amplification at different replica counts and
+  nomination windows.
+- Hot-set hit rate under asymmetric read traffic compared with a naive policy
+  that synchronizes one node's eviction decision to every replica.
 - Healthy-target p99 while another peer is delayed or partitioned.
 - WAL-block compaction and tombstone collection under write churn.
 - Reconfiguration seeding with foreground reads and writes.
@@ -709,6 +907,18 @@ sets. Preserve raw results and commands under `benchmarks/`.
 - Every built-in conflict policy is deterministic, associative, commutative,
   and idempotent over its supported operations.
 - A deleted or expired value cannot be resurrected by an older peer.
+- Local residency eviction never emits a causal mutation, changes another
+  replica's residency, or performs network work on the cache-hit path.
+- Exact eviction and fault-in generation checks cannot remove or promote a
+  payload over a newer write, delete, or expiry.
+- No resident payload is dropped unless its exact version satisfies the
+  configured durable recovery-source floor.
+- The default majority policy prevents one cold replica from cluster-evicting a
+  value, and quorum nomination converges to one bounded eviction marker.
+- A cluster eviction commit suppresses only its targeted dots; a concurrent or
+  newer SET survives and explicit DEL/expiry remains remove-wins.
+- Eviction stubs, source advertisements, nominations, and markers remain within
+  tested hard byte and count limits under adversarial key churn.
 - Explicit sync never reports complete while a selected peer or divergent range
   remains unresolved.
 - Duplicate or reordered block circulation applies every mutation dot at most
@@ -738,9 +948,13 @@ sets. Preserve raw results and commands under `benchmarks/`.
 3. Enable explicit sync for embedded shardmaps with background sync disabled.
 4. Enable background manifest repair, snapshot fallback, and convergence
    monitoring.
-5. Enable active writes for exact point operations under explicit policies.
-6. Enable overlapping replica-group changes after retirement tests pass.
-7. Add Redis command families only when their convergence semantics are
+5. Enable local exact-version eviction and fault-in with cluster eviction
+   nomination disabled.
+6. Enable majority cold nomination after source-floor, churn, and asymmetric
+   heat tests pass.
+7. Enable active writes for exact point operations under explicit policies.
+8. Enable overlapping replica-group changes after retirement tests pass.
+9. Add Redis command families only when their convergence semantics are
    documented and history-tested.
 
 Existing single-primary replication and KV overflow remain supported. Active
@@ -759,3 +973,5 @@ and operational costs are proven.
 - Choose the external topology backend and minimum supported version.
 - Set offline-member retention and clock quarantine defaults from production
   recovery measurements.
+- Choose the default recovery-source floor, nomination window, confirmation
+  threshold, and eviction-stub budget from durable-cache benchmarks.
