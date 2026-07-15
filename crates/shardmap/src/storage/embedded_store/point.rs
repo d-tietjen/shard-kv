@@ -12,6 +12,13 @@ impl EmbeddedStore {
         self.get_with_route(route, key, now_ms)
     }
 
+    /// Crate-internal owned read for callers that already computed placement.
+    #[cfg(feature = "active-sync")]
+    #[inline(always)]
+    pub(crate) fn get_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Option<Bytes> {
+        self.get_with_route(route, key, now_millis())
+    }
+
     /// Returns a borrowed value guard for `key` without copying value bytes.
     ///
     /// The returned guard holds the routed shard lock for as long as the value

@@ -44,6 +44,10 @@ struct Args {
     #[arg(long, default_value_t = 1000)]
     sync_interval_ms: u64,
 
+    /// Apply the same long-lived TTL to baseline and active-sync values.
+    #[arg(long, default_value_t = 0)]
+    ttl_seconds: u64,
+
     #[arg(long, default_value_t = 10_000)]
     latency_sample_rate: u64,
 }
@@ -95,13 +99,23 @@ impl BenchStore {
         }
     }
 
-    fn set(&self, key: &[u8], value: &Bytes) {
+    fn set(&self, key: &[u8], value: &Bytes, ttl: Option<Duration>) {
         match self {
-            Self::Baseline(store) => store.set_value_bytes(key, value.clone(), None),
+            Self::Baseline(store) => store.set_value_bytes(
+                key,
+                value.clone(),
+                ttl.map(|ttl| benchmark_now_millis().saturating_add(duration_millis(ttl))),
+            ),
             Self::Active(store) => {
-                store
-                    .set_value_bytes(key, value.clone())
-                    .expect("active-sync benchmark write");
+                if let Some(ttl) = ttl {
+                    store
+                        .set_value_bytes_with_ttl(key, value.clone(), ttl)
+                        .expect("active-sync benchmark TTL write");
+                } else {
+                    store
+                        .set_value_bytes(key, value.clone())
+                        .expect("active-sync benchmark write");
+                }
             }
         }
     }
@@ -144,11 +158,12 @@ fn main() -> Result<(), BoxError> {
             .collect::<Vec<_>>(),
     );
     let value = Bytes::from(build_value(args.value_size));
+    let ttl = (args.ttl_seconds > 0).then(|| Duration::from_secs(args.ttl_seconds));
 
     println!("| mode | shards | clients | value | read % | ops/s | p50 | p99 | p999 | retained |");
     println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
     for mode in modes {
-        let (store, peer) = build_store(mode, &args, &keys, &value)?;
+        let (store, peer) = build_store(mode, &args, &keys, &value, ttl)?;
         let sync_stop = Arc::new(AtomicBool::new(false));
         let sync_join = peer.map(|peer| {
             let BenchStore::Active(local) = store.clone() else {
@@ -213,12 +228,17 @@ fn build_store(
     args: &Args,
     keys: &[Box<[u8]>],
     value: &Bytes,
+    ttl: Option<Duration>,
 ) -> Result<(BenchStore, Option<ActiveShardMap>), BoxError> {
     match mode {
         Mode::Baseline => {
             let store = Arc::new(EmbeddedStore::new(args.shards));
             for key in keys {
-                store.set_value_bytes(key, value.clone(), None);
+                store.set_value_bytes(
+                    key,
+                    value.clone(),
+                    ttl.map(|ttl| benchmark_now_millis().saturating_add(duration_millis(ttl))),
+                );
             }
             Ok((BenchStore::Baseline(store), None))
         }
@@ -228,7 +248,11 @@ fn build_store(
             local_config.incarnation_id = IncarnationId(1);
             let local = ActiveShardMap::new(args.shards, local_config)?;
             for key in keys {
-                local.set_value_bytes(key, value.clone())?;
+                if let Some(ttl) = ttl {
+                    local.set_value_bytes_with_ttl(key, value.clone(), ttl)?;
+                } else {
+                    local.set_value_bytes(key, value.clone())?;
+                }
             }
             local.seal_pending()?;
             let peer = if matches!(mode, Mode::ActiveSync) {
@@ -265,6 +289,7 @@ fn run_phase(
             let value = value.clone();
             let read_percent = u64::from(args.read_percent);
             let sample_rate = args.latency_sample_rate;
+            let ttl = (args.ttl_seconds > 0).then(|| Duration::from_secs(args.ttl_seconds));
             joins.push(scope.spawn(move || {
                 let mut state = (client_id as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
                 let mut operations = 0u64;
@@ -282,7 +307,7 @@ fn run_phase(
                     if read {
                         store.get(key);
                     } else {
-                        store.set(key, &value);
+                        store.set(key, &value, ttl);
                     }
                     if let Some(operation_start) = operation_start {
                         latency.record(
@@ -318,4 +343,18 @@ fn build_value(size: usize) -> Vec<u8> {
     (0..size)
         .map(|index| (index as u8).wrapping_mul(31).wrapping_add(17))
         .collect()
+}
+
+fn benchmark_now_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }

@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 
-use crate::storage::{EmbeddedStore, FastHashMap, hash_key, now_millis};
+use crate::storage::{EmbeddedKeyRoute, EmbeddedStore, FastHashMap, hash_key, now_millis};
 use crate::{Result, ShardCacheError};
 
 #[cfg(feature = "active-sync-tls")]
@@ -269,6 +269,9 @@ struct ActiveShardMapInner {
     config: ActiveSyncConfig,
     shards: Box<[RwLock<ActiveShardState>]>,
     special_reads: Box<[AtomicBool]>,
+    // Monotonic so a readable store hit can bypass metadata unless this shard
+    // has ever materialized a governance conflict.
+    conflict_reads: Box<[AtomicBool]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -555,12 +558,17 @@ impl ActiveShardMap {
             .map(|_| AtomicBool::new(false))
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let conflict_reads = (0..shard_count)
+            .map(|_| AtomicBool::new(false))
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Ok(Self {
             inner: Arc::new(ActiveShardMapInner {
                 store: EmbeddedStore::new(shard_count),
                 config,
                 shards,
                 special_reads,
+                conflict_reads,
             }),
         })
     }
@@ -593,10 +601,20 @@ impl ActiveShardMap {
         value: impl AsRef<[u8]>,
         ttl: Duration,
     ) -> Result<SyncToken> {
+        self.set_value_bytes_with_ttl(key, SharedBytes::copy_from_slice(value.as_ref()), ttl)
+    }
+
+    /// Stores an already-owned value with a TTL without copying its payload.
+    pub fn set_value_bytes_with_ttl(
+        &self,
+        key: impl AsRef<[u8]>,
+        value: SharedBytes,
+        ttl: Duration,
+    ) -> Result<SyncToken> {
         let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
         self.set_shared(
             key.as_ref(),
-            SharedBytes::copy_from_slice(value.as_ref()),
+            value,
             Some(now_millis().saturating_add(ttl_ms)),
             None,
         )
@@ -691,30 +709,27 @@ impl ActiveShardMap {
         let key = key.as_ref();
         let route = self.inner.store.route_key(key);
         if !self.inner.special_reads[route.shard_id].load(AtomicOrdering::Acquire) {
-            return self.inner.store.get(key);
+            return self.inner.store.get_routed(route, key);
         }
-        self.try_get(key).ok().flatten()
+        let value = self.inner.store.get_routed(route, key);
+        if value.is_some()
+            && !self.inner.conflict_reads[route.shard_id].load(AtomicOrdering::Acquire)
+        {
+            return value;
+        }
+        match self.is_readable_routed(route, key) {
+            Ok(true) => value,
+            Ok(false) | Err(_) => None,
+        }
     }
 
     pub fn try_get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
         let key = key.as_ref();
-        self.expire_if_needed(key)?;
         let route = self.inner.store.route_key(key);
-        let shard = self.inner.shards[route.shard_id].read();
-        let Some(version) = shard.versions.get(key) else {
-            return Ok(None);
-        };
-        if version.governance_conflict {
-            return Err(ShardCacheError::Command(
-                "active-sync governance conflict requires explicit resolution".into(),
-            ));
-        }
-        if !matches!(version.kind, MutationKind::Set)
-            || !matches!(version.residency, Residency::Resident)
-        {
+        if !self.is_readable_routed(route, key)? {
             return Ok(None);
         }
-        Ok(self.inner.store.get(key))
+        Ok(self.inner.store.get_routed(route, key))
     }
 
     pub fn version_dot(&self, key: impl AsRef<[u8]>) -> Option<MutationDot> {
@@ -1219,13 +1234,16 @@ impl ActiveShardMap {
                     "active-sync snapshot contains a duplicate key".into(),
                 ));
             }
-            self.store_mutation(&mutation);
             if mutation.expire_at_ms.is_some()
                 || mutation.governance.is_some()
                 || governance_conflict
             {
                 self.inner.special_reads[route.shard_id].store(true, AtomicOrdering::Release);
             }
+            if governance_conflict {
+                self.inner.conflict_reads[route.shard_id].store(true, AtomicOrdering::Release);
+            }
+            self.store_mutation(&mutation);
             let mut state = VersionState::from_mutation(&mutation, None);
             state.governance_conflict = governance_conflict;
             shard.versions.insert(mutation.key.clone(), state);
@@ -1535,6 +1553,9 @@ impl ActiveShardMap {
 
         stats.conflicts += 1;
         let governance_conflict = local.governance.as_deref() != incoming.governance.as_deref();
+        if governance_conflict {
+            self.inner.conflict_reads[route.shard_id].store(true, AtomicOrdering::Release);
+        }
         let incoming_wins = concurrent_incoming_wins(local, incoming);
         let mut joined = local.full_context();
         joined.join(&incoming.context);
@@ -1624,8 +1645,37 @@ impl ActiveShardMap {
         Ok(())
     }
 
-    fn expire_if_needed(&self, key: &[u8]) -> Result<()> {
-        let route = self.inner.store.route_key(key);
+    fn is_readable_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Result<bool> {
+        loop {
+            let should_expire = {
+                let shard = self.inner.shards[route.shard_id].read();
+                let Some(version) = shard.versions.get(key) else {
+                    return Ok(false);
+                };
+                if version.governance_conflict {
+                    return Err(ShardCacheError::Command(
+                        "active-sync governance conflict requires explicit resolution".into(),
+                    ));
+                }
+                if !matches!(version.kind, MutationKind::Set)
+                    || !matches!(version.residency, Residency::Resident)
+                {
+                    return Ok(false);
+                }
+                version
+                    .expire_at_ms
+                    .is_some_and(|deadline| deadline <= now_millis())
+            };
+            if !should_expire {
+                return Ok(true);
+            }
+            if self.expire_if_needed_routed(route, key)? {
+                return Ok(false);
+            }
+        }
+    }
+
+    fn expire_if_needed_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Result<bool> {
         let mut shard = self.inner.shards[route.shard_id].write();
         let should_expire = shard.versions.get(key).is_some_and(|version| {
             matches!(version.kind, MutationKind::Set)
@@ -1634,7 +1684,7 @@ impl ActiveShardMap {
                     .is_some_and(|deadline| deadline <= now_millis())
         });
         if !should_expire {
-            return Ok(());
+            return Ok(false);
         }
         let mutation = self.local_mutation(
             &mut shard,
@@ -1654,7 +1704,7 @@ impl ActiveShardMap {
             VersionState::from_mutation(&mutation, None),
         );
         self.queue_local_mutation(&mut shard, mutation);
-        Ok(())
+        Ok(true)
     }
 
     fn validate_peer(&self, peer: &Self) -> Result<()> {
@@ -2444,6 +2494,25 @@ mod tests {
         left.sync_with(&right, SyncOptions::default()).unwrap();
         assert!(left.try_get("key").is_err());
         assert!(right.try_get("key").is_err());
+        assert_eq!(left.get("key"), None);
+        assert_eq!(right.get("key"), None);
+    }
+
+    #[test]
+    fn governance_conflict_with_unguarded_winner_fails_closed() {
+        let left = map("left");
+        let right = map("right");
+        left.set("key", "unguarded").unwrap();
+        right
+            .set_with_governance("key", "guarded", "tenant-a")
+            .unwrap();
+
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+
+        assert!(left.try_get("key").is_err());
+        assert!(right.try_get("key").is_err());
+        assert_eq!(left.get("key"), None);
+        assert_eq!(right.get("key"), None);
     }
 
     #[test]
@@ -2455,6 +2524,19 @@ mod tests {
         left.sync_with(&right, SyncOptions::default()).unwrap();
         assert_eq!(right.get("key"), None);
         assert_eq!(right.health_snapshot().tombstones, 1);
+    }
+
+    #[test]
+    fn live_ttl_and_plain_values_share_the_read_path() {
+        let map = map("left");
+        map.set_with_ttl("ttl", "ttl-value", Duration::from_secs(60))
+            .unwrap();
+        map.set("plain", "plain-value").unwrap();
+
+        assert_eq!(map.get("ttl"), Some(b"ttl-value".to_vec()));
+        assert_eq!(map.get("plain"), Some(b"plain-value".to_vec()));
+        assert_eq!(map.try_get("ttl").unwrap(), Some(b"ttl-value".to_vec()));
+        assert_eq!(map.try_get("plain").unwrap(), Some(b"plain-value".to_vec()));
     }
 
     #[test]
