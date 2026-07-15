@@ -131,29 +131,58 @@ key, value, absolute expiry, governance metadata, and causal context. HLC is
 used only by policies that explicitly select it. Mutation uniqueness and
 anti-entropy correctness never depend on wall-clock ordering.
 
-### Conflict Policies
+### Causal-First Resolution
 
-Active replication must require an explicit policy per namespace or store:
+The first active-sync release uses a causal register. Each stored key version
+contains its mutation dot and a bounded dotted causal context for the slot's
+replica group. The typical three-to-five-member context is stored inline; origin
+and membership counts have hard limits.
 
-- `lww_hlc`: choose the greatest `(hlc, origin_node_id, dot)` tuple. Reject or
-  quarantine timestamps beyond `max_clock_skew_ms` so a bad clock cannot
-  dominate indefinitely.
-- `multi_value`: preserve causally concurrent versions and expose them through
-  conflict-aware APIs. A later write that observes those versions supersedes
-  them.
-- `merge`: invoke a registered deterministic merge implementation identified by
-  a stable policy ID and version. Every peer must advertise the same ID and
-  version before joining the group. The merge operator must be associative,
-  commutative, idempotent, resource-bounded, and free of network or storage I/O.
+WAL block order, arrival order, and forwarding path never select a winner. For
+each incoming key mutation, compare causal state first:
+
+| Relationship | Result |
+| --- | --- |
+| Same dot | Acknowledge as a duplicate without reapplying it. |
+| Incoming context dominates local | Apply the incoming version. |
+| Local context dominates incoming | Keep local state and record the incoming dot as observed. |
+| Concurrent | Apply the configured concurrent-version rule. |
+
+The initial concurrent-version rule is `causal_lww` with
+`concurrent_delete = "remove_wins"`:
+
+- Concurrent value versus value selects the greatest
+  `(hlc, origin_node_id, dot)` tuple.
+- Concurrent tombstone versus value selects the tombstone.
+- A later SET that causally observes the tombstone may recreate the key.
+- Concurrent tombstones merge their causal contexts and retain the greatest HLC
+  only for deterministic metadata and diagnostics.
+- Timestamps beyond `max_clock_skew_ms` are quarantined instead of being allowed
+  to dominate indefinitely.
+
+Every resolution joins the causal contexts of all observed versions, including
+discarded versions. This is required so an older block arriving later cannot
+resurrect a losing value. Resolution is associative, commutative, and idempotent,
+so every peer reaches the same state under duplicate and reordered block
+delivery.
 
 The value, TTL, and governance metadata form one atomic version. Conflict
 resolution cannot combine a value from one version with metadata or expiry from
-another.
+another. If causally concurrent versions have different governance metadata, or
+only some are governed, the store preserves the conflict and ordinary GET fails
+closed. A governed conflict API may inspect authorized versions and resolve them
+by writing a new version whose causal context dominates every conflicting dot.
 
-`lww_hlc` is available for Redis-compatible point SET, DEL, and EXPIRE only when
-configured explicitly. Commands such as INCR, list mutation, transactions, and
+`multi_value` and versioned deterministic custom merge policies are later
+extensions built on the same causal comparison. A custom merge operator must be
+associative, commutative, idempotent, resource-bounded, and free of network or
+storage I/O. Every peer must advertise the same policy ID and version before
+joining a group.
+
+Redis-compatible active mode initially supports point SET, DEL, and EXPIRE under
+the causal register. Commands such as INCR, list mutation, transactions, and
 conditional updates need operation-specific CRDT or coordination semantics and
-remain local-only or rejected in active mode until implemented.
+remain local-only or are rejected until implemented.
 
 ### Deletes And TTL
 
@@ -288,6 +317,12 @@ impl ActiveShardMap {
     pub fn sync_slot(&self, slot: u32, options: SyncOptions) -> Result<SyncReport>;
     pub fn sync_peer(&self, peer: NodeId, options: SyncOptions) -> Result<SyncReport>;
     pub fn wait_for(&self, token: &SyncToken, deadline: Instant) -> Result<()>;
+    pub fn resolve_conflicts(
+        &self,
+        key: &[u8],
+        expected: &[MutationDot],
+        resolution: ResolvedValue,
+    ) -> Result<SyncToken>;
     pub fn convergence_snapshot(&self) -> ConvergenceSnapshot;
 }
 ```
@@ -307,6 +342,11 @@ frontier; writes concurrent with or after that frontier may still be pending.
 `SyncReport` includes starting and ending block and causal frontiers, transferred
 blocks and bytes, conflicts, tombstones, state-snapshot fallbacks, and peers that
 still lag.
+
+`resolve_conflicts` is a guarded causal write. It succeeds only when the current
+conflict set matches `expected`, and the new version's context dominates every
+resolved dot. A write concurrent with the resolution remains visible as a new
+conflict rather than being silently discarded.
 
 Background sync uses the configured interval, jitter, block and byte budgets,
 and maximum concurrency. It reuses the same shard-local runtimes and limits as
@@ -383,8 +423,11 @@ node_id = "cache-us-east-1a-01"
 slot_count = 16384
 replica_count = 3
 write_ack = "local"
-conflict_policy = "lww_hlc"
+conflict_policy = "causal_lww"
+concurrent_delete = "remove_wins"
+governance_conflict = "fail_closed"
 max_clock_skew_ms = 5000
+max_causal_origins_per_group = 16
 block_queue_capacity_per_shard = 1024
 max_replica_groups_per_shard = 1024
 max_pending_block_materializations_per_shard = 4
@@ -480,9 +523,10 @@ consistent.
 
 ### Clock Skew
 
-Mutation identity and causal dominance do not use wall time. `lww_hlc` requires
-bounded clock skew and quarantines future timestamps. `multi_value` and custom
-causal merge policies can operate without selecting a wall-clock winner.
+Mutation identity and causal dominance do not use wall time. `causal_lww` uses
+HLC only after versions are proven concurrent, requires bounded clock skew, and
+quarantines future timestamps. Later multi-value and custom causal merge policies
+can operate without selecting a wall-clock winner.
 
 ### Recovery
 
@@ -536,8 +580,10 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
 
 - Add dots, HLC, causal context, tombstones, and conflict-policy identifiers.
 - Extend WAL and snapshots with backward-readable versioned records.
-- Implement `lww_hlc` and `multi_value` for exact point SET, DEL, and EXPIRE.
-- Preserve governance as part of each atomic version.
+- Implement causal dominance, `causal_lww`, remove-wins concurrent tombstones,
+  and joined causal contexts for exact point SET, DEL, and EXPIRE.
+- Preserve governance as part of each atomic version and fail closed on
+  concurrent governance disagreement.
 
 ### Phase 2: Shard-Owned WAL Block Exchange
 
@@ -567,11 +613,12 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
 - Add overlapping membership changes, seeding, convergence proof, and retirement.
 - Verify node and local-shard additions do not reorder slot identities.
 
-### Phase 5: Redis And Merge Policies
+### Phase 5: Redis And Additional Merge Policies
 
-- Expose explicitly configured LWW point commands over RESP.
+- Expose explicitly configured causal point commands over RESP.
 - Reject unsupported active-active commands rather than giving false Redis
   atomicity guarantees.
+- Add `multi_value` only after conflict and guarded-resolution APIs are stable.
 - Define the deterministic custom merge registration and compatibility handshake.
 - Add operation-specific CRDTs only as separately tested features.
 
@@ -587,8 +634,13 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
 ### Unit And Model Tests
 
 - Dot uniqueness across restart, sequence rollover, and shard reassignment.
-- Causal dominance, concurrency detection, LWW tie-breaking, and multi-value
-  convergence under every delivery permutation.
+- Causal dominance and concurrency detection under every delivery permutation.
+- Concurrent SET/SET HLC tie-breaking, concurrent remove-wins tombstones, and a
+  causally later SET recreating a deleted key.
+- Every concurrent resolution joins both causal contexts so a delayed losing
+  version cannot return.
+- Governance disagreement preserves the conflict and makes ordinary GET fail
+  closed.
 - Duplicate, reordered, dropped, delayed, truncated, and corrupted blocks.
 - Canonical block digest and header validation across compression codecs.
 - Interval rotation is shard-local, emits no empty blocks, and seals early at
@@ -703,7 +755,6 @@ and operational costs are proven.
 - Choose the block digest and origin-signature algorithms and rotation policy.
 - Choose the digest tree shape and rebuild strategy.
 - Define stable merge-policy registration and upgrade compatibility.
-- Decide whether `lww_hlc` may be the server default or must always be explicit.
 - Define Redis error behavior for unsupported active-active commands.
 - Choose the external topology backend and minimum supported version.
 - Set offline-member retention and clock quarantine defaults from production
