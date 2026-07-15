@@ -1,4 +1,12 @@
-# Eventually Consistent Active-Active Replication Plan
+# Shardcache 0.7 Active-Active Replication Plan
+
+## Release Target
+
+Active-active synchronization, causal conflict handling, independent residency
+eviction, and distributed cluster eviction are targeted for Shardcache `0.7.0`.
+They are not part of the published `0.6.x` API or compatibility contract. The
+workspace crate versions remain at `0.6.0` until the implementation reaches the
+0.7 release gate.
 
 ## Summary
 
@@ -143,7 +151,7 @@ anti-entropy correctness never depend on wall-clock ordering.
 
 ### Causal-First Resolution
 
-The first active-sync release uses a causal register. Each stored key version
+The 0.7 active-sync release uses a causal register. Each stored key version
 contains its mutation dot and a bounded dotted causal context for the slot's
 replica group. The typical three-to-five-member context is stored inline; origin
 and membership counts have hard limits.
