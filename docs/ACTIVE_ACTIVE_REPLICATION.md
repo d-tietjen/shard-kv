@@ -1,258 +1,348 @@
-# Active-Active Replication Plan
+# Eventually Consistent Active-Active Replication Plan
 
 ## Summary
 
-Build an active-active shardcache cluster in which every node can accept client
-traffic and every node owns an exclusive subset of logical slots. A slot has
-exactly one authoritative writer in a topology epoch and a configurable set of
-replica nodes. Requests received by a non-owner are routed to the current
-owner. This gives the cluster active use of every node without introducing
-ambiguous concurrent writes to the same key.
+Build active-active shardmap synchronization in which every member of a slot's
+replica group may accept local reads and writes. Writes commit to the local WAL
+and map first, then converge through shard-owned mutation streams and periodic
+anti-entropy. Network partitions do not stop local writes. When peers reconnect,
+they exchange causal summaries, fetch missing mutations or state, resolve
+concurrent versions deterministically, and reach the same result.
 
-The implementation should reuse the 0.6 shard-owned networking, fixed-slot
-routing, FCRP mutation batches, watermarks, backlog catch-up, snapshots, TLS,
-bounded queues, governance propagation, and topology handoff. It must add a
-durable control plane, slot epochs, fencing, idempotent mutation identities,
-replication acknowledgements, read consistency modes, failover, and safe slot
-migration.
+The implementation should reuse the 0.6 fixed-slot topology, shard-owned
+networking, bounded pipelines, FCRP frames, WAL, snapshots, TLS, governance
+propagation, and overflow integration. It must add globally unique mutation
+dots, hybrid logical clocks, explicit conflict policies, tombstones, per-origin
+version summaries, range digests, bidirectional sync, and topology-safe replica
+group changes.
 
-True multi-writer conflict resolution for the same slot is out of scope for the
-first release. Last-writer-wins and generic CRDT behavior are not safe defaults
-for Redis transactions, TTL changes, governed values, or arbitrary application
-payloads.
+This model prioritizes availability and eventual convergence. It does not claim
+linearizability, serializability, or automatic lossless merging for every Redis
+command. Those limits must be explicit in APIs, configuration, metrics, and
+documentation.
 
 ## Goals
 
-- Allow every cluster node to own slots and process reads and writes.
-- Preserve one authoritative writer for each slot in a given epoch.
-- Route requests received by any node to the authoritative slot owner.
-- Replicate every authoritative mutation to a configurable number of followers.
-- Support asynchronous, quorum, and all-replica write acknowledgement policies.
-- Serve local replica reads under an explicit consistency policy.
-- Fail over a slot without allowing the previous owner to continue writing.
-- Rebalance slots online with bounded memory and network use.
-- Preserve WAL, snapshot, TTL, governance, and overflow semantics.
-- Keep queues, protocol frames, retry state, and retained tombstones bounded.
-- Retain shard-local network ownership and avoid shared worker contention.
+- Allow every member of a slot replica group to accept writes.
+- Keep local write latency independent of network round trips by default.
+- Stream mutations continuously when peers are connected.
+- Let shardmaps explicitly synchronize on demand.
+- Repair missed or compacted mutations through bounded anti-entropy.
+- Converge concurrent point SET, DEL, EXPIRE, and governed SET operations.
+- Preserve stable slot identities while nodes and local shards are added.
+- Keep one networking runtime, queue set, and sync state owner per local shard.
+- Preserve WAL, snapshot, TTL, governance, and overflow behavior.
+- Bound logs, summaries, tombstones, digest trees, queues, and conflict state.
 
 ## Non-Goals
 
-- Concurrent writers for the same slot or key.
-- Automatic merging of conflicting Redis values or transactions.
-- Cross-slot serializable transactions.
-- A new general-purpose consensus implementation inside shardmap.
-- Treating LRU overflow copies as durable active replicas.
-- Allowing an isolated minority partition to acknowledge writes.
-- Transparent compatibility with Redis Cluster administration commands in the
-  first implementation.
+- Linearizable reads or writes in eventual mode.
+- Cross-node serializable transactions.
+- Transparent conflict-free behavior for arbitrary Redis commands.
+- Silently selecting a conflict policy for protected or application-specific
+  values.
+- Counting LRU overflow copies toward the active replica count.
+- Depending on a global worker, endpoint mutex, or per-operation `Arc` churn.
+- Replacing a production membership system with a new consensus algorithm.
 
 ## Consistency Model
 
-### Slot Ownership
+### Replica Groups
 
-The cluster has a fixed power-of-two `slot_count`. Each slot assignment contains:
-
-- `slot`
-- `owner_node_id`
-- `epoch`
-- ordered `replica_node_ids`
-- assignment state: `stable`, `preparing`, `cutover`, or `retiring`
-
-Only the owner named by the latest committed assignment may originate a
-mutation for the slot. Every mutation carries the assignment epoch. A receiver
-rejects a mutation or forwarded write from an older epoch, even when its local
-data version is newer than the incoming mutation sequence.
-
-Each node may own many slots. The cluster is active-active at the node level,
-while each slot remains single-writer.
-
-The control plane stores adjacent assignments with identical ownership as
-compact ranges. Each node expands the committed ranges into its local O(1)
-slot table. Membership watches and lease renewal therefore scale with nodes and
-assignment ranges, not with every individual slot. Splitting a range during
-migration does not change any slot identity.
-
-### Write Acknowledgement
-
-Add these policies:
-
-- `local`: acknowledge after local WAL admission and application.
-- `quorum`: acknowledge after a majority of the total configured copies,
-  including the owner, have durably admitted the mutation. With replication
-  factor three, the owner plus either follower satisfies quorum.
-- `all`: acknowledge after all copies in the configured replication factor,
-  including the owner, have durably admitted the mutation.
-
-`local` is the low-latency mode and may lose acknowledged writes if the owner
-fails before replication. `quorum` is the production default for durable
-active-active deployments. Queue admission must occur before local mutation
-when the selected policy cannot safely enqueue the required replication work.
-
-An acknowledgement means durable WAL admission unless persistence is explicitly
-disabled. Memory application alone must never satisfy a durable acknowledgement
-policy.
-
-### Read Consistency
-
-Add explicit read modes:
-
-- `owner`: route to the current owner.
-- `local_stale`: read a local replica without a lag guarantee.
-- `bounded_staleness`: read locally only when the replica's applied watermark is
-  within the configured sequence and time limits; otherwise route to the owner.
-- `session`: require a client-provided minimum mutation token and route to a node
-  that has applied at least that token.
-
-The default is `owner`. No API should silently downgrade consistency when the
-owner is unavailable.
-
-### Mutation Identity And Ordering
-
-Replace source-local `(shard_id, sequence)` identity for active-active traffic
-with:
+The cluster has a fixed power-of-two `slot_count`. Each slot maps to a stable
+replica group:
 
 ```text
-(cluster_id, slot, epoch, owner_node_id, sequence)
+(slot, topology_epoch, ordered_member_node_ids)
 ```
 
-The owner maintains a monotonically increasing sequence per slot or compact
-slot group. Replicas persist the highest contiguous sequence and a bounded gap
-set. Retries are idempotent. Duplicate mutations are acknowledged without
-reapplication, and gaps trigger backlog catch-up or a slot snapshot.
+Any current member may accept a mutation. Nodes outside the group route a
+request to a member, preferring a local or low-latency path. There is no
+authoritative writer or lease in the data path.
 
-Deletes and expiration produce tombstones. Tombstones include epoch and
-sequence and remain until every assigned replica and retained migration target
-has advanced beyond them, subject to a configured safety interval.
+Adjacent slots with the same membership are stored as compact ranges in the
+topology service and expanded into an O(1) local slot table. Membership order
+does not affect slot identity. No request may derive placement by taking a node
+list index modulo the current node count.
+
+### Local Commit And Optional Sync Acknowledgement
+
+Add these acknowledgement modes:
+
+- `local`: acknowledge after local WAL admission and map application.
+- `one_peer`: acknowledge after local commit and durable admission by one other
+  current group member.
+- `majority`: acknowledge after a majority of current group members, including
+  the local writer, have durably admitted the mutation.
+- `all_available`: acknowledge after every currently reachable member has
+  durably admitted the mutation and return the observed membership revision.
+
+`local` is the eventual-consistency default. Stronger acknowledgement improves
+durability at the time of the write but does not make reads linearizable and
+does not prevent a concurrent write on another member.
+
+`local` never waits for or reserves a network queue entry. Its durable
+shard-local mutation log is the source for later streaming and anti-entropy, so
+a long partition does not consume one queued payload per write. Network lanes
+carry coalesced wakeups and peer cursors rather than copied values.
+
+Modes that wait for peers reserve bounded acknowledgement state before local
+mutation. If that reservation fails, the write returns backpressure without
+changing the local value. A timeout after local commit returns an explicit
+ambiguous result with a mutation token so the caller can query or synchronize
+it.
+
+### Reads
+
+Local reads return the locally converged version and never perform hidden
+network I/O. Add explicit alternatives:
+
+- `get_local`: return the local value immediately.
+- `get_after(token)`: wait until the local shard has observed the token's causal
+  context, or return a deadline error.
+- `get_synced`: perform a bounded sync with the slot group, then read locally.
+- `get_conflicts`: return concurrent versions when the configured policy keeps
+  them instead of resolving to one value.
+
+Ordinary APIs remain local. Applications choose network synchronization
+explicitly rather than receiving an accidental latency increase.
+
+### Mutation Identity
+
+Every mutation has a globally unique dot:
+
+```text
+(cluster_id, slot, origin_node_id, origin_incarnation, origin_sequence)
+```
+
+- `origin_node_id` is stable across restarts.
+- `origin_incarnation` is newly generated on restart and durably recorded before
+  that incarnation accepts writes.
+- `origin_sequence` is monotonic within an incarnation and local shard lane.
+- `slot` prevents a mutation from being replayed into another placement range.
+
+Each mutation also carries a hybrid logical clock (HLC), operation, key hash,
+key, value, absolute expiry, governance metadata, and causal context. HLC is
+used only by policies that explicitly select it. Mutation uniqueness and
+anti-entropy correctness never depend on wall-clock ordering.
+
+### Conflict Policies
+
+Active replication must require an explicit policy per namespace or store:
+
+- `lww_hlc`: choose the greatest `(hlc, origin_node_id, dot)` tuple. Reject or
+  quarantine timestamps beyond `max_clock_skew_ms` so a bad clock cannot
+  dominate indefinitely.
+- `multi_value`: preserve causally concurrent versions and expose them through
+  conflict-aware APIs. A later write that observes those versions supersedes
+  them.
+- `merge`: invoke a registered deterministic merge implementation identified by
+  a stable policy ID and version. Every peer must advertise the same ID and
+  version before joining the group. The merge operator must be associative,
+  commutative, idempotent, resource-bounded, and free of network or storage I/O.
+
+The value, TTL, and governance metadata form one atomic version. Conflict
+resolution cannot combine a value from one version with metadata or expiry from
+another.
+
+`lww_hlc` is available for Redis-compatible point SET, DEL, and EXPIRE only when
+configured explicitly. Commands such as INCR, list mutation, transactions, and
+conditional updates need operation-specific CRDT or coordination semantics and
+remain local-only or rejected in active mode until implemented.
+
+### Deletes And TTL
+
+DEL and expiration create versioned tombstones. A tombstone participates in the
+same causal and conflict policy as a value so an old value cannot reappear after
+sync. Expiration uses the accepted write's absolute deadline and produces a
+tombstone when observed locally.
+
+A tombstone may be collected only after every current member and every retained
+previous member has acknowledged a causal summary that dominates it, and after
+`tombstone_grace_seconds`. Offline members older than the configured retention
+window require a full state sync before rejoining.
+
+## Synchronization
+
+### Streaming Fast Path
+
+Each local storage shard owns an `ActiveSyncIo` runtime. It maintains one
+bounded mutation lane per remote target shard, reuses direct-shard SCNP
+connections, and pipelines ordered writes by origin. Workers advance durable
+per-peer cursors through the local mutation log; coalesced wakeups avoid a
+second payload allocation and queue entry for every local write. Independent
+targets make progress concurrently so a slow peer cannot block healthy peers.
+
+Peers exchange durable acknowledgement summaries, not only per-request replies.
+Retries are idempotent. Duplicate dots are acknowledged without reapplication.
+A sequence gap schedules range synchronization without blocking unrelated keys.
+
+### Anti-Entropy
+
+Streaming alone is insufficient because peers can be offline longer than the
+retained mutation log. Add a bounded anti-entropy protocol:
+
+1. Exchange cluster ID, topology epoch, slot range, protocol capabilities, and
+   compact per-origin version summaries.
+2. Use fixed-depth Merkle or range digest trees with a collision-resistant
+   digest to locate divergent key ranges.
+3. Exchange version metadata for only divergent ranges.
+4. Transfer missing values, tombstones, or mutation segments in bounded chunks.
+5. Apply the configured conflict policy and return an updated durable summary.
+
+Digest construction runs incrementally from mutation application and snapshot
+recovery. A sync request must not scan the entire map while holding a shard
+lock. Snapshot fallback is range-scoped and uses the existing bounded,
+fallible materialization path for remote-only values.
+
+### Explicit Shardmap Sync APIs
+
+Provide background and caller-driven synchronization:
+
+```rust,ignore
+pub struct SyncToken {
+    pub slot: u32,
+    pub origin_node_id: NodeId,
+    pub origin_incarnation: IncarnationId,
+    pub origin_sequence: u64,
+}
+
+pub struct SyncOptions {
+    pub deadline: Duration,
+    pub peers: SyncPeerSelection,
+    pub durability: SyncDurability,
+    pub max_bytes: usize,
+}
+
+impl ActiveShardMap {
+    pub fn sync_with(
+        &self,
+        peer: &ActiveShardMap,
+        options: SyncOptions,
+    ) -> Result<BidirectionalSyncReport>;
+    pub fn sync_once(&self, options: SyncOptions) -> Result<SyncReport>;
+    pub fn sync_slot(&self, slot: u32, options: SyncOptions) -> Result<SyncReport>;
+    pub fn sync_peer(&self, peer: NodeId, options: SyncOptions) -> Result<SyncReport>;
+    pub fn wait_for(&self, token: &SyncToken, deadline: Instant) -> Result<()>;
+    pub fn convergence_snapshot(&self) -> ConvergenceSnapshot;
+}
+```
+
+`sync_with` provides direct bidirectional synchronization between embedded
+shardmap instances without requiring a TCP server. It uses the same summaries,
+chunk limits, and conflict engine as network sync and never holds locks from
+both maps at the same time. A transport trait supports network and application
+provided transports without duplicating convergence logic.
+
+`sync_once` synchronizes bidirectionally with configured peers. It returns
+partial progress and peer-specific errors rather than claiming full convergence
+when a peer is unavailable. Reports describe convergence through the exchanged
+frontier; writes concurrent with or after that frontier may still be pending.
+`SyncReport` includes starting and ending causal summaries, transferred bytes,
+conflicts, tombstones, and peers that still lag.
+
+Background sync uses configurable intervals, jitter, byte budgets, and maximum
+concurrency. It reuses the same shard-local runtimes and limits as explicit
+sync. Explicit sync receives priority without bypassing memory ceilings.
+
+## Topology And Membership
+
+Data convergence does not require a leader. Topology still needs a consistent
+membership revision so nodes agree which replica groups should retain data.
+Support two modes:
+
+- `static`: identical replica-group configuration on every node, suitable for
+  embedded deployments and tests.
+- `external`: a production topology adapter backed by etcd or another
+  linearizable service.
+
+The topology service stores node identities, addresses, capabilities, replica
+groups, and monotonic topology epochs. It does not participate in each write.
+The data path remains available during a topology-service outage using the last
+durable membership view.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     C["Client"] --> A["Any shardcache node"]
-    A --> R["Fixed-slot router"]
-    R --> O["Authoritative slot owner"]
-    O --> W["Owner WAL"]
-    O --> Q["Shard-local replication lane"]
-    Q --> F1["Follower WAL and store"]
-    Q --> F2["Follower WAL and store"]
-    O --> X["KV or object overflow"]
-    F1 --> X1["Follower overflow"]
-    F2 --> X2["Follower overflow"]
-    CP["External consensus control plane"] --> R
-    CP --> O
-    CP --> F1
-    CP --> F2
+    A --> R["Fixed-slot replica-group router"]
+    R --> N1["Writable shardmap A"]
+    R --> N2["Writable shardmap B"]
+    R --> N3["Writable shardmap C"]
+    N1 <--> S1["Shard-local streaming and anti-entropy"]
+    N2 <--> S1
+    N3 <--> S1
+    N1 --> O1["KV or object overflow"]
+    N2 --> O2["KV or object overflow"]
+    N3 --> O3["KV or object overflow"]
+    T["Static or external topology"] --> R
 ```
-
-### Control Plane
-
-Use an external consensus-backed control plane for membership, slot
-assignments, epochs, and leases. The first adapter should support an embedded
-test implementation and a production interface suitable for etcd or another
-linearizable store. Shardcache must not implement an unproven consensus
-algorithm as part of the data path.
-
-`replication_factor` means total durable copies, including the owner. The
-control plane uses one renewable node lease, or a bounded number of ownership
-group leases, rather than one lease per slot. Losing a node lease fences all
-assignments bound to that lease.
-
-The control plane contract must provide:
-
-- compare-and-swap assignment updates
-- monotonic slot epochs
-- lease acquisition and renewal
-- owner fencing on lease loss
-- membership health and stable node IDs
-- watch or long-poll updates with revision numbers
-- linearizable reads during failover and cutover
-
-A node enters read-only degraded mode for affected slots before its ownership
-lease expires. It must stop accepting new writes when it cannot prove that it
-still owns the committed epoch.
-
-### Data Plane
-
-Create one `ActiveReplicationIo` runtime per local storage shard. It owns:
-
-- the outbound connections for slots mapped to that local shard
-- bounded mutation queues and completion lanes
-- per-target ordered pipelines
-- per-replica watermarks and retry state
-- quorum completion tracking
-- snapshot and backlog transfer state
-
-No operation should require an endpoint-wide mutex or a shared global worker.
-Connections may be shared by slots only when they are owned by the same local
-shard runtime and target the same remote shard. A delayed target must not block
-healthy targets or unrelated slots.
-
-FCRP should gain a versioned active-replication capability rather than changing
-version 1 semantics in place. The handshake must bind:
-
-- cluster ID
-- source and destination node IDs
-- topology revision
-- supported slot count
-- protocol capabilities
-- TLS peer identity
-- maximum frame, batch, and snapshot chunk sizes
 
 ## Reuse From 0.6
 
-The implementation should extend, not duplicate, these components:
+Extend these components instead of creating parallel implementations:
 
-- fixed logical slots and O(1) slot lookup
-- shard-owned queues, drains, and direct-shard connections
-- ordered, byte-capped mutation pipelines
+- fixed logical slots and precomputed O(1) placement
+- one queue set, drain, and connection owner per local shard
+- direct-shard SCNP and independent target progress
+- ordered, byte-capped pipelines and bounded completion lanes
 - TLS 1.3, mTLS, token authentication, deadlines, and reconnect handling
-- bounded frame decoding and allocation checks
-- FCRP snapshot, mutation batch, acknowledgement, and error frames
-- per-shard watermarks and retained backlog catch-up
-- fallible snapshots and WAL recovery
+- bounded frame parsing and decompression limits
+- FCRP mutation, acknowledgement, snapshot, and error frames
+- WAL records, fallible snapshots, and backlog catch-up
 - exact governance encoding and fail-closed reads
-- KV overflow generation checks and acknowledged cold eviction
+- KV overflow generations and acknowledged cold eviction
 - topology identity validation and multi-address failover
-- health snapshots, latency totals, and failure classification
+- health snapshots and failure classifications
 
-Overflow and active replication remain separate layers. An active replica stores
-authoritative replicated state and may only evict it when its WAL or lower
-durable tier can reconstruct the value. An overflow owner remains a capacity
-tier and is not counted toward replication quorum.
+Active replicas and overflow remain separate layers. A replica-group member is
+responsible for convergent state even when its resident cache evicts a value.
+Its WAL, snapshot, or lower durable tier must reconstruct the version and
+tombstone history needed for sync. Overflow copies do not satisfy `one_peer`,
+`majority`, or convergence reporting.
 
 ## Configuration Surface
 
-Add a new `[active_replication]` section rather than overloading the existing
-single-primary `[replication]` configuration:
+Add `[active_sync]` rather than overloading single-primary replication:
 
 ```toml
-[active_replication]
+[active_sync]
 enabled = true
 cluster_id = "production-a"
 node_id = "cache-us-east-1a-01"
 slot_count = 16384
-replication_factor = 3
-write_ack = "quorum"
-read_consistency = "owner"
+replica_count = 3
+write_ack = "local"
+conflict_policy = "lww_hlc"
+max_clock_skew_ms = 5000
 queue_capacity_per_shard = 4096
 pipeline_max_items = 64
 pipeline_max_bytes = 262144
 pipeline_flush_micros = 50
 max_inflight_per_target = 4
-lease_ttl_ms = 5000
-lease_renew_before_ms = 2000
-tombstone_retention_seconds = 86400
-max_replica_lag_sequences = 10000
-max_replica_lag_ms = 1000
+mutation_log_bytes_per_shard = 67108864
+tombstone_grace_seconds = 86400
+offline_member_retention_seconds = 604800
+sync_interval_ms = 1000
+sync_jitter_ms = 250
+sync_max_bytes_per_round = 16777216
+sync_max_concurrent_peers_per_shard = 2
+digest_fanout = 16
+digest_depth = 4
 
-[active_replication.control_plane]
-backend = "etcd"
-endpoints = ["https://etcd-1:2379", "https://etcd-2:2379"]
-namespace = "/shardcache/production-a"
-username_env = "SHARDCACHE_ETCD_USERNAME"
-password_env = "SHARDCACHE_ETCD_PASSWORD"
+[active_sync.topology]
+backend = "static"
 
-[active_replication.tls]
+[[active_sync.peers]]
+id = "cache-us-east-1a-02"
+addresses = ["cache-us-east-1a-02:6501"]
+
+[[active_sync.peers]]
+id = "cache-us-east-1a-03"
+addresses = ["cache-us-east-1a-03:6501"]
+
+[active_sync.tls]
 enabled = true
 require_client_auth = true
 cert_path = "/run/secrets/node.crt"
@@ -260,292 +350,251 @@ key_path = "/run/secrets/node.key"
 ca_path = "/run/secrets/cluster-ca.crt"
 ```
 
-Credential values must come from environment variables or secret files and
-must be redacted from debug and health output. Non-loopback active replication
-must require authenticated TLS unless an explicit private-overlay escape hatch
-is enabled.
+`replica_count` counts the complete current group, including the local member.
+Static configuration validation requires every member to derive the same group
+for every slot.
 
-## Public APIs
+An external topology block may load credentials from configured environment
+variables. Credentials, keys, values, governance metadata, and certificate
+paths must be redacted from diagnostics. Non-loopback synchronization requires
+authenticated TLS unless an explicit private encrypted-overlay exception is
+enabled.
 
-Add routing and consistency options without changing existing embedded APIs:
+## Replica Group Changes
 
-```rust,ignore
-pub enum ActiveWriteAck {
-    Local,
-    Quorum,
-    All,
-}
+Adding nodes or local shards changes replica-group membership, never slot
+identity. Reconfiguration uses overlapping membership:
 
-pub enum ActiveReadConsistency {
-    Owner,
-    LocalStale,
-    BoundedStaleness,
-    Session(MutationToken),
-}
+1. **Expand**: publish a new topology epoch containing both old and new members.
+2. **Seed**: new members receive range snapshots and mutation-log catch-up.
+3. **Converge**: anti-entropy proves every new member dominates the retained
+   summaries for the range.
+4. **Contract**: publish a later epoch that removes old members.
+5. **Retain**: old members keep tombstones and accept sync for a grace period,
+   then securely purge the retired range.
 
-pub struct MutationToken {
-    pub slot: u32,
-    pub epoch: u64,
-    pub sequence: u64,
-}
-```
+There is no single-writer cutover. Writes may occur on any current member during
+the move and converge normally. Previous membership remains configured until
+the convergence proof is durable.
 
-Server requests may include consistency metadata in SCNP extensions. RESP
-clients use configured defaults initially. Redis Cluster compatible `MOVED`
-and `ASK` behavior should be a later compatibility layer over the same routing
-table, not the source of truth for ownership.
-
-## Slot Rebalancing
-
-Use an explicit four-stage protocol:
-
-1. **Prepare**: reserve a pending next epoch without changing the committed
-   current epoch. The source remains the only writer under the current epoch.
-   The destination installs a slot snapshot and catches up through the source
-   backlog.
-2. **Catch up**: destination reports a durable applied watermark. Source keeps
-   sending live mutations and retains tombstones and backlog needed by the move.
-3. **Cut over**: the control plane atomically fences the source and promotes the
-   reserved next epoch, with the destination as owner. The destination may
-   accept writes only after it observes the committed assignment and holds the
-   lease. Replicas reject the source's previous-epoch mutations after this
-   commit.
-4. **Retire**: old copies remain readable only for repair until all routers have
-   observed the cutover revision and the safety interval has elapsed.
-
-Adding shards or nodes changes slot assignments, not slot identities. The
-rebalancer should move bounded batches and limit concurrent moves per node and
-per shard. It must expose pause, resume, and abort-before-cutover operations.
-An interrupted move resumes from durable watermarks.
-
-No request may use modulo node count or list position for ownership. Stable node
-IDs and the committed slot table prevent slot reordering when membership
-changes.
+An isolated node with stale topology may continue accepting local writes. This
+is a deliberate availability tradeoff. Operators must keep removed nodes
+reachable through the retention period or explicitly accept that writes made
+only on a permanently removed, isolated node cannot converge. A stale node that
+reconnects synchronizes its accepted dots before retirement.
 
 ## Failure Semantics
 
-### Owner Failure
+### Peer Failure
 
-The control plane waits for lease expiry or an explicit fenced transition,
-selects a replica whose durable watermark satisfies the configured data-loss
-policy, increments the slot epoch, and grants ownership. A stale owner rejects
-writes as soon as it loses its lease and cannot regain ownership without a new
-committed epoch.
-
-### Replica Failure
-
-Write behavior follows the acknowledgement policy. `quorum` continues while a
-majority is available. The cluster marks under-replicated slots and schedules
-repair to a replacement replica. `all` returns unavailable until every assigned
-replica is durable.
+Local mode continues accepting writes and reports the peer as lagging.
+Acknowledgement modes requiring peers return unavailable or ambiguous according
+to whether local commit occurred. Recovery uses mutation-log catch-up or range
+anti-entropy.
 
 ### Network Partition
 
-Only the partition containing the control-plane majority can grant or renew
-ownership. Minority nodes serve only reads allowed by the configured stale-read
-policy. They never acknowledge writes.
+Every side continues local reads and writes. Concurrent versions are resolved
+after reconnection by the configured policy. The system exposes partition age,
+unseen dots, and conflicts; it does not describe either side as strongly
+consistent.
 
-### Clock Skew And TTL
+### Clock Skew
 
-Mutation ordering must not depend on wall-clock time. TTL uses an absolute
-expiry timestamp from the owner and is checked at every read. Deployments must
-monitor clock skew because expiry is time-based, but skew cannot decide
-ownership or resolve conflicts.
+Mutation identity and causal dominance do not use wall time. `lww_hlc` requires
+bounded clock skew and quarantines future timestamps. `multi_value` and custom
+causal merge policies can operate without selecting a wall-clock winner.
 
 ### Recovery
 
-WAL and snapshots persist slot, epoch, sequence, tombstone, governance, and
-origin identity. On restart a node loads local state but does not serve owner
-writes until it confirms its assignments and leases with the control plane.
-Replica recovery uses backlog catch-up when possible and a slot-scoped snapshot
-otherwise.
+WAL and snapshots persist dots, HLC values, causal context, tombstones,
+governance, and topology epoch. A restarted node serves recovered local state
+and enters catch-up immediately. A node offline beyond retention must complete
+a full range sync before it is considered converged.
 
 ## Governance And Security
 
-- Governance metadata remains part of the atomic value version and replication
-  checksum.
-- Governed reads fail closed on owners, replicas, forwarded requests, snapshots,
-  overflow fetches, and repair paths.
-- A forwarded request carries authenticated caller context separately from
-  stored governance metadata. Metadata itself is not an ACL.
-- Cluster peers authenticate node ID through mTLS or a bound token identity.
-- Protocol lengths, decompression ratios, gap sets, tombstones, pending quorum
-  waiters, and snapshot staging are hard-bounded before allocation.
-- Lease and epoch messages are accepted only from the configured control plane.
-- Health and tracing output never include credentials, tokens, values, keys, or
+- Governance metadata is part of the atomic version and integrity checksum.
+- Governed reads fail closed before local return, promotion, or conflict
+  exposure.
+- Peer synchronization is a privileged replication surface authenticated by
+  node identity; it does not interpret governance metadata as an ACL.
+- A custom merge policy may not inspect protected values unless it is registered
+  as governance-aware and runs inside the trusted store boundary.
+- Protocol lengths, causal contexts, origin summaries, tombstones, digest
+  nodes, conflict sets, pending acknowledgements, and snapshot staging are
+  bounded before allocation.
+- Unknown cluster IDs, node IDs, policy IDs, policy versions, or topology epochs
+  fail closed.
+- Sync logs and health output never expose keys, values, credentials, or
   governance metadata.
 
 ## Observability
 
-Expose cluster and per-slot-group health without requiring per-key cardinality:
+Expose cluster and per-local-shard health without per-key metric cardinality:
 
-- topology revision and control-plane connectivity
-- owned, replicated, moving, unavailable, and under-replicated slot counts
-- current epoch and lease remaining time by slot group
-- routed and forwarded request counts and latency
-- local, quorum, and all acknowledgement latency
-- replica durable and applied lag in sequences, bytes, and milliseconds
-- queue depth, pipeline size, bytes, RTT, retries, and reconnects per local shard
-- duplicate mutations, gaps, stale-epoch rejects, and fenced-write rejects
-- backlog catch-up and slot snapshot counts and bytes
-- tombstone count, bytes, and oldest retained age
-- rebalance stage, progress, throttling, failures, and estimated remaining bytes
-- failover count, election duration, unavailable duration, and estimated data loss
+- topology epoch and replica-group coverage
+- local origin sequence and durable/applied summaries
+- connected, lagging, offline, seeding, and retired peers
+- streamed and anti-entropy bytes, entries, tombstones, and rounds
+- digest comparisons, divergent ranges, snapshot fallbacks, and repair duration
+- duplicate dots, sequence gaps, conflicts, resolutions, and quarantined clocks
+- local, one-peer, majority, and all-available acknowledgement latency
+- queue depth, pipeline bytes, RTT, retries, reconnects, and circuit state
+- mutation-log bytes, compaction watermark, and oldest retained dot
+- tombstone count, bytes, and oldest age
+- explicit sync partial completions and deadline failures
+- reconfiguration seeding and convergence progress
 
 ## Implementation Phases
 
-### Phase 1: Protocol And Local State Machine
+### Phase 1: Versioned Point State
 
-- Introduce slot assignments, epochs, mutation IDs, tombstones, and durable
-  replica watermarks.
-- Add FCRP version 2 capability negotiation and active mutation frames.
-- Implement idempotent application, stale-epoch rejection, gap detection, and
-  slot-scoped snapshots.
-- Build a deterministic in-memory control-plane adapter for tests.
+- Add dots, HLC, causal context, tombstones, and conflict-policy identifiers.
+- Extend WAL and snapshots with backward-readable versioned records.
+- Implement `lww_hlc` and `multi_value` for exact point SET, DEL, and EXPIRE.
+- Preserve governance as part of each atomic version.
 
-### Phase 2: Shard-Owned Replication
+### Phase 2: Shard-Owned Mutation Streaming
 
-- Add one `ActiveReplicationIo` runtime per local shard.
-- Reuse direct-shard connections, bounded queues, byte-capped pipelines, TLS,
-  and independent target progress.
-- Implement `local`, `quorum`, and `all` completion tracking without a global
-  acknowledgement mutex.
-- Add backpressure before local mutation when admission cannot meet policy.
+- Add one `ActiveSyncIo` runtime per local shard.
+- Extend FCRP capability negotiation and mutation frames.
+- Implement bidirectional streams, per-origin summaries, idempotent apply, gap
+  detection, and bounded acknowledgement tracking.
+- Preserve independent target progress and no shared worker contention.
 
-### Phase 3: Routing And Reads
+### Phase 3: Anti-Entropy And Explicit Sync
 
-- Add the O(1) committed slot table and request forwarding.
-- Add owner, stale, bounded-staleness, and session read modes.
-- Return explicit topology-stale and unavailable errors rather than silently
-  serving weaker consistency.
-- Preserve governance authorization across forwarding and replica reads.
+- Add incremental range digests and bounded divergent-range exchange.
+- Add `sync_with`, `sync_once`, `sync_slot`, `sync_peer`, `wait_for`, and
+  convergence health.
+- Add range snapshot fallback for compacted or long-offline peers.
+- Add background scheduling with jitter, budgets, and shard-local concurrency.
 
-### Phase 4: Control Plane And Failover
+### Phase 4: Routing And Topology
 
-- Define the `ActiveReplicationControlPlane` trait.
-- Implement a production etcd adapter behind a feature flag.
-- Add leases, fencing, topology watches, failover selection, and repair.
-- Validate cluster identity, slot count, node identity, and TLS capabilities at
-  startup.
+- Add replica-group placement and connect-to-any-node routing.
+- Implement static topology first and an external adapter behind a feature flag.
+- Add overlapping membership changes, seeding, convergence proof, and retirement.
+- Verify node and local-shard additions do not reorder slot identities.
 
-### Phase 5: Online Rebalancing
+### Phase 5: Redis And Merge Policies
 
-- Implement prepare, catch-up, cutover, and retire states.
-- Add bounded slot snapshots and backlog retention for active moves.
-- Add throttling, resumability, progress reporting, and rollback before cutover.
-- Verify shard-count and node-count changes do not reorder unaffected slots.
+- Expose explicitly configured LWW point commands over RESP.
+- Reject unsupported active-active commands rather than giving false Redis
+  atomicity guarantees.
+- Define the deterministic custom merge registration and compatibility handshake.
+- Add operation-specific CRDTs only as separately tested features.
 
-### Phase 6: Overflow Integration And Release Hardening
+### Phase 6: Overflow And Release Hardening
 
-- Permit active owners and replicas to use KV or object overflow without
-  counting overflow copies toward replication quorum.
-- Verify remote-only values materialize for snapshots, repair, and migration.
-- Add rolling-upgrade compatibility, operator documentation, benchmarks, and
-  production fault injection.
+- Synchronize resident and remote-only values through fallible materialization.
+- Verify replica members using filesystem, S3/RustFS, or KV overflow retain the
+  history required for repair.
+- Add rolling upgrades, fault injection, production benchmarks, and runbooks.
 
 ## Test Plan
 
 ### Unit And Model Tests
 
-- Unique owner and replica coverage for fixed slot tables.
-- Deterministic assignment across process restarts and membership order changes.
-- Monotonic epochs and stale-owner fencing.
-- Duplicate, reordered, missing, and conflicting mutation delivery.
-- Tombstone retention and safe garbage collection.
-- Quorum calculation for replica addition, removal, and failure.
-- Governance and TTL preservation through every mutation type.
-- Bounded allocation for malicious frames, gap sets, and pending waiters.
-- State-machine model tests for prepare, catch-up, cutover, and retire.
+- Dot uniqueness across restart, sequence rollover, and shard reassignment.
+- Causal dominance, concurrency detection, LWW tie-breaking, and multi-value
+  convergence under every delivery permutation.
+- Duplicate, reordered, dropped, delayed, and corrupted mutations.
+- Delete and expiry tombstones cannot resurrect older values.
+- Safe tombstone and mutation-log garbage collection.
+- Governance, TTL, and value remain one atomic conflict unit.
+- Digest equality implies equal version summaries for the covered range.
+- Hard bounds for causal context, conflicts, digests, gaps, and sync chunks.
 
 ### Integration Tests
 
-- Three-node write/read replication with every node owning slots.
-- Connect-to-any-node routing for SCNP and RESP.
-- Owner crash before and after quorum acknowledgement.
-- Stale owner restart and attempted writes after failover.
-- Majority and minority network partitions.
-- Replica lag under each read consistency mode.
-- Backlog catch-up and slot snapshot fallback after restart.
-- Online node and shard additions with no slot identity changes.
-- Interrupted and resumed slot migration.
-- Rolling upgrade with FCRP version negotiation.
-- Active replicas backed by filesystem, S3/RustFS, and KV overflow.
+- Three writable shardmaps converge after concurrent writes on every node.
+- Direct `sync_with` converges two embedded shardmaps without a server runtime.
+- Bidirectional explicit sync works with background sync disabled.
+- Partitions accept writes and converge after healing.
+- Long-offline peers recover by anti-entropy after mutation-log compaction.
+- Restart preserves dots, summaries, tombstones, and convergence.
+- Node and shard additions use overlapping membership without slot reordering.
+- Removed nodes reconcile retained writes before retirement.
+- Governed values remain protected through conflicts and sync.
+- Filesystem, S3/RustFS, SCNP, and Redis/Valkey overflow materialize correctly
+  during anti-entropy.
 
-Use deterministic network proxies and process-level fault injection for drops,
-duplication, delay, corruption, half-open connections, and asymmetric
-partitions. Tests must verify acknowledged write outcomes after recovery, not
-only request return codes.
+Use deterministic network proxies and process-level faults for asymmetric
+partitions, duplication, reordering, corruption, half-open sockets, and clock
+skew. Validate final state on every peer, not only request return codes.
 
-### Formal And Jepsen-Style Tests
+### Formal And History Tests
 
-- Model slot ownership, leases, epochs, and quorum acknowledgement in the
-  existing formal support crate.
-- Check single-writer safety, monotonic session reads, no stale-epoch commits,
-  and no acknowledged-write loss under the documented quorum assumptions.
-- Run a history checker for register, set, delete, expire, and compare-and-set
-  workloads during failover and rebalancing.
+- Model causal delivery, tombstones, conflict policies, and membership overlap
+  in the formal support crate.
+- Prove convergence for each built-in policy under arbitrary finite delivery
+  order and duplication.
+- Check that causally newer writes dominate older values and that garbage
+  collection cannot remove state needed by a retained peer.
+- Run history tests for SET, GET, DEL, EXPIRE, governed SET, partitions, and
+  reconfiguration. Verify eventual convergence, read-your-writes locally, and
+  documented conflict outcomes rather than linearizability.
 
 ### Performance Tests
 
-- Embedded baseline versus active replication with factors 1, 2, and 3.
-- Local, quorum, and all acknowledgement latency at 64 B, 1 KiB, and 64 KiB.
-- One and sixteen local shards with one runtime per shard.
-- Routed versus owner-local requests.
-- Pipeline sizes 1, 16, and 64 under 0.1 ms, 1 ms, and 10 ms RTT.
-- Healthy-target p99 while another target is delayed or unavailable.
-- Failover recovery time and backlog catch-up throughput.
-- Rebalance throughput with foreground read/write load.
-- Idle and saturated memory use per connection, slot, tombstone, and waiter.
+- Embedded baseline versus local active-sync metadata with networking disabled.
+- Streaming throughput for replica counts 2, 3, and 5.
+- Local, one-peer, and majority write latency at 64 B, 1 KiB, and 64 KiB.
+- Explicit full-sync and one-percent divergence repair throughput.
+- Digest maintenance overhead and memory per key, origin, and slot range.
+- Healthy-target p99 while another peer is delayed or partitioned.
+- Mutation-log compaction and tombstone collection under write churn.
+- Reconfiguration seeding with foreground reads and writes.
 
-Run production benchmarks on Adam with separately pinned client, owner, and
-replica CPU sets. Preserve raw results and exact commands under `benchmarks/`.
+Run production benchmarks on Adam with separate pinned client and peer CPU
+sets. Preserve raw results and commands under `benchmarks/`.
 
 ## Acceptance Gates
 
-- No two healthy nodes can acknowledge writes as owner for the same slot epoch.
-- A fenced owner cannot commit or replicate a mutation after cutover.
-- Quorum-acknowledged writes survive any single-node failure at replication
-  factor three.
-- Minority partitions acknowledge no writes.
-- Duplicate and reordered delivery produces the same final state as ordered
-  exactly-once delivery.
+- All connected peers converge after finite writes and eventual message delivery.
+- Every built-in conflict policy is deterministic, associative, commutative,
+  and idempotent over its supported operations.
+- A deleted or expired value cannot be resurrected by an older peer.
+- Explicit sync never reports complete while a selected peer or divergent range
+  remains unresolved.
+- Network partitions do not block local-mode writes.
 - Node addition or removal does not change slot identity or move unaffected
-  assignments.
-- A delayed target increases healthy-target p99 by no more than 2x.
-- Asynchronous primary enqueue throughput remains at least 90% of the embedded
-  baseline while queues have capacity.
-- Quorum mode adds no shared worker or global connection-lock contention.
-- Idle user-space connection buffering remains at or below 16 KiB per socket
-  pair unless TLS library requirements are documented separately.
-- All queues, frames, snapshots, tombstones, and waiter collections have tested
-  hard limits.
+  ranges.
+- A delayed peer increases healthy-peer p99 by no more than 2x.
+- Local-mode write throughput remains at least 90% of embedded-only throughput
+  while queues have capacity.
+- Local-mode p99 remains no more than 1.2x the embedded baseline.
+- No global worker, endpoint mutex, or connection lock appears in the mutation
+  or sync hot paths.
+- All logs, summaries, conflicts, tombstones, digests, queues, and frames have
+  tested hard limits.
 - `cargo fmt --check`, workspace tests, feature-matrix checks, rustdoc, and
   `cargo clippy --workspace --all-targets --all-features -- -D warnings` pass.
 
 ## Rollout
 
-1. Ship protocol and state-machine code disabled by default.
-2. Run shadow replication without serving reads or participating in failover.
-3. Enable replica reads for noncritical bounded-staleness workloads.
-4. Enable manual slot movement with automatic rollback before cutover.
-5. Enable quorum writes and manual failover.
-6. Enable automatic failover after partition and history-checker evidence is
-   complete.
-7. Enable automated rebalancing last, with conservative movement limits.
+1. Ship version metadata and conflict policies disabled by default.
+2. Enable shadow mutation streaming while reads remain local and unchanged.
+3. Enable explicit sync for embedded shardmaps with background sync disabled.
+4. Enable background anti-entropy and convergence monitoring.
+5. Enable active writes for exact point operations under explicit policies.
+6. Enable overlapping replica-group changes after retirement tests pass.
+7. Add Redis command families only when their convergence semantics are
+   documented and history-tested.
 
-The existing single-primary replication and KV overflow modes remain supported
-throughout the rollout. Active replication is a separate feature flag and
-configuration surface until its compatibility and operational guarantees are
-proven.
+Existing single-primary replication and KV overflow remain supported. Active
+sync uses a separate feature flag and configuration surface until its behavior
+and operational costs are proven.
 
 ## Open Decisions
 
-- Select the production control-plane backend and minimum supported version.
-- Decide whether sequences are per slot or per fixed slot group after measuring
-  memory and acknowledgement overhead.
-- Define the first RESP surface for consistency selection and topology errors.
-- Choose the default replication factor and acknowledgement policy for the
-  server package.
-- Set the maximum safe clock skew for bounded-staleness and TTL operations.
-- Decide whether automatic failover may proceed from a non-quorum local write
-  watermark or must require explicit operator acceptance of potential loss.
+- Choose the causal-context representation after measuring per-key memory cost.
+- Choose the digest tree shape and rebuild strategy.
+- Define stable merge-policy registration and upgrade compatibility.
+- Decide whether `lww_hlc` may be the server default or must always be explicit.
+- Define Redis error behavior for unsupported active-active commands.
+- Choose the external topology backend and minimum supported version.
+- Set offline-member retention and clock quarantine defaults from production
+  recovery measurements.

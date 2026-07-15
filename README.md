@@ -40,7 +40,7 @@ this repository for now.
 | Benchmarks | [`benchmarks/README.md`](benchmarks/README.md) | You want reproducible head-to-head and hardware-ceiling artifacts. |
 | 0.6 feature guide | [`docs/RELEASE_0_6.md`](docs/RELEASE_0_6.md) | You want the new overflow, topology, security, migration, and release-boundary summary. |
 | Exact point governance | [`docs/EXACT_GOVERNANCE.md`](docs/EXACT_GOVERNANCE.md) | You need fail-closed authorization metadata on exact values and overflow tiers. |
-| Active-active replication plan | [`docs/ACTIVE_ACTIVE_REPLICATION.md`](docs/ACTIVE_ACTIVE_REPLICATION.md) | You want the proposed slot-owned replication, fencing, failover, consistency, and online-rebalancing design. |
+| Active-active replication plan | [`docs/ACTIVE_ACTIVE_REPLICATION.md`](docs/ACTIVE_ACTIVE_REPLICATION.md) | You want the proposed eventually consistent shardmap sync, conflict resolution, anti-entropy, and replica-group design. |
 | Prefix-aware eviction | [`docs/PREFIX_AWARE_EVICTION.md`](docs/PREFIX_AWARE_EVICTION.md) | You want the feature-gated KV-cache hit-rate policy boundary beyond LRU/LFU. |
 | Partitioned KV overflow | [`docs/KV_OVERFLOW.md`](docs/KV_OVERFLOW.md) | You want an in-memory primary whose acknowledged cold data and read traffic can scale across shard-owned SCNP or Redis/Valkey overflow capacity. |
 | Dependency inventory | [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) | You want the complete locked all-feature workspace dependency and license list. |
