@@ -907,7 +907,10 @@ skew. Validate final state on every peer, not only request return codes.
 - Reconfiguration seeding with foreground reads and writes.
 
 Run production benchmarks on Adam with separate pinned client and peer CPU
-sets. Preserve raw results and commands under `benchmarks/`.
+sets. Preserve raw results and commands under `benchmarks/`. The
+[pre-implementation Adam baseline](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md)
+defines the comparison surfaces and demonstrates why the existing
+per-mutation replication path cannot stand in for this design.
 
 ## Acceptance Gates
 
