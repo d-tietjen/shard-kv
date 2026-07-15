@@ -45,6 +45,43 @@ target/release/active_sync_cost \
   --sync-interval-ms 100 --latency-sample-rate 1000
 ```
 
+## Optimized GET Fast Path
+
+Commit `f009e6d` removes duplicate key routing from active reads, returns
+conflict-free readable payloads directly from embedded storage, and adds a
+zero-copy TTL setter so baseline and active TTL values have equivalent buffer
+ownership. A monotonic per-shard governance-conflict guard keeps the direct
+return fail-closed. Expired misses still enter active metadata handling and
+produce replicated tombstones.
+
+The following ten-second release measurements used eight shards, eight clients,
+100,000 keys, 1 KiB values, a two-second warmup, and a 100 ms sync interval on
+the Apple M5 Max development host. Each mode was invoked separately to avoid
+the local command runner's duration limit.
+
+| Values | Mode | Ops/s | Baseline retained | p50 | p99 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Plain | baseline | 17.78M | 100.0% | 250ns | 3.6us |
+| Plain | active-local | 17.34M | 97.5% | 250ns | 3.4us |
+| Plain | active-sync | 17.39M | 97.8% | 291ns | 3.3us |
+| TTL | baseline | 17.24M | 100.0% | 250ns | 3.5us |
+| TTL | active-local | 17.05M | 98.9% | 291ns | 3.3us |
+| TTL | active-sync | 17.07M | 99.0% | 291ns | 3.2us |
+
+These local rows show that plain and live-TTL GET throughput are within two and
+a half percent of the embedded baseline, with no p99 regression. They do not
+replace the pinned Adam result below; commit `f009e6d` still requires the same
+canonical Adam rerun before using these figures as a release claim.
+
+TTL command shape:
+
+```bash
+target/release/active_sync_cost \
+  --modes MODE --shards 8 --clients 8 --key-count 100000 --value-size 1024 \
+  --read-percent 100 --warmup 2 --duration 10 \
+  --sync-interval-ms 100 --latency-sample-rate 10000 --ttl-seconds 3600
+```
+
 ## Implemented ActiveShardMap On Adam
 
 Commit `e835105` was built natively in release mode and run on CPUs `0-7` with
