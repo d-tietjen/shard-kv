@@ -125,6 +125,19 @@ Use a stable `--data-dir` for persistent deployments. Benchmark and
 compatibility proof runs often pass `--disable-persistence` so the storage path
 does not dominate command measurements.
 
+With persistence enabled, each storage shard exclusively owns a local WAL
+block appender. Mutations accumulate until `wal_block_max_records`,
+`wal_block_max_bytes`, or `fsync_interval_ms` seals the block. Per-shard bounded
+queues feed one background merger, which preserves each shard's mutation order,
+writes the existing canonical segment format, and calls `sync_data` at the
+configured interval. A full shard queue applies backpressure only to that shard;
+there is no producer lock shared by storage workers.
+
+The defaults seal at 64 records or 256 KiB. Smaller blocks reduce the amount of
+data exposed to process failure before handoff but increase channel and merger
+overhead. The fsync interval remains the upper durability window; shutdown
+flushes partial blocks and performs a final data sync before recovery can begin.
+
 ## Logs And Shutdown
 
 The server writes startup and runtime logs through the configured Rust logging

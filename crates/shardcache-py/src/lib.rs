@@ -8,6 +8,7 @@
 
 use dashmap::DashMap;
 extern crate shardmap as shardmap_crate;
+use parking_lot::Mutex;
 use shardmap_crate::config::{EvictionPolicy, ShardCacheConfig};
 use shardmap_crate::cuda::CudaConfig;
 use shardmap_crate::persistence::{PersistenceRuntime, WalAppender, load_recovery_state};
@@ -531,15 +532,15 @@ struct ThreadedStoreCore {
     numa: NumaTopology,
     #[cfg(feature = "telemetry")]
     metrics: Option<Arc<CacheTelemetry>>,
+    wal_appenders: Vec<Mutex<WalAppender>>,
     _persistence_owner: Option<Arc<PersistenceRuntime>>,
-    wal_appenders: Vec<WalAppender>,
     wal_sequences: Vec<AtomicU64>,
 }
 
 struct SharedStoreCore {
     store: EmbeddedStore,
+    wal_appenders: Vec<Mutex<WalAppender>>,
     _persistence_owner: Option<Arc<PersistenceRuntime>>,
-    wal_appenders: Vec<WalAppender>,
     wal_sequences: Vec<AtomicU64>,
 }
 
@@ -835,7 +836,7 @@ impl ThreadedStoreCore {
             #[cfg(feature = "telemetry")]
             metrics,
             _persistence_owner: persistence,
-            wal_appenders,
+            wal_appenders: wal_appenders.into_iter().map(Mutex::new).collect(),
             wal_sequences: (0..worker_count).map(|_| AtomicU64::new(0)).collect(),
         }
     }
@@ -933,6 +934,7 @@ impl ThreadedStoreCore {
         if let Some(appender) = self.wal_appenders.get(shard_id) {
             let sequence = self.wal_sequences[shard_id].fetch_add(1, Ordering::Relaxed) + 1;
             appender
+                .lock()
                 .append(MutationRecord {
                     shard_id,
                     sequence,
@@ -969,6 +971,7 @@ impl SharedStoreCore {
         if let Some(appender) = self.wal_appenders.get(shard_id) {
             let sequence = self.wal_sequences[shard_id].fetch_add(1, Ordering::Relaxed) + 1;
             appender
+                .lock()
                 .append(MutationRecord {
                     shard_id,
                     sequence,
@@ -1459,7 +1462,7 @@ impl StoreCore {
                 Ok(Self::Shared(SharedStoreCore {
                     store,
                     _persistence_owner: persistence,
-                    wal_appenders,
+                    wal_appenders: wal_appenders.into_iter().map(Mutex::new).collect(),
                     wal_sequences: (0..cores).map(|_| AtomicU64::new(0)).collect(),
                 }))
             }

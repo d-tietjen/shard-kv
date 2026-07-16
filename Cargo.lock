@@ -2485,6 +2485,7 @@ dependencies = [
  "core_affinity",
  "dashmap",
  "libc",
+ "parking_lot",
  "pyo3",
  "shardcache-client-rs",
  "shardcache-runtime",

@@ -637,6 +637,12 @@ cargo run --release -p shardcache-benchmarks --features monoio \
   --clients 16 --shards 16 --duration 10
 ```
 
+The benchmark requires at most one client per shard because production WAL
+appenders have exclusive shard ownership. Use `--wal-block-max-records 1` for a
+per-record handoff baseline and `--wal-block-max-records 64` for the default
+shard-local batching path. `--wal-block-max-bytes` independently bounds large
+values.
+
 ## Memory Bandwidth Ceiling
 
 `memory_write_cost` isolates local memory movement from cache lookup, eviction,

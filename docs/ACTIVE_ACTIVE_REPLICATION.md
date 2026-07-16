@@ -342,8 +342,10 @@ events.
 
 ### Interval WAL Checkpoints
 
-Every local storage shard owns its WAL writer, active sync-block builder, and
-`ActiveSyncIo` runtime. On `sync_interval_ms`, the shard atomically:
+Every local storage shard owns its WAL block appender, active sync-block
+builder, and `ActiveSyncIo` runtime. Shards publish bounded blocks without a
+shared producer lock; one background persistence merger writes and fsyncs the
+canonical local WAL. On `sync_interval_ms`, the shard atomically:
 
 1. records the interval's upper mutation frontier;
 2. seals nonempty replica-group record indexes over that WAL interval;

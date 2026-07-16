@@ -21,10 +21,23 @@
 - Added convergence, conflict, compaction, corruption, resource-bound, live
   mTLS, credential-rotation, and revocation tests plus an active-sync cost
   benchmark and runnable embedded example.
+- Added exclusive shard-owned persistence WAL block appenders and one
+  background canonical-log merger. Record and byte thresholds bound blocks,
+  partial blocks flush on deadlines and shutdown, and real `sync_data` calls
+  enforce the configured durability interval without a cross-shard producer
+  lock.
 
 ### Changed
 
 - Bumped workspace and publishable crate versions to `0.7.0`.
+
+### Validation
+
+- A local release WAL plus TCP-export A/B with four dedicated shard producers
+  improved 4 KiB append throughput from 155K/s to 204K/s while reducing CPU
+  from 3.47 to 2.32 vCPU. At 64-byte values, throughput remained within 2%
+  while CPU fell from 4.62 to 2.60 vCPU. Neither run dropped export frames or
+  reported transport failures.
 
 ## 0.6.0 - Unreleased
 

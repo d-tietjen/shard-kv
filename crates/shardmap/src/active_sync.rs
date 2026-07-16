@@ -271,6 +271,7 @@ struct ActiveShardMapInner {
     store: EmbeddedStore,
     config: ActiveSyncConfig,
     shards: Box<[Mutex<ActiveShardState>]>,
+    local_origins: Box<[Arc<CausalOrigin>]>,
     special_reads: Box<[AtomicBool]>,
     // Monotonic so a readable store hit can bypass metadata unless this shard
     // has ever materialized a governance conflict.
@@ -329,6 +330,32 @@ impl CausalContext {
                     index,
                     CausalFrontier {
                         origin: Arc::new(origin),
+                        sequence,
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    fn observe_shared_origin(&mut self, origin: &Arc<CausalOrigin>, sequence: u64) -> bool {
+        if self.0.len() == 1 && Arc::ptr_eq(&self.0[0].origin, origin) {
+            self.0[0].sequence = self.0[0].sequence.max(sequence);
+            return false;
+        }
+        match self
+            .0
+            .binary_search_by(|frontier| frontier.origin.as_ref().cmp(origin.as_ref()))
+        {
+            Ok(index) => {
+                self.0[index].sequence = self.0[index].sequence.max(sequence);
+                false
+            }
+            Err(index) => {
+                self.0.insert(
+                    index,
+                    CausalFrontier {
+                        origin: Arc::clone(origin),
                         sequence,
                     },
                 );
@@ -457,6 +484,20 @@ impl VersionState {
     fn full_context(&self) -> CausalContext {
         let mut context = self.context.clone();
         context.observe(&self.dot);
+        context
+    }
+
+    fn full_context_with_local_origin(&self, local_origin: &Arc<CausalOrigin>) -> CausalContext {
+        let mut context = self.context.clone();
+        if local_origin.incarnation_id == self.dot.incarnation_id
+            && local_origin.shard_id == self.dot.shard_id
+            && (Arc::ptr_eq(&local_origin.node_id.0, &self.dot.node_id.0)
+                || local_origin.node_id == self.dot.node_id)
+        {
+            context.observe_shared_origin(local_origin, self.dot.sequence);
+        } else {
+            context.observe(&self.dot);
+        }
         context
     }
 
@@ -681,6 +722,16 @@ impl ActiveShardMap {
             .map(|_| Mutex::new(ActiveShardState::default()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let local_origins = (0..shard_count)
+            .map(|shard_id| {
+                Arc::new(CausalOrigin {
+                    node_id: config.node_id.clone(),
+                    incarnation_id: config.incarnation_id,
+                    shard_id: shard_id as u32,
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let special_reads = (0..shard_count)
             .map(|_| AtomicBool::new(false))
             .collect::<Vec<_>>()
@@ -694,6 +745,7 @@ impl ActiveShardMap {
                 store: EmbeddedStore::new(shard_count),
                 config,
                 shards,
+                local_origins,
                 special_reads,
                 conflict_reads,
             }),
@@ -783,7 +835,7 @@ impl ActiveShardMap {
             governance,
             wall_ms,
         )?;
-        let retired = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        let (retired, mutation_bytes) = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
         self.store_mutation_at(&mutation, wall_ms);
         replace_version_hashed(
             &mut shard.versions,
@@ -795,7 +847,7 @@ impl ActiveShardMap {
             self.inner.special_reads[route.shard_id].store(true, AtomicOrdering::Release);
         }
         let dot = mutation.dot.clone();
-        self.queue_local_mutation(&mut shard, mutation);
+        self.queue_local_mutation(&mut shard, mutation, mutation_bytes);
         drop(shard);
         drop(retired);
         Ok(SyncToken {
@@ -824,7 +876,7 @@ impl ActiveShardMap {
             None,
             wall_ms,
         )?;
-        let retired = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        let (retired, mutation_bytes) = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
         self.store_mutation_at(&mutation, wall_ms);
         replace_version_hashed(
             &mut shard.versions,
@@ -833,7 +885,7 @@ impl ActiveShardMap {
             VersionState::from_mutation(&mutation, None),
         );
         let dot = mutation.dot.clone();
-        self.queue_local_mutation(&mut shard, mutation);
+        self.queue_local_mutation(&mut shard, mutation, mutation_bytes);
         drop(shard);
         drop(retired);
         Ok(SyncToken {
@@ -947,7 +999,7 @@ impl ActiveShardMap {
             None,
             wall_ms,
         )?;
-        let retired = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        let (retired, mutation_bytes) = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
         self.store_mutation_at(&mutation, wall_ms);
         replace_version_hashed(
             &mut shard.versions,
@@ -956,7 +1008,7 @@ impl ActiveShardMap {
             VersionState::from_mutation(&mutation, None),
         );
         let dot = mutation.dot.clone();
-        self.queue_local_mutation(&mut shard, mutation);
+        self.queue_local_mutation(&mut shard, mutation, mutation_bytes);
         drop(shard);
         drop(retired);
         Ok(Some(SyncToken {
@@ -1410,10 +1462,18 @@ impl ActiveShardMap {
         governance: Option<&[u8]>,
         wall_ms: u64,
     ) -> Result<ActiveMutation> {
-        let (context, key) = version_key_value_hashed(&shard.versions, key_hash, key).map_or_else(
-            || (CausalContext::default(), SharedBytes::copy_from_slice(key)),
-            |(stored_key, version)| (version.full_context(), stored_key.clone()),
-        );
+        let (context, key) = shard
+            .versions
+            .get_key_value_hashed(key_hash, key)
+            .map_or_else(
+                || (CausalContext::default(), SharedBytes::copy_from_slice(key)),
+                |(stored_key, version)| {
+                    (
+                        version.full_context_with_local_origin(&self.inner.local_origins[shard_id]),
+                        stored_key.clone(),
+                    )
+                },
+            );
         if context.len() > self.inner.config.max_causal_origins_per_shard {
             return Err(ShardCacheError::Backpressure(
                 "active-sync causal context limit reached",
@@ -1446,7 +1506,7 @@ impl ActiveShardMap {
         &self,
         shard: &mut ActiveShardState,
         mutation: &ActiveMutation,
-    ) -> Result<Vec<Arc<SyncBlock>>> {
+    ) -> Result<(Vec<Arc<SyncBlock>>, usize)> {
         let bytes = mutation.estimated_bytes();
         if bytes > self.inner.config.max_block_bytes {
             return Err(ShardCacheError::Protocol(
@@ -1459,13 +1519,19 @@ impl ActiveShardMap {
                 || shard.pending_bytes.saturating_add(bytes) > self.inner.config.max_block_bytes)
         {
             let shard_id = mutation.dot.shard_id as usize;
-            return self.seal_shard(shard, shard_id);
+            return self
+                .seal_shard(shard, shard_id)
+                .map(|retired| (retired, bytes));
         }
-        Ok(Vec::new())
+        Ok((Vec::new(), bytes))
     }
 
-    fn queue_local_mutation(&self, shard: &mut ActiveShardState, mutation: ActiveMutation) {
-        let bytes = mutation.estimated_bytes();
+    fn queue_local_mutation(
+        &self,
+        shard: &mut ActiveShardState,
+        mutation: ActiveMutation,
+        bytes: usize,
+    ) {
         shard.pending_bytes = shard.pending_bytes.saturating_add(bytes);
         shard.pending.push(mutation);
     }
@@ -1876,7 +1942,7 @@ impl ActiveShardMap {
             None,
             wall_ms,
         )?;
-        let retired = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        let (retired, mutation_bytes) = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
         self.store_mutation_at(&mutation, wall_ms);
         replace_version_hashed(
             &mut shard.versions,
@@ -1884,7 +1950,7 @@ impl ActiveShardMap {
             mutation.key.clone(),
             VersionState::from_mutation(&mutation, None),
         );
-        self.queue_local_mutation(&mut shard, mutation);
+        self.queue_local_mutation(&mut shard, mutation, mutation_bytes);
         drop(shard);
         drop(retired);
         Ok(true)
@@ -2377,15 +2443,6 @@ impl SnapshotFrontier {
 }
 
 #[inline]
-fn version_key_value_hashed<'a>(
-    versions: &'a ActiveVersionMap,
-    hash: u64,
-    key: &[u8],
-) -> Option<(&'a SharedBytes, &'a VersionState)> {
-    versions.get_key_value_hashed(hash, key)
-}
-
-#[inline]
 fn replace_version_hashed(
     versions: &mut ActiveVersionMap,
     hash: u64,
@@ -2538,6 +2595,26 @@ mod tests {
         assert!(std::mem::size_of::<ActiveMutation>() <= 240);
         assert!(std::mem::size_of::<VersionState>() <= 192);
         assert!(std::mem::size_of::<MutationKind>() <= 16);
+    }
+
+    #[test]
+    fn repeated_local_writes_reuse_the_shard_origin() {
+        let map = map("left");
+        map.set("key", "one").unwrap();
+        map.set("key", "two").unwrap();
+
+        let shard_id = map.inner.store.route_key(b"key").shard_id;
+        let shard = map.inner.shards[shard_id].lock();
+        let pending_origin = &shard.pending[1].context.0[0].origin;
+        let version_origin = &shard.versions.get(b"key").unwrap().context.0[0].origin;
+        assert!(Arc::ptr_eq(
+            pending_origin,
+            &map.inner.local_origins[shard_id]
+        ));
+        assert!(Arc::ptr_eq(
+            version_origin,
+            &map.inner.local_origins[shard_id]
+        ));
     }
 
     #[test]

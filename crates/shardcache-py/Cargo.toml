@@ -25,6 +25,7 @@ crate-type = ["cdylib"]
 core_affinity = { workspace = true }
 dashmap = "6.1"
 libc = { workspace = true }
+parking_lot = { workspace = true }
 shardmap = { workspace = true, default-features = false, features = ["sharded"] }
 shardcache-runtime = { path = "../shardcache-runtime", version = "0.7.0" }
 shardcache-client-rs = { workspace = true }

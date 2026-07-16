@@ -797,6 +797,22 @@ impl<'a> PersistenceValidation<'a> {
                     self.config.segment_size_bytes >= 4 * 1024,
                     "persistence.segment_size_bytes must be at least 4096",
                 )?;
+                ConfigCheck::require(
+                    self.config.fsync_interval_ms > 0,
+                    "persistence.fsync_interval_ms must be > 0",
+                )?;
+                ConfigCheck::require(
+                    self.config.wal_channel_capacity > 0,
+                    "persistence.wal_channel_capacity must be > 0",
+                )?;
+                ConfigCheck::require(
+                    self.config.wal_block_max_records > 0,
+                    "persistence.wal_block_max_records must be > 0",
+                )?;
+                ConfigCheck::require(
+                    self.config.wal_block_max_bytes > 0,
+                    "persistence.wal_block_max_bytes must be > 0",
+                )?;
                 WalTcpExportValidation::new(&self.config.tcp_export).validate()
             }
         }
