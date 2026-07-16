@@ -27,7 +27,7 @@ Build and run the feature-gated active-sync comparison with:
 
 ```bash
 cargo build --release -p shardcache-benchmarks \
-  --features active-sync --bin active_sync_cost
+  --features active-sync-consensus-ordered-eventual --bin active_sync_cost
 
 target/release/active_sync_cost \
   --modes baseline,causal-local,consensus-local,causal-sync,consensus-sync \

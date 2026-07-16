@@ -87,7 +87,7 @@ cargo run -p shardmap --example configured_cache
 cargo run -p shardmap --example prepared_keys_threads
 cargo run -p shardmap --example ttl_and_locks
 cargo run -p shardmap --example semantic_cache
-cargo run -p shardmap --example active_sync --features active-sync
+cargo run -p shardmap --example active_sync --features active-sync-causal-eventual
 ```
 
 See [`crates/shardmap/examples`](crates/shardmap/examples/README.md) for the

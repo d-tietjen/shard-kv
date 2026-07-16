@@ -51,15 +51,15 @@ guard is enough.
 | Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
 | Semantic TTL | Combine semantic reuse with freshness windows. | [`semantic_ttl.rs`](examples/semantic_ttl.rs) |
 | Governance metadata | Enforce application-owned authorization context on semantic and exact point hits. | [`semantic_cache.rs`](examples/semantic_cache.rs), [`EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) |
-| Active-active point values | Exchange bounded causal blocks, converge SET/DEL/expiry conflicts, evict local payloads independently, and reconcile revisioned TLS membership. | Enable `active-sync`; add `active-sync-tls` for networking; see [`active_sync.rs`](examples/active_sync.rs) |
-| Blossom conflict ordering | Finalize only ambiguous active-active conflict winners without sending values or WAL blocks to the ordering plane. | Enable `active-sync-blossom`; see [`ACTIVE_ACTIVE_REPLICATION.md`](../../docs/ACTIVE_ACTIVE_REPLICATION.md) |
+| Causal eventual active-active values | Exchange bounded causal blocks, converge SET/DEL/expiry conflicts with deterministic HLC ordering, and evict local payloads independently. | Enable `active-sync-causal-eventual`; add `active-sync-tls` for networking; see [`active_sync.rs`](examples/active_sync.rs) |
+| Consensus-ordered eventual active-active values | Finalize only ambiguous active-active conflict winners without sending values or WAL blocks to the ordering plane. | Enable `active-sync-consensus-ordered-eventual`; add `active-sync-tls` for networking; see [`ACTIVE_ACTIVE_REPLICATION.md`](../../docs/ACTIVE_ACTIVE_REPLICATION.md) |
 | Mini app | A small feature-flag cache combining TTL, prepared keys, and locks. | [`mini_feature_flags.rs`](examples/mini_feature_flags.rs) |
 
 Run any example with:
 
 ```bash
 cargo run -p shardmap --example basic_map
-cargo run -p shardmap --example active_sync --features active-sync
+cargo run -p shardmap --example active_sync --features active-sync-causal-eventual
 ```
 
 For active-active exact values, choose the guarantee explicitly:

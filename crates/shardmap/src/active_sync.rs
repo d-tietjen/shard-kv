@@ -27,11 +27,11 @@ use xxhash_rust::xxh3::Xxh3;
 use crate::storage::{EmbeddedKeyRoute, EmbeddedStore, hash_key, now_millis, ttl_now_millis};
 use crate::{Result, ShardCacheError};
 
-#[cfg(feature = "active-sync-blossom")]
+#[cfg(feature = "active-sync-consensus-ordered-eventual")]
 mod blossom;
 #[cfg(feature = "active-sync-tls")]
 mod tls;
-#[cfg(feature = "active-sync-blossom")]
+#[cfg(feature = "active-sync-consensus-ordered-eventual")]
 pub use blossom::{
     BlossomConflictCertificate, BlossomConflictConsensus, BlossomConflictOrderer,
     BlossomConflictOrdererHealth, BlossomConflictOrdererOptions,
@@ -1058,6 +1058,7 @@ impl ActiveShardMap {
 
     /// Builds an eventually consistent map whose ambiguous concurrent
     /// conflicts require an externally finalized total order.
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     pub fn new_consensus_ordered_eventual(
         shard_count: usize,
         config: ActiveSyncConfig,
@@ -1068,6 +1069,7 @@ impl ActiveShardMap {
 
     /// Backwards-compatible alias for
     /// [`Self::new_consensus_ordered_eventual`].
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     pub fn new_with_conflict_orderer(
         shard_count: usize,
         config: ActiveSyncConfig,
@@ -3160,16 +3162,19 @@ fn hash_optional_bytes(digest: &mut Sha256, bytes: Option<&[u8]>) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     use super::*;
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     struct NodeWinnerOrderer {
         calls: AtomicUsize,
         available: AtomicBool,
         winner: NodeId,
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     impl ConflictOrderer for NodeWinnerOrderer {
         fn decide(&self, claim: &ConflictClaim) -> Result<ConflictDecision> {
             self.calls.fetch_add(1, AtomicOrdering::Relaxed);
@@ -3218,7 +3223,7 @@ mod tests {
     }
 
     #[test]
-    fn consistency_modes_report_their_actual_guarantees() {
+    fn causal_consistency_mode_reports_its_actual_guarantee() {
         let causal = ActiveShardMap::new_causal_eventual(
             1,
             ActiveSyncConfig::new("test-cluster", NodeId::new("causal").unwrap()),
@@ -3228,7 +3233,14 @@ mod tests {
             causal.consistency_mode(),
             ActiveConsistencyMode::CausalEventual
         );
+        assert!(!causal.consistency_mode().requires_external_orderer());
+        assert!(!causal.consistency_mode().is_linearizable());
+        assert!(!causal.consistency_mode().is_serializable());
+    }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
+    #[test]
+    fn consensus_consistency_mode_reports_its_actual_guarantee() {
         let consensus = ActiveShardMap::new_consensus_ordered_eventual(
             1,
             ActiveSyncConfig::new("test-cluster", NodeId::new("consensus").unwrap()),
@@ -3292,6 +3304,7 @@ mod tests {
         ActiveShardMap::new(4, config).unwrap()
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     fn map_with_orderer(node: &str, orderer: Arc<dyn ConflictOrderer>) -> ActiveShardMap {
         let mut config = ActiveSyncConfig::new("test-cluster", NodeId::new(node).unwrap());
         config.incarnation_id = IncarnationId(u128::from(node.as_bytes()[0]));
@@ -3299,6 +3312,7 @@ mod tests {
         ActiveShardMap::new_with_conflict_orderer(4, config, orderer).unwrap()
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     #[test]
     fn external_orderer_is_not_called_without_a_conflict() {
         let orderer = Arc::new(NodeWinnerOrderer {
@@ -3316,6 +3330,7 @@ mod tests {
         assert_eq!(right.get("key"), Some(b"value".to_vec()));
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     #[test]
     fn external_orderer_selects_the_concurrent_set_winner() {
         let orderer = Arc::new(NodeWinnerOrderer {
@@ -3338,6 +3353,7 @@ mod tests {
         assert_eq!(right.health_snapshot().conflict_ordered, 1);
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     #[test]
     fn unavailable_orderer_does_not_acknowledge_or_replace_the_local_value() {
         let orderer = Arc::new(NodeWinnerOrderer {
@@ -3360,6 +3376,7 @@ mod tests {
         assert_eq!(right.get("key"), Some(b"left-value".to_vec()));
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     #[test]
     fn semantic_remove_wins_without_consensus_work() {
         let orderer = Arc::new(NodeWinnerOrderer {
@@ -3381,11 +3398,13 @@ mod tests {
         assert_eq!(orderer.calls.load(AtomicOrdering::Relaxed), 0);
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     struct ChangingOrderer {
         calls: AtomicUsize,
         target: Mutex<Option<ActiveShardMap>>,
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     impl ConflictOrderer for ChangingOrderer {
         fn decide(&self, claim: &ConflictClaim) -> Result<ConflictDecision> {
             let call = self.calls.fetch_add(1, AtomicOrdering::Relaxed);
@@ -3407,6 +3426,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
     #[test]
     fn stale_consensus_decision_is_retried_without_holding_the_shard_lock() {
         let orderer = Arc::new(ChangingOrderer {
@@ -3827,5 +3847,5 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "active-sync-blossom"))]
+#[cfg(all(test, feature = "active-sync-consensus-ordered-eventual"))]
 mod deterministic_tests;

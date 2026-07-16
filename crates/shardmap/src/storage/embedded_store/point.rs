@@ -13,7 +13,7 @@ impl EmbeddedStore {
     }
 
     /// Crate-internal owned read for callers that already computed placement.
-    #[cfg(feature = "active-sync")]
+    #[cfg(feature = "active-sync-causal-eventual")]
     #[inline(always)]
     pub(crate) fn get_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Option<Bytes> {
         self.get_with_route(route, key, now_millis())

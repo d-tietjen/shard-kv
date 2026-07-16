@@ -56,7 +56,7 @@ declared compatible version ranges.
 | `rustls`, `tokio-rustls`, `rustls-pemfile`, `ring` | `scnp-tls`, `active-sync-tls` | TLS 1.3, mTLS, certificate parsing, and cryptography for SCNP overflow and active-active peer sync. |
 | `shardcache-client-rs` | `kv-overflow` | SCNP framing and direct replica communication. |
 | `lz4_flex`, `zstd` | Overflow features | Optional value and object compression. |
-| `crc32fast`, `sha2` | Overflow and active-sync integrity, TLS identity, `active-sync-blossom` | Envelope and sync-block integrity, certificate fingerprints, and content-addressed conflict claims. |
+| `crc32fast`, `sha2` | Overflow and active-sync integrity, TLS identity, `active-sync-consensus-ordered-eventual` | Envelope and sync-block integrity, certificate fingerprints, and content-addressed conflict claims. |
 | `deterministic-test-env` | Test builds only | Non-published harness vendored from pinned Blossom revision `46750a97a70fd301e3e6f3255316c1d7e837a9dd` for replayable active-sync fault schedules. |
 | `tokio`, `flume` | Server and asynchronous overflow paths | Event loops, sockets, timers, bounded asynchronous lanes, and shutdown. |
 | `bytes-handoff`, `monoio` | Optional server transport | Buffer handoff and Linux transport experiments. |
@@ -70,7 +70,7 @@ TLS dependency policy is enforced by
 the all-feature production graph must not contain OpenSSL, native-tls, or an
 OpenSSL-backed Rustls provider.
 
-The publishable `shardmap` `active-sync-blossom` graph deliberately has no
+The publishable `shardmap` `active-sync-consensus-ordered-eventual` graph deliberately has no
 Blossom runtime dependency. It exposes a bounded `BlossomConflictConsensus`
 service boundary. The standalone source-only `shardmap-blossom-bridge` package
 is excluded from the public workspace so normal builds need no private Git

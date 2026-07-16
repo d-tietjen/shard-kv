@@ -186,19 +186,36 @@ write_patch_table >>"$scnp_tls_consumer/Cargo.toml"
 
 check_consumer scnp-tls-consumer
 
-active_sync_consumer="$tmp/active-sync-consumer"
-mkdir -p "$active_sync_consumer"
-write_consumer_main "$active_sync_consumer"
-cat >"$active_sync_consumer/Cargo.toml" <<EOF
+causal_sync_consumer="$tmp/causal-sync-consumer"
+mkdir -p "$causal_sync_consumer"
+write_consumer_main "$causal_sync_consumer"
+cat >"$causal_sync_consumer/Cargo.toml" <<EOF
 [package]
-name = "shard-kv-publish-active-sync-consumer"
+name = "shard-kv-publish-causal-sync-consumer"
 version = "0.0.0"
 edition = "2024"
 publish = false
 
 [dependencies]
-shardmap = { version = "$shardmap_version", default-features = false, features = ["active-sync-tls"] }
+shardmap = { version = "$shardmap_version", default-features = false, features = ["active-sync-causal-eventual"] }
 EOF
-write_patch_table >>"$active_sync_consumer/Cargo.toml"
+write_patch_table >>"$causal_sync_consumer/Cargo.toml"
 
-check_consumer active-sync-consumer
+check_consumer causal-sync-consumer
+
+consensus_sync_consumer="$tmp/consensus-sync-consumer"
+mkdir -p "$consensus_sync_consumer"
+write_consumer_main "$consensus_sync_consumer"
+cat >"$consensus_sync_consumer/Cargo.toml" <<EOF
+[package]
+name = "shard-kv-publish-consensus-sync-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shardmap = { version = "$shardmap_version", default-features = false, features = ["active-sync-consensus-ordered-eventual", "active-sync-tls"] }
+EOF
+write_patch_table >>"$consensus_sync_consumer/Cargo.toml"
+
+check_consumer consensus-sync-consumer

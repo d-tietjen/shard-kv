@@ -33,7 +33,7 @@ name = "shardmap"
 [[example]]
 name = "active_sync"
 path = "examples/active_sync.rs"
-required-features = ["active-sync"]
+required-features = ["active-sync-causal-eventual"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(creusot)"] }
@@ -105,9 +105,9 @@ object-overflow = []
 object-overflow-s3 = ["object-overflow", "dep:futures-util", "dep:object_store"]
 kv-overflow = ["embedded", "dep:shardcache-client-rs"]
 kv-overflow-redis = ["kv-overflow", "dep:redis-client"]
-active-sync = ["embedded", "dep:sha2"]
-active-sync-blossom = ["active-sync"]
-active-sync-tls = ["active-sync", "dep:rustls"]
+active-sync-causal-eventual = ["embedded", "dep:sha2"]
+active-sync-consensus-ordered-eventual = ["active-sync-causal-eventual"]
+active-sync-tls = ["active-sync-causal-eventual", "dep:rustls"]
 scnp-tls = [
     "server",
     "kv-overflow",

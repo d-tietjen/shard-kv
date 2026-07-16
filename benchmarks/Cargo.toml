@@ -36,7 +36,11 @@ object-overflow = ["shardmap/object-overflow"]
 kv-overflow = ["shardmap/kv-overflow"]
 kv-overflow-redis = ["kv-overflow", "shardmap/kv-overflow-redis"]
 scnp-tls = ["kv-overflow", "shardmap/scnp-tls", "shardcache-client-rs/tls"]
-active-sync = ["shardmap/active-sync"]
+active-sync-causal-eventual = ["shardmap/active-sync-causal-eventual"]
+active-sync-consensus-ordered-eventual = [
+    "active-sync-causal-eventual",
+    "shardmap/active-sync-consensus-ordered-eventual",
+]
 # Build the benchmark-only server that exposes a caller-owned shardmap store
 # through the shardcache RESP/SCNP server path.
 embedded-server = ["shardmap/redis-server"]
@@ -82,7 +86,7 @@ path = "src/bin/replication_cost.rs"
 [[bin]]
 name = "active_sync_cost"
 path = "src/bin/active_sync_cost.rs"
-required-features = ["active-sync"]
+required-features = ["active-sync-consensus-ordered-eventual"]
 
 [[bin]]
 name = "replication_tcp_cost"

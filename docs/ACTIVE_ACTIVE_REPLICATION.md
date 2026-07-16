@@ -9,8 +9,11 @@ contract and do not affect the default `ShardMap` layout or hot path.
 
 ## Implementation Status
 
-The `active-sync` feature currently provides `ActiveShardMap` for exact byte
-keys and values. It includes:
+The `active-sync-causal-eventual` and
+`active-sync-consensus-ordered-eventual` features provide `ActiveShardMap` for
+exact byte keys and values. The consensus-ordered feature implies the causal
+replication core, so callers select one outcome flag rather than naming an
+ordering implementation. They include:
 
 - per-shard mutation dots, hybrid logical clocks, compact causal contexts, and
   deterministic convergence for SET, DEL, expiry, and governed SET;
@@ -32,6 +35,18 @@ keys and values. It includes:
   and resource-bound tests plus the `active_sync_cost` benchmark.
 
 ### Consistency Modes
+
+Select the public Cargo feature that names the required outcome:
+
+| Cargo feature | Compiled guarantee | Conflict ordering |
+| --- | --- | --- |
+| `active-sync-causal-eventual` | Eventual convergence using causal dominance, remove-wins semantics, and deterministic HLC ordering | Local only |
+| `active-sync-consensus-ordered-eventual` | Eventual convergence with an externally finalized total order for ambiguous conflicts | Pluggable `ConflictOrderer`; Blossom is one adapter |
+| `active-sync-tls` | Direct-shard mTLS transport for either outcome | Transport only; implies the causal replication core |
+
+`active-sync-consensus-ordered-eventual` can be passed by itself. Add
+`active-sync-tls` when peers synchronize over the network. The feature name
+does not claim linearizability or serializability.
 
 Conflict ordering and peer synchronization are separate choices. The supported
 deployment profiles are:
@@ -296,10 +311,12 @@ The initial concurrent-version rule is `causal_lww` with
 - Timestamps beyond `max_clock_skew_ms` are quarantined instead of being allowed
   to dominate indefinitely.
 
-When `active-sync-blossom` is enabled and an external orderer is installed,
-causal dominance and the remove/eviction safety rules above remain local. Only
-ambiguous concurrent conflicts, such as SET versus SET, are sent to Blossom.
-The HLC tuple remains the compatibility fallback when no orderer is configured.
+When `active-sync-consensus-ordered-eventual` is enabled and an external
+orderer is installed, causal dominance and the remove/eviction safety rules
+above remain local. Only ambiguous concurrent conflicts, such as SET versus
+SET, are sent to the configured orderer. The HLC tuple remains the
+compatibility fallback when no orderer is configured. Blossom is the current
+production adapter, but it is not part of the public feature contract.
 
 Every resolution joins the causal contexts of all observed versions, including
 discarded versions. This is required so an older block arriving later cannot

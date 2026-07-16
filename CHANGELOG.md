@@ -26,13 +26,18 @@
   partial blocks flush on deadlines and shutdown, and real `sync_data` calls
   enforce the configured durability interval without a cross-shard producer
   lock.
-- Added optional Blossom-backed conflict ordering behind
-  `active-sync-blossom`. Only ambiguous concurrent mutation identities and
-  digests enter the ordering plane; keys, values, and WAL blocks continue to
-  replicate exclusively through active-sync. Consensus waits release the shard
-  lock, stale decisions are retried, and failed decisions leave source blocks
-  unacknowledged. Stable per-candidate finalized-epoch ranks impose a transitive
-  total order, preventing three-way conflict cycles under reordered WAL delivery.
+- Added optional consensus-ordered eventual conflict handling behind
+  `active-sync-consensus-ordered-eventual`. Only ambiguous concurrent mutation
+  identities and digests enter the ordering plane; keys, values, and WAL blocks
+  continue to replicate exclusively through active-sync. Consensus waits
+  release the shard lock, stale decisions are retried, and failed decisions
+  leave source blocks unacknowledged. Stable per-candidate finalized-epoch ranks
+  impose a transitive total order, preventing three-way conflict cycles under
+  reordered WAL delivery.
+- Added outcome-oriented active-sync feature flags. Use
+  `active-sync-causal-eventual` for deterministic causal/HLC convergence or
+  `active-sync-consensus-ordered-eventual` for externally finalized ambiguous
+  conflicts; Blossom remains an adapter rather than a public feature name.
 - Added a vendored, revision-pinned deterministic Blossom test environment that
   injects consensus outages, invalid certificates, node unavailability,
   latency, duplicate WAL blocks, and different three-way delivery orders, then
@@ -87,7 +92,7 @@
   external orderer.
 - Default raw-cache and native ShardMap GET, SET, and 80/20 rows remained within
   2.4% of their recorded Adam baselines with zero errors. The all-feature
-  workspace suite passed 420 ShardMap unit tests plus integration, differential,
+  workspace suite passed 421 ShardMap unit tests plus integration, differential,
   deterministic-fault, mTLS, overflow, formal-model, and doc tests.
 
 ## 0.6.0 - Unreleased
