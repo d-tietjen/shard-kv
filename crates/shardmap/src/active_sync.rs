@@ -349,9 +349,10 @@ pub trait ConflictOrderer: Send + Sync {
 ///
 /// Both modes keep reads local and require explicit or background synchronization
 /// for remote visibility. Neither mode is linearizable or serializable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveConsistencyMode {
     /// Deterministic causal resolution with HLC ordering for concurrent SETs.
+    #[default]
     CausalEventual,
     /// Eventual replication with externally finalized ordering for ambiguous
     /// concurrent mutations.
@@ -372,12 +373,6 @@ impl ActiveConsistencyMode {
     /// Active-sync modes never provide cross-node serializable transactions.
     pub const fn is_serializable(self) -> bool {
         false
-    }
-}
-
-impl Default for ActiveConsistencyMode {
-    fn default() -> Self {
-        Self::CausalEventual
     }
 }
 
