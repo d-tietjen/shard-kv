@@ -35,6 +35,12 @@
   leave source blocks unacknowledged. Stable per-candidate finalized-epoch ranks
   impose a transitive total order, preventing three-way conflict cycles under
   reordered WAL delivery.
+- Added bounded live conflict batching for consensus-ordered synchronization.
+  Independent claims from one shard block are finalized together without
+  holding the storage-shard lock; repeated keys preserve exact order, stale
+  decisions are revalidated, and failed batches leave the source block
+  unacknowledged. The Blossom bridge writes unresolved claims as multiple
+  transactions in one signed block and returns exact per-claim certificates.
 - Added outcome-oriented active-sync feature flags. Use
   `active-sync-causal-eventual` for deterministic causal/HLC convergence or
   `active-sync-consensus-ordered-eventual` for externally finalized ambiguous
@@ -92,11 +98,10 @@
   2.2us p99, confirming no conflict-free read penalty from configuring the
   external orderer.
 - The Adam concurrent-conflict benchmark kept local admission effectively
-  unchanged at 2.22M causal versus 2.25M consensus mutations/s. With a
-  zero-latency deterministic orderer, convergence measured 330K causal versus
-  195K consensus conflict pairs/s. A synthetic 100us decision delay reduced
-  consensus to 3.20K pairs/s because each same-key conflict currently requires
-  two serial ordering calls; conflict batching remains future work.
+  unchanged. With a synthetic 100us external operation, bounded batching
+  improved consensus convergence from 3.20K to 66.0K conflict pairs/s and cut
+  sync p99 from 80.2ms to 3.9ms. At zero external latency, batching changed
+  convergence by 2.6% and improved p99 from 6.7ms to 5.5ms.
 - Default raw-cache and native ShardMap GET, SET, and 80/20 rows remained within
   2.4% of their recorded Adam baselines with zero errors. The all-feature
   workspace suite passed 421 ShardMap unit tests plus integration, differential,

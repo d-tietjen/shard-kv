@@ -33,6 +33,8 @@ use tokio::net::TcpStream;
 const CLAIM_MAGIC: &[u8; 4] = b"SCC1";
 const CLAIM_FIXED_BYTES: usize = 4 + 32 + 4 + 32;
 const MAX_CLAIM_BYTES: usize = 768;
+const MAX_CLAIMS_PER_BATCH: usize = 1_024;
+const MAX_CLAIM_BATCH_BYTES: usize = 4 * 1024 * 1024;
 const MAX_ENDPOINTS: usize = 64;
 const MAX_GROUPS: usize = 4_096;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -237,38 +239,93 @@ impl BlossomTcpConflictBridge {
         claim_payload: &[u8],
         deadline: Duration,
     ) -> Result<BlossomConflictCertificate> {
-        validate_claim(claim_payload)?;
-        if deadline.is_zero() {
-            return Err(protocol_error("Blossom bridge deadline is zero"));
+        self.commit_batch(logical_group, &[claim_payload.to_vec()], deadline)?
+            .pop()
+            .ok_or_else(|| protocol_error("Blossom bridge returned no conflict certificate"))
+    }
+
+    fn commit_batch(
+        &self,
+        logical_group: [u8; 32],
+        claim_payloads: &[Vec<u8>],
+        deadline: Duration,
+    ) -> Result<Vec<BlossomConflictCertificate>> {
+        if claim_payloads.is_empty()
+            || claim_payloads.len() > MAX_CLAIMS_PER_BATCH
+            || deadline.is_zero()
+        {
+            return Err(protocol_error(
+                "Blossom bridge conflict batch is empty or exceeds its bound",
+            ));
+        }
+        let mut batch_bytes = 0usize;
+        let mut claim_digests = Vec::with_capacity(claim_payloads.len());
+        let mut unique_digests = BTreeSet::new();
+        for payload in claim_payloads {
+            validate_claim(payload)?;
+            batch_bytes = batch_bytes
+                .checked_add(payload.len())
+                .ok_or_else(|| protocol_error("Blossom conflict batch size overflowed"))?;
+            let digest = claim_digest(payload);
+            if !unique_digests.insert(digest) {
+                return Err(protocol_error(
+                    "Blossom conflict batch contains a duplicate claim",
+                ));
+            }
+            claim_digests.push(digest);
+        }
+        if batch_bytes > MAX_CLAIM_BATCH_BYTES {
+            return Err(protocol_error("Blossom conflict batch is too large"));
         }
         let group = self
             .groups
             .get(&logical_group)
             .ok_or_else(|| config_error("unconfigured ShardMap Blossom group"))?;
         let mut group = group.lock();
-        let claim_digest = claim_digest(claim_payload);
-        if let Some(receipt) = group.state.receipts.get(&digest_key(claim_digest)) {
-            return certificate(logical_group, claim_digest, receipt);
+        if let Some(certificates) = completed_certificates(
+            logical_group,
+            &claim_digests,
+            &group.state.receipts,
+        )? {
+            return Ok(certificates);
         }
 
         let expires = Instant::now() + deadline;
         self.runtime.block_on(async {
             refresh_until_current(&self.config, &mut group, expires).await?;
-            if let Some(receipt) = group.state.receipts.get(&digest_key(claim_digest)) {
-                return certificate(logical_group, claim_digest, receipt);
+            if let Some(certificates) = completed_certificates(
+                logical_group,
+                &claim_digests,
+                &group.state.receipts,
+            )? {
+                return Ok(certificates);
             }
 
+            let mut pending = pending_claims(
+                claim_payloads,
+                &claim_digests,
+                &group.state.receipts,
+            );
             let mut submitted_nonce =
-                submit_claim(&self.config, &group.config, claim_payload, expires).await?;
+                submit_claims(&self.config, &group.config, &pending, expires).await?;
 
             loop {
                 refresh_until_current(&self.config, &mut group, expires).await?;
-                if let Some(receipt) = group.state.receipts.get(&digest_key(claim_digest)) {
-                    return certificate(logical_group, claim_digest, receipt);
+                if let Some(certificates) = completed_certificates(
+                    logical_group,
+                    &claim_digests,
+                    &group.state.receipts,
+                )? {
+                    return Ok(certificates);
                 }
                 if group.state.checkpoint_nonce >= submitted_nonce {
+                    pending = pending_claims(
+                        claim_payloads,
+                        &claim_digests,
+                        &group.state.receipts,
+                    );
                     submitted_nonce =
-                        submit_claim(&self.config, &group.config, claim_payload, expires).await?;
+                        submit_claims(&self.config, &group.config, &pending, expires).await?;
                 }
                 sleep_bounded(self.config.poll_interval, expires).await?;
             }
@@ -276,12 +333,15 @@ impl BlossomTcpConflictBridge {
     }
 }
 
-async fn submit_claim(
+async fn submit_claims(
     config: &BlossomTcpBridgeConfig,
     group: &BlossomGroupConfig,
-    claim_payload: &[u8],
+    claim_payloads: &[&[u8]],
     expires: Instant,
 ) -> Result<u64> {
+    if claim_payloads.is_empty() {
+        return Err(protocol_error("Blossom conflict submission is empty"));
+    }
     let secret = load_signer(&config.signer_secret_path)?;
     let signer = Keypair::from_secret(secret);
     let endpoint = config
@@ -317,7 +377,11 @@ async fn submit_claim(
                 "Blossom signing key is not trusted for the target validator generation",
             ));
         }
-        let block = signed_block(target, secret, [Transaction::new(claim_payload)]);
+        let transactions = claim_payloads
+            .iter()
+            .map(|payload| Transaction::new(*payload))
+            .collect::<Vec<_>>();
+        let block = signed_block(target, secret, transactions);
         match submit_block(
             candidate_endpoint,
             group,
@@ -345,6 +409,15 @@ impl BlossomConflictConsensus for BlossomTcpConflictBridge {
         deadline: Duration,
     ) -> Result<BlossomConflictCertificate> {
         self.commit(group_id, claim_payload, deadline)
+    }
+
+    fn commit_conflicts(
+        &self,
+        group_id: [u8; 32],
+        claim_payloads: &[Vec<u8>],
+        deadline: Duration,
+    ) -> Result<Vec<BlossomConflictCertificate>> {
+        self.commit_batch(group_id, claim_payloads, deadline)
     }
 }
 
@@ -856,6 +929,34 @@ fn certificate(
         claim_digest,
         candidate_epochs: receipt.candidate_epochs,
     })
+}
+
+fn completed_certificates(
+    group_id: [u8; 32],
+    claim_digests: &[[u8; 32]],
+    receipts: &BTreeMap<String, PersistedReceipt>,
+) -> Result<Option<Vec<BlossomConflictCertificate>>> {
+    let mut certificates = Vec::with_capacity(claim_digests.len());
+    for digest in claim_digests {
+        let Some(receipt) = receipts.get(&digest_key(*digest)) else {
+            return Ok(None);
+        };
+        certificates.push(certificate(group_id, *digest, receipt)?);
+    }
+    Ok(Some(certificates))
+}
+
+fn pending_claims<'a>(
+    claim_payloads: &'a [Vec<u8>],
+    claim_digests: &[[u8; 32]],
+    receipts: &BTreeMap<String, PersistedReceipt>,
+) -> Vec<&'a [u8]> {
+    claim_payloads
+        .iter()
+        .zip(claim_digests)
+        .filter(|(_, digest)| !receipts.contains_key(&digest_key(**digest)))
+        .map(|(payload, _)| payload.as_slice())
+        .collect()
 }
 
 fn load_signer(path: &Path) -> Result<SecKey> {

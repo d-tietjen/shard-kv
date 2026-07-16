@@ -59,16 +59,17 @@ cargo build --release -p shardcache-benchmarks \
 target/release/active_sync_conflict_cost \
   --modes causal,consensus --shards 8 --conflict-keys 1024 \
   --value-size 1024 --warmup-rounds 5 --rounds 50 \
-  --orderer-delay-micros 0
+  --batch-items 256 --orderer-delay-micros 0
 ```
 
 Every round writes different values to the same keys on two previously
 synchronized maps. The driver times local mutation admission separately from
 bidirectional convergence, requires sync to report the conflicts, and compares
 every key after each round. Consensus mode shares one deterministic orderer
-between the peers and can inject per-decision latency. The delay is synthetic;
-use it to measure sensitivity, not as a claim about a particular consensus
-deployment. Run each mode in a separate process for release comparisons.
+between the peers and can inject latency once per batch operation. The delay is
+synthetic; use it to measure sensitivity, not as a claim about a particular
+consensus deployment. Set `--batch-items 1` for the per-claim control. Run each
+mode in a separate process for release comparisons.
 
 ## Docker Server Suite
 

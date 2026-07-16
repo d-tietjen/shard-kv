@@ -48,6 +48,7 @@ const BLOCK_FORMAT_VERSION: u8 = 1;
 const BLOCK_MAGIC: &[u8; 4] = b"ASB1";
 const SNAPSHOT_MAGIC: &[u8; 4] = b"ASS1";
 const SNAPSHOT_HEADER_BYTES: usize = 4 + 1 + 8 + 32;
+const MAX_CONFLICT_ORDER_BATCH_ITEMS: usize = 1_024;
 static INCARNATION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Stable active-sync node identity.
@@ -343,6 +344,15 @@ impl ConflictDecision {
 /// this method without holding a storage-shard lock.
 pub trait ConflictOrderer: Send + Sync {
     fn decide(&self, claim: &ConflictClaim) -> Result<ConflictDecision>;
+
+    /// Orders a bounded set of independent claims while preserving input order.
+    ///
+    /// The default keeps existing orderers source compatible. Networked
+    /// implementations should override this method so one batch maps to one
+    /// external ordering operation.
+    fn decide_batch(&self, claims: &[ConflictClaim]) -> Result<Vec<ConflictDecision>> {
+        claims.iter().map(|claim| self.decide(claim)).collect()
+    }
 }
 
 /// Cross-node consistency guarantee selected for ambiguous concurrent writes.
@@ -393,6 +403,7 @@ pub struct ActiveSyncConfig {
     pub max_pending_block_gaps_per_shard: usize,
     pub max_snapshot_bytes: usize,
     pub max_conflict_order_retries: usize,
+    pub max_conflict_order_batch: usize,
     pub max_clock_skew: Duration,
 }
 
@@ -413,6 +424,7 @@ impl ActiveSyncConfig {
             max_pending_block_gaps_per_shard: 1024,
             max_snapshot_bytes: 1024 * 1024 * 1024,
             max_conflict_order_retries: 4,
+            max_conflict_order_batch: 256,
             max_clock_skew: Duration::from_secs(5),
         }
     }
@@ -433,9 +445,15 @@ impl ActiveSyncConfig {
             || self.max_pending_block_gaps_per_shard == 0
             || self.max_snapshot_bytes == 0
             || self.max_conflict_order_retries == 0
+            || self.max_conflict_order_batch == 0
         {
             return Err(ShardCacheError::Config(
                 "active-sync resource limits must be nonzero".into(),
+            ));
+        }
+        if self.max_conflict_order_batch > MAX_CONFLICT_ORDER_BATCH_ITEMS {
+            return Err(ShardCacheError::Config(
+                "active-sync conflict ordering batch exceeds its hard item limit".into(),
             ));
         }
         Ok(())
@@ -495,6 +513,7 @@ pub struct ActiveSyncHealthSnapshot {
     pub retained_blocks: usize,
     pub retained_block_bytes: usize,
     pub conflict_order_requests: u64,
+    pub conflict_order_batches: u64,
     pub conflict_order_failures: u64,
     pub conflict_order_retries: u64,
     pub conflict_ordered: u64,
@@ -516,6 +535,7 @@ struct ActiveShardMapInner {
     conflict_reads: Box<[AtomicBool]>,
     conflict_orderer: Option<Arc<dyn ConflictOrderer>>,
     conflict_order_requests: AtomicU64,
+    conflict_order_batches: AtomicU64,
     conflict_order_failures: AtomicU64,
     conflict_order_retries: AtomicU64,
     conflict_ordered: AtomicU64,
@@ -1121,6 +1141,7 @@ impl ActiveShardMap {
                 conflict_reads,
                 conflict_orderer,
                 conflict_order_requests: AtomicU64::new(0),
+                conflict_order_batches: AtomicU64::new(0),
                 conflict_order_failures: AtomicU64::new(0),
                 conflict_order_retries: AtomicU64::new(0),
                 conflict_ordered: AtomicU64::new(0),
@@ -1550,6 +1571,10 @@ impl ActiveShardMap {
             conflict_order_requests: self
                 .inner
                 .conflict_order_requests
+                .load(AtomicOrdering::Relaxed),
+            conflict_order_batches: self
+                .inner
+                .conflict_order_batches
                 .load(AtomicOrdering::Relaxed),
             conflict_order_failures: self
                 .inner
@@ -2119,29 +2144,71 @@ impl ActiveShardMap {
             ));
         }
         let mut stats = ApplyStats::default();
-        for mutation in block.records.iter() {
-            let mut retries = 0usize;
-            loop {
-                let claim = self.ambiguous_conflict_claim(&shard, mutation);
-                let Some((orderer, claim)) = self.inner.conflict_orderer.as_ref().zip(claim) else {
-                    self.apply_remote_mutation(
-                        &mut shard,
-                        mutation,
-                        source_peer,
-                        &mut stats,
-                        None,
-                    )?;
+        let mut record_index = 0usize;
+        while record_index < block.records.len() {
+            let mutation = &block.records[record_index];
+            let claim = self.ambiguous_conflict_claim(&shard, mutation);
+            let Some((orderer, claim)) = self.inner.conflict_orderer.as_ref().zip(claim) else {
+                self.apply_remote_mutation(&mut shard, mutation, source_peer, &mut stats, None)?;
+                record_index += 1;
+                continue;
+            };
+
+            // Consecutive independent conflicts can share one ordering-plane
+            // operation. A repeated key ends the batch so mutation order for
+            // that key remains exact.
+            let mut batch = Vec::with_capacity(self.inner.config.max_conflict_order_batch);
+            batch.push((record_index, claim));
+            let mut batch_keys = HashSet::with_capacity(self.inner.config.max_conflict_order_batch);
+            batch_keys.insert(mutation.key.as_ref());
+            let mut next_index = record_index + 1;
+            while next_index < block.records.len()
+                && batch.len() < self.inner.config.max_conflict_order_batch
+            {
+                let next = &block.records[next_index];
+                if !batch_keys.insert(next.key.as_ref()) {
+                    break;
+                }
+                let Some(next_claim) = self.ambiguous_conflict_claim(&shard, next) else {
                     break;
                 };
+                batch.push((next_index, next_claim));
+                next_index += 1;
+            }
 
-                // Consensus can take an epoch. Never pin a primary shard while
-                // the ordering plane is unavailable or waiting for quorum.
-                drop(shard);
-                let decision = self.order_conflict(orderer.as_ref(), &claim)?;
-                shard = shard_lock.lock();
+            let claims = batch
+                .iter()
+                .map(|(_, claim)| claim.clone())
+                .collect::<Vec<_>>();
+            // Consensus can take an epoch. Never pin a primary shard while
+            // the ordering plane is unavailable or waiting for quorum.
+            drop(shard);
+            let decisions = self.order_conflicts(orderer.as_ref(), &claims)?;
+            shard = shard_lock.lock();
 
-                let current_claim = self.ambiguous_conflict_claim(&shard, mutation);
-                if current_claim.as_ref().map(ConflictClaim::digest) != Some(claim.digest()) {
+            for ((ordered_index, mut ordered_claim), mut decision) in
+                batch.into_iter().zip(decisions)
+            {
+                let ordered_mutation = &block.records[ordered_index];
+                let mut retries = 0usize;
+                loop {
+                    let current_claim = self.ambiguous_conflict_claim(&shard, ordered_mutation);
+                    if current_claim.as_ref().map(ConflictClaim::digest)
+                        == Some(ordered_claim.digest())
+                    {
+                        self.apply_remote_mutation(
+                            &mut shard,
+                            ordered_mutation,
+                            source_peer,
+                            &mut stats,
+                            Some(decision.winner()),
+                        )?;
+                        self.inner
+                            .conflict_ordered
+                            .fetch_add(1, AtomicOrdering::Relaxed);
+                        break;
+                    }
+
                     retries = retries.saturating_add(1);
                     self.inner
                         .conflict_order_retries
@@ -2151,20 +2218,23 @@ impl ActiveShardMap {
                             "active-sync conflict changed while awaiting consensus",
                         ));
                     }
-                    continue;
+                    let Some(new_claim) = current_claim else {
+                        self.apply_remote_mutation(
+                            &mut shard,
+                            ordered_mutation,
+                            source_peer,
+                            &mut stats,
+                            None,
+                        )?;
+                        break;
+                    };
+                    drop(shard);
+                    decision = self.order_conflict(orderer.as_ref(), &new_claim)?;
+                    shard = shard_lock.lock();
+                    ordered_claim = new_claim;
                 }
-                self.apply_remote_mutation(
-                    &mut shard,
-                    mutation,
-                    source_peer,
-                    &mut stats,
-                    Some(decision.winner()),
-                )?;
-                self.inner
-                    .conflict_ordered
-                    .fetch_add(1, AtomicOrdering::Relaxed);
-                break;
             }
+            record_index = next_index;
         }
         if shard
             .block_frontiers
@@ -2314,16 +2384,46 @@ impl ActiveShardMap {
         orderer: &dyn ConflictOrderer,
         claim: &ConflictClaim,
     ) -> Result<ConflictDecision> {
+        self.order_conflicts(orderer, std::slice::from_ref(claim))?
+            .pop()
+            .ok_or_else(|| {
+                ShardCacheError::Protocol(
+                    "active-sync conflict orderer returned no decision".into(),
+                )
+            })
+    }
+
+    fn order_conflicts(
+        &self,
+        orderer: &dyn ConflictOrderer,
+        claims: &[ConflictClaim],
+    ) -> Result<Vec<ConflictDecision>> {
+        if claims.is_empty() || claims.len() > self.inner.config.max_conflict_order_batch {
+            return Err(ShardCacheError::Protocol(
+                "active-sync conflict ordering batch is empty or exceeds its bound".into(),
+            ));
+        }
         self.inner
             .conflict_order_requests
+            .fetch_add(claims.len() as u64, AtomicOrdering::Relaxed);
+        self.inner
+            .conflict_order_batches
             .fetch_add(1, AtomicOrdering::Relaxed);
-        let result = orderer
-            .decide(claim)
-            .and_then(|decision| decision.validate_for(claim).map(|()| decision));
+        let result = orderer.decide_batch(claims).and_then(|decisions| {
+            if decisions.len() != claims.len() {
+                return Err(ShardCacheError::Protocol(
+                    "active-sync conflict orderer returned the wrong decision count".into(),
+                ));
+            }
+            for (claim, decision) in claims.iter().zip(&decisions) {
+                decision.validate_for(claim)?;
+            }
+            Ok(decisions)
+        });
         if result.is_err() {
             self.inner
                 .conflict_order_failures
-                .fetch_add(1, AtomicOrdering::Relaxed);
+                .fetch_add(claims.len() as u64, AtomicOrdering::Relaxed);
         }
         result
     }
@@ -3196,6 +3296,50 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
+    struct BatchWinnerOrderer {
+        batches: AtomicUsize,
+        items: AtomicUsize,
+        available: AtomicBool,
+        winner: NodeId,
+    }
+
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
+    impl BatchWinnerOrderer {
+        fn decision(&self, claim: &ConflictClaim) -> Result<ConflictDecision> {
+            if !self.available.load(AtomicOrdering::Relaxed) {
+                return Err(ShardCacheError::Protocol(
+                    "test batch orderer unavailable".into(),
+                ));
+            }
+            let winner = claim
+                .candidates()
+                .iter()
+                .find(|candidate| candidate.dot().node_id == self.winner)
+                .ok_or_else(|| {
+                    ShardCacheError::Protocol("configured test winner is absent".into())
+                })?
+                .dot()
+                .clone();
+            ConflictDecision::new(claim, winner)
+        }
+    }
+
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
+    impl ConflictOrderer for BatchWinnerOrderer {
+        fn decide(&self, claim: &ConflictClaim) -> Result<ConflictDecision> {
+            self.batches.fetch_add(1, AtomicOrdering::Relaxed);
+            self.items.fetch_add(1, AtomicOrdering::Relaxed);
+            self.decision(claim)
+        }
+
+        fn decide_batch(&self, claims: &[ConflictClaim]) -> Result<Vec<ConflictDecision>> {
+            self.batches.fetch_add(1, AtomicOrdering::Relaxed);
+            self.items.fetch_add(claims.len(), AtomicOrdering::Relaxed);
+            claims.iter().map(|claim| self.decision(claim)).collect()
+        }
+    }
+
     #[test]
     fn active_metadata_layout_stays_compact() {
         assert!(std::mem::size_of::<CompactMutationDot>() <= 16);
@@ -3351,6 +3495,94 @@ mod tests {
         assert_eq!(orderer.calls.load(AtomicOrdering::Relaxed), 2);
         assert_eq!(left.health_snapshot().conflict_ordered, 1);
         assert_eq!(right.health_snapshot().conflict_ordered, 1);
+    }
+
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
+    #[test]
+    fn block_conflicts_are_ordered_in_bounded_batches() {
+        let orderer = Arc::new(BatchWinnerOrderer {
+            batches: AtomicUsize::new(0),
+            items: AtomicUsize::new(0),
+            available: AtomicBool::new(true),
+            winner: NodeId::new("left").unwrap(),
+        });
+        let build = |node: &str, incarnation| {
+            let mut config = ActiveSyncConfig::new("test-cluster", NodeId::new(node).unwrap());
+            config.incarnation_id = IncarnationId(incarnation);
+            config.max_conflict_order_batch = 16;
+            ActiveShardMap::new_consensus_ordered_eventual(1, config, orderer.clone()).unwrap()
+        };
+        let left = build("left", 1);
+        let right = build("right", 2);
+        for index in 0..64 {
+            let key = format!("conflict-{index}");
+            left.set(&key, "left-value").unwrap();
+            right.set(&key, "right-value").unwrap();
+        }
+
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+
+        assert_eq!(orderer.items.load(AtomicOrdering::Relaxed), 128);
+        assert_eq!(orderer.batches.load(AtomicOrdering::Relaxed), 8);
+        assert_eq!(left.health_snapshot().conflict_order_requests, 64);
+        assert_eq!(left.health_snapshot().conflict_order_batches, 4);
+        assert_eq!(right.health_snapshot().conflict_order_requests, 64);
+        assert_eq!(right.health_snapshot().conflict_order_batches, 4);
+        for index in 0..64 {
+            assert_eq!(
+                left.get(format!("conflict-{index}")),
+                Some(b"left-value".to_vec())
+            );
+            assert_eq!(
+                right.get(format!("conflict-{index}")),
+                Some(b"left-value".to_vec())
+            );
+        }
+    }
+
+    #[cfg(feature = "active-sync-consensus-ordered-eventual")]
+    #[test]
+    fn failed_conflict_batch_does_not_acknowledge_or_partially_apply_block() {
+        let orderer = Arc::new(BatchWinnerOrderer {
+            batches: AtomicUsize::new(0),
+            items: AtomicUsize::new(0),
+            available: AtomicBool::new(false),
+            winner: NodeId::new("left").unwrap(),
+        });
+        let build = |node: &str, incarnation| {
+            let mut config = ActiveSyncConfig::new("test-cluster", NodeId::new(node).unwrap());
+            config.incarnation_id = IncarnationId(incarnation);
+            config.max_conflict_order_batch = 16;
+            ActiveShardMap::new_consensus_ordered_eventual(1, config, orderer.clone()).unwrap()
+        };
+        let left = build("left", 1);
+        let right = build("right", 2);
+        for index in 0..32 {
+            let key = format!("conflict-{index}");
+            left.set(&key, "left-value").unwrap();
+            right.set(&key, "right-value").unwrap();
+        }
+
+        assert!(left.sync_with(&right, SyncOptions::default()).is_err());
+        for index in 0..32 {
+            assert_eq!(
+                right.get(format!("conflict-{index}")),
+                Some(b"right-value".to_vec())
+            );
+        }
+
+        orderer.available.store(true, AtomicOrdering::Relaxed);
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+        for index in 0..32 {
+            assert_eq!(
+                left.get(format!("conflict-{index}")),
+                Some(b"left-value".to_vec())
+            );
+            assert_eq!(
+                right.get(format!("conflict-{index}")),
+                Some(b"left-value".to_vec())
+            );
+        }
     }
 
     #[cfg(feature = "active-sync-consensus-ordered-eventual")]
@@ -3652,6 +3884,10 @@ mod tests {
         let map = ActiveShardMap::new(1, config).unwrap();
         assert!(map.set("key", "four").is_err());
         assert_eq!(map.health_snapshot().pending_records, 0);
+
+        let mut config = ActiveSyncConfig::new("test-cluster", NodeId::new("left").unwrap());
+        config.max_conflict_order_batch = MAX_CONFLICT_ORDER_BATCH_ITEMS + 1;
+        assert!(ActiveShardMap::new(1, config).is_err());
     }
 
     #[test]

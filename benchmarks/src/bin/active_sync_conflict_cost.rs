@@ -38,7 +38,10 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     warmup_rounds: usize,
 
-    /// Synthetic external-orderer latency per decision.
+    #[arg(long, default_value_t = 256)]
+    batch_items: usize,
+
+    /// Synthetic external-orderer latency per batch operation.
     #[arg(long, default_value_t = 0)]
     orderer_delay_micros: u64,
 }
@@ -70,6 +73,7 @@ impl Mode {
 struct DeterministicOrderer {
     delay: Duration,
     calls: AtomicU64,
+    batches: AtomicU64,
 }
 
 impl DeterministicOrderer {
@@ -77,24 +81,24 @@ impl DeterministicOrderer {
         Self {
             delay,
             calls: AtomicU64::new(0),
+            batches: AtomicU64::new(0),
         }
     }
 
     fn reset_calls(&self) {
         self.calls.store(0, Ordering::Relaxed);
+        self.batches.store(0, Ordering::Relaxed);
     }
 
     fn calls(&self) -> u64 {
         self.calls.load(Ordering::Relaxed)
     }
-}
 
-impl ConflictOrderer for DeterministicOrderer {
-    fn decide(&self, claim: &ConflictClaim) -> shardmap::Result<ConflictDecision> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        if !self.delay.is_zero() {
-            thread::sleep(self.delay);
-        }
+    fn batches(&self) -> u64 {
+        self.batches.load(Ordering::Relaxed)
+    }
+
+    fn decide_claim(claim: &ConflictClaim) -> shardmap::Result<ConflictDecision> {
         let winner = claim
             .candidates()
             .iter()
@@ -106,6 +110,26 @@ impl ConflictOrderer for DeterministicOrderer {
     }
 }
 
+impl ConflictOrderer for DeterministicOrderer {
+    fn decide(&self, claim: &ConflictClaim) -> shardmap::Result<ConflictDecision> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        if !self.delay.is_zero() {
+            thread::sleep(self.delay);
+        }
+        Self::decide_claim(claim)
+    }
+
+    fn decide_batch(&self, claims: &[ConflictClaim]) -> shardmap::Result<Vec<ConflictDecision>> {
+        self.calls.fetch_add(claims.len() as u64, Ordering::Relaxed);
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        if !self.delay.is_zero() {
+            thread::sleep(self.delay);
+        }
+        claims.iter().map(Self::decide_claim).collect()
+    }
+}
+
 #[derive(Debug)]
 struct BenchResult {
     conflict_pairs: u64,
@@ -114,6 +138,7 @@ struct BenchResult {
     convergence_elapsed: Duration,
     convergence_latency: LatencyHistogram,
     orderer_calls: u64,
+    orderer_batches: u64,
 }
 
 struct BenchPair {
@@ -133,17 +158,20 @@ fn main() -> Result<(), BoxError> {
     let keys = build_keys(args.conflict_keys);
 
     println!(
-        "| mode | orderer delay | conflict pairs | admission mutations/s | convergence pairs/s | end-to-end pairs/s | sync p50 | sync p99 | reported conflicts | orderer calls/pair |"
+        "| mode | orderer delay | batch bound | conflict pairs | admission mutations/s | convergence pairs/s | end-to-end pairs/s | sync p50 | sync p99 | reported conflicts | ordered claims/pair | claims/batch |"
     );
-    println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!(
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+    );
     for mode in modes {
         let result = run_benchmark(mode, &args, &keys)?;
         let admission_mutations = result.conflict_pairs.saturating_mul(2);
         let end_to_end_elapsed = result.admission_elapsed + result.convergence_elapsed;
         println!(
-            "| {} | {} | {} | {:.2} | {:.2} | {:.2} | {} | {} | {} | {:.2} |",
+            "| {} | {} | {} | {} | {:.2} | {:.2} | {:.2} | {} | {} | {} | {:.2} | {:.2} |",
             mode.label(),
             orderer_delay_label(mode, args.orderer_delay_micros),
+            args.batch_items,
             result.conflict_pairs,
             rate(admission_mutations, result.admission_elapsed),
             rate(result.conflict_pairs, result.convergence_elapsed),
@@ -152,6 +180,11 @@ fn main() -> Result<(), BoxError> {
             format_ns(result.convergence_latency.p99_ns()),
             result.reported_conflicts,
             result.orderer_calls as f64 / result.conflict_pairs as f64,
+            if result.orderer_batches == 0 {
+                0.0
+            } else {
+                result.orderer_calls as f64 / result.orderer_batches as f64
+            },
         );
     }
     Ok(())
@@ -163,6 +196,7 @@ fn validate_args(args: &Args) -> Result<(), BoxError> {
         || args.conflict_keys == 0
         || args.value_size == 0
         || args.rounds == 0
+        || args.batch_items == 0
     {
         return Err(
             "shards must be a nonzero power of two and benchmark counts must be nonzero".into(),
@@ -187,6 +221,7 @@ fn run_benchmark(mode: Mode, args: &Args, keys: &[Box<[u8]>]) -> Result<BenchRes
         convergence_elapsed: Duration::ZERO,
         convergence_latency: LatencyHistogram::new(),
         orderer_calls: 0,
+        orderer_batches: 0,
     };
     for round in 0..args.rounds {
         let measured = run_round(
@@ -207,6 +242,7 @@ fn run_benchmark(mode: Mode, args: &Args, keys: &[Box<[u8]>]) -> Result<BenchRes
             .record(duration_ns(measured.convergence_elapsed));
     }
     result.orderer_calls = pair.orderer.as_ref().map_or(0, |orderer| orderer.calls());
+    result.orderer_batches = pair.orderer.as_ref().map_or(0, |orderer| orderer.batches());
     let expected_conflict_applications = result.conflict_pairs.saturating_mul(2);
     if result.reported_conflicts != expected_conflict_applications {
         return Err(format!(
@@ -284,8 +320,22 @@ fn build_pair(mode: Mode, args: &Args, keys: &[Box<[u8]>]) -> Result<BenchPair, 
             args.orderer_delay_micros,
         )))
     });
-    let left = build_map(mode, args.shards, "conflict-left", 1, orderer.clone())?;
-    let right = build_map(mode, args.shards, "conflict-right", 2, orderer.clone())?;
+    let left = build_map(
+        mode,
+        args.shards,
+        args.batch_items,
+        "conflict-left",
+        1,
+        orderer.clone(),
+    )?;
+    let right = build_map(
+        mode,
+        args.shards,
+        args.batch_items,
+        "conflict-right",
+        2,
+        orderer.clone(),
+    )?;
     let seed = round_value(args.value_size, u64::MAX, b'S');
     for key in keys {
         left.set_value_bytes(key, seed.clone())?;
@@ -309,12 +359,14 @@ fn build_pair(mode: Mode, args: &Args, keys: &[Box<[u8]>]) -> Result<BenchPair, 
 fn build_map(
     mode: Mode,
     shards: usize,
+    batch_items: usize,
     node: &str,
     incarnation: u128,
     orderer: Option<Arc<DeterministicOrderer>>,
 ) -> Result<ActiveShardMap, BoxError> {
     let mut config = ActiveSyncConfig::new("conflict-benchmark", NodeId::new(node)?);
     config.incarnation_id = IncarnationId(incarnation);
+    config.max_conflict_order_batch = batch_items;
     match mode {
         Mode::Causal => Ok(ActiveShardMap::new_causal_eventual(shards, config)?),
         Mode::Consensus => Ok(ActiveShardMap::new_consensus_ordered_eventual(
@@ -370,6 +422,7 @@ mod tests {
             value_size: 32,
             rounds: 2,
             warmup_rounds: 1,
+            batch_items: 256,
             orderer_delay_micros: 0,
         }
     }
@@ -387,5 +440,6 @@ mod tests {
         assert_eq!(consensus.conflict_pairs, 16);
         assert_eq!(consensus.reported_conflicts, 32);
         assert!(consensus.orderer_calls >= consensus.conflict_pairs);
+        assert!(consensus.orderer_batches < consensus.orderer_calls);
     }
 }

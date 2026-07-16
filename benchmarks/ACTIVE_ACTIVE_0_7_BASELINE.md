@@ -76,32 +76,35 @@ every round, each sync reported two conflict applications per key, and the
 driver verified exact convergence after every round. Admission and convergence
 were timed separately.
 
-| Mode | Synthetic decision delay | Conflict pairs | Admission mutations/s | Convergence pairs/s | End-to-end pairs/s | Sync p50 | Sync p99 | Orderer calls/pair |
+| Mode | Delay | Batch bound | Conflict pairs | Admission mutations/s | Convergence pairs/s | End-to-end pairs/s | Sync p99 | Claims/batch |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Causal | n/a | 51,200 | 2.220M | 330.4K | 254.6K | 3.1ms | 3.2ms | 0 |
-| Consensus | 0 | 51,200 | 2.247M | 195.3K | 166.4K | 5.3ms | 5.3ms | 2 |
-| Causal | n/a | 2,560 | 2.361M | 328.5K | 257.0K | 777us | 790us | 0 |
-| Consensus | 100us | 2,560 | 2.301M | 3.20K | 3.19K | 80.0ms | 80.1ms | 2 |
+| Causal | n/a | 256 | 51,200 | 2.227M | 333.9K | 256.9K | 3.2ms | n/a |
+| Consensus | 0 | 1 | 51,200 | 2.136M | 182.2K | 155.6K | 6.7ms | 1 |
+| Consensus | 0 | 256 | 51,200 | 2.320M | 186.9K | 160.9K | 5.5ms | 128 |
+| Consensus | 100us | 1 | 2,560 | 2.242M | 3.20K | 3.19K | 80.2ms | 1 |
+| Consensus | 100us | 256 | 2,560 | 2.624M | 66.0K | 62.9K | 3.9ms | 32 |
 
-At zero external latency, configuring the consensus mode still leaves local
-admission unchanged, but actual conflict convergence is 41% lower than causal
-resolution and end-to-end conflict throughput is 35% lower. With 100us of
-synthetic latency per decision, the current sequential path is bounded by two
-ordering calls per key. This is why causal eventual remains a useful mode for
-workloads that do not require externally finalized conflict order. Batching
-conflict claims is required before consensus mode is suitable for sustained
-same-key conflict storms.
+`--batch-items 1` preserves the previous per-claim path as the direct control.
+At zero external latency, bounded batching changes convergence by only 2.6%
+and improves p99 from 6.7ms to 5.5ms. With 100us synthetic latency per external
+operation, batching improves convergence by 20.6x and cuts p99 by 95%. The
+engine still processes two logical conflict applications per key pair, but it
+submits one bounded claim batch per shard block instead of one external request
+per claim. Causal eventual remains the cheaper mode when externally finalized
+conflict order is not required.
 
 Canonical conflict commands:
 
 ```bash
 taskset -c 0-7 target/release/active_sync_conflict_cost \
   --modes MODE --shards 8 --conflict-keys 1024 --value-size 1024 \
-  --warmup-rounds 5 --rounds 50 --orderer-delay-micros 0
+  --warmup-rounds 5 --rounds 50 --batch-items BATCH \
+  --orderer-delay-micros 0
 
 taskset -c 0-7 target/release/active_sync_conflict_cost \
   --modes MODE --shards 8 --conflict-keys 256 --value-size 1024 \
-  --warmup-rounds 2 --rounds 10 --orderer-delay-micros 100
+  --warmup-rounds 2 --rounds 10 --batch-items BATCH \
+  --orderer-delay-micros 100
 ```
 
 The 80/20 value-size sensitivity run used the same settings, except the 64 KiB

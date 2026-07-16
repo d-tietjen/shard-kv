@@ -141,11 +141,11 @@ causal-sync and 15.16M consensus-sync with the same 2.2us p99. Blossom is not
 called in these conflict-free rows; the result verifies that merely configuring
 the stronger conflict guarantee does not add a read-path penalty.
 
-The conflict-heavy Adam benchmark reaches 330.4K causal versus 195.3K
+The conflict-heavy Adam benchmark reaches 333.9K causal versus 186.9K batched
 consensus conflict pairs/s with a zero-latency deterministic orderer. Local
-admission remains unchanged, but consensus convergence is 41% lower because
-both replicas finalize the ambiguous conflict. At 100us synthetic latency per
-decision, the current two-call sequential path reaches 3.20K pairs/s. See
+admission remains unchanged. At 100us synthetic latency per external operation,
+batching improves consensus from 3.20K to 66.0K pairs/s and cuts sync p99 from
+80.2ms to 3.9ms. See
 [`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md)
 for the exact workload and commands. This confirms that causal eventual is a
 meaningfully cheaper option for conflict-heavy workloads; consensus mode should
@@ -373,13 +373,17 @@ more concurrent writes; a pair-specific epoch hash is not a valid winner seed
 because it can form cycles and leave replicas permanently divergent.
 
 Consensus is invoked by the shard's background synchronization path only after
-a real concurrent conflict is detected. The storage-shard lock is released
-before waiting for finality. A stale certificate is rejected if the key changes
-while consensus is in progress, and the new exact conflict set is retried up to
-`max_conflict_order_retries`. An unavailable or invalid ordering service fails
-the sync round without acknowledging its source WAL block or replacing the
-local version. Conflict-free SET, GET, sealing, and replication do not call the
-ordering service.
+a real concurrent conflict is detected. Consecutive conflicts for independent
+keys in one shard block are collected into bounded batches, with 256 claims as
+the default maximum. Repeated keys end a batch so their mutation order remains
+exact. The storage-shard lock is released before waiting for finality. Every
+decision is then matched to its claim digest and revalidated after reacquiring
+the lock. If a key changed while consensus was in progress, its new exact
+conflict is retried up to `max_conflict_order_retries`. An unavailable, partial,
+or invalid batch response is rejected before applying any decision from that
+response and fails the sync round without acknowledging its source WAL block.
+Conflict-free SET, GET, sealing, and replication do not call the ordering
+service.
 
 Applications install the integration with
 `ActiveShardMap::new_with_conflict_orderer`. The feature-provided
@@ -387,7 +391,12 @@ Applications install the integration with
 bridge is responsible for deduplicating claims, verifying finality against the
 configured validator set, maintaining the stable candidate-epoch index,
 returning the earliest certificate, enforcing a deadline, and using an
-authenticated confidential transport.
+authenticated confidential transport. `decide_batch` and `commit_conflicts`
+preserve claim order and submit unresolved claims as multiple transactions in
+one signed Blossom block. Existing custom orderers remain source compatible
+through the single-claim default implementation. Keep
+`ActiveSyncConfig::max_conflict_order_batch` at or below
+`BlossomConflictOrdererOptions::max_batch_items`; both default to 256.
 
 `shardmap-blossom-bridge` accepts loopback addresses only. Each address is
 configured with one expected validator public key, endpoint identities must be
@@ -888,6 +897,7 @@ concurrent_delete = "remove_wins"
 governance_conflict = "fail_closed"
 max_clock_skew_ms = 5000
 max_conflict_order_retries = 4
+max_conflict_order_batch = 256
 max_causal_origins_per_group = 16
 eviction_scope = "local_then_cluster"
 eviction_policy = "lru"

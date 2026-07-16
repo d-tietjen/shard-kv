@@ -91,28 +91,33 @@ async fn real_finality_receipt_survives_bridge_restart() {
         max_state_bytes_per_group: 4 * 1024 * 1024,
         max_response_bytes: 4 * 1024 * 1024,
     };
-    let claim = claim_payload(("node-a", 1), ("node-b", 1));
+    let claims = vec![
+        claim_payload(("node-a", 1), ("node-b", 1)),
+        claim_payload(("node-c", 2), ("node-d", 2)),
+    ];
 
     let first_config = config.clone();
-    let first_claim = claim.clone();
+    let first_claims = claims.clone();
     let first = tokio::task::spawn_blocking(move || {
         let bridge = BlossomTcpConflictBridge::open(first_config).unwrap();
         bridge
-            .commit_conflict(logical_group, &first_claim, Duration::from_secs(10))
+            .commit_conflicts(logical_group, &first_claims, Duration::from_secs(10))
             .unwrap()
     })
     .await
     .unwrap();
-    assert!(first.epoch_nonce > 0);
-    assert_eq!(first.candidate_epochs[0], first.epoch_nonce);
-    assert_eq!(first.candidate_epochs[1], first.epoch_nonce);
+    assert_eq!(first.len(), 2);
+    assert!(first[0].epoch_nonce > 0);
+    assert_eq!(first[0].epoch_nonce, first[1].epoch_nonce);
+    assert_eq!(first[0].candidate_epochs[0], first[0].epoch_nonce);
+    assert_eq!(first[0].candidate_epochs[1], first[0].epoch_nonce);
 
     drop(cluster);
     let restart_config = config.clone();
     let restarted = tokio::task::spawn_blocking(move || {
         let bridge = BlossomTcpConflictBridge::open(restart_config).unwrap();
         bridge
-            .commit_conflict(logical_group, &claim, Duration::from_millis(100))
+            .commit_conflicts(logical_group, &claims, Duration::from_millis(100))
             .unwrap()
     })
     .await

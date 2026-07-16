@@ -14,6 +14,7 @@ use super::{
 };
 
 const GROUP_DOMAIN: &[u8] = b"shardmap.active-sync.blossom.group.v1";
+const MAX_BATCH_ITEMS: usize = 1_024;
 
 /// Proof returned by a Blossom adapter after an exact conflict claim is part
 /// of a finalized epoch.
@@ -44,6 +45,36 @@ pub trait BlossomConflictConsensus: Send + Sync {
         claim_payload: &[u8],
         deadline: Duration,
     ) -> Result<BlossomConflictCertificate>;
+
+    /// Commits several conflict claims in one consensus operation.
+    ///
+    /// The default preserves compatibility for bridges that only support one
+    /// transaction at a time while enforcing one deadline across the batch.
+    fn commit_conflicts(
+        &self,
+        group_id: [u8; 32],
+        claim_payloads: &[Vec<u8>],
+        deadline: Duration,
+    ) -> Result<Vec<BlossomConflictCertificate>> {
+        if claim_payloads.is_empty() {
+            return Err(ShardCacheError::Protocol(
+                "Blossom conflict batch is empty".into(),
+            ));
+        }
+        let started = Instant::now();
+        claim_payloads
+            .iter()
+            .map(|payload| {
+                let remaining = deadline.saturating_sub(started.elapsed());
+                if remaining.is_zero() {
+                    return Err(ShardCacheError::Protocol(
+                        "Blossom conflict ordering deadline exceeded".into(),
+                    ));
+                }
+                self.commit_conflict(group_id, payload, remaining)
+            })
+            .collect()
+    }
 }
 
 /// Bounded execution policy for Blossom conflict ordering.
@@ -51,6 +82,7 @@ pub trait BlossomConflictConsensus: Send + Sync {
 pub struct BlossomConflictOrdererOptions {
     pub deadline: Duration,
     pub queue_capacity_per_group: usize,
+    pub max_batch_items: usize,
     pub decision_cache_capacity_per_group: usize,
     pub candidate_cache_capacity_per_group: usize,
     pub max_groups: usize,
@@ -65,6 +97,7 @@ impl Default for BlossomConflictOrdererOptions {
         Self {
             deadline: Duration::from_secs(2),
             queue_capacity_per_group: 64,
+            max_batch_items: 256,
             decision_cache_capacity_per_group: 4_096,
             candidate_cache_capacity_per_group: 8_192,
             max_groups: 1_024,
@@ -80,6 +113,7 @@ impl BlossomConflictOrdererOptions {
     fn validate(&self) -> Result<()> {
         if self.deadline.is_zero()
             || self.queue_capacity_per_group == 0
+            || self.max_batch_items == 0
             || self.decision_cache_capacity_per_group == 0
             || self.candidate_cache_capacity_per_group == 0
             || self.max_groups == 0
@@ -88,6 +122,11 @@ impl BlossomConflictOrdererOptions {
         {
             return Err(ShardCacheError::Config(
                 "Blossom conflict ordering limits and deadlines must be nonzero".into(),
+            ));
+        }
+        if self.max_batch_items > MAX_BATCH_ITEMS {
+            return Err(ShardCacheError::Config(
+                "Blossom conflict ordering batch exceeds its hard item limit".into(),
             ));
         }
         Ok(())
@@ -99,6 +138,8 @@ impl BlossomConflictOrdererOptions {
 pub struct BlossomConflictOrdererHealth {
     pub groups: u64,
     pub requests: u64,
+    pub batches: u64,
+    pub consensus_batches: u64,
     pub cache_hits: u64,
     pub retries: u64,
     pub timeouts: u64,
@@ -113,6 +154,8 @@ pub struct BlossomConflictOrdererHealth {
 struct OrdererMetrics {
     groups: AtomicU64,
     requests: AtomicU64,
+    batches: AtomicU64,
+    consensus_batches: AtomicU64,
     cache_hits: AtomicU64,
     retries: AtomicU64,
     timeouts: AtomicU64,
@@ -128,6 +171,8 @@ impl OrdererMetrics {
         BlossomConflictOrdererHealth {
             groups: self.groups.load(Ordering::Relaxed),
             requests: self.requests.load(Ordering::Relaxed),
+            batches: self.batches.load(Ordering::Relaxed),
+            consensus_batches: self.consensus_batches.load(Ordering::Relaxed),
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
             retries: self.retries.load(Ordering::Relaxed),
             timeouts: self.timeouts.load(Ordering::Relaxed),
@@ -218,16 +263,40 @@ impl fmt::Debug for BlossomConflictOrderer {
 
 impl ConflictOrderer for BlossomConflictOrderer {
     fn decide(&self, claim: &ConflictClaim) -> Result<ConflictDecision> {
-        self.metrics.requests.fetch_add(1, Ordering::Relaxed);
-        let group_id = Self::group_id(claim);
+        self.decide_batch(std::slice::from_ref(claim))?
+            .pop()
+            .ok_or_else(|| ShardCacheError::Protocol("Blossom orderer returned no decision".into()))
+    }
+
+    fn decide_batch(&self, claims: &[ConflictClaim]) -> Result<Vec<ConflictDecision>> {
+        if claims.is_empty() || claims.len() > self.options.max_batch_items {
+            return Err(ShardCacheError::Backpressure(
+                "Blossom conflict ordering batch is empty or exceeds its bound",
+            ));
+        }
+        self.metrics
+            .requests
+            .fetch_add(claims.len() as u64, Ordering::Relaxed);
+        self.metrics.batches.fetch_add(1, Ordering::Relaxed);
+
+        let group_id = Self::group_id(&claims[0]);
+        if claims
+            .iter()
+            .skip(1)
+            .any(|claim| Self::group_id(claim) != group_id)
+        {
+            return Err(ShardCacheError::Protocol(
+                "Blossom conflict ordering batch spans multiple shard groups".into(),
+            ));
+        }
         self.lane(group_id)?
-            .decide(claim.clone(), self.options.deadline)
+            .decide_batch(claims.to_vec(), self.options.deadline)
     }
 }
 
 struct OrderingJob {
-    claim: ConflictClaim,
-    response: SyncSender<Result<ConflictDecision>>,
+    claims: Vec<ConflictClaim>,
+    response: SyncSender<Result<Vec<ConflictDecision>>>,
 }
 
 #[derive(Debug, Default)]
@@ -283,10 +352,26 @@ impl OrderingLane {
         Ok(lane)
     }
 
-    fn decide(&self, claim: ConflictClaim, deadline: Duration) -> Result<ConflictDecision> {
-        if let Some(decision) = self.cache.lock().decisions.get(&claim.digest()).cloned() {
-            self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(decision);
+    fn decide_batch(
+        &self,
+        claims: Vec<ConflictClaim>,
+        deadline: Duration,
+    ) -> Result<Vec<ConflictDecision>> {
+        let mut decisions = vec![None; claims.len()];
+        let mut unresolved = Vec::with_capacity(claims.len());
+        {
+            let cache = self.cache.lock();
+            for (index, claim) in claims.into_iter().enumerate() {
+                if let Some(decision) = cache.decisions.get(&claim.digest()).cloned() {
+                    self.metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    decisions[index] = Some(decision);
+                } else {
+                    unresolved.push((index, claim));
+                }
+            }
+        }
+        if unresolved.is_empty() {
+            return collect_decisions(decisions);
         }
         if !self.admit() {
             self.metrics
@@ -298,7 +383,19 @@ impl OrderingLane {
         }
 
         let (response, receiver) = sync_channel(1);
-        match self.sender.try_send(OrderingJob { claim, response }) {
+        let unresolved_indices = unresolved
+            .iter()
+            .map(|(index, _)| *index)
+            .collect::<Vec<_>>();
+        let unresolved_claims = unresolved
+            .into_iter()
+            .map(|(_, claim)| claim)
+            .collect::<Vec<_>>();
+        let unresolved_count = unresolved_claims.len();
+        match self.sender.try_send(OrderingJob {
+            claims: unresolved_claims,
+            response,
+        }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 self.metrics.queue_full.fetch_add(1, Ordering::Relaxed);
@@ -315,10 +412,22 @@ impl OrderingLane {
             }
         }
         match receiver.recv_timeout(deadline) {
-            Ok(Ok(decision)) => {
+            Ok(Ok(ordered)) => {
+                if ordered.len() != unresolved_indices.len() {
+                    self.record_failure();
+                    self.metrics.failures.fetch_add(1, Ordering::Relaxed);
+                    return Err(ShardCacheError::Protocol(
+                        "Blossom ordering lane returned the wrong decision count".into(),
+                    ));
+                }
+                for (index, decision) in unresolved_indices.into_iter().zip(ordered) {
+                    decisions[index] = Some(decision);
+                }
                 self.record_success();
-                self.metrics.completed.fetch_add(1, Ordering::Relaxed);
-                Ok(decision)
+                self.metrics
+                    .completed
+                    .fetch_add(unresolved_count as u64, Ordering::Relaxed);
+                collect_decisions(decisions)
             }
             Ok(Err(error)) => {
                 self.record_failure();
@@ -425,51 +534,106 @@ fn run_ordering_lane(
     receiver: Receiver<OrderingJob>,
 ) {
     while let Ok(job) = receiver.recv() {
-        let digest = job.claim.digest();
-        if let Some(decision) = cache.lock().decisions.get(&digest).cloned() {
-            metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
-            let _ = job.response.send(Ok(decision));
-            continue;
-        }
-
-        let started = Instant::now();
-        let mut attempt = 0usize;
-        let result = loop {
-            let remaining = options.deadline.saturating_sub(started.elapsed());
-            if remaining.is_zero() {
-                break Err(ShardCacheError::Protocol(
-                    "Blossom conflict ordering deadline exceeded".into(),
-                ));
-            }
-            let result =
-                consensus.commit_conflict(group_id, &job.claim.canonical_bytes(), remaining);
-            match result {
-                Ok(certificate) => {
-                    break validate_and_cache_decision(
-                        &job.claim,
-                        group_id,
-                        certificate,
-                        &cache,
-                        &metrics,
-                    );
-                }
-                Err(error) if attempt < options.max_retries => {
-                    attempt += 1;
-                    metrics.retries.fetch_add(1, Ordering::Relaxed);
-                    let delay = options
-                        .retry_backoff
-                        .saturating_mul(u32::try_from(attempt).unwrap_or(u32::MAX));
-                    let remaining = options.deadline.saturating_sub(started.elapsed());
-                    if remaining <= delay {
-                        break Err(error);
-                    }
-                    thread::sleep(delay);
-                }
-                Err(error) => break Err(error),
-            }
-        };
+        let result = order_claim_batch(
+            &job.claims,
+            group_id,
+            consensus.as_ref(),
+            &options,
+            &metrics,
+            &cache,
+        );
         let _ = job.response.send(result);
     }
+}
+
+fn order_claim_batch(
+    claims: &[ConflictClaim],
+    group_id: [u8; 32],
+    consensus: &dyn BlossomConflictConsensus,
+    options: &BlossomConflictOrdererOptions,
+    metrics: &OrdererMetrics,
+    cache: &Mutex<LaneCache>,
+) -> Result<Vec<ConflictDecision>> {
+    let mut decisions = vec![None; claims.len()];
+    let mut unresolved_indices = Vec::with_capacity(claims.len());
+    let mut unresolved_claims = Vec::with_capacity(claims.len());
+    {
+        let cache = cache.lock();
+        for (index, claim) in claims.iter().enumerate() {
+            if let Some(decision) = cache.decisions.get(&claim.digest()).cloned() {
+                metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+                decisions[index] = Some(decision);
+            } else {
+                unresolved_indices.push(index);
+                unresolved_claims.push(claim);
+            }
+        }
+    }
+    if unresolved_claims.is_empty() {
+        return collect_decisions(decisions);
+    }
+
+    let payloads = unresolved_claims
+        .iter()
+        .map(|claim| claim.canonical_bytes())
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    let mut attempt = 0usize;
+    let certificates = loop {
+        let remaining = options.deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(ShardCacheError::Protocol(
+                "Blossom conflict ordering deadline exceeded".into(),
+            ));
+        }
+        metrics.consensus_batches.fetch_add(1, Ordering::Relaxed);
+        match consensus.commit_conflicts(group_id, &payloads, remaining) {
+            Ok(certificates) => break certificates,
+            Err(error) if attempt < options.max_retries => {
+                attempt += 1;
+                metrics.retries.fetch_add(1, Ordering::Relaxed);
+                let delay = options
+                    .retry_backoff
+                    .saturating_mul(u32::try_from(attempt).unwrap_or(u32::MAX));
+                let remaining = options.deadline.saturating_sub(started.elapsed());
+                if remaining <= delay {
+                    return Err(error);
+                }
+                thread::sleep(delay);
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    if certificates.len() != unresolved_claims.len() {
+        return Err(ShardCacheError::Protocol(
+            "Blossom consensus returned the wrong certificate count".into(),
+        ));
+    }
+    for ((index, claim), certificate) in unresolved_indices
+        .into_iter()
+        .zip(unresolved_claims)
+        .zip(certificates)
+    {
+        decisions[index] = Some(validate_and_cache_decision(
+            claim,
+            group_id,
+            certificate,
+            cache,
+            metrics,
+        )?);
+    }
+    collect_decisions(decisions)
+}
+
+fn collect_decisions(decisions: Vec<Option<ConflictDecision>>) -> Result<Vec<ConflictDecision>> {
+    decisions
+        .into_iter()
+        .map(|decision| {
+            decision.ok_or_else(|| {
+                ShardCacheError::Protocol("Blossom ordering decision is missing".into())
+            })
+        })
+        .collect()
 }
 
 fn validate_and_cache_decision(
@@ -565,6 +729,52 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct BatchRecordingConsensus {
+        batches: AtomicUsize,
+    }
+
+    impl BlossomConflictConsensus for BatchRecordingConsensus {
+        fn commit_conflict(
+            &self,
+            _group_id: [u8; 32],
+            _claim_payload: &[u8],
+            _deadline: Duration,
+        ) -> Result<BlossomConflictCertificate> {
+            Err(ShardCacheError::Protocol(
+                "batch test unexpectedly used the single-claim path".into(),
+            ))
+        }
+
+        fn commit_conflicts(
+            &self,
+            group_id: [u8; 32],
+            claim_payloads: &[Vec<u8>],
+            _deadline: Duration,
+        ) -> Result<Vec<BlossomConflictCertificate>> {
+            self.batches.fetch_add(1, AtomicOrdering::Relaxed);
+            claim_payloads
+                .iter()
+                .map(|payload| {
+                    Ok(BlossomConflictCertificate {
+                        group_id,
+                        epoch_nonce: 7,
+                        epoch_hash: [9; 32],
+                        claim_digest: Sha256::digest(
+                            [
+                                b"shardmap.active-sync.conflict-claim.v1".as_slice(),
+                                payload.as_slice(),
+                            ]
+                            .concat(),
+                        )
+                        .into(),
+                        candidate_epochs: [3, 7],
+                    })
+                })
+                .collect()
+        }
+    }
+
     fn candidate(node: &str, sequence: u64) -> ConflictCandidate {
         ConflictCandidate {
             dot: MutationDot {
@@ -603,6 +813,41 @@ mod tests {
         let second = orderer.decide(&claim).unwrap();
         assert_eq!(first, second);
         assert_eq!(consensus.payloads.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn orderer_submits_uncached_claims_in_one_consensus_batch() {
+        let consensus = Arc::new(BatchRecordingConsensus::default());
+        let orderer =
+            BlossomConflictOrderer::new(consensus.clone(), Duration::from_secs(1)).unwrap();
+        let claims = vec![
+            ConflictClaim::new(
+                b"cluster",
+                0,
+                b"first-key",
+                candidate("a", 1),
+                candidate("b", 2),
+            ),
+            ConflictClaim::new(
+                b"cluster",
+                0,
+                b"second-key",
+                candidate("a", 1),
+                candidate("b", 2),
+            ),
+        ];
+
+        let first = orderer.decide_batch(&claims).unwrap();
+        let second = orderer.decide_batch(&claims).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(consensus.batches.load(AtomicOrdering::Relaxed), 1);
+        let health = orderer.health_snapshot();
+        assert_eq!(health.requests, 4);
+        assert_eq!(health.batches, 2);
+        assert_eq!(health.consensus_batches, 1);
+        assert_eq!(health.cache_hits, 2);
+        assert_eq!(health.completed, 2);
     }
 
     #[test]
