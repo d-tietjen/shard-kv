@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 use rustls::pki_types::ServerName;
 use sha2::{Digest, Sha256};
 
@@ -17,6 +17,20 @@ const WIRE_VERSION: u8 = 1;
 const WIRE_HEADER_BYTES: usize = 10;
 const ACTIVE_SYNC_ALPN: &[u8] = b"shardmap-active-sync/1";
 const MAX_MANIFEST_ORIGINS: usize = 65_536;
+
+type CausalOriginInterner = BTreeMap<CausalOrigin, Arc<CausalOrigin>>;
+
+fn intern_causal_origin(
+    interner: &mut CausalOriginInterner,
+    origin: CausalOrigin,
+) -> Arc<CausalOrigin> {
+    if let Some(shared) = interner.get(&origin) {
+        return Arc::clone(shared);
+    }
+    let shared = Arc::new(origin.clone());
+    interner.insert(origin, Arc::clone(&shared));
+    shared
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -301,6 +315,655 @@ impl ActiveSyncTlsPeer {
             server_name,
             credentials,
         })
+    }
+
+    fn same_route(&self, other: &Self) -> bool {
+        self.node_id == other.node_id
+            && self.shard_addresses == other.shard_addresses
+            && self.server_name == other.server_name
+    }
+}
+
+/// Timing and resource bounds for automatic active-sync membership.
+#[derive(Debug, Clone)]
+pub struct ActiveSyncMembershipOptions {
+    /// Interval between successful synchronization rounds.
+    pub sync_interval: Duration,
+    /// Delay before retrying after a peer synchronization failure.
+    pub retry_interval: Duration,
+    /// Time after which a draining peer is reported as timed out.
+    pub drain_timeout: Duration,
+    /// Maximum number of desired peers. Draining peers may temporarily double
+    /// this bound while one revision replaces the complete membership.
+    pub max_members: usize,
+    /// Per-peer synchronization bounds.
+    pub sync_options: SyncOptions,
+    /// Connection, handshake, and I/O deadline for each shard round.
+    pub io_timeout: Duration,
+    /// Maximum accepted active-sync frame size.
+    pub max_frame_bytes: usize,
+}
+
+impl Default for ActiveSyncMembershipOptions {
+    fn default() -> Self {
+        Self {
+            sync_interval: Duration::from_secs(1),
+            retry_interval: Duration::from_millis(250),
+            drain_timeout: Duration::from_secs(30),
+            max_members: 16,
+            sync_options: SyncOptions::default(),
+            io_timeout: Duration::from_secs(10),
+            max_frame_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+impl ActiveSyncMembershipOptions {
+    fn validate(&self) -> Result<()> {
+        if self.sync_interval.is_zero()
+            || self.retry_interval.is_zero()
+            || self.drain_timeout.is_zero()
+            || self.max_members == 0
+            || self.max_members > 65_536
+            || self.sync_options.max_blocks == 0
+            || self.sync_options.max_bytes == 0
+            || self.io_timeout.is_zero()
+            || self.max_frame_bytes < 1024
+        {
+            return Err(ShardCacheError::Config(
+                "active-sync membership limits and deadlines must be nonzero and bounded".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Lifecycle of one peer in the locally reconciled membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveSyncMemberState {
+    Joining,
+    Active,
+    Draining,
+}
+
+/// Bounded per-peer membership health. Addresses and credentials are omitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSyncMemberHealth {
+    pub node_id: NodeId,
+    pub state: ActiveSyncMemberState,
+    pub caught_up_shards: usize,
+    pub shard_count: usize,
+    pub ready_to_retire: bool,
+    pub drain_timed_out: bool,
+    pub successful_rounds: u64,
+    pub failed_rounds: u64,
+    pub consecutive_failures: u64,
+}
+
+/// Health and progress for automatic TLS peer reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveSyncMembershipHealthSnapshot {
+    pub revision: u64,
+    pub desired_members: usize,
+    pub joining_members: usize,
+    pub active_members: usize,
+    pub draining_members: usize,
+    pub worker_count: usize,
+    pub successful_rounds: u64,
+    pub failed_rounds: u64,
+    pub rejected_updates: u64,
+    pub forced_retirements: u64,
+    pub members: Vec<ActiveSyncMemberHealth>,
+}
+
+struct MembershipPeer {
+    peer: ActiveSyncTlsPeer,
+    state: ActiveSyncMemberState,
+    route_revision: u64,
+    caught_up_shards: Box<[bool]>,
+    ready_to_retire: bool,
+    drain_started: Option<Instant>,
+    successful_rounds: u64,
+    failed_rounds: u64,
+    consecutive_failures: u64,
+}
+
+impl MembershipPeer {
+    fn new(peer: ActiveSyncTlsPeer, revision: u64, shard_count: usize) -> Self {
+        Self {
+            peer,
+            state: ActiveSyncMemberState::Joining,
+            route_revision: revision,
+            caught_up_shards: vec![false; shard_count].into_boxed_slice(),
+            ready_to_retire: false,
+            drain_started: None,
+            successful_rounds: 0,
+            failed_rounds: 0,
+            consecutive_failures: 0,
+        }
+    }
+
+    fn reset_progress(&mut self) {
+        self.caught_up_shards.fill(false);
+        self.ready_to_retire = false;
+        self.consecutive_failures = 0;
+    }
+}
+
+struct MembershipState {
+    revision: u64,
+    peers: BTreeMap<NodeId, MembershipPeer>,
+    successful_rounds: u64,
+    failed_rounds: u64,
+    rejected_updates: u64,
+    forced_retirements: u64,
+}
+
+#[derive(Default)]
+struct MembershipWake {
+    epoch: Mutex<u64>,
+    changed: Condvar,
+}
+
+impl MembershipWake {
+    fn notify_all(&self) {
+        let mut epoch = self.epoch.lock();
+        *epoch = epoch.wrapping_add(1);
+        self.changed.notify_all();
+    }
+
+    fn wait(&self, observed_epoch: &mut u64, duration: Duration) {
+        let mut epoch = self.epoch.lock();
+        if *epoch == *observed_epoch {
+            self.changed.wait_for(&mut epoch, duration);
+        }
+        *observed_epoch = *epoch;
+    }
+}
+
+/// Revisioned automatic TLS membership and synchronization coordinator.
+///
+/// Exactly one coordinator thread is created per local shard. The coordinator
+/// never participates in local GET or mutation paths. Adding a peer starts
+/// catch-up automatically; removing one keeps it in `Draining` until every
+/// shard completes a bounded quiet round. Call [`Self::retire_drained`] only
+/// after the removed writer has been fenced by the deployment control plane.
+pub struct ActiveSyncTlsMembership {
+    local_node_id: NodeId,
+    shard_count: usize,
+    state: Arc<RwLock<MembershipState>>,
+    options: ActiveSyncMembershipOptions,
+    shutdown: Arc<AtomicBool>,
+    wake: Arc<MembershipWake>,
+    joins: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl fmt::Debug for ActiveSyncTlsMembership {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let active_threads = self
+            .joins
+            .lock()
+            .iter()
+            .filter(|join| !join.is_finished())
+            .count();
+        let state = self.state.read();
+        formatter
+            .debug_struct("ActiveSyncTlsMembership")
+            .field("local_node_id", &self.local_node_id)
+            .field("shard_count", &self.shard_count)
+            .field("revision", &state.revision)
+            .field("member_count", &state.peers.len())
+            .field("active_threads", &active_threads)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ActiveSyncTlsMembership {
+    /// Starts shard-owned reconciliation for the initial membership revision.
+    pub fn start(
+        map: ActiveShardMap,
+        revision: u64,
+        peers: Vec<ActiveSyncTlsPeer>,
+        options: ActiveSyncMembershipOptions,
+    ) -> Result<Self> {
+        options.validate()?;
+        validate_membership_peers(&map, &peers, options.max_members)?;
+        let shard_count = map.shard_count();
+        let local_node_id = map.node_id().clone();
+        let state = Arc::new(RwLock::new(MembershipState {
+            revision,
+            peers: peers
+                .into_iter()
+                .map(|peer| {
+                    let node_id = peer.node_id.clone();
+                    (node_id, MembershipPeer::new(peer, revision, shard_count))
+                })
+                .collect(),
+            successful_rounds: 0,
+            failed_rounds: 0,
+            rejected_updates: 0,
+            forced_retirements: 0,
+        }));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(MembershipWake::default());
+        let mut joins = Vec::with_capacity(shard_count);
+        for shard_id in 0..shard_count {
+            let worker_map = map.clone();
+            let worker_state = Arc::clone(&state);
+            let worker_options = options.clone();
+            let worker_shutdown = Arc::clone(&shutdown);
+            let worker_wake = Arc::clone(&wake);
+            match thread::Builder::new()
+                .name(format!("active-membership-shard-{shard_id}"))
+                .spawn(move || {
+                    run_membership_worker(
+                        worker_map,
+                        shard_id,
+                        worker_state,
+                        worker_options,
+                        worker_shutdown,
+                        worker_wake,
+                    );
+                }) {
+                Ok(join) => joins.push(join),
+                Err(error) => {
+                    shutdown.store(true, Ordering::Release);
+                    wake.notify_all();
+                    for join in joins {
+                        let _ = join.join();
+                    }
+                    return Err(ShardCacheError::Config(format!(
+                        "failed to start active-sync membership worker: {error}"
+                    )));
+                }
+            }
+        }
+        Ok(Self {
+            local_node_id,
+            shard_count,
+            state,
+            options,
+            shutdown,
+            wake,
+            joins: Mutex::new(joins),
+        })
+    }
+
+    /// Applies an exact desired peer set at a monotonically increasing revision.
+    /// Equal revisions are accepted only when their routes are identical.
+    pub fn apply_membership(&self, revision: u64, peers: Vec<ActiveSyncTlsPeer>) -> Result<()> {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(ShardCacheError::Config(
+                "active-sync membership coordinator is shut down".into(),
+            ));
+        }
+        if let Err(error) = validate_membership_peer_values(
+            &self.local_node_id,
+            self.shard_count,
+            &peers,
+            self.options.max_members,
+        ) {
+            let mut state = self.state.write();
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            return Err(error);
+        }
+        let desired = peers
+            .into_iter()
+            .map(|peer| (peer.node_id.clone(), peer))
+            .collect::<BTreeMap<_, _>>();
+        let mut state = self.state.write();
+        if revision < state.revision {
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            return Err(ShardCacheError::Config(
+                "active-sync membership revision is stale".into(),
+            ));
+        }
+        if revision == state.revision {
+            let current_desired_count = state
+                .peers
+                .values()
+                .filter(|member| member.state != ActiveSyncMemberState::Draining)
+                .count();
+            let identical = current_desired_count == desired.len()
+                && desired.iter().all(|(node_id, peer)| {
+                    state.peers.get(node_id).is_some_and(|member| {
+                        member.state != ActiveSyncMemberState::Draining
+                            && member.peer.same_route(peer)
+                    })
+                });
+            if identical {
+                return Ok(());
+            }
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            return Err(ShardCacheError::Config(
+                "active-sync membership revision was reused with different routes".into(),
+            ));
+        }
+
+        let retiring_members = state
+            .peers
+            .keys()
+            .filter(|node_id| !desired.contains_key(*node_id))
+            .count();
+        let maximum_transition_members = self.options.max_members.saturating_mul(2);
+        if desired.len().saturating_add(retiring_members) > maximum_transition_members {
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            return Err(ShardCacheError::Config(
+                "active-sync membership has too many unretired draining peers".into(),
+            ));
+        }
+
+        let now = Instant::now();
+        for member in state.peers.values_mut() {
+            if !desired.contains_key(&member.peer.node_id)
+                && member.state != ActiveSyncMemberState::Draining
+            {
+                member.state = ActiveSyncMemberState::Draining;
+                member.route_revision = revision;
+                member.drain_started = Some(now);
+                member.reset_progress();
+            }
+        }
+        for (node_id, peer) in desired {
+            match state.peers.get_mut(&node_id) {
+                Some(member) if member.peer.same_route(&peer) => {
+                    if member.state == ActiveSyncMemberState::Draining {
+                        member.state = ActiveSyncMemberState::Joining;
+                        member.route_revision = revision;
+                        member.drain_started = None;
+                        member.reset_progress();
+                    }
+                    member.peer = peer;
+                    member.route_revision = revision;
+                }
+                Some(member) => {
+                    member.peer = peer;
+                    member.state = ActiveSyncMemberState::Joining;
+                    member.route_revision = revision;
+                    member.drain_started = None;
+                    member.reset_progress();
+                }
+                None => {
+                    state.peers.insert(
+                        node_id,
+                        MembershipPeer::new(peer, revision, self.shard_count),
+                    );
+                }
+            }
+        }
+        state.revision = revision;
+        drop(state);
+        self.wake.notify_all();
+        Ok(())
+    }
+
+    /// Removes a caught-up draining peer after its writer was fenced before
+    /// the removal revision was applied.
+    pub fn retire_drained(&self, revision: u64, node_id: &NodeId) -> Result<()> {
+        let mut state = self.state.write();
+        validate_retirement(&state, revision, node_id, true)?;
+        state.peers.remove(node_id);
+        drop(state);
+        self.wake.notify_all();
+        Ok(())
+    }
+
+    /// Explicitly removes a draining peer that cannot complete catch-up.
+    ///
+    /// This can discard mutations known only to that peer and must be a
+    /// control-plane decision, not an automatic timeout action.
+    pub fn force_retire(&self, revision: u64, node_id: &NodeId) -> Result<()> {
+        let mut state = self.state.write();
+        validate_retirement(&state, revision, node_id, false)?;
+        state.peers.remove(node_id);
+        state.forced_retirements = state.forced_retirements.saturating_add(1);
+        drop(state);
+        self.wake.notify_all();
+        Ok(())
+    }
+
+    pub fn health_snapshot(&self) -> ActiveSyncMembershipHealthSnapshot {
+        let worker_count = self
+            .joins
+            .lock()
+            .iter()
+            .filter(|join| !join.is_finished())
+            .count();
+        let state = self.state.read();
+        let now = Instant::now();
+        let members = state
+            .peers
+            .values()
+            .map(|member| ActiveSyncMemberHealth {
+                node_id: member.peer.node_id.clone(),
+                state: member.state,
+                caught_up_shards: member
+                    .caught_up_shards
+                    .iter()
+                    .filter(|caught_up| **caught_up)
+                    .count(),
+                shard_count: self.shard_count,
+                ready_to_retire: member.ready_to_retire,
+                drain_timed_out: member.state == ActiveSyncMemberState::Draining
+                    && member.drain_started.is_some_and(|started| {
+                        now.duration_since(started) >= self.options.drain_timeout
+                    }),
+                successful_rounds: member.successful_rounds,
+                failed_rounds: member.failed_rounds,
+                consecutive_failures: member.consecutive_failures,
+            })
+            .collect::<Vec<_>>();
+        ActiveSyncMembershipHealthSnapshot {
+            revision: state.revision,
+            desired_members: members
+                .iter()
+                .filter(|member| member.state != ActiveSyncMemberState::Draining)
+                .count(),
+            joining_members: members
+                .iter()
+                .filter(|member| member.state == ActiveSyncMemberState::Joining)
+                .count(),
+            active_members: members
+                .iter()
+                .filter(|member| member.state == ActiveSyncMemberState::Active)
+                .count(),
+            draining_members: members
+                .iter()
+                .filter(|member| member.state == ActiveSyncMemberState::Draining)
+                .count(),
+            worker_count,
+            successful_rounds: state.successful_rounds,
+            failed_rounds: state.failed_rounds,
+            rejected_updates: state.rejected_updates,
+            forced_retirements: state.forced_retirements,
+            members,
+        }
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.wake.notify_all();
+        let joins = self.joins.lock().drain(..).collect::<Vec<_>>();
+        for join in joins {
+            if join.join().is_err() {
+                tracing::warn!("active-sync membership worker panicked during shutdown");
+            }
+        }
+    }
+}
+
+impl Drop for ActiveSyncTlsMembership {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn validate_membership_peers(
+    map: &ActiveShardMap,
+    peers: &[ActiveSyncTlsPeer],
+    max_members: usize,
+) -> Result<()> {
+    validate_membership_peer_values(map.node_id(), map.shard_count(), peers, max_members)
+}
+
+fn validate_membership_peer_values(
+    local_node_id: &NodeId,
+    shard_count: usize,
+    peers: &[ActiveSyncTlsPeer],
+    max_members: usize,
+) -> Result<()> {
+    if peers.len() > max_members {
+        return Err(ShardCacheError::Config(
+            "active-sync membership exceeds max_members".into(),
+        ));
+    }
+    let mut node_ids = HashSet::with_capacity(peers.len());
+    for peer in peers {
+        if peer.node_id == *local_node_id {
+            return Err(ShardCacheError::Config(
+                "active-sync membership must not contain the local node".into(),
+            ));
+        }
+        if peer.shard_addresses.len() != shard_count {
+            return Err(ShardCacheError::Config(
+                "active-sync membership peer address count does not match local shard count".into(),
+            ));
+        }
+        if !node_ids.insert(peer.node_id.clone()) {
+            return Err(ShardCacheError::Config(
+                "active-sync membership contains a duplicate node ID".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_retirement(
+    state: &MembershipState,
+    revision: u64,
+    node_id: &NodeId,
+    require_caught_up: bool,
+) -> Result<()> {
+    if revision != state.revision {
+        return Err(ShardCacheError::Config(
+            "active-sync retirement revision does not match current membership".into(),
+        ));
+    }
+    let member = state.peers.get(node_id).ok_or_else(|| {
+        ShardCacheError::Config("active-sync retirement peer does not exist".into())
+    })?;
+    if member.state != ActiveSyncMemberState::Draining {
+        return Err(ShardCacheError::Config(
+            "active-sync retirement peer is not draining".into(),
+        ));
+    }
+    if require_caught_up && !member.ready_to_retire {
+        return Err(ShardCacheError::Config(
+            "active-sync draining peer has not completed shard catch-up".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn run_membership_worker(
+    map: ActiveShardMap,
+    shard_id: usize,
+    state: Arc<RwLock<MembershipState>>,
+    options: ActiveSyncMembershipOptions,
+    shutdown: Arc<AtomicBool>,
+    wake: Arc<MembershipWake>,
+) {
+    let mut observed_epoch = 0;
+    let mut round = 0usize;
+    while !shutdown.load(Ordering::Acquire) {
+        let mut peers = state
+            .read()
+            .peers
+            .values()
+            .map(|member| (member.peer.clone(), member.route_revision))
+            .collect::<Vec<_>>();
+        if peers.is_empty() {
+            wake.wait(&mut observed_epoch, options.sync_interval);
+            continue;
+        }
+        if let Err(error) = map.seal_pending_shard(shard_id) {
+            tracing::warn!(shard_id, "active-sync membership seal failed: {error}");
+            wake.wait(&mut observed_epoch, options.retry_interval);
+            continue;
+        }
+        if !peers.is_empty() {
+            let peer_count = peers.len();
+            peers.rotate_left((round.wrapping_add(shard_id)) % peer_count);
+        }
+        let mut round_failed = false;
+        for (peer, route_revision) in peers {
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            let result = sync_tls_shard(
+                &map,
+                &peer,
+                shard_id,
+                &options.sync_options,
+                options.io_timeout,
+                options.max_frame_bytes,
+            );
+            record_membership_round(&state, &peer.node_id, route_revision, shard_id, &result);
+            round_failed |= result.is_err();
+        }
+        round = round.wrapping_add(1);
+        let delay = if round_failed {
+            options.retry_interval
+        } else {
+            options.sync_interval
+        };
+        wake.wait(&mut observed_epoch, delay);
+    }
+}
+
+fn record_membership_round(
+    state: &RwLock<MembershipState>,
+    node_id: &NodeId,
+    route_revision: u64,
+    shard_id: usize,
+    result: &Result<BidirectionalSyncReport>,
+) {
+    let mut state = state.write();
+    let Some(member) = state.peers.get_mut(node_id) else {
+        return;
+    };
+    if member.route_revision != route_revision || shard_id >= member.caught_up_shards.len() {
+        return;
+    }
+    match result {
+        Ok(report) => {
+            member.successful_rounds = member.successful_rounds.saturating_add(1);
+            member.consecutive_failures = 0;
+            member.caught_up_shards[shard_id] = !report.truncated;
+            let caught_up = member.caught_up_shards.iter().all(|caught_up| *caught_up);
+            match member.state {
+                ActiveSyncMemberState::Joining if caught_up => {
+                    member.state = ActiveSyncMemberState::Active;
+                }
+                ActiveSyncMemberState::Draining => {
+                    member.ready_to_retire = caught_up;
+                }
+                ActiveSyncMemberState::Joining | ActiveSyncMemberState::Active => {}
+            }
+        }
+        Err(_) => {
+            member.failed_rounds = member.failed_rounds.saturating_add(1);
+            member.consecutive_failures = member.consecutive_failures.saturating_add(1);
+            member.caught_up_shards[shard_id] = false;
+            if member.state == ActiveSyncMemberState::Draining {
+                member.ready_to_retire = false;
+            }
+        }
+    }
+    if result.is_ok() {
+        state.successful_rounds = state.successful_rounds.saturating_add(1);
+    } else {
+        state.failed_rounds = state.failed_rounds.saturating_add(1);
     }
 }
 
@@ -713,6 +1376,7 @@ fn sync_tls_shard(
     report.duplicate_mutations += received.duplicate_mutations;
     report.conflicts += received.conflicts;
     report.state_snapshot_fallbacks += received.state_snapshot_fallbacks;
+    report.truncated |= received.truncated;
     write_frame(&mut stream, WireFrameKind::Ack, &[], max_frame_bytes)?;
     Ok(report)
 }
@@ -1205,9 +1869,16 @@ fn decode_block(payload: &[u8]) -> Result<SyncBlock> {
             "active-sync block record count exceeds payload bounds".into(),
         ));
     }
+    let mut origins = CausalOriginInterner::new();
+    let block_origin = CausalOrigin {
+        node_id: origin.node_id.clone(),
+        incarnation_id: origin.incarnation_id,
+        shard_id: origin.shard_id,
+    };
+    intern_causal_origin(&mut origins, block_origin);
     let mut records = Vec::with_capacity(count);
     for _ in 0..count {
-        records.push(decode_mutation(&mut decoder)?);
+        records.push(decode_mutation(&mut decoder, &mut origins)?);
     }
     decoder.finish()?;
     Ok(SyncBlock {
@@ -1221,7 +1892,7 @@ fn decode_block(payload: &[u8]) -> Result<SyncBlock> {
 }
 
 fn encode_mutation(out: &mut Vec<u8>, mutation: &ActiveMutation) -> Result<()> {
-    put_dot(out, &mutation.dot)?;
+    put_compact_dot(out, &mutation.dot)?;
     out.extend_from_slice(&mutation.hlc.physical_ms.to_le_bytes());
     out.extend_from_slice(&mutation.hlc.logical.to_le_bytes());
     put_u32(out, mutation.context.len())?;
@@ -1248,8 +1919,13 @@ fn encode_mutation(out: &mut Vec<u8>, mutation: &ActiveMutation) -> Result<()> {
     Ok(())
 }
 
-fn decode_mutation(decoder: &mut Decoder<'_>) -> Result<ActiveMutation> {
-    let dot = decoder.dot()?;
+fn decode_mutation(
+    decoder: &mut Decoder<'_>,
+    origins: &mut CausalOriginInterner,
+) -> Result<ActiveMutation> {
+    let public_dot = decoder.dot()?;
+    let dot_origin = intern_causal_origin(origins, CausalOrigin::from(&public_dot));
+    let dot = CompactMutationDot::from_shared_origin(&dot_origin, public_dot.sequence);
     let hlc = HybridLogicalClock {
         physical_ms: decoder.u64()?,
         logical: decoder.u32()?,
@@ -1268,7 +1944,8 @@ fn decode_mutation(decoder: &mut Decoder<'_>) -> Result<ActiveMutation> {
             shard_id: decoder.u32()?,
         };
         let sequence = decoder.u64()?;
-        if !context.observe_origin(origin, sequence) {
+        let origin = intern_causal_origin(origins, origin);
+        if !context.observe_shared_origin(&origin, sequence) {
             return Err(ShardCacheError::Protocol(
                 "active-sync mutation contains a duplicate causal origin".into(),
             ));
@@ -1302,7 +1979,7 @@ fn decode_mutation(decoder: &mut Decoder<'_>) -> Result<ActiveMutation> {
         key_hash,
         key,
         value,
-        expire_at_ms,
+        expire_at_ms: CompactExpiration::new(expire_at_ms),
         governance,
         kind,
     })
@@ -1310,12 +1987,21 @@ fn decode_mutation(decoder: &mut Decoder<'_>) -> Result<ActiveMutation> {
 
 fn decode_standalone_mutation(payload: &[u8]) -> Result<ActiveMutation> {
     let mut decoder = Decoder::new(payload);
-    let mutation = decode_mutation(&mut decoder)?;
+    let mut origins = CausalOriginInterner::new();
+    let mutation = decode_mutation(&mut decoder, &mut origins)?;
     decoder.finish()?;
     Ok(mutation)
 }
 
 fn put_dot(out: &mut Vec<u8>, dot: &MutationDot) -> Result<()> {
+    put_string(out, dot.node_id.as_str())?;
+    out.extend_from_slice(&dot.incarnation_id.0.to_le_bytes());
+    out.extend_from_slice(&dot.shard_id.to_le_bytes());
+    out.extend_from_slice(&dot.sequence.to_le_bytes());
+    Ok(())
+}
+
+fn put_compact_dot(out: &mut Vec<u8>, dot: &CompactMutationDot) -> Result<()> {
     put_string(out, dot.node_id.as_str())?;
     out.extend_from_slice(&dot.incarnation_id.0.to_le_bytes());
     out.extend_from_slice(&dot.shard_id.to_le_bytes());
@@ -1546,18 +2232,38 @@ mod tests {
         }
     }
 
+    fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if condition() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(condition(), "condition did not become true before timeout");
+    }
+
     #[test]
     fn block_codec_round_trip_and_truncation() {
         let mut config = ActiveSyncConfig::new("cluster", NodeId::new("left").unwrap());
         config.incarnation_id = IncarnationId(1);
         let map = ActiveShardMap::new(1, config).unwrap();
         map.set("key", "value").unwrap();
+        map.set("key", "new-value").unwrap();
         map.seal_pending().unwrap();
         let block = map.inner.shards[0].lock().blocks[0].clone();
         let encoded = encode_block(&block).unwrap();
         let decoded = decode_block(&encoded).unwrap();
         assert_eq!(decoded.digest(), block.digest());
-        assert_eq!(decoded.records.len(), 1);
+        assert_eq!(decoded.records.len(), 2);
+        assert!(Arc::ptr_eq(
+            &decoded.records[0].dot.origin,
+            &decoded.records[1].dot.origin
+        ));
+        assert!(Arc::ptr_eq(
+            &decoded.records[1].dot.origin,
+            &decoded.records[1].context.0[0].origin
+        ));
         assert!(decode_block(&encoded[..encoded.len() - 1]).is_err());
     }
 
@@ -1574,6 +2280,203 @@ mod tests {
         assert_eq!(decode_hello(&encoded).unwrap().node_id, hello.node_id);
         encoded.push(0);
         assert!(decode_hello(&encoded).is_err());
+    }
+
+    #[test]
+    fn membership_rejects_stale_revisions_and_requires_explicit_forced_retirement() {
+        let identity = test_tls_identity();
+        let map = ActiveShardMap::new(
+            1,
+            ActiveSyncConfig::new("cluster", NodeId::new("left").unwrap()),
+        )
+        .unwrap();
+        let credentials = Arc::new(ActiveSyncTlsClientCredentials::new(identity.client));
+        let peer = ActiveSyncTlsPeer::new(
+            NodeId::new("right").unwrap(),
+            vec!["127.0.0.1:1".parse().unwrap()],
+            "localhost",
+            credentials,
+        )
+        .unwrap();
+        let membership = ActiveSyncTlsMembership::start(
+            map,
+            4,
+            Vec::new(),
+            ActiveSyncMembershipOptions {
+                sync_interval: Duration::from_millis(10),
+                retry_interval: Duration::from_millis(10),
+                drain_timeout: Duration::from_millis(20),
+                max_members: 1,
+                io_timeout: Duration::from_millis(20),
+                ..ActiveSyncMembershipOptions::default()
+            },
+        )
+        .unwrap();
+
+        membership.apply_membership(5, vec![peer.clone()]).unwrap();
+        membership.apply_membership(5, vec![peer.clone()]).unwrap();
+        assert!(membership.apply_membership(4, vec![peer.clone()]).is_err());
+        let changed_route = ActiveSyncTlsPeer::new(
+            peer.node_id.clone(),
+            vec!["127.0.0.1:2".parse().unwrap()],
+            "localhost",
+            Arc::clone(&peer.credentials),
+        )
+        .unwrap();
+        assert!(membership.apply_membership(5, vec![changed_route]).is_err());
+
+        let replacement = ActiveSyncTlsPeer::new(
+            NodeId::new("replacement").unwrap(),
+            vec!["127.0.0.1:3".parse().unwrap()],
+            "localhost",
+            Arc::clone(&peer.credentials),
+        )
+        .unwrap();
+        membership
+            .apply_membership(6, vec![replacement.clone()])
+            .unwrap();
+        let third = ActiveSyncTlsPeer::new(
+            NodeId::new("third").unwrap(),
+            vec!["127.0.0.1:4".parse().unwrap()],
+            "localhost",
+            Arc::clone(&peer.credentials),
+        )
+        .unwrap();
+        assert!(membership.apply_membership(7, vec![third]).is_err());
+        assert!(membership.retire_drained(6, &peer.node_id).is_err());
+        wait_until(Duration::from_secs(1), || {
+            membership
+                .health_snapshot()
+                .members
+                .iter()
+                .find(|member| member.node_id == peer.node_id)
+                .is_some_and(|member| member.drain_timed_out)
+        });
+        membership.force_retire(6, &peer.node_id).unwrap();
+        membership.apply_membership(7, Vec::new()).unwrap();
+        membership.force_retire(7, &replacement.node_id).unwrap();
+        let health = membership.health_snapshot();
+        assert_eq!(health.revision, 7);
+        assert_eq!(health.rejected_updates, 3);
+        assert_eq!(health.forced_retirements, 2);
+        assert!(health.failed_rounds > 0);
+        assert!(health.members.is_empty());
+        membership.shutdown();
+        assert!(membership.apply_membership(8, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn empty_membership_does_not_seal_pending_writes() {
+        let map = ActiveShardMap::new(
+            1,
+            ActiveSyncConfig::new("cluster", NodeId::new("only-node").unwrap()),
+        )
+        .unwrap();
+        map.set("key", "value").unwrap();
+        let membership = ActiveSyncTlsMembership::start(
+            map.clone(),
+            1,
+            Vec::new(),
+            ActiveSyncMembershipOptions {
+                sync_interval: Duration::from_millis(5),
+                retry_interval: Duration::from_millis(5),
+                ..ActiveSyncMembershipOptions::default()
+            },
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(30));
+        let health = map.health_snapshot();
+        assert_eq!(health.pending_records, 1);
+        assert_eq!(health.retained_blocks, 0);
+        membership.shutdown();
+    }
+
+    #[test]
+    fn live_membership_joins_syncs_and_drains_over_direct_shard_tls() {
+        let identity = test_tls_identity();
+        let left = ActiveShardMap::new(
+            2,
+            ActiveSyncConfig {
+                incarnation_id: IncarnationId(1),
+                ..ActiveSyncConfig::new("cluster", NodeId::new("left").unwrap())
+            },
+        )
+        .unwrap();
+        let right = ActiveShardMap::new(
+            2,
+            ActiveSyncConfig {
+                incarnation_id: IncarnationId(2),
+                ..ActiveSyncConfig::new("cluster", NodeId::new("right").unwrap())
+            },
+        )
+        .unwrap();
+        let server_credentials = Arc::new(
+            ActiveSyncTlsServerCredentials::new(
+                Arc::clone(&identity.server),
+                vec![ActiveSyncAuthorizedPeer {
+                    node_id: left.node_id().clone(),
+                    certificate_sha256: identity.client_fingerprint,
+                }],
+            )
+            .unwrap(),
+        );
+        let server = ActiveSyncTlsServer::start(
+            right.clone(),
+            vec![
+                "127.0.0.1:0".parse().unwrap(),
+                "127.0.0.1:0".parse().unwrap(),
+            ],
+            server_credentials,
+            ActiveSyncTlsServerOptions::default(),
+        )
+        .unwrap();
+        let peer = ActiveSyncTlsPeer::new(
+            right.node_id().clone(),
+            server.local_addresses().to_vec(),
+            "localhost",
+            Arc::new(ActiveSyncTlsClientCredentials::new(identity.client)),
+        )
+        .unwrap();
+        left.set("left-key", "left-value").unwrap();
+        right.set("right-key", "right-value").unwrap();
+        let membership = ActiveSyncTlsMembership::start(
+            left.clone(),
+            1,
+            vec![peer.clone()],
+            ActiveSyncMembershipOptions {
+                sync_interval: Duration::from_millis(20),
+                retry_interval: Duration::from_millis(10),
+                drain_timeout: Duration::from_secs(1),
+                io_timeout: Duration::from_secs(1),
+                ..ActiveSyncMembershipOptions::default()
+            },
+        )
+        .unwrap();
+
+        wait_until(Duration::from_secs(5), || {
+            let health = membership.health_snapshot();
+            health.active_members == 1
+                && health.worker_count == 2
+                && left.get("right-key") == Some(b"right-value".to_vec())
+                && right.get("left-key") == Some(b"left-value".to_vec())
+        });
+
+        membership.apply_membership(2, Vec::new()).unwrap();
+        wait_until(Duration::from_secs(5), || {
+            membership
+                .health_snapshot()
+                .members
+                .first()
+                .is_some_and(|member| member.ready_to_retire)
+        });
+        membership.retire_drained(2, &peer.node_id).unwrap();
+        let health = membership.health_snapshot();
+        assert_eq!(health.desired_members, 0);
+        assert_eq!(health.draining_members, 0);
+        assert!(health.successful_rounds > 0);
+        assert!(health.members.is_empty());
+        membership.shutdown();
+        server.shutdown();
     }
 
     #[test]

@@ -15,10 +15,37 @@ Two modes, parallel and independent:
 | `redis_embedded_command_matrix` | Prepared embedded Redis commands, per command | In-process command throughput for the full shardcache Redis command surface |
 | `run-memcache-comparison.sh` | Docker-isolated cache workload | Head-to-head GET/SET/mixed throughput for shardcache server modes vs Memcached |
 | `semantic_cache_matrix` | Pairwise embedding sweep plus lookup latency | Semantic cache F1/FPR across thresholds and unique/cycling lookup latency |
+| `active_sync_cost` | Embedded active-active A/B | Baseline, local causal metadata, installed conflict orderer, and background convergence cost with a final convergence assertion |
 
 The throughput drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `shardcache-lmcache`
 emit rows in the same schema.
+
+## Active-Active Cost
+
+Build and run the feature-gated active-sync comparison with:
+
+```bash
+cargo build --release -p shardcache-benchmarks \
+  --features active-sync --bin active_sync_cost
+
+target/release/active_sync_cost \
+  --modes baseline,causal-local,consensus-local,causal-sync,consensus-sync \
+  --shards 8 --clients 8 --key-count 100000 --value-size 1024 \
+  --read-percent 80 --warmup 2 --duration 10 \
+  --sync-interval-ms 100 --latency-sample-rate 10000
+```
+
+`causal-local` and `consensus-local` disable peer synchronization and differ
+only in conflict ordering. `causal-sync` and `consensus-sync` run the same
+background peer exchange with their respective conflict guarantees. Consensus
+modes install an orderer that fails if this no-conflict workload invokes it.
+Synchronized modes propagate background errors, drain bounded final sync rounds
+until quiet, and verify every key on both maps before reporting success. Legacy
+`active-local`, `active-orderer`, and `active-sync` arguments remain accepted as
+aliases. Run modes in separate processes for release comparisons. Curated Adam
+results and known write-path limits are in
+[`ACTIVE_ACTIVE_0_7_BASELINE.md`](ACTIVE_ACTIVE_0_7_BASELINE.md).
 
 ## Docker Server Suite
 

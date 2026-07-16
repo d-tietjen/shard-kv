@@ -31,11 +31,11 @@ third_party_count="$(jq '[.packages[] | select(.source != null)] | length' "$met
   cat <<'EOF'
 # Dependency Inventory
 
-This is the complete locked dependency inventory for the Shardcache workspace.
-It includes publishable and source-only workspace packages plus normal, build,
-development, optional, platform-specific, and transitive packages reachable by
-the all-feature workspace graph. A deployed binary includes only the subset
-selected by its package, Cargo features, and target.
+This is the complete locked dependency inventory for the public Shardcache
+workspace. It includes publishable and vendored test-support workspace packages
+plus normal, build, development, optional, platform-specific, and transitive
+packages reachable by the all-feature workspace graph. A deployed binary
+includes only the subset selected by its package, Cargo features, and target.
 
 The inventory is generated from `Cargo.lock` with:
 
@@ -56,7 +56,8 @@ declared compatible version ranges.
 | `rustls`, `tokio-rustls`, `rustls-pemfile`, `ring` | `scnp-tls`, `active-sync-tls` | TLS 1.3, mTLS, certificate parsing, and cryptography for SCNP overflow and active-active peer sync. |
 | `shardcache-client-rs` | `kv-overflow` | SCNP framing and direct replica communication. |
 | `lz4_flex`, `zstd` | Overflow features | Optional value and object compression. |
-| `crc32fast`, `sha2` | Overflow and active-sync integrity, TLS identity | Envelope and sync-block integrity plus certificate fingerprints. |
+| `crc32fast`, `sha2` | Overflow and active-sync integrity, TLS identity, `active-sync-blossom` | Envelope and sync-block integrity, certificate fingerprints, and content-addressed conflict claims. |
+| `deterministic-test-env` | Test builds only | Non-published harness vendored from pinned Blossom revision `46750a97a70fd301e3e6f3255316c1d7e837a9dd` for replayable active-sync fault schedules. |
 | `tokio`, `flume` | Server and asynchronous overflow paths | Event loops, sockets, timers, bounded asynchronous lanes, and shutdown. |
 | `bytes-handoff`, `monoio` | Optional server transport | Buffer handoff and Linux transport experiments. |
 | `fast-telemetry` | `telemetry` | Metrics integration. |
@@ -68,6 +69,26 @@ TLS dependency policy is enforced by
 [`scripts/check-tls-dependency-policy.sh`](../scripts/check-tls-dependency-policy.sh):
 the all-feature production graph must not contain OpenSSL, native-tls, or an
 OpenSSL-backed Rustls provider.
+
+The publishable `shardmap` `active-sync-blossom` graph deliberately has no
+Blossom runtime dependency. It exposes a bounded `BlossomConflictConsensus`
+service boundary. The standalone source-only `shardmap-blossom-bridge` package
+is excluded from the public workspace so normal builds need no private Git
+credentials. It pins the Blossom runtime and implements quorum finality
+verification behind a loopback or identity-bound mTLS proxy. The bridge
+transmits conflict claims only; active-sync WAL blocks and values never cross
+this boundary.
+
+## Standalone Source Integration
+
+`crates/shardmap-blossom-bridge` is a non-published standalone crate. Its
+manifest pins `blossom` `2.0.0-pre-release` to Git revision
+`46750a97a70fd301e3e6f3255316c1d7e837a9dd`; it also directly depends on
+`parking_lot`, `serde`, `serde_json`, `sha2`, `shardmap`, and `tokio`, with
+`tempfile` for tests. Its adjacent `Cargo.lock` records the complete exact
+standalone graph. Run its tests separately in an authenticated source checkout.
+Because it is outside the public workspace, those packages are not included in
+the generated tables below.
 
 EOF
 

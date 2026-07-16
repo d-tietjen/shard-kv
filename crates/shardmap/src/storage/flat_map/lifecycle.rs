@@ -217,12 +217,16 @@ impl FlatMap {
         ObjectOffloadAttempt::Offloaded
     }
 
+    #[inline]
     pub(super) fn delete_remote_hashed(
         &mut self,
         hash: u64,
         key: &[u8],
         reason: DeleteReason,
     ) -> bool {
+        if self.remote_entries.is_empty() {
+            return false;
+        }
         let Some(remote) = self.remote_entries.remove(key) else {
             return false;
         };

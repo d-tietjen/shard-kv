@@ -51,7 +51,8 @@ guard is enough.
 | Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
 | Semantic TTL | Combine semantic reuse with freshness windows. | [`semantic_ttl.rs`](examples/semantic_ttl.rs) |
 | Governance metadata | Enforce application-owned authorization context on semantic and exact point hits. | [`semantic_cache.rs`](examples/semantic_cache.rs), [`EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) |
-| Active-active point values | Exchange bounded causal blocks, converge SET/DEL/expiry conflicts, and evict local payloads independently. | Enable `active-sync`; see [`active_sync.rs`](examples/active_sync.rs) |
+| Active-active point values | Exchange bounded causal blocks, converge SET/DEL/expiry conflicts, evict local payloads independently, and reconcile revisioned TLS membership. | Enable `active-sync`; add `active-sync-tls` for networking; see [`active_sync.rs`](examples/active_sync.rs) |
+| Blossom conflict ordering | Finalize only ambiguous active-active conflict winners without sending values or WAL blocks to the ordering plane. | Enable `active-sync-blossom`; see [`ACTIVE_ACTIVE_REPLICATION.md`](../../docs/ACTIVE_ACTIVE_REPLICATION.md) |
 | Mini app | A small feature-flag cache combining TTL, prepared keys, and locks. | [`mini_feature_flags.rs`](examples/mini_feature_flags.rs) |
 
 Run any example with:
@@ -60,6 +61,17 @@ Run any example with:
 cargo run -p shardmap --example basic_map
 cargo run -p shardmap --example active_sync --features active-sync
 ```
+
+For active-active exact values, choose the guarantee explicitly:
+
+| Constructor | Conflict guarantee | Remote visibility |
+| --- | --- | --- |
+| `ActiveShardMap::new_causal_eventual` | Causal dominance with deterministic HLC ordering | Only after explicit or scheduled sync |
+| `ActiveShardMap::new_consensus_ordered_eventual` | External finality for ambiguous concurrent mutations | Only after explicit or scheduled sync |
+
+Both modes are eventually consistent. Neither provides linearizable reads or
+cross-node serializable transactions. `consistency_mode()` and the active-sync
+health snapshot report the selected guarantee.
 
 ## Typed Map Operations
 

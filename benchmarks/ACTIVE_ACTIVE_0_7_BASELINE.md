@@ -1,10 +1,106 @@
 # Shardcache 0.7 Active-Active Performance
 
-Measured: 2026-07-15
+Measured through: 2026-07-16
 
 This note preserves the pre-implementation Adam budget and records the first
 `ActiveShardMap` measurements. Results distinguish local causal admission from
 caller-driven synchronization; neither mode is enabled in the default build.
+
+## Final 0.7 Candidate On Adam
+
+The 2026-07-16 candidate was built from `dt/active-active-replication` and run
+on Adam's CPUs `0-7`. Each mode ran in a separate process with eight shards,
+eight clients, 100,000 keys, 1 KiB values, a two-second warmup, a ten-second
+measurement, a 100 ms sync interval, and one latency sample per 10,000
+operations. The benchmark now propagates background sync errors, drains bounded
+final rounds until no transfer remains, and performs a full-key convergence
+check. `consensus-local` and `consensus-sync` install the external
+conflict-ordering callback but generate no conflicts; they isolate the normal
+hot-path cost of making Blossom ordering available.
+
+| Workload | Mode | Ops/s | Baseline retained | p50 | p99 | p999 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| GET | baseline | 17.70M | 100.0% | 360ns | 2.1us | 4.7us |
+| GET | causal-local | 15.78M | 89.2% | 390ns | 2.3us | 6.7us |
+| GET | consensus-local | 15.72M | 88.9% | 380ns | 2.3us | 12.2us |
+| GET | causal-sync | 15.05M | 85.0% | 400ns | 2.2us | 8.7us |
+| GET | consensus-sync | 14.70M | 83.1% | 390ns | 2.6us | 21.6us |
+| SET | baseline | 7.86M | 100.0% | 630ns | 6.0us | 22.8us |
+| SET | causal-local | 2.75M | 34.9% | 1.8us | 17.2us | 28.5us |
+| SET | consensus-local | 2.73M | 34.8% | 1.8us | 15.5us | 34.4us |
+| SET | causal-sync | 2.33M | 29.6% | 1.8us | 19.3us | 119.6us |
+| SET | consensus-sync | 2.29M | 29.1% | 1.8us | 19.3us | 49.6us |
+| 80% GET / 20% SET | baseline | 14.72M | 100.0% | 390ns | 2.8us | 9.6us |
+| 80% GET / 20% SET | causal-local | 9.94M | 67.6% | 450ns | 3.6us | 8.4us |
+| 80% GET / 20% SET | consensus-local | 9.90M | 67.3% | 450ns | 3.7us | 18.3us |
+| 80% GET / 20% SET | causal-sync | 7.94M | 54.0% | 450ns | 3.8us | 25.2us |
+| 80% GET / 20% SET | consensus-sync | 7.95M | 54.0% | 450ns | 3.9us | 24.9us |
+
+### Write-path compaction follow-up
+
+A same-load Adam A/B on 2026-07-16 compared the preserved pre-compaction
+binary with the compacted build. Mutation dots now share immutable causal
+origins, deadline and residency metadata use niche-backed eight-byte layouts,
+and pending-byte accounting includes the actual mutation structure size. On a
+64-bit build, `ActiveMutation` decreased from at most 240 bytes to 192 bytes
+and `VersionState` decreased from 192 bytes to 144 bytes.
+
+| Workload | Pre-compaction | Compacted | Change | Pre p50 / p99 | Compacted p50 / p99 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SET, three-run mean | 2.761M | 3.608M | +30.7% | 1.8us / 18.0us | 1.4us / 15.4us |
+| 80% GET / 20% SET | 9.985M | 11.048M | +10.6% | 460ns / 3.7us | 460ns / 3.2us |
+| GET | 15.626M | 15.525M | -0.6% | 390ns / 2.3us | 390ns / 2.3us |
+
+The compacted SET run retained 44.5% of its same-run 8.109M embedded baseline.
+The small GET difference is within run-to-run noise and had no measured latency
+regression. These follow-up runs used 15-second measurement windows; all other
+workload parameters match the canonical command below.
+
+Installing the conflict orderer reduced throughput by at most 0.5% relative to
+`causal-local` in these canonical rows. Consensus is not called without an
+ambiguous conflict. `consensus-sync` remained within 2.4% of `causal-sync` in
+the ten-second rows. A 20-second GET repeat measured 14.90M causal-sync and
+15.16M consensus-sync ops/s with the same 2.2us p99, confirming that the
+conflict-free read path has no directional consensus penalty. Against the
+earlier Adam implementation, causal-sync GET
+was effectively flat at 15.05M versus 15.11M ops/s, while SET increased from
+1.34M to 2.33M and 80/20 increased from 5.36M to 7.94M ops/s. Local and
+background write modes still do not meet the original 90% throughput gate, so
+active sync remains feature-gated and opt-in.
+
+The 80/20 value-size sensitivity run used the same settings, except the 64 KiB
+case used 10,000 keys to bound resident memory:
+
+| Value | Baseline | Causal local | Consensus local | Causal sync |
+| --- | ---: | ---: | ---: | ---: |
+| 64 B | 15.45M | 9.98M (64.6%) | 10.05M (65.1%) | 8.08M (52.3%) |
+| 1 KiB | 14.72M | 9.94M (67.6%) | 9.90M (67.3%) | 7.94M (54.0%) |
+| 64 KiB | 3.21M | 3.04M (94.9%) | 3.05M (95.2%) | 2.10M (65.5%) |
+
+Large borrowed values keep local active metadata close to baseline, but full
+payload retention and circulation in background interval blocks remains
+visible. Durable WAL-offset descriptors are still the planned fix for that
+cost.
+
+The default, feature-disabled surfaces were rerun with the existing
+`saturation` driver. The 20-second raw-cache GET repeat reached 33.33M ops/s;
+the other rows used ten-second measurements. Every row completed with zero
+errors and remained within 2.4% of its recorded Adam baseline.
+
+| Workload | Raw cache | Prior raw | Native ShardMap | Prior native |
+| --- | ---: | ---: | ---: | ---: |
+| GET | 33.33M | 33.98M | 21.94M | 22.21M |
+| SET | 10.27M | 10.38M | 9.64M | 9.70M |
+| 80% GET / 20% SET | 19.72M | 20.19M | 16.06M | 16.23M |
+
+Canonical command shape:
+
+```bash
+taskset -c 0-7 target/release/active_sync_cost \
+  --modes MODE --shards 8 --clients 8 --key-count 100000 \
+  --value-size 1024 --read-percent MIX --warmup 2 --duration 10 \
+  --sync-interval-ms 100 --latency-sample-rate 10000
+```
 
 ## Initial ActiveShardMap Measurement
 

@@ -1,14 +1,18 @@
-use shardmap::{ActiveShardMap, ActiveSyncConfig, NodeId, SyncOptions};
+use shardmap::{ActiveConsistencyMode, ActiveShardMap, ActiveSyncConfig, NodeId, SyncOptions};
 
 fn main() -> shardmap::Result<()> {
-    let left = ActiveShardMap::new(
+    let left = ActiveShardMap::new_causal_eventual(
         4,
         ActiveSyncConfig::new("example-cluster", NodeId::new("left")?),
     )?;
-    let right = ActiveShardMap::new(
+    let right = ActiveShardMap::new_causal_eventual(
         4,
         ActiveSyncConfig::new("example-cluster", NodeId::new("right")?),
     )?;
+    assert_eq!(
+        left.consistency_mode(),
+        ActiveConsistencyMode::CausalEventual
+    );
 
     left.set("session:42", "ready")?;
     right.set("session:7", "running")?;

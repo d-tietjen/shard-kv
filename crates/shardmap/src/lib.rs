@@ -42,14 +42,22 @@ mod monoio_runtime;
 
 #[cfg(feature = "active-sync")]
 pub use active_sync::{
-    ActiveShardMap, ActiveSyncConfig, ActiveSyncHealthSnapshot, BidirectionalSyncReport,
-    EvictionOutcome, HybridLogicalClock, IncarnationId, MutationDot, NodeId, SyncOptions,
-    SyncToken,
+    ActiveConsistencyMode, ActiveShardMap, ActiveSyncConfig, ActiveSyncHealthSnapshot,
+    BidirectionalSyncReport, ConflictCandidate, ConflictClaim, ConflictDecision,
+    ConflictMutationClass, ConflictOrderer, EvictionOutcome, HybridLogicalClock, IncarnationId,
+    MutationDot, NodeId, SyncOptions, SyncToken,
 };
 #[cfg(feature = "active-sync-tls")]
 pub use active_sync::{
-    ActiveSyncAuthorizedPeer, ActiveSyncTlsClientCredentials, ActiveSyncTlsPeer,
+    ActiveSyncAuthorizedPeer, ActiveSyncMemberHealth, ActiveSyncMemberState,
+    ActiveSyncMembershipHealthSnapshot, ActiveSyncMembershipOptions,
+    ActiveSyncTlsClientCredentials, ActiveSyncTlsMembership, ActiveSyncTlsPeer,
     ActiveSyncTlsServer, ActiveSyncTlsServerCredentials, ActiveSyncTlsServerOptions,
+};
+#[cfg(feature = "active-sync-blossom")]
+pub use active_sync::{
+    BlossomConflictCertificate, BlossomConflictConsensus, BlossomConflictOrderer,
+    BlossomConflictOrdererHealth, BlossomConflictOrdererOptions,
 };
 #[cfg(feature = "embedded")]
 pub use cache::{

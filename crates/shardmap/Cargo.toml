@@ -106,6 +106,7 @@ object-overflow-s3 = ["object-overflow", "dep:futures-util", "dep:object_store"]
 kv-overflow = ["embedded", "dep:shardcache-client-rs"]
 kv-overflow-redis = ["kv-overflow", "dep:redis-client"]
 active-sync = ["embedded", "dep:sha2"]
+active-sync-blossom = ["active-sync"]
 active-sync-tls = ["active-sync", "dep:rustls"]
 scnp-tls = [
     "server",
@@ -165,6 +166,7 @@ xxhash-rust = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
+deterministic-test-env = { path = "../deterministic-test-env" }
 rcgen = "0.14"
 tempfile = { workspace = true }
 

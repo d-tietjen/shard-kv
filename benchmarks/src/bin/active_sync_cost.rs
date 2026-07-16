@@ -10,14 +10,20 @@ use bytes::Bytes;
 use clap::Parser;
 use shardcache_benchmarks::histogram::{LatencyHistogram, format_ns};
 use shardmap::storage::EmbeddedStore;
-use shardmap::{ActiveShardMap, ActiveSyncConfig, IncarnationId, NodeId, SyncOptions};
+use shardmap::{
+    ActiveShardMap, ActiveSyncConfig, ConflictClaim, ConflictDecision, ConflictOrderer,
+    IncarnationId, NodeId, ShardCacheError, SyncOptions,
+};
 
 type BoxError = Box<dyn Error + Send + Sync>;
 
 #[derive(Debug, Parser)]
 #[command(about = "Measure active-sync local and background convergence cost")]
 struct Args {
-    #[arg(long, default_value = "baseline,active-local,active-sync")]
+    #[arg(
+        long,
+        default_value = "baseline,causal-local,consensus-local,causal-sync,consensus-sync"
+    )]
     modes: String,
 
     #[arg(long, default_value_t = 16)]
@@ -55,18 +61,22 @@ struct Args {
 #[derive(Debug, Clone, Copy)]
 enum Mode {
     Baseline,
-    ActiveLocal,
-    ActiveSync,
+    CausalLocal,
+    ConsensusLocal,
+    CausalSync,
+    ConsensusSync,
 }
 
 impl Mode {
     fn parse(value: &str) -> Result<Self, BoxError> {
         match value.trim() {
             "baseline" => Ok(Self::Baseline),
-            "active-local" => Ok(Self::ActiveLocal),
-            "active-sync" => Ok(Self::ActiveSync),
+            "causal-local" | "active-local" => Ok(Self::CausalLocal),
+            "consensus-local" | "active-orderer" => Ok(Self::ConsensusLocal),
+            "causal-sync" | "active-sync" => Ok(Self::CausalSync),
+            "consensus-sync" => Ok(Self::ConsensusSync),
             other => Err(format!(
-                "unknown mode `{other}`; use baseline, active-local, or active-sync"
+                "unknown mode `{other}`; use baseline, causal-local, consensus-local, causal-sync, or consensus-sync"
             )
             .into()),
         }
@@ -75,9 +85,31 @@ impl Mode {
     fn label(self) -> &'static str {
         match self {
             Self::Baseline => "baseline",
-            Self::ActiveLocal => "active-local",
-            Self::ActiveSync => "active-sync",
+            Self::CausalLocal => "causal-local",
+            Self::ConsensusLocal => "consensus-local",
+            Self::CausalSync => "causal-sync",
+            Self::ConsensusSync => "consensus-sync",
         }
+    }
+
+    fn uses_consensus(self) -> bool {
+        matches!(self, Self::ConsensusLocal | Self::ConsensusSync)
+    }
+
+    fn syncs_peer(self) -> bool {
+        matches!(self, Self::CausalSync | Self::ConsensusSync)
+    }
+
+    fn conflict_order(self) -> &'static str {
+        match self {
+            Self::Baseline => "n/a",
+            Self::CausalLocal | Self::CausalSync => "causal-hlc",
+            Self::ConsensusLocal | Self::ConsensusSync => "consensus",
+        }
+    }
+
+    fn peer_sync(self) -> &'static str {
+        if self.syncs_peer() { "on" } else { "off" }
     }
 }
 
@@ -128,6 +160,16 @@ struct PhaseResult {
     latency: LatencyHistogram,
 }
 
+struct UnexpectedConflictOrderer;
+
+impl ConflictOrderer for UnexpectedConflictOrderer {
+    fn decide(&self, _claim: &ConflictClaim) -> shardmap::Result<ConflictDecision> {
+        Err(ShardCacheError::Protocol(
+            "conflict-free benchmark unexpectedly invoked the orderer".into(),
+        ))
+    }
+}
+
 fn main() -> Result<(), BoxError> {
     let args = Args::parse();
     if args.clients == 0
@@ -160,22 +202,28 @@ fn main() -> Result<(), BoxError> {
     let value = Bytes::from(build_value(args.value_size));
     let ttl = (args.ttl_seconds > 0).then(|| Duration::from_secs(args.ttl_seconds));
 
-    println!("| mode | shards | clients | value | read % | ops/s | p50 | p99 | p999 | retained |");
-    println!("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+    println!(
+        "| mode | conflict order | peer sync | shards | clients | value | read % | ops/s | p50 | p99 | p999 | retained |"
+    );
+    println!("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
     for mode in modes {
         let (store, peer) = build_store(mode, &args, &keys, &value, ttl)?;
         let sync_stop = Arc::new(AtomicBool::new(false));
-        let sync_join = peer.map(|peer| {
+        let sync_join = peer.as_ref().map(|peer| {
             let BenchStore::Active(local) = store.clone() else {
                 unreachable!();
             };
+            let peer = peer.clone();
             let stop = Arc::clone(&sync_stop);
             let interval = Duration::from_millis(args.sync_interval_ms.max(1));
             thread::spawn(move || {
                 while !stop.load(Ordering::Acquire) {
                     thread::sleep(interval);
-                    let _ = local.sync_with(&peer, SyncOptions::default());
+                    local
+                        .sync_with(&peer, SyncOptions::default())
+                        .map_err(|error| error.to_string())?;
                 }
+                Ok::<(), String>(())
             })
         });
 
@@ -200,15 +248,21 @@ fn main() -> Result<(), BoxError> {
         sync_stop.store(true, Ordering::Release);
         if let Some(join) = sync_join {
             join.join()
-                .map_err(|_| "active-sync benchmark thread panicked")?;
+                .map_err(|_| "active-sync benchmark thread panicked")?
+                .map_err(|error| format!("active-sync background sync failed: {error}"))?;
+        }
+        if let (BenchStore::Active(local), Some(peer)) = (&store, &peer) {
+            finish_sync_and_verify(local, peer, &keys)?;
         }
         let retained = match &store {
             BenchStore::Baseline(_) => 0,
             BenchStore::Active(store) => store.health_snapshot().retained_blocks,
         };
         println!(
-            "| {} | {} | {} | {} | {} | {:.2} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {:.2} | {} | {} | {} | {} |",
             mode.label(),
+            mode.conflict_order(),
+            mode.peer_sync(),
             args.shards,
             args.clients,
             args.value_size,
@@ -219,6 +273,37 @@ fn main() -> Result<(), BoxError> {
             format_ns(result.latency.p999_ns()),
             retained,
         );
+    }
+    Ok(())
+}
+
+fn finish_sync_and_verify(
+    local: &ActiveShardMap,
+    peer: &ActiveShardMap,
+    keys: &[Box<[u8]>],
+) -> Result<(), BoxError> {
+    const MAX_FINAL_SYNC_ROUNDS: usize = 4096;
+
+    let mut reached_quiet_round = false;
+    for _ in 0..MAX_FINAL_SYNC_ROUNDS {
+        let report = local.sync_with(peer, SyncOptions::default())?;
+        let transferred =
+            report.blocks_to_local + report.blocks_to_peer + report.state_snapshot_fallbacks;
+        if !report.truncated && transferred == 0 {
+            reached_quiet_round = true;
+            break;
+        }
+        if report.truncated && transferred == 0 {
+            return Err("active-sync final convergence made no progress".into());
+        }
+    }
+    if !reached_quiet_round {
+        return Err("active-sync final convergence exceeded its round limit".into());
+    }
+    for key in keys {
+        if local.get(key) != peer.get(key) {
+            return Err("active-sync benchmark peers did not converge".into());
+        }
     }
     Ok(())
 }
@@ -242,11 +327,19 @@ fn build_store(
             }
             Ok((BenchStore::Baseline(store), None))
         }
-        Mode::ActiveLocal | Mode::ActiveSync => {
+        Mode::CausalLocal | Mode::ConsensusLocal | Mode::CausalSync | Mode::ConsensusSync => {
             let mut local_config =
                 ActiveSyncConfig::new("benchmark", NodeId::new("benchmark-local")?);
             local_config.incarnation_id = IncarnationId(1);
-            let local = ActiveShardMap::new(args.shards, local_config)?;
+            let local = if mode.uses_consensus() {
+                ActiveShardMap::new_consensus_ordered_eventual(
+                    args.shards,
+                    local_config,
+                    Arc::new(UnexpectedConflictOrderer),
+                )?
+            } else {
+                ActiveShardMap::new_causal_eventual(args.shards, local_config)?
+            };
             for key in keys {
                 if let Some(ttl) = ttl {
                     local.set_value_bytes_with_ttl(key, value.clone(), ttl)?;
@@ -255,11 +348,19 @@ fn build_store(
                 }
             }
             local.seal_pending()?;
-            let peer = if matches!(mode, Mode::ActiveSync) {
+            let peer = if mode.syncs_peer() {
                 let mut peer_config =
                     ActiveSyncConfig::new("benchmark", NodeId::new("benchmark-peer")?);
                 peer_config.incarnation_id = IncarnationId(2);
-                let peer = ActiveShardMap::new(args.shards, peer_config)?;
+                let peer = if mode.uses_consensus() {
+                    ActiveShardMap::new_consensus_ordered_eventual(
+                        args.shards,
+                        peer_config,
+                        Arc::new(UnexpectedConflictOrderer),
+                    )?
+                } else {
+                    ActiveShardMap::new_causal_eventual(args.shards, peer_config)?
+                };
                 local.sync_with(&peer, SyncOptions::default())?;
                 Some(peer)
             } else {

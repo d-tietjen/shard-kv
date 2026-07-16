@@ -9,6 +9,8 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::io::{Read, Write};
+use std::num::NonZeroU64;
+use std::ops::Deref;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, OnceLock};
@@ -22,14 +24,23 @@ use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::storage::{EmbeddedKeyRoute, EmbeddedStore, hash_key, now_millis};
+use crate::storage::{EmbeddedKeyRoute, EmbeddedStore, hash_key, now_millis, ttl_now_millis};
 use crate::{Result, ShardCacheError};
 
+#[cfg(feature = "active-sync-blossom")]
+mod blossom;
 #[cfg(feature = "active-sync-tls")]
 mod tls;
+#[cfg(feature = "active-sync-blossom")]
+pub use blossom::{
+    BlossomConflictCertificate, BlossomConflictConsensus, BlossomConflictOrderer,
+    BlossomConflictOrdererHealth, BlossomConflictOrdererOptions,
+};
 #[cfg(feature = "active-sync-tls")]
 pub use tls::{
-    ActiveSyncAuthorizedPeer, ActiveSyncTlsClientCredentials, ActiveSyncTlsPeer,
+    ActiveSyncAuthorizedPeer, ActiveSyncMemberHealth, ActiveSyncMemberState,
+    ActiveSyncMembershipHealthSnapshot, ActiveSyncMembershipOptions,
+    ActiveSyncTlsClientCredentials, ActiveSyncTlsMembership, ActiveSyncTlsPeer,
     ActiveSyncTlsServer, ActiveSyncTlsServerCredentials, ActiveSyncTlsServerOptions,
 };
 
@@ -129,6 +140,42 @@ impl HybridLogicalClock {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(transparent)]
+struct CompactExpiration(Option<NonZeroU64>);
+
+impl CompactExpiration {
+    fn new(expire_at_ms: Option<u64>) -> Self {
+        // Zero is already expired for every valid wall clock, while MAX is
+        // the wire-format sentinel for no deadline. Moving either inward by
+        // one millisecond preserves its practical behavior and representation.
+        Self(expire_at_ms.map(|deadline| {
+            NonZeroU64::new(deadline.clamp(1, u64::MAX - 1))
+                .expect("canonical deadline is non-zero")
+        }))
+    }
+
+    fn get(self) -> Option<u64> {
+        self.0.map(NonZeroU64::get)
+    }
+
+    fn is_some(self) -> bool {
+        self.0.is_some()
+    }
+
+    fn is_none(self) -> bool {
+        self.0.is_none()
+    }
+
+    fn is_some_and(self, predicate: impl FnOnce(u64) -> bool) -> bool {
+        self.get().is_some_and(predicate)
+    }
+
+    fn unwrap_or(self, default: u64) -> u64 {
+        self.get().unwrap_or(default)
+    }
+}
+
 /// Globally unique identity for one point mutation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MutationDot {
@@ -143,6 +190,195 @@ pub struct MutationDot {
 pub struct SyncToken {
     pub slot: u32,
     pub dot: MutationDot,
+}
+
+/// The mutation category exposed to an external conflict-ordering service.
+///
+/// Values, keys, governance metadata, TTLs, and WAL bytes are deliberately not
+/// part of this surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConflictMutationClass {
+    Set,
+    Delete,
+    Expired,
+    ClusterEvict,
+}
+
+/// One content-addressed candidate in an ambiguous concurrent conflict.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ConflictCandidate {
+    dot: MutationDot,
+    class: ConflictMutationClass,
+}
+
+impl ConflictCandidate {
+    pub fn dot(&self) -> &MutationDot {
+        &self.dot
+    }
+
+    pub fn class(&self) -> ConflictMutationClass {
+        self.class
+    }
+}
+
+/// Compact conflict metadata submitted for external ordering.
+///
+/// The key is represented by a SHA-256 digest and candidates contain only
+/// mutation identities and classes. This prevents the ordering plane from
+/// becoming a second WAL or value-replication path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictClaim {
+    cluster_digest: [u8; 32],
+    shard_id: u32,
+    key_digest: [u8; 32],
+    candidates: [ConflictCandidate; 2],
+}
+
+impl ConflictClaim {
+    fn new(
+        cluster_id: &[u8],
+        shard_id: u32,
+        key: &[u8],
+        first: ConflictCandidate,
+        second: ConflictCandidate,
+    ) -> Self {
+        let mut candidates = [first, second];
+        candidates.sort();
+        Self {
+            cluster_digest: Sha256::digest(cluster_id).into(),
+            shard_id,
+            key_digest: Sha256::digest(key).into(),
+            candidates,
+        }
+    }
+
+    pub fn cluster_digest(&self) -> [u8; 32] {
+        self.cluster_digest
+    }
+
+    pub fn shard_id(&self) -> u32 {
+        self.shard_id
+    }
+
+    pub fn key_digest(&self) -> [u8; 32] {
+        self.key_digest
+    }
+
+    pub fn candidates(&self) -> &[ConflictCandidate; 2] {
+        &self.candidates
+    }
+
+    pub fn digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"shardmap.active-sync.conflict-claim.v1");
+        digest.update(self.canonical_bytes());
+        digest.finalize().into()
+    }
+
+    /// Stable bytes suitable for an opaque Blossom transaction.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(192);
+        bytes.extend_from_slice(b"SCC1");
+        bytes.extend_from_slice(&self.cluster_digest);
+        bytes.extend_from_slice(&self.shard_id.to_le_bytes());
+        bytes.extend_from_slice(&self.key_digest);
+        for candidate in &self.candidates {
+            put_conflict_dot(&mut bytes, &candidate.dot);
+            bytes.push(conflict_class_code(candidate.class));
+        }
+        bytes
+    }
+}
+
+/// A winner bound to one exact conflict claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictDecision {
+    claim_digest: [u8; 32],
+    winner: MutationDot,
+}
+
+impl ConflictDecision {
+    pub fn new(claim: &ConflictClaim, winner: MutationDot) -> Result<Self> {
+        if !claim
+            .candidates
+            .iter()
+            .any(|candidate| candidate.dot == winner)
+        {
+            return Err(ShardCacheError::Protocol(
+                "active-sync conflict winner is not a claim candidate".into(),
+            ));
+        }
+        Ok(Self {
+            claim_digest: claim.digest(),
+            winner,
+        })
+    }
+
+    pub fn claim_digest(&self) -> [u8; 32] {
+        self.claim_digest
+    }
+
+    pub fn winner(&self) -> &MutationDot {
+        &self.winner
+    }
+
+    fn validate_for(&self, claim: &ConflictClaim) -> Result<()> {
+        if self.claim_digest != claim.digest()
+            || !claim
+                .candidates
+                .iter()
+                .any(|candidate| candidate.dot == self.winner)
+        {
+            return Err(ShardCacheError::Protocol(
+                "active-sync conflict decision does not match the current claim".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Orders only ambiguous concurrent mutations.
+///
+/// Implementations may block waiting for consensus. ShardMap always invokes
+/// this method without holding a storage-shard lock.
+pub trait ConflictOrderer: Send + Sync {
+    fn decide(&self, claim: &ConflictClaim) -> Result<ConflictDecision>;
+}
+
+/// Cross-node consistency guarantee selected for ambiguous concurrent writes.
+///
+/// Both modes keep reads local and require explicit or background synchronization
+/// for remote visibility. Neither mode is linearizable or serializable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveConsistencyMode {
+    /// Deterministic causal resolution with HLC ordering for concurrent SETs.
+    CausalEventual,
+    /// Eventual replication with externally finalized ordering for ambiguous
+    /// concurrent mutations.
+    ConsensusOrderedEventual,
+}
+
+impl ActiveConsistencyMode {
+    /// Returns whether ambiguous conflicts require an external orderer.
+    pub const fn requires_external_orderer(self) -> bool {
+        matches!(self, Self::ConsensusOrderedEventual)
+    }
+
+    /// Active-sync modes never make local reads linearizable across nodes.
+    pub const fn is_linearizable(self) -> bool {
+        false
+    }
+
+    /// Active-sync modes never provide cross-node serializable transactions.
+    pub const fn is_serializable(self) -> bool {
+        false
+    }
+}
+
+impl Default for ActiveConsistencyMode {
+    fn default() -> Self {
+        Self::CausalEventual
+    }
 }
 
 /// Hard resource limits and local identity for one active map.
@@ -161,6 +397,7 @@ pub struct ActiveSyncConfig {
     pub max_retained_block_bytes_per_shard: usize,
     pub max_pending_block_gaps_per_shard: usize,
     pub max_snapshot_bytes: usize,
+    pub max_conflict_order_retries: usize,
     pub max_clock_skew: Duration,
 }
 
@@ -180,6 +417,7 @@ impl ActiveSyncConfig {
             max_retained_block_bytes_per_shard: 256 * 1024 * 1024,
             max_pending_block_gaps_per_shard: 1024,
             max_snapshot_bytes: 1024 * 1024 * 1024,
+            max_conflict_order_retries: 4,
             max_clock_skew: Duration::from_secs(5),
         }
     }
@@ -199,6 +437,7 @@ impl ActiveSyncConfig {
             || self.max_retained_block_bytes_per_shard == 0
             || self.max_pending_block_gaps_per_shard == 0
             || self.max_snapshot_bytes == 0
+            || self.max_conflict_order_retries == 0
         {
             return Err(ShardCacheError::Config(
                 "active-sync resource limits must be nonzero".into(),
@@ -251,6 +490,7 @@ pub enum EvictionOutcome {
 /// Bounded health information that does not expose keys or credentials.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActiveSyncHealthSnapshot {
+    pub consistency_mode: ActiveConsistencyMode,
     pub shard_count: usize,
     pub live_versions: usize,
     pub tombstones: usize,
@@ -259,14 +499,17 @@ pub struct ActiveSyncHealthSnapshot {
     pub pending_records: usize,
     pub retained_blocks: usize,
     pub retained_block_bytes: usize,
+    pub conflict_order_requests: u64,
+    pub conflict_order_failures: u64,
+    pub conflict_order_retries: u64,
+    pub conflict_ordered: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ActiveShardMap {
     inner: Arc<ActiveShardMapInner>,
 }
 
-#[derive(Debug)]
 struct ActiveShardMapInner {
     store: EmbeddedStore,
     config: ActiveSyncConfig,
@@ -276,13 +519,92 @@ struct ActiveShardMapInner {
     // Monotonic so a readable store hit can bypass metadata unless this shard
     // has ever materialized a governance conflict.
     conflict_reads: Box<[AtomicBool]>,
+    conflict_orderer: Option<Arc<dyn ConflictOrderer>>,
+    conflict_order_requests: AtomicU64,
+    conflict_order_failures: AtomicU64,
+    conflict_order_retries: AtomicU64,
+    conflict_ordered: AtomicU64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+impl fmt::Debug for ActiveShardMap {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ActiveShardMap")
+            .field("node_id", &self.inner.config.node_id)
+            .field("shard_count", &self.inner.shards.len())
+            .field(
+                "external_conflict_ordering",
+                &self.inner.conflict_orderer.is_some(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct CausalOrigin {
     node_id: NodeId,
     incarnation_id: IncarnationId,
     shard_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct CompactMutationDot {
+    origin: Arc<CausalOrigin>,
+    sequence: u64,
+}
+
+impl CompactMutationDot {
+    fn from_shared_origin(origin: &Arc<CausalOrigin>, sequence: u64) -> Self {
+        Self {
+            origin: Arc::clone(origin),
+            sequence,
+        }
+    }
+
+    fn to_public(&self) -> MutationDot {
+        MutationDot {
+            node_id: self.origin.node_id.clone(),
+            incarnation_id: self.origin.incarnation_id,
+            shard_id: self.origin.shard_id,
+            sequence: self.sequence,
+        }
+    }
+
+    fn matches_public(&self, other: &MutationDot) -> bool {
+        self.sequence == other.sequence
+            && self.origin.shard_id == other.shard_id
+            && self.origin.incarnation_id == other.incarnation_id
+            && self.origin.node_id == other.node_id
+    }
+}
+
+impl Deref for CompactMutationDot {
+    type Target = CausalOrigin;
+
+    fn deref(&self) -> &Self::Target {
+        &self.origin
+    }
+}
+
+impl From<&MutationDot> for CompactMutationDot {
+    fn from(dot: &MutationDot) -> Self {
+        Self {
+            origin: Arc::new(CausalOrigin::from(dot)),
+            sequence: dot.sequence,
+        }
+    }
+}
+
+impl PartialEq<MutationDot> for CompactMutationDot {
+    fn eq(&self, other: &MutationDot) -> bool {
+        self.matches_public(other)
+    }
+}
+
+impl PartialEq<CompactMutationDot> for MutationDot {
+    fn eq(&self, other: &CompactMutationDot) -> bool {
+        other.matches_public(self)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,16 +620,15 @@ struct CausalFrontier {
 struct CausalContext(SmallVec<[CausalFrontier; 1]>);
 
 impl CausalContext {
-    fn observes(&self, dot: &MutationDot) -> bool {
-        let origin = CausalOrigin::from(dot);
+    fn observes(&self, dot: &CompactMutationDot) -> bool {
         self.0
-            .binary_search_by(|frontier| frontier.origin.as_ref().cmp(&origin))
+            .binary_search_by(|frontier| frontier.origin.as_ref().cmp(dot.origin.as_ref()))
             .ok()
             .is_some_and(|index| self.0[index].sequence >= dot.sequence)
     }
 
-    fn observe(&mut self, dot: &MutationDot) {
-        self.observe_origin(CausalOrigin::from(dot), dot.sequence);
+    fn observe(&mut self, dot: &CompactMutationDot) {
+        self.observe_shared_origin(&dot.origin, dot.sequence);
     }
 
     fn join(&mut self, other: &Self) {
@@ -402,20 +723,20 @@ enum MutationKind {
 
 #[derive(Debug, Clone)]
 struct ActiveMutation {
-    dot: MutationDot,
+    dot: CompactMutationDot,
     hlc: HybridLogicalClock,
     context: CausalContext,
     key_hash: u64,
     key: SharedBytes,
     value: Option<SharedBytes>,
-    expire_at_ms: Option<u64>,
+    expire_at_ms: CompactExpiration,
     governance: Option<SharedBytes>,
     kind: MutationKind,
 }
 
 impl ActiveMutation {
     fn estimated_bytes(&self) -> usize {
-        160usize
+        std::mem::size_of::<Self>()
             .saturating_add(self.key.len())
             .saturating_add(self.value.as_ref().map_or(0, SharedBytes::len))
             .saturating_add(self.governance.as_ref().map_or(0, SharedBytes::len))
@@ -424,19 +745,39 @@ impl ActiveMutation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Residency {
-    Resident,
-    Evicted { generation: u64 },
-    ClusterEvicted,
+#[repr(transparent)]
+struct Residency(u64);
+
+impl Residency {
+    const RESIDENT: Self = Self(0);
+    const CLUSTER_EVICTED: Self = Self(u64::MAX);
+
+    fn evicted(generation: u64) -> Self {
+        // MAX is reserved for ClusterEvicted. Reaching this saturation point
+        // would require more than 2^64 eviction cycles for one exact version.
+        Self(generation.saturating_add(1).min(u64::MAX - 1))
+    }
+
+    fn evicted_generation(self) -> Option<u64> {
+        (self != Self::RESIDENT && self != Self::CLUSTER_EVICTED).then(|| self.0 - 1)
+    }
+
+    fn is_resident(self) -> bool {
+        self == Self::RESIDENT
+    }
+
+    fn is_evicted(self) -> bool {
+        self.evicted_generation().is_some()
+    }
 }
 
 #[derive(Debug, Clone)]
 struct VersionState {
-    dot: MutationDot,
+    dot: CompactMutationDot,
     hlc: HybridLogicalClock,
     context: CausalContext,
     kind: MutationKind,
-    expire_at_ms: Option<u64>,
+    expire_at_ms: CompactExpiration,
     governance: Option<SharedBytes>,
     residency: Residency,
     // Local versions have no recovery peer. Allocate the set only after a
@@ -453,10 +794,10 @@ struct RecoveryPeerSet {
 impl VersionState {
     fn from_mutation(mutation: &ActiveMutation, source_peer: Option<&NodeId>) -> Self {
         let residency = match mutation.kind {
-            MutationKind::Set if mutation.value.is_some() => Residency::Resident,
-            MutationKind::Set => Residency::Evicted { generation: 0 },
-            MutationKind::Tombstone(_) => Residency::Resident,
-            MutationKind::ClusterEvict { .. } => Residency::ClusterEvicted,
+            MutationKind::Set if mutation.value.is_some() => Residency::RESIDENT,
+            MutationKind::Set => Residency::evicted(0),
+            MutationKind::Tombstone(_) => Residency::RESIDENT,
+            MutationKind::ClusterEvict { .. } => Residency::CLUSTER_EVICTED,
         };
         let recovery_peers = if mutation.value.is_some()
             && matches!(mutation.kind, MutationKind::Set)
@@ -489,10 +830,8 @@ impl VersionState {
 
     fn full_context_with_local_origin(&self, local_origin: &Arc<CausalOrigin>) -> CausalContext {
         let mut context = self.context.clone();
-        if local_origin.incarnation_id == self.dot.incarnation_id
-            && local_origin.shard_id == self.dot.shard_id
-            && (Arc::ptr_eq(&local_origin.node_id.0, &self.dot.node_id.0)
-                || local_origin.node_id == self.dot.node_id)
+        if Arc::ptr_eq(local_origin, &self.dot.origin)
+            || local_origin.as_ref() == self.dot.origin.as_ref()
         {
             context.observe_shared_origin(local_origin, self.dot.sequence);
         } else {
@@ -711,7 +1050,42 @@ enum SnapshotKind {
 }
 
 impl ActiveShardMap {
+    /// Builds a causally ordered map that converges after synchronization and
+    /// eventual message delivery.
+    pub fn new_causal_eventual(shard_count: usize, config: ActiveSyncConfig) -> Result<Self> {
+        Self::new_inner(shard_count, config, None)
+    }
+
+    /// Backwards-compatible alias for [`Self::new_causal_eventual`].
     pub fn new(shard_count: usize, config: ActiveSyncConfig) -> Result<Self> {
+        Self::new_causal_eventual(shard_count, config)
+    }
+
+    /// Builds an eventually consistent map whose ambiguous concurrent
+    /// conflicts require an externally finalized total order.
+    pub fn new_consensus_ordered_eventual(
+        shard_count: usize,
+        config: ActiveSyncConfig,
+        conflict_orderer: Arc<dyn ConflictOrderer>,
+    ) -> Result<Self> {
+        Self::new_inner(shard_count, config, Some(conflict_orderer))
+    }
+
+    /// Backwards-compatible alias for
+    /// [`Self::new_consensus_ordered_eventual`].
+    pub fn new_with_conflict_orderer(
+        shard_count: usize,
+        config: ActiveSyncConfig,
+        conflict_orderer: Arc<dyn ConflictOrderer>,
+    ) -> Result<Self> {
+        Self::new_consensus_ordered_eventual(shard_count, config, conflict_orderer)
+    }
+
+    fn new_inner(
+        shard_count: usize,
+        config: ActiveSyncConfig,
+        conflict_orderer: Option<Arc<dyn ConflictOrderer>>,
+    ) -> Result<Self> {
         config.validate()?;
         if shard_count == 0 || !shard_count.is_power_of_two() {
             return Err(ShardCacheError::Config(
@@ -748,6 +1122,11 @@ impl ActiveShardMap {
                 local_origins,
                 special_reads,
                 conflict_reads,
+                conflict_orderer,
+                conflict_order_requests: AtomicU64::new(0),
+                conflict_order_failures: AtomicU64::new(0),
+                conflict_order_retries: AtomicU64::new(0),
+                conflict_ordered: AtomicU64::new(0),
             }),
         })
     }
@@ -758,6 +1137,15 @@ impl ActiveShardMap {
 
     pub fn node_id(&self) -> &NodeId {
         &self.inner.config.node_id
+    }
+
+    /// Returns the configured cross-node conflict guarantee.
+    pub fn consistency_mode(&self) -> ActiveConsistencyMode {
+        if self.inner.conflict_orderer.is_some() {
+            ActiveConsistencyMode::ConsensusOrderedEventual
+        } else {
+            ActiveConsistencyMode::CausalEventual
+        }
     }
 
     pub fn set(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<SyncToken> {
@@ -822,7 +1210,7 @@ impl ActiveShardMap {
     ) -> Result<SyncToken> {
         self.validate_point(key, &value, governance)?;
         let route = self.inner.store.route_key(key);
-        let wall_ms = now_millis();
+        let wall_ms = ttl_now_millis();
         let mut shard = self.inner.shards[route.shard_id].lock();
         let mutation = self.local_mutation(
             &mut shard,
@@ -846,7 +1234,7 @@ impl ActiveShardMap {
         if expire_at_ms.is_some() || governance.is_some() {
             self.inner.special_reads[route.shard_id].store(true, AtomicOrdering::Release);
         }
-        let dot = mutation.dot.clone();
+        let dot = mutation.dot.to_public();
         self.queue_local_mutation(&mut shard, mutation, mutation_bytes);
         drop(shard);
         drop(retired);
@@ -863,7 +1251,7 @@ impl ActiveShardMap {
     fn tombstone(&self, key: &[u8], kind: TombstoneKind) -> Result<SyncToken> {
         self.validate_point(key, &[], None)?;
         let route = self.inner.store.route_key(key);
-        let wall_ms = now_millis();
+        let wall_ms = ttl_now_millis();
         let mut shard = self.inner.shards[route.shard_id].lock();
         let mutation = self.local_mutation(
             &mut shard,
@@ -884,7 +1272,7 @@ impl ActiveShardMap {
             mutation.key.clone(),
             VersionState::from_mutation(&mutation, None),
         );
-        let dot = mutation.dot.clone();
+        let dot = mutation.dot.to_public();
         self.queue_local_mutation(&mut shard, mutation, mutation_bytes);
         drop(shard);
         drop(retired);
@@ -928,7 +1316,7 @@ impl ActiveShardMap {
             .lock()
             .versions
             .get(key)
-            .map(|version| version.dot.clone())
+            .map(|version| version.dot.to_public())
     }
 
     pub fn evict_local_exact(
@@ -945,7 +1333,7 @@ impl ActiveShardMap {
         if &version.dot != expected {
             return Ok(EvictionOutcome::Stale);
         }
-        if matches!(version.residency, Residency::Evicted { .. }) {
+        if version.residency.is_evicted() {
             return Ok(EvictionOutcome::AlreadyEvicted);
         }
         if !matches!(version.kind, MutationKind::Set) {
@@ -954,14 +1342,14 @@ impl ActiveShardMap {
         if !version.has_recovery_peer() {
             return Ok(EvictionOutcome::NoRecoverySource);
         }
-        let generation = match version.residency {
-            Residency::Evicted { generation } => generation.saturating_add(1),
-            _ => 1,
-        };
+        let generation = version
+            .residency
+            .evicted_generation()
+            .map_or(1, |generation| generation.saturating_add(1));
         if !self.inner.store.delete(key) {
             return Ok(EvictionOutcome::Missing);
         }
-        version.residency = Residency::Evicted { generation };
+        version.residency = Residency::evicted(generation);
         Ok(EvictionOutcome::Evicted)
     }
 
@@ -978,7 +1366,7 @@ impl ActiveShardMap {
         let key = key.as_ref();
         self.validate_point(key, &[], None)?;
         let route = self.inner.store.route_key(key);
-        let wall_ms = now_millis();
+        let wall_ms = ttl_now_millis();
         let mut shard = self.inner.shards[route.shard_id].lock();
         let Some(version) = shard.versions.get(key) else {
             return Ok(None);
@@ -1007,7 +1395,7 @@ impl ActiveShardMap {
             mutation.key.clone(),
             VersionState::from_mutation(&mutation, None),
         );
-        let dot = mutation.dot.clone();
+        let dot = mutation.dot.to_public();
         self.queue_local_mutation(&mut shard, mutation, mutation_bytes);
         drop(shard);
         drop(retired);
@@ -1026,19 +1414,19 @@ impl ActiveShardMap {
             let Some(version) = shard.versions.get(key) else {
                 return Ok(None);
             };
-            let Residency::Evicted { generation } = version.residency else {
+            let Some(generation) = version.residency.evicted_generation() else {
                 return self.try_get(key);
             };
             (version.dot.clone(), generation)
         };
-        let Some(value) = peer.read_exact(key, &expected)? else {
+        let Some(value) = peer.read_exact(key, &expected.to_public())? else {
             return Ok(None);
         };
         let mut shard = self.inner.shards[route.shard_id].lock();
         let Some(version) = shard.versions.get_mut(key) else {
             return Ok(None);
         };
-        if version.dot != expected || version.residency != (Residency::Evicted { generation }) {
+        if version.dot != expected || version.residency != Residency::evicted(generation) {
             return Ok(None);
         }
         let mutation = ActiveMutation {
@@ -1053,7 +1441,7 @@ impl ActiveShardMap {
             kind: version.kind.clone(),
         };
         self.store_mutation(&mutation);
-        version.residency = Residency::Resident;
+        version.residency = Residency::RESIDENT;
         version.add_recovery_peer(peer.node_id().clone());
         Ok(Some(value))
     }
@@ -1066,7 +1454,7 @@ impl ActiveShardMap {
         };
         if &version.dot != expected
             || !matches!(version.kind, MutationKind::Set)
-            || !matches!(version.residency, Residency::Resident)
+            || !version.residency.is_resident()
             || version.governance_conflict
         {
             return Ok(None);
@@ -1160,7 +1548,21 @@ impl ActiveShardMap {
 
     pub fn health_snapshot(&self) -> ActiveSyncHealthSnapshot {
         let mut health = ActiveSyncHealthSnapshot {
+            consistency_mode: self.consistency_mode(),
             shard_count: self.shard_count(),
+            conflict_order_requests: self
+                .inner
+                .conflict_order_requests
+                .load(AtomicOrdering::Relaxed),
+            conflict_order_failures: self
+                .inner
+                .conflict_order_failures
+                .load(AtomicOrdering::Relaxed),
+            conflict_order_retries: self
+                .inner
+                .conflict_order_retries
+                .load(AtomicOrdering::Relaxed),
+            conflict_ordered: self.inner.conflict_ordered.load(AtomicOrdering::Relaxed),
             ..ActiveSyncHealthSnapshot::default()
         };
         for shard in &self.inner.shards {
@@ -1174,7 +1576,7 @@ impl ActiveShardMap {
                     MutationKind::Tombstone(_) => health.tombstones += 1,
                     MutationKind::ClusterEvict { .. } => health.evicted_versions += 1,
                 }
-                if matches!(version.residency, Residency::Evicted { .. }) {
+                if version.residency.is_evicted() {
                     health.evicted_versions += 1;
                 }
                 if version.governance_conflict {
@@ -1351,7 +1753,7 @@ impl ActiveShardMap {
             for (key, version) in shard.versions.iter() {
                 let value = match version.kind {
                     MutationKind::Set => {
-                        if !matches!(version.residency, Residency::Resident) {
+                        if !version.residency.is_resident() {
                             return Err(ShardCacheError::Persistence(format!(
                                 "active-sync value for key hash {} is not materialized",
                                 hash_key(key)
@@ -1483,12 +1885,10 @@ impl ActiveShardMap {
             .next_mutation_sequence
             .checked_add(1)
             .ok_or_else(|| ShardCacheError::Persistence("active-sync sequence exhausted".into()))?;
-        let dot = MutationDot {
-            node_id: self.inner.config.node_id.clone(),
-            incarnation_id: self.inner.config.incarnation_id,
-            shard_id: shard_id as u32,
-            sequence: shard.next_mutation_sequence,
-        };
+        let dot = CompactMutationDot::from_shared_origin(
+            &self.inner.local_origins[shard_id],
+            shard.next_mutation_sequence,
+        );
         Ok(ActiveMutation {
             dot,
             hlc: shard.clock.tick(wall_ms),
@@ -1496,7 +1896,7 @@ impl ActiveShardMap {
             key_hash,
             key,
             value,
-            expire_at_ms,
+            expire_at_ms: CompactExpiration::new(expire_at_ms),
             governance: governance.map(SharedBytes::copy_from_slice),
             kind,
         })
@@ -1624,7 +2024,7 @@ impl ActiveShardMap {
                                 &mutation.key,
                                 value.clone(),
                                 mutation.governance.clone(),
-                                mutation.expire_at_ms,
+                                mutation.expire_at_ms.get(),
                                 now_ms,
                                 || {},
                             );
@@ -1723,7 +2123,58 @@ impl ActiveShardMap {
         }
         let mut stats = ApplyStats::default();
         for mutation in block.records.iter() {
-            self.apply_remote_mutation(&mut shard, mutation, source_peer, &mut stats)?;
+            let mut retries = 0usize;
+            loop {
+                let claim = self.ambiguous_conflict_claim(&shard, mutation);
+                let Some((orderer, claim)) = self.inner.conflict_orderer.as_ref().zip(claim) else {
+                    self.apply_remote_mutation(
+                        &mut shard,
+                        mutation,
+                        source_peer,
+                        &mut stats,
+                        None,
+                    )?;
+                    break;
+                };
+
+                // Consensus can take an epoch. Never pin a primary shard while
+                // the ordering plane is unavailable or waiting for quorum.
+                drop(shard);
+                let decision = self.order_conflict(orderer.as_ref(), &claim)?;
+                shard = shard_lock.lock();
+
+                let current_claim = self.ambiguous_conflict_claim(&shard, mutation);
+                if current_claim.as_ref().map(ConflictClaim::digest) != Some(claim.digest()) {
+                    retries = retries.saturating_add(1);
+                    self.inner
+                        .conflict_order_retries
+                        .fetch_add(1, AtomicOrdering::Relaxed);
+                    if retries >= self.inner.config.max_conflict_order_retries {
+                        return Err(ShardCacheError::Backpressure(
+                            "active-sync conflict changed while awaiting consensus",
+                        ));
+                    }
+                    continue;
+                }
+                self.apply_remote_mutation(
+                    &mut shard,
+                    mutation,
+                    source_peer,
+                    &mut stats,
+                    Some(decision.winner()),
+                )?;
+                self.inner
+                    .conflict_ordered
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                break;
+            }
+        }
+        if shard
+            .block_frontiers
+            .get(&block.origin)
+            .is_some_and(|frontier| block.sequence <= *frontier)
+        {
+            return Ok(stats);
         }
         shard.clock.observe(
             block
@@ -1747,6 +2198,7 @@ impl ActiveShardMap {
         incoming: &ActiveMutation,
         source_peer: &NodeId,
         stats: &mut ApplyStats,
+        conflict_winner: Option<&MutationDot>,
     ) -> Result<()> {
         self.validate_incoming_mutation(incoming)?;
         let route = self
@@ -1800,7 +2252,19 @@ impl ActiveShardMap {
         if governance_conflict {
             self.inner.conflict_reads[route.shard_id].store(true, AtomicOrdering::Release);
         }
-        let incoming_wins = concurrent_incoming_wins(local, incoming);
+        let incoming_wins = match semantic_concurrent_incoming_wins(local, incoming) {
+            Some(incoming_wins) => incoming_wins,
+            None => match conflict_winner {
+                Some(winner) if winner == &incoming.dot => true,
+                Some(winner) if winner == &local.dot => false,
+                Some(_) => {
+                    return Err(ShardCacheError::Protocol(
+                        "active-sync conflict decision selected an unknown mutation".into(),
+                    ));
+                }
+                None => concurrent_clock_incoming_wins(local, incoming),
+            },
+        };
         let mut joined = local.full_context();
         joined.join(&incoming.context);
         joined.observe(&incoming.dot);
@@ -1818,6 +2282,53 @@ impl ActiveShardMap {
             stats.duplicates += 1;
         }
         Ok(())
+    }
+
+    fn ambiguous_conflict_claim(
+        &self,
+        shard: &ActiveShardState,
+        incoming: &ActiveMutation,
+    ) -> Option<ConflictClaim> {
+        let local = shard.versions.get(incoming.key.as_ref())?;
+        if local.dot == incoming.dot
+            || incoming.context.observes(&local.dot)
+            || local.context.observes(&incoming.dot)
+            || semantic_concurrent_incoming_wins(local, incoming).is_some()
+        {
+            return None;
+        }
+        Some(ConflictClaim::new(
+            self.inner.config.cluster_id.as_bytes(),
+            incoming.dot.shard_id,
+            incoming.key.as_ref(),
+            ConflictCandidate {
+                dot: local.dot.to_public(),
+                class: conflict_mutation_class(&local.kind),
+            },
+            ConflictCandidate {
+                dot: incoming.dot.to_public(),
+                class: conflict_mutation_class(&incoming.kind),
+            },
+        ))
+    }
+
+    fn order_conflict(
+        &self,
+        orderer: &dyn ConflictOrderer,
+        claim: &ConflictClaim,
+    ) -> Result<ConflictDecision> {
+        self.inner
+            .conflict_order_requests
+            .fetch_add(1, AtomicOrdering::Relaxed);
+        let result = orderer
+            .decide(claim)
+            .and_then(|decision| decision.validate_for(claim).map(|()| decision));
+        if result.is_err() {
+            self.inner
+                .conflict_order_failures
+                .fetch_add(1, AtomicOrdering::Relaxed);
+        }
+        result
     }
 
     fn validate_incoming_mutation(&self, incoming: &ActiveMutation) -> Result<()> {
@@ -1901,9 +2412,7 @@ impl ActiveShardMap {
                         "active-sync governance conflict requires explicit resolution".into(),
                     ));
                 }
-                if !matches!(version.kind, MutationKind::Set)
-                    || !matches!(version.residency, Residency::Resident)
-                {
+                if !matches!(version.kind, MutationKind::Set) || !version.residency.is_resident() {
                     return Ok(false);
                 }
                 version
@@ -1920,7 +2429,7 @@ impl ActiveShardMap {
     }
 
     fn expire_if_needed_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Result<bool> {
-        let wall_ms = now_millis();
+        let wall_ms = ttl_now_millis();
         let mut shard = self.inner.shards[route.shard_id].lock();
         let should_expire = shard.versions.get(key).is_some_and(|version| {
             matches!(version.kind, MutationKind::Set)
@@ -2068,7 +2577,7 @@ impl ActiveShardMap {
             }
             let value = match version.kind {
                 MutationKind::Set => {
-                    if !matches!(version.residency, Residency::Resident) {
+                    if !version.residency.is_resident() {
                         return Err(ShardCacheError::Persistence(
                             "active-sync state transfer requires materialized values".into(),
                         ));
@@ -2119,10 +2628,44 @@ impl ActiveShardMap {
         let shard = self.inner.shards.get(shard_id).ok_or_else(|| {
             ShardCacheError::Protocol("active-sync state shard is out of range".into())
         })?;
-        let mut shard = shard.lock();
         let mut stats = ApplyStats::default();
-        self.apply_remote_mutation(&mut shard, mutation, source_peer, &mut stats)?;
-        Ok(stats)
+        let mut retries = 0usize;
+        loop {
+            let mut state = shard.lock();
+            let claim = self.ambiguous_conflict_claim(&state, mutation);
+            let Some((orderer, claim)) = self.inner.conflict_orderer.as_ref().zip(claim) else {
+                self.apply_remote_mutation(&mut state, mutation, source_peer, &mut stats, None)?;
+                return Ok(stats);
+            };
+            drop(state);
+
+            let decision = self.order_conflict(orderer.as_ref(), &claim)?;
+            let mut state = shard.lock();
+            let current_claim = self.ambiguous_conflict_claim(&state, mutation);
+            if current_claim.as_ref().map(ConflictClaim::digest) != Some(claim.digest()) {
+                retries = retries.saturating_add(1);
+                self.inner
+                    .conflict_order_retries
+                    .fetch_add(1, AtomicOrdering::Relaxed);
+                if retries >= self.inner.config.max_conflict_order_retries {
+                    return Err(ShardCacheError::Backpressure(
+                        "active-sync state conflict changed while awaiting consensus",
+                    ));
+                }
+                continue;
+            }
+            self.apply_remote_mutation(
+                &mut state,
+                mutation,
+                source_peer,
+                &mut stats,
+                Some(decision.winner()),
+            )?;
+            self.inner
+                .conflict_ordered
+                .fetch_add(1, AtomicOrdering::Relaxed);
+            return Ok(stats);
+        }
     }
 
     fn accept_snapshot_frontiers(
@@ -2225,7 +2768,7 @@ impl ActiveShardMap {
             for (key, version) in shard.versions.iter() {
                 let value = match version.kind {
                     MutationKind::Set => {
-                        if !matches!(version.residency, Residency::Resident) {
+                        if !version.residency.is_resident() {
                             return Err(ShardCacheError::Persistence(
                                 "active-sync state transfer requires materialized values".into(),
                             ));
@@ -2279,15 +2822,7 @@ impl ActiveShardMap {
         report: &mut BidirectionalSyncReport,
     ) -> Result<()> {
         for mutation in records {
-            let shard_id = mutation.dot.shard_id as usize;
-            let Some(shard) = destination.inner.shards.get(shard_id) else {
-                return Err(ShardCacheError::Protocol(
-                    "active-sync snapshot shard is out of range".into(),
-                ));
-            };
-            let mut shard = shard.lock();
-            let mut stats = ApplyStats::default();
-            destination.apply_remote_mutation(&mut shard, mutation, source_peer, &mut stats)?;
+            let stats = destination.apply_state_mutation(mutation, source_peer)?;
             report.applied_mutations += stats.applied;
             report.duplicate_mutations += stats.duplicates;
             report.conflicts += stats.conflicts;
@@ -2303,8 +2838,7 @@ impl ActiveShardMap {
                     .versions
                     .iter()
                     .filter(|(_, version)| {
-                        matches!(version.kind, MutationKind::Set)
-                            && matches!(version.residency, Residency::Resident)
+                        matches!(version.kind, MutationKind::Set) && version.residency.is_resident()
                     })
                     .map(|(key, version)| (key.clone(), version.dot.clone()))
                     .collect::<Vec<_>>()
@@ -2348,14 +2882,14 @@ impl SnapshotVersion {
                 })
                 .collect(),
             kind,
-            expire_at_ms: version.expire_at_ms,
+            expire_at_ms: version.expire_at_ms.get(),
             governance: version.governance.as_deref().map(<[u8]>::to_vec),
             governance_conflict: version.governance_conflict,
         }
     }
 
     fn to_mutation(&self) -> Result<ActiveMutation> {
-        let dot = self.dot.to_dot()?;
+        let dot = CompactMutationDot::from(&self.dot.to_dot()?);
         let mut context = CausalContext::default();
         for frontier in &self.context {
             let origin = CausalOrigin {
@@ -2390,7 +2924,7 @@ impl SnapshotVersion {
             key_hash: hash_key(&self.key),
             key: SharedBytes::copy_from_slice(&self.key),
             value: self.value.as_deref().map(SharedBytes::copy_from_slice),
-            expire_at_ms: self.expire_at_ms,
+            expire_at_ms: CompactExpiration::new(self.expire_at_ms),
             governance: self.governance.as_deref().map(SharedBytes::copy_from_slice),
             kind,
         })
@@ -2474,24 +3008,68 @@ impl From<&MutationDot> for SnapshotDot {
     }
 }
 
-fn concurrent_incoming_wins(local: &VersionState, incoming: &ActiveMutation) -> bool {
-    match (&local.kind, &incoming.kind) {
-        (MutationKind::Tombstone(_), MutationKind::Set) => false,
-        (MutationKind::Set, MutationKind::Tombstone(_)) => true,
-        (MutationKind::ClusterEvict { target }, MutationKind::Set) => {
-            &incoming.dot != target.as_ref()
-        }
-        (MutationKind::Set, MutationKind::ClusterEvict { target }) => &local.dot == target.as_ref(),
-        (MutationKind::Tombstone(_), MutationKind::ClusterEvict { .. }) => false,
-        (MutationKind::ClusterEvict { .. }, MutationKind::Tombstone(_)) => true,
-        _ => {
-            (incoming.hlc, &incoming.dot.node_id, &incoming.dot).cmp(&(
-                local.hlc,
-                &local.dot.node_id,
-                &local.dot,
-            )) == Ordering::Greater
+impl From<&CompactMutationDot> for SnapshotDot {
+    fn from(dot: &CompactMutationDot) -> Self {
+        Self {
+            node_id: dot.node_id.to_string(),
+            incarnation_id: dot.incarnation_id.0,
+            shard_id: dot.shard_id,
+            sequence: dot.sequence,
         }
     }
+}
+
+fn semantic_concurrent_incoming_wins(
+    local: &VersionState,
+    incoming: &ActiveMutation,
+) -> Option<bool> {
+    match (&local.kind, &incoming.kind) {
+        (MutationKind::Tombstone(_), MutationKind::Set) => Some(false),
+        (MutationKind::Set, MutationKind::Tombstone(_)) => Some(true),
+        (MutationKind::ClusterEvict { target }, MutationKind::Set) => {
+            Some(&incoming.dot != target.as_ref())
+        }
+        (MutationKind::Set, MutationKind::ClusterEvict { target }) => {
+            Some(&local.dot == target.as_ref())
+        }
+        (MutationKind::Tombstone(_), MutationKind::ClusterEvict { .. }) => Some(false),
+        (MutationKind::ClusterEvict { .. }, MutationKind::Tombstone(_)) => Some(true),
+        _ => None,
+    }
+}
+
+fn concurrent_clock_incoming_wins(local: &VersionState, incoming: &ActiveMutation) -> bool {
+    (incoming.hlc, &incoming.dot.node_id, &incoming.dot).cmp(&(
+        local.hlc,
+        &local.dot.node_id,
+        &local.dot,
+    )) == Ordering::Greater
+}
+
+fn conflict_mutation_class(kind: &MutationKind) -> ConflictMutationClass {
+    match kind {
+        MutationKind::Set => ConflictMutationClass::Set,
+        MutationKind::Tombstone(TombstoneKind::Delete) => ConflictMutationClass::Delete,
+        MutationKind::Tombstone(TombstoneKind::Expired) => ConflictMutationClass::Expired,
+        MutationKind::ClusterEvict { .. } => ConflictMutationClass::ClusterEvict,
+    }
+}
+
+fn conflict_class_code(class: ConflictMutationClass) -> u8 {
+    match class {
+        ConflictMutationClass::Set => 1,
+        ConflictMutationClass::Delete => 2,
+        ConflictMutationClass::Expired => 3,
+        ConflictMutationClass::ClusterEvict => 4,
+    }
+}
+
+fn put_conflict_dot(bytes: &mut Vec<u8>, dot: &MutationDot) {
+    bytes.push(dot.node_id.as_str().len() as u8);
+    bytes.extend_from_slice(dot.node_id.as_str().as_bytes());
+    bytes.extend_from_slice(&dot.incarnation_id.0.to_le_bytes());
+    bytes.extend_from_slice(&dot.shard_id.to_le_bytes());
+    bytes.extend_from_slice(&dot.sequence.to_le_bytes());
 }
 
 fn observe_block_sequence(
@@ -2587,14 +3165,91 @@ fn hash_optional_bytes(digest: &mut Sha256, bytes: Option<&[u8]>) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
     use super::*;
+
+    struct NodeWinnerOrderer {
+        calls: AtomicUsize,
+        available: AtomicBool,
+        winner: NodeId,
+    }
+
+    impl ConflictOrderer for NodeWinnerOrderer {
+        fn decide(&self, claim: &ConflictClaim) -> Result<ConflictDecision> {
+            self.calls.fetch_add(1, AtomicOrdering::Relaxed);
+            if !self.available.load(AtomicOrdering::Relaxed) {
+                return Err(ShardCacheError::Protocol(
+                    "test conflict orderer unavailable".into(),
+                ));
+            }
+            let winner = claim
+                .candidates()
+                .iter()
+                .find(|candidate| candidate.dot().node_id == self.winner)
+                .ok_or_else(|| {
+                    ShardCacheError::Protocol("configured test winner is absent".into())
+                })?
+                .dot()
+                .clone();
+            ConflictDecision::new(claim, winner)
+        }
+    }
 
     #[test]
     fn active_metadata_layout_stays_compact() {
+        assert!(std::mem::size_of::<CompactMutationDot>() <= 16);
         assert!(std::mem::size_of::<CausalContext>() <= 32);
-        assert!(std::mem::size_of::<ActiveMutation>() <= 240);
-        assert!(std::mem::size_of::<VersionState>() <= 192);
+        assert!(std::mem::size_of::<ActiveMutation>() <= 192);
+        assert!(std::mem::size_of::<VersionState>() <= 144);
         assert!(std::mem::size_of::<MutationKind>() <= 16);
+        assert!(std::mem::size_of::<CompactExpiration>() <= 8);
+        assert!(std::mem::size_of::<Residency>() <= 8);
+    }
+
+    #[test]
+    fn compact_metadata_preserves_deadline_and_residency_semantics() {
+        assert_eq!(CompactExpiration::new(None).get(), None);
+        assert_eq!(CompactExpiration::new(Some(0)).get(), Some(1));
+        assert_eq!(
+            CompactExpiration::new(Some(u64::MAX)).get(),
+            Some(u64::MAX - 1)
+        );
+
+        assert_eq!(Residency::RESIDENT.evicted_generation(), None);
+        assert_eq!(Residency::evicted(0).evicted_generation(), Some(0));
+        assert_eq!(Residency::evicted(42).evicted_generation(), Some(42));
+        assert_eq!(Residency::CLUSTER_EVICTED.evicted_generation(), None);
+    }
+
+    #[test]
+    fn consistency_modes_report_their_actual_guarantees() {
+        let causal = ActiveShardMap::new_causal_eventual(
+            1,
+            ActiveSyncConfig::new("test-cluster", NodeId::new("causal").unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            causal.consistency_mode(),
+            ActiveConsistencyMode::CausalEventual
+        );
+
+        let consensus = ActiveShardMap::new_consensus_ordered_eventual(
+            1,
+            ActiveSyncConfig::new("test-cluster", NodeId::new("consensus").unwrap()),
+            Arc::new(NodeWinnerOrderer {
+                calls: AtomicUsize::new(0),
+                available: AtomicBool::new(true),
+                winner: NodeId::new("consensus").unwrap(),
+            }),
+        )
+        .unwrap();
+        let mode = consensus.consistency_mode();
+        assert_eq!(mode, ActiveConsistencyMode::ConsensusOrderedEventual);
+        assert_eq!(consensus.health_snapshot().consistency_mode, mode);
+        assert!(mode.requires_external_orderer());
+        assert!(!mode.is_linearizable());
+        assert!(!mode.is_serializable());
     }
 
     #[test]
@@ -2640,6 +3295,147 @@ mod tests {
         config.incarnation_id = IncarnationId(u128::from(node.as_bytes()[0]));
         config.max_clock_skew = Duration::from_secs(60);
         ActiveShardMap::new(4, config).unwrap()
+    }
+
+    fn map_with_orderer(node: &str, orderer: Arc<dyn ConflictOrderer>) -> ActiveShardMap {
+        let mut config = ActiveSyncConfig::new("test-cluster", NodeId::new(node).unwrap());
+        config.incarnation_id = IncarnationId(u128::from(node.as_bytes()[0]));
+        config.max_clock_skew = Duration::from_secs(60);
+        ActiveShardMap::new_with_conflict_orderer(4, config, orderer).unwrap()
+    }
+
+    #[test]
+    fn external_orderer_is_not_called_without_a_conflict() {
+        let orderer = Arc::new(NodeWinnerOrderer {
+            calls: AtomicUsize::new(0),
+            available: AtomicBool::new(true),
+            winner: NodeId::new("left").unwrap(),
+        });
+        let left = map_with_orderer("left", orderer.clone());
+        let right = map_with_orderer("right", orderer.clone());
+        left.set("key", "value").unwrap();
+
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+
+        assert_eq!(orderer.calls.load(AtomicOrdering::Relaxed), 0);
+        assert_eq!(right.get("key"), Some(b"value".to_vec()));
+    }
+
+    #[test]
+    fn external_orderer_selects_the_concurrent_set_winner() {
+        let orderer = Arc::new(NodeWinnerOrderer {
+            calls: AtomicUsize::new(0),
+            available: AtomicBool::new(true),
+            winner: NodeId::new("left").unwrap(),
+        });
+        let left = map_with_orderer("left", orderer.clone());
+        let right = map_with_orderer("right", orderer.clone());
+        left.set("key", "left-value").unwrap();
+        right.set("key", "right-value").unwrap();
+
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+
+        assert_eq!(left.get("key"), Some(b"left-value".to_vec()));
+        assert_eq!(right.get("key"), Some(b"left-value".to_vec()));
+        assert_eq!(left.version_dot("key"), right.version_dot("key"));
+        assert_eq!(orderer.calls.load(AtomicOrdering::Relaxed), 2);
+        assert_eq!(left.health_snapshot().conflict_ordered, 1);
+        assert_eq!(right.health_snapshot().conflict_ordered, 1);
+    }
+
+    #[test]
+    fn unavailable_orderer_does_not_acknowledge_or_replace_the_local_value() {
+        let orderer = Arc::new(NodeWinnerOrderer {
+            calls: AtomicUsize::new(0),
+            available: AtomicBool::new(false),
+            winner: NodeId::new("left").unwrap(),
+        });
+        let left = map_with_orderer("left", orderer.clone());
+        let right = map_with_orderer("right", orderer.clone());
+        left.set("key", "left-value").unwrap();
+        right.set("key", "right-value").unwrap();
+
+        assert!(left.sync_with(&right, SyncOptions::default()).is_err());
+        assert_eq!(right.get("key"), Some(b"right-value".to_vec()));
+        assert_eq!(right.health_snapshot().conflict_order_failures, 1);
+
+        orderer.available.store(true, AtomicOrdering::Relaxed);
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+        assert_eq!(left.get("key"), Some(b"left-value".to_vec()));
+        assert_eq!(right.get("key"), Some(b"left-value".to_vec()));
+    }
+
+    #[test]
+    fn semantic_remove_wins_without_consensus_work() {
+        let orderer = Arc::new(NodeWinnerOrderer {
+            calls: AtomicUsize::new(0),
+            available: AtomicBool::new(true),
+            winner: NodeId::new("right").unwrap(),
+        });
+        let left = map_with_orderer("left", orderer.clone());
+        let right = map_with_orderer("right", orderer.clone());
+        left.set("key", "old").unwrap();
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+
+        left.delete("key").unwrap();
+        right.set("key", "concurrent").unwrap();
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+
+        assert_eq!(left.get("key"), None);
+        assert_eq!(right.get("key"), None);
+        assert_eq!(orderer.calls.load(AtomicOrdering::Relaxed), 0);
+    }
+
+    struct ChangingOrderer {
+        calls: AtomicUsize,
+        target: Mutex<Option<ActiveShardMap>>,
+    }
+
+    impl ConflictOrderer for ChangingOrderer {
+        fn decide(&self, claim: &ConflictClaim) -> Result<ConflictDecision> {
+            let call = self.calls.fetch_add(1, AtomicOrdering::Relaxed);
+            if call == 0 {
+                self.target
+                    .lock()
+                    .as_ref()
+                    .unwrap()
+                    .set("key", "new-local-value")?;
+            }
+            let winner = claim
+                .candidates()
+                .iter()
+                .find(|candidate| candidate.dot().node_id.as_str() == "right")
+                .unwrap()
+                .dot()
+                .clone();
+            ConflictDecision::new(claim, winner)
+        }
+    }
+
+    #[test]
+    fn stale_consensus_decision_is_retried_without_holding_the_shard_lock() {
+        let orderer = Arc::new(ChangingOrderer {
+            calls: AtomicUsize::new(0),
+            target: Mutex::new(None),
+        });
+        let left = map("left");
+        let right = map_with_orderer("right", orderer.clone());
+        *orderer.target.lock() = Some(right.clone());
+        left.set("key", "left-value").unwrap();
+        right.set("key", "right-value").unwrap();
+        left.seal_pending().unwrap();
+        let shard_id = left.inner.store.route_key(b"key").shard_id;
+        let block = left.inner.shards[shard_id]
+            .lock()
+            .blocks
+            .back()
+            .unwrap()
+            .clone();
+
+        right.apply_block(block, left.node_id()).unwrap();
+
+        assert_eq!(right.get("key"), Some(b"new-local-value".to_vec()));
+        assert_eq!(orderer.calls.load(AtomicOrdering::Relaxed), 2);
     }
 
     #[test]
@@ -2908,7 +3704,11 @@ mod tests {
             .unwrap();
         let valid = original.records[0].clone();
         let mut forged_record = valid.clone();
-        forged_record.dot.node_id = NodeId::new("forged").unwrap();
+        forged_record.dot.origin = Arc::new(CausalOrigin {
+            node_id: NodeId::new("forged").unwrap(),
+            incarnation_id: forged_record.dot.incarnation_id,
+            shard_id: forged_record.dot.shard_id,
+        });
         let records = vec![valid, forged_record];
         let encoded_bytes = records.iter().map(ActiveMutation::estimated_bytes).sum();
         let forged = Arc::new(SyncBlock {
@@ -3031,3 +3831,6 @@ mod tests {
         assert!(left.sync_with(&right, SyncOptions::default()).is_err());
     }
 }
+
+#[cfg(all(test, feature = "active-sync-blossom"))]
+mod deterministic_tests;

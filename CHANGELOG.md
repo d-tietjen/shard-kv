@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 - Unreleased
+## 0.7.0 - 2026-07-16
 
 ### Added
 
@@ -26,10 +26,45 @@
   partial blocks flush on deadlines and shutdown, and real `sync_data` calls
   enforce the configured durability interval without a cross-shard producer
   lock.
+- Added optional Blossom-backed conflict ordering behind
+  `active-sync-blossom`. Only ambiguous concurrent mutation identities and
+  digests enter the ordering plane; keys, values, and WAL blocks continue to
+  replicate exclusively through active-sync. Consensus waits release the shard
+  lock, stale decisions are retried, and failed decisions leave source blocks
+  unacknowledged. Stable per-candidate finalized-epoch ranks impose a transitive
+  total order, preventing three-way conflict cycles under reordered WAL delivery.
+- Added a vendored, revision-pinned deterministic Blossom test environment that
+  injects consensus outages, invalid certificates, node unavailability,
+  latency, duplicate WAL blocks, and different three-way delivery orders, then
+  verifies exact version convergence and event-log replay across 32 fixed seeds.
+- Added the source-only `shardmap-blossom-bridge` production adapter with
+  loopback-only identity-bound endpoints, concurrent supermajority epoch reads,
+  exact validator generations, signer-key reload, hard deadlines, bounded
+  per-group queues and caches, retry backoff, circuit breaking, and health
+  counters. Accepted but omitted claims are resubmitted without sending values
+  or WAL data through consensus.
+- Added checksummed, fsynced, byte- and entry-bounded candidate-rank recovery,
+  a real six-validator Blossom TCP finality/restart test, atomic signer-rotation
+  coverage, and an executable three-way convergence model for reordered
+  duplicate SETs and remove-wins eviction/deletion behavior.
+- Added explicit `CausalEventual` and `ConsensusOrderedEventual` API modes,
+  named constructors, and runtime guarantee introspection. The active-sync
+  benchmark now separates local versus synchronized execution from causal
+  versus consensus conflict ordering and includes the full `consensus-sync`
+  profile.
+- Added revisioned automatic mTLS peer reconciliation for exact active-sync
+  values. One scheduler per local shard performs bounded catch-up outside the
+  GET/SET path; stale or conflicting topology revisions fail closed, joins
+  require complete shard rounds, and removals require revision-checked drain or
+  an explicitly counted force-retirement decision.
 
 ### Changed
 
 - Bumped workspace and publishable crate versions to `0.7.0`.
+- Kept the private, pre-release Blossom runtime out of the public Cargo
+  workspace. The production bridge remains a standalone source integration,
+  while the deterministic test harness is vendored and non-published so clean
+  builds, CI, and crates.io packaging do not require private Git credentials.
 
 ### Validation
 
@@ -38,6 +73,22 @@
   from 3.47 to 2.32 vCPU. At 64-byte values, throughput remained within 2%
   while CPU fell from 4.62 to 2.60 vCPU. Neither run dropped export frames or
   reported transport failures.
+- The final Adam active-sync matrix used eight shards and clients, 1 KiB values,
+  pinned CPUs `0-7`, isolated ten-second mode runs, and convergence validation.
+  Installing conflict ordering without a conflict stayed within 0.5% of
+  `causal-local`. Causal-sync GET measured 15.05M ops/s, SET 2.33M ops/s, and
+  80/20 7.94M ops/s; the latter two improved from 1.34M and 5.36M in the prior
+  Adam run. Write-heavy modes remain below the 90% release gate and stay
+  explicit and disabled by default.
+- The full `consensus-sync` profile measured 14.70M GET/s, 2.29M SET/s, and
+  7.95M 80/20 ops/s in the ten-second Adam matrix. A 20-second GET repeat
+  measured 14.90M causal-sync versus 15.16M consensus-sync with identical
+  2.2us p99, confirming no conflict-free read penalty from configuring the
+  external orderer.
+- Default raw-cache and native ShardMap GET, SET, and 80/20 rows remained within
+  2.4% of their recorded Adam baselines with zero errors. The all-feature
+  workspace suite passed 420 ShardMap unit tests plus integration, differential,
+  deterministic-fault, mTLS, overflow, formal-model, and doc tests.
 
 ## 0.6.0 - Unreleased
 

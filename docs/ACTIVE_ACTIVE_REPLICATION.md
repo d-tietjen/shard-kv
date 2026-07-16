@@ -24,23 +24,107 @@ keys and values. It includes:
 - explicit in-process synchronization through `sync_with`;
 - an `active-sync-tls` direct-shard transport with mandatory mutual TLS 1.3,
   ALPN, certificate-fingerprint authorization, deadlines, bounded frames,
-  credential overlap, and immediate node revocation; and
+  credential overlap, and immediate node revocation;
+- revisioned automatic TLS membership reconciliation with one scheduler per
+  local shard, bounded join catch-up, explicit draining, and health reporting;
+  and
 - focused fault, convergence, snapshot, compaction, mTLS, credential-rotation,
   and resource-bound tests plus the `active_sync_cost` benchmark.
 
+### Consistency Modes
+
+Conflict ordering and peer synchronization are separate choices. The supported
+deployment profiles are:
+
+| Profile | Constructor | Peer sync | Concurrent conflict rule | Guarantee |
+| --- | --- | --- | --- | --- |
+| Embedded baseline | `EmbeddedStore::new` | None | None | Atomic local point operations only; no cross-node visibility. |
+| `causal-local` | `ActiveShardMap::new_causal_eventual` | Off | Causal dominance, HLC tie-break, remove-wins DEL/expiry | Local read-your-writes and causal history; no remote visibility until the application synchronizes. |
+| `consensus-local` | `ActiveShardMap::new_consensus_ordered_eventual` | Off | External finality for ambiguous conflicts | Same local guarantee, with consensus ready for conflicts imported by a later sync. It does not call consensus on conflict-free local writes. |
+| `causal-sync` | `ActiveShardMap::new_causal_eventual` | Explicit or scheduled | Causal dominance, HLC tie-break, remove-wins DEL/expiry | Eventual convergence after finite writes and eventual successful delivery. |
+| `consensus-sync` | `ActiveShardMap::new_consensus_ordered_eventual` | Explicit or scheduled | External supermajority-finalized total order for ambiguous conflicts | Eventual convergence with BFT conflict arbitration. This is the strongest supported active-active conflict guarantee. |
+
+`ActiveShardMap::consistency_mode` returns `CausalEventual` or
+`ConsensusOrderedEventual`, so applications and health surfaces can report the
+configured guarantee without inspecting constructor wiring. Existing `new` and
+`new_with_conflict_orderer` calls remain aliases for compatibility.
+
+None of these profiles provides linearizable reads, serializable cross-node
+transactions, or immediate remote visibility. Local writes remain available
+during a partition. `consensus-sync` orders only an observed ambiguous conflict;
+it does not place every write through consensus and does not turn Blossom into a
+second replication path.
+
+The standalone source-only `shardmap-blossom-bridge` crate provides the
+concrete Blossom TCP adapter. It is excluded from the public workspace and
+crates.io publication because Blossom is pinned to a pre-release Git revision;
+normal workspace builds therefore require no private Git credentials. The
+adapter uses bounded per-group
+state, deadline-enforced requests, stable persisted candidate ranks, exact
+validator generations, signer-key reload, and quorum reads from distinct
+validator endpoints before treating an epoch as finalized.
+
 The first 0.7 implementation is caller-driven. Applications seal or synchronize
-at their selected interval; there is no implicit networking on local reads or
-writes. Peer fanout accepts only blocks whose origin is the authenticated peer,
-so unsigned multi-hop forwarding is deliberately rejected.
+explicitly, or install `ActiveSyncTlsMembership` to run bounded sync rounds at
+their selected interval. Neither mode adds networking to local reads or writes.
+Peer fanout accepts only blocks whose origin is the authenticated peer, so
+unsigned multi-hop forwarding is deliberately rejected.
+
+### Automatic TLS Membership
+
+`ActiveSyncTlsMembership` reconciles an application-provided desired peer set.
+It does not discover nodes or implement Redis command semantics. Every update
+has a monotonically increasing revision and stable `NodeId` identities. Stale
+revisions and equal revisions with different routes fail closed; an equal,
+identical revision is idempotent. Address counts must match the local shard
+count, peer IDs must be unique, and desired plus unretired membership is
+bounded.
+
+The manager starts exactly one background scheduler per local shard. Each
+scheduler seals and transfers only its shard and reuses the direct-shard mTLS
+protocol. Membership locks are taken only between network rounds; GET and SET
+do not inspect the coordinator. A joining peer becomes active after every shard
+completes an untruncated round. Failed peers remain visible with bounded retry
+and consecutive-failure counters.
+
+The safe leave order is: fence writes on the leaving node, publish the higher
+membership revision without that peer, wait for `ready_to_retire`, and call
+`retire_drained` with that same revision. Applying the revision marks the peer
+`Draining`, resets its catch-up progress, and continues bidirectional
+synchronization until every shard completes an untruncated post-fence round.
+The manager never silently deletes the peer. An unreachable peer remains
+draining after `drain_timeout`; `force_retire` is an explicit data-loss-risk
+override and is counted in health. Server certificate authorization must be
+installed before a peer joins and should be revoked only after retirement.
+
+Because origin authentication deliberately rejects unsigned forwarding, every
+node still needs direct connectivity to every peer whose mutations it must
+receive. External service discovery, topology persistence, and multi-hop block
+signatures remain separate control-plane work.
 
 The following design items remain release gates rather than implemented
 claims: building sync blocks from durable WAL offsets instead of retaining
-mutation payloads in memory, automatic membership/topology scheduling,
+mutation payloads in memory, external topology discovery and persistence,
 multi-hop origin signatures, quorum cold nominations, tombstone garbage
 collection, stronger acknowledgement modes, Redis command-family semantics,
-and online overlapping replica-group reconfiguration. The current local write
-benchmark also does not meet the 90% throughput target; see
+and automated writer fencing for overlapping replica-group reconfiguration.
+The current local write benchmark also does not meet the 90% throughput target; see
 [`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md).
+
+The final Adam candidate measured conflict-orderer installation within 0.5% of
+`causal-local` throughput when no ambiguous conflict occurred. Causal-sync GET
+was 15.05M ops/s, effectively unchanged from the earlier 15.11M result, while
+SET improved from 1.34M to 2.33M ops/s and the 80/20 workload improved from
+5.36M to 7.94M ops/s. The default raw-cache and native ShardMap surfaces stayed
+within 2.4% of their recorded baselines. These results validate the fail-closed
+ordering hook and absence of a global regression; they do not remove the
+write-heavy opt-in restriction.
+
+The full `consensus-sync` profile measured 14.70M GET/s, 2.29M SET/s, and 7.95M
+80/20 ops/s in the ten-second matrix. A longer GET repeat measured 14.90M
+causal-sync and 15.16M consensus-sync with the same 2.2us p99. Blossom is not
+called in these conflict-free rows; the result verifies that merely configuring
+the stronger conflict guarantee does not add a read-path penalty.
 
 ## Summary
 
@@ -212,6 +296,11 @@ The initial concurrent-version rule is `causal_lww` with
 - Timestamps beyond `max_clock_skew_ms` are quarantined instead of being allowed
   to dominate indefinitely.
 
+When `active-sync-blossom` is enabled and an external orderer is installed,
+causal dominance and the remove/eviction safety rules above remain local. Only
+ambiguous concurrent conflicts, such as SET versus SET, are sent to Blossom.
+The HLC tuple remains the compatibility fallback when no orderer is configured.
+
 Every resolution joins the causal contexts of all observed versions, including
 discarded versions. This is required so an older block arriving later cannot
 resurrect a losing value. Resolution is associative, commutative, and idempotent,
@@ -230,6 +319,91 @@ extensions built on the same causal comparison. A custom merge operator must be
 associative, commutative, idempotent, resource-bounded, and free of network or
 storage I/O. Every peer must advertise the same policy ID and version before
 joining a group.
+
+### Blossom Conflict Ordering
+
+Blossom is a conflict-ordering plane, not a second replication plane. Normal
+active-sync blocks remain the only mechanism that transfers mutation keys,
+values, governance metadata, TTLs, tombstones, eviction records, and WAL-backed
+state between nodes. ShardMap does not submit those blocks to Blossom.
+
+An ambiguous conflict creates one bounded claim containing:
+
+```text
+format version, cluster digest, shard ID, key digest,
+candidate mutation dot and mutation class for each candidate
+```
+
+The claim contains no raw key, value, governance metadata, TTL, causal context,
+or WAL bytes. One deterministic Blossom consensus group is derived per ShardMap
+shard. The bridge indexes the earliest finalized epoch in which each conflicted
+mutation dot appears and returns those stable per-candidate ranks with the
+verified claim certificate. The later rank wins, with the canonical mutation
+dot as a deterministic tie-breaker when candidates first appear in the same
+epoch. Repeated claims and overlapping candidate pairs must return the same
+rank for a mutation. This defines one transitive total order across three or
+more concurrent writes; a pair-specific epoch hash is not a valid winner seed
+because it can form cycles and leave replicas permanently divergent.
+
+Consensus is invoked by the shard's background synchronization path only after
+a real concurrent conflict is detected. The storage-shard lock is released
+before waiting for finality. A stale certificate is rejected if the key changes
+while consensus is in progress, and the new exact conflict set is retried up to
+`max_conflict_order_retries`. An unavailable or invalid ordering service fails
+the sync round without acknowledging its source WAL block or replacing the
+local version. Conflict-free SET, GET, sealing, and replication do not call the
+ordering service.
+
+Applications install the integration with
+`ActiveShardMap::new_with_conflict_orderer`. The feature-provided
+`BlossomConflictOrderer` consumes a `BlossomConflictConsensus` bridge. That
+bridge is responsible for deduplicating claims, verifying finality against the
+configured validator set, maintaining the stable candidate-epoch index,
+returning the earliest certificate, enforcing a deadline, and using an
+authenticated confidential transport.
+
+`shardmap-blossom-bridge` accepts loopback addresses only. Each address is
+configured with one expected validator public key, endpoint identities must be
+unique, and every validator generation must have enough configured endpoints
+for a Blossom supermajority. For hosts other than the local machine, terminate
+mutual TLS in an identity-bound local proxy and map one listener to exactly one
+validator. Blossom's raw TCP port is plaintext and is not a production network
+security boundary.
+
+Blossom's current TCP epoch-chain response does not include the commit-message
+signatures in `Epoch.signatures`. The bridge therefore requires a BFT quorum
+read: a supermajority of distinct configured validator endpoints must report the
+same epoch hash. It then verifies group identity, nonce and hash-chain
+continuity from a trusted checkpoint, the exact configured validator set, the
+recomputed epoch hash, every block signature and integrity field, and the exact
+claim payload. A single endpoint response is never a finality certificate.
+For a membership transition at epoch `N`, the quorum receipt uses the validator
+generation committed in epoch `N-1`, while the resulting epoch body must match
+the generation configured to become active at `N`.
+
+Candidate ranks and exact claim receipts are written atomically and fsynced
+before a decision is returned. Entry counts and state-file bytes have hard
+limits, malformed claims are rejected before length-driven allocation, and
+response frame lengths are rejected against `max_response_bytes` before
+allocation. Endpoint and group counts and aggregate in-flight response bytes
+have hard ceilings. Secret-key files must be owner-only on Unix. The signer
+file is re-read for
+every new submission, allowing an atomic file replacement to rotate credentials
+without restarting the bridge. During a validator rotation, configure an
+explicit nonce generation containing the overlap set, then remove the old key
+in a later generation. Configuration and debug output redact the signer path.
+
+An accepted Blossom block is not necessarily included in that target epoch. If
+a verified checkpoint advances past an accepted submission without the claim,
+the bridge resubmits the same idempotent metadata through the authoring
+validator. It never submits ShardMap WAL blocks or values. The bounded orderer
+uses one lazy lane per conflict group, a bounded queue, caller and adapter
+deadlines, capped retry backoff, bounded decision caches, and a circuit breaker.
+This machinery is absent from conflict-free GET, SET, sealing, and sync paths.
+
+Health snapshots expose conflict-order requests, failures, stale retries, and
+completed ordered conflicts. These counters increment only on the background
+conflict path.
 
 Redis-compatible active mode initially supports point SET, DEL, and EXPIRE under
 the causal register. Commands such as INCR, list mutation, transactions, and
@@ -686,6 +860,7 @@ conflict_policy = "causal_lww"
 concurrent_delete = "remove_wins"
 governance_conflict = "fail_closed"
 max_clock_skew_ms = 5000
+max_conflict_order_retries = 4
 max_causal_origins_per_group = 16
 eviction_scope = "local_then_cluster"
 eviction_policy = "lru"
