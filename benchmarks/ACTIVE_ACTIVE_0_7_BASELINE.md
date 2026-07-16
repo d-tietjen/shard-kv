@@ -82,6 +82,54 @@ target/release/active_sync_cost \
   --sync-interval-ms 100 --latency-sample-rate 10000 --ttl-seconds 3600
 ```
 
+## Optimized Active Write Path
+
+Commit `85a0630` reduces local mutation admission and interval-block overhead.
+It reuses the embedded route hash for active version lookup, uses the embedded
+store's no-TTL write path for plain values, reads the wall clock once, and
+transfers pending record vectors into sealed blocks without relocating their
+contents. Retired blocks are released after dropping the shard metadata lock.
+The common causal context, mutation kind, and recovery-peer state are also
+stored more compactly and checked by layout regression tests.
+
+The following ten-second release measurements used eight shards, eight clients,
+100,000 keys, 1 KiB values, a two-second warmup, and a 100 ms sync interval on
+the Apple M5 Max development host. Each mode was invoked separately. The GET
+row verifies that the write-path changes did not regress the direct read path.
+
+| Workload | Mode | Ops/s | Baseline retained | p50 | p99 | p999 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| GET | baseline | 15.35M | 100.0% | 291ns | 3.7us | 17.7us |
+| GET | active-local | 15.44M | 100.6% | 292ns | 3.8us | 19.5us |
+| GET | active-sync | 15.50M | 101.0% | 292ns | 3.8us | 19.0us |
+| SET | baseline | 9.64M | 100.0% | 375ns | 6.6us | 32.0us |
+| SET | active-local | 3.19M | 33.1% | 1.1us | 22.5us | 79.4us |
+| SET | active-sync | 2.77M | 28.7% | 1.2us | 25.3us | 48.5us |
+| 80% GET / 20% SET | baseline | 12.86M | 100.0% | 333ns | 4.7us | 27.2us |
+| 80% GET / 20% SET | active-local | 9.56M | 74.3% | 375ns | 6.0us | 26.2us |
+| 80% GET / 20% SET | active-sync | 9.70M | 75.4% | 333ns | 7.8us | 33.6us |
+
+Against the pre-change local write smoke measurements, SET throughput improved
+by approximately 29% in `active-local` and 25% in `active-sync`. The active
+metadata layout now uses 32 bytes for `CausalContext`, 16 bytes for
+`MutationKind`, 192 bytes for `VersionState`, and 240 bytes for
+`ActiveMutation` on this target.
+
+These rows remain development-host diagnostics. The current interval stream
+retains full mutation values in memory; it is not a durable WAL and does not yet
+reference value bytes by WAL offset. SET-heavy and mixed modes still miss the
+90% release throughput gate, so the optimized code requires the canonical Adam
+rerun and further write-path work before active sync is enabled by default.
+
+Command shape:
+
+```bash
+target/release/active_sync_cost \
+  --modes MODE --shards 8 --clients 8 --key-count 100000 --value-size 1024 \
+  --read-percent MIX --warmup 2 --duration 10 \
+  --sync-interval-ms 100 --latency-sample-rate 10000
+```
+
 ## Implemented ActiveShardMap On Adam
 
 Commit `e835105` was built natively in release mode and run on CPUs `0-7` with
