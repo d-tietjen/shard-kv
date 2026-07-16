@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::{self, OpenOptions};
+use std::hash::{BuildHasherDefault, Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
@@ -14,12 +15,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes as SharedBytes;
-use parking_lot::RwLock;
+use hashbrown::HashMap as HashBrownMap;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
+use xxhash_rust::xxh3::Xxh3;
 
-use crate::storage::{EmbeddedKeyRoute, EmbeddedStore, FastHashMap, hash_key, now_millis};
+use crate::storage::{EmbeddedKeyRoute, EmbeddedStore, hash_key, now_millis};
 use crate::{Result, ShardCacheError};
 
 #[cfg(feature = "active-sync-tls")]
@@ -267,7 +270,7 @@ pub struct ActiveShardMap {
 struct ActiveShardMapInner {
     store: EmbeddedStore,
     config: ActiveSyncConfig,
-    shards: Box<[RwLock<ActiveShardState>]>,
+    shards: Box<[Mutex<ActiveShardState>]>,
     special_reads: Box<[AtomicBool]>,
     // Monotonic so a readable store hit can bypass metadata unless this shard
     // has ever materialized a governance conflict.
@@ -283,18 +286,21 @@ struct CausalOrigin {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CausalFrontier {
-    origin: CausalOrigin,
+    origin: Arc<CausalOrigin>,
     sequence: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CausalContext(SmallVec<[CausalFrontier; 4]>);
+// Local writes normally observe one origin. Keeping four full origins inline
+// made every live version and retained mutation substantially larger, which in
+// turn amplified cache misses and pending-block relocation costs.
+struct CausalContext(SmallVec<[CausalFrontier; 1]>);
 
 impl CausalContext {
     fn observes(&self, dot: &MutationDot) -> bool {
         let origin = CausalOrigin::from(dot);
         self.0
-            .binary_search_by(|frontier| frontier.origin.cmp(&origin))
+            .binary_search_by(|frontier| frontier.origin.as_ref().cmp(&origin))
             .ok()
             .is_some_and(|index| self.0[index].sequence >= dot.sequence)
     }
@@ -305,21 +311,27 @@ impl CausalContext {
 
     fn join(&mut self, other: &Self) {
         for frontier in &other.0 {
-            self.observe_origin(frontier.origin.clone(), frontier.sequence);
+            self.observe_origin(frontier.origin.as_ref().clone(), frontier.sequence);
         }
     }
 
     fn observe_origin(&mut self, origin: CausalOrigin, sequence: u64) -> bool {
         match self
             .0
-            .binary_search_by(|frontier| frontier.origin.cmp(&origin))
+            .binary_search_by(|frontier| frontier.origin.as_ref().cmp(&origin))
         {
             Ok(index) => {
                 self.0[index].sequence = self.0[index].sequence.max(sequence);
                 false
             }
             Err(index) => {
-                self.0.insert(index, CausalFrontier { origin, sequence });
+                self.0.insert(
+                    index,
+                    CausalFrontier {
+                        origin: Arc::new(origin),
+                        sequence,
+                    },
+                );
                 true
             }
         }
@@ -332,7 +344,7 @@ impl CausalContext {
     fn iter(&self) -> impl Iterator<Item = (&CausalOrigin, u64)> {
         self.0
             .iter()
-            .map(|frontier| (&frontier.origin, frontier.sequence))
+            .map(|frontier| (frontier.origin.as_ref(), frontier.sequence))
     }
 }
 
@@ -356,7 +368,9 @@ enum TombstoneKind {
 enum MutationKind {
     Set,
     Tombstone(TombstoneKind),
-    ClusterEvict { target: MutationDot },
+    // Cluster eviction is rare; boxing its large dot keeps every ordinary SET
+    // and tombstone record compact.
+    ClusterEvict { target: Box<MutationDot> },
 }
 
 #[derive(Debug, Clone)]
@@ -398,8 +412,15 @@ struct VersionState {
     expire_at_ms: Option<u64>,
     governance: Option<SharedBytes>,
     residency: Residency,
-    recovery_peers: HashSet<NodeId>,
+    // Local versions have no recovery peer. Allocate the set only after a
+    // remote copy is actually acknowledged.
+    recovery_peers: Option<Box<RecoveryPeerSet>>,
     governance_conflict: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RecoveryPeerSet {
+    peers: HashSet<NodeId>,
 }
 
 impl VersionState {
@@ -410,13 +431,16 @@ impl VersionState {
             MutationKind::Tombstone(_) => Residency::Resident,
             MutationKind::ClusterEvict { .. } => Residency::ClusterEvicted,
         };
-        let mut recovery_peers = HashSet::new();
-        if mutation.value.is_some()
+        let recovery_peers = if mutation.value.is_some()
             && matches!(mutation.kind, MutationKind::Set)
             && let Some(peer) = source_peer
         {
-            recovery_peers.insert(peer.clone());
-        }
+            Some(Box::new(RecoveryPeerSet {
+                peers: HashSet::from([peer.clone()]),
+            }))
+        } else {
+            None
+        };
         Self {
             dot: mutation.dot.clone(),
             hlc: mutation.hlc,
@@ -435,6 +459,23 @@ impl VersionState {
         context.observe(&self.dot);
         context
     }
+
+    fn has_recovery_peer(&self) -> bool {
+        self.recovery_peers
+            .as_ref()
+            .is_some_and(|peers| !peers.peers.is_empty())
+    }
+
+    fn add_recovery_peer(&mut self, peer: NodeId) {
+        self.recovery_peers
+            .get_or_insert_with(|| {
+                Box::new(RecoveryPeerSet {
+                    peers: HashSet::new(),
+                })
+            })
+            .peers
+            .insert(peer);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -450,7 +491,10 @@ struct SyncBlock {
     origin: BlockOrigin,
     sequence: u64,
     digest: OnceLock<[u8; 32]>,
-    records: Arc<[ActiveMutation]>,
+    // Keep the Vec allocation so sealing is an O(1) ownership transfer. An
+    // Arc<[T]> conversion may relocate every large mutation while the shard is
+    // write locked.
+    records: Arc<Vec<ActiveMutation>>,
     encoded_bytes: usize,
 }
 
@@ -478,13 +522,96 @@ struct ActiveShardState {
     next_mutation_sequence: u64,
     next_block_sequence: u64,
     clock: HybridLogicalClock,
-    versions: FastHashMap<SharedBytes, VersionState>,
+    versions: ActiveVersionMap,
     pending: Vec<ActiveMutation>,
     pending_bytes: usize,
     blocks: VecDeque<Arc<SyncBlock>>,
     retained_block_bytes: usize,
     block_frontiers: BTreeMap<BlockOrigin, u64>,
     pending_block_gaps: BTreeMap<BlockOrigin, BTreeMap<u64, [u8; 32]>>,
+}
+
+#[derive(Debug, Default)]
+struct ActiveVersionMap {
+    entries: HashBrownMap<ActiveVersionKey, VersionState, BuildHasherDefault<Xxh3>>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ActiveVersionKey(SharedBytes);
+
+impl Hash for ActiveVersionKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(&self.0);
+    }
+}
+
+impl ActiveVersionMap {
+    #[inline]
+    fn get(&self, key: &[u8]) -> Option<&VersionState> {
+        self.get_key_value_hashed(hash_key(key), key)
+            .map(|(_, version)| version)
+    }
+
+    #[inline]
+    fn get_mut(&mut self, key: &[u8]) -> Option<&mut VersionState> {
+        let hash = hash_key(key);
+        match self
+            .entries
+            .raw_entry_mut()
+            .from_hash(hash, |stored_key| stored_key.0.as_ref() == key)
+        {
+            hashbrown::hash_map::RawEntryMut::Occupied(occupied) => Some(occupied.into_mut()),
+            hashbrown::hash_map::RawEntryMut::Vacant(_) => None,
+        }
+    }
+
+    #[inline]
+    fn get_key_value_hashed(&self, hash: u64, key: &[u8]) -> Option<(&SharedBytes, &VersionState)> {
+        self.entries
+            .raw_entry()
+            .from_hash(hash, |stored_key| stored_key.0.as_ref() == key)
+            .map(|(stored_key, version)| (&stored_key.0, version))
+    }
+
+    #[inline]
+    fn contains_key(&self, key: &[u8]) -> bool {
+        self.get(key).is_some()
+    }
+
+    #[inline]
+    fn insert(&mut self, key: SharedBytes, version: VersionState) -> Option<VersionState> {
+        self.replace_hashed(hash_key(&key), key, version)
+    }
+
+    #[inline]
+    fn replace_hashed(
+        &mut self,
+        hash: u64,
+        key: SharedBytes,
+        replacement: VersionState,
+    ) -> Option<VersionState> {
+        match self
+            .entries
+            .raw_entry_mut()
+            .from_hash(hash, |stored_key| stored_key.0.as_ref() == key.as_ref())
+        {
+            hashbrown::hash_map::RawEntryMut::Occupied(mut occupied) => {
+                Some(std::mem::replace(occupied.get_mut(), replacement))
+            }
+            hashbrown::hash_map::RawEntryMut::Vacant(vacant) => {
+                vacant.insert_hashed_nocheck(hash, ActiveVersionKey(key), replacement);
+                None
+            }
+        }
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&SharedBytes, &VersionState)> {
+        self.entries.iter().map(|(key, version)| (&key.0, version))
+    }
+
+    fn values(&self) -> impl Iterator<Item = &VersionState> {
+        self.entries.values()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -551,7 +678,7 @@ impl ActiveShardMap {
             ));
         }
         let shards = (0..shard_count)
-            .map(|_| RwLock::new(ActiveShardState::default()))
+            .map(|_| Mutex::new(ActiveShardState::default()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let special_reads = (0..shard_count)
@@ -643,7 +770,8 @@ impl ActiveShardMap {
     ) -> Result<SyncToken> {
         self.validate_point(key, &value, governance)?;
         let route = self.inner.store.route_key(key);
-        let mut shard = self.inner.shards[route.shard_id].write();
+        let wall_ms = now_millis();
+        let mut shard = self.inner.shards[route.shard_id].lock();
         let mutation = self.local_mutation(
             &mut shard,
             route.shard_id,
@@ -653,11 +781,13 @@ impl ActiveShardMap {
             Some(value),
             expire_at_ms,
             governance,
+            wall_ms,
         )?;
-        self.prepare_local_mutation_queue(&mut shard, &mutation)?;
-        self.store_mutation(&mutation);
-        replace_version(
+        let retired = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        self.store_mutation_at(&mutation, wall_ms);
+        replace_version_hashed(
             &mut shard.versions,
+            route.key_hash,
             mutation.key.clone(),
             VersionState::from_mutation(&mutation, None),
         );
@@ -666,6 +796,8 @@ impl ActiveShardMap {
         }
         let dot = mutation.dot.clone();
         self.queue_local_mutation(&mut shard, mutation);
+        drop(shard);
+        drop(retired);
         Ok(SyncToken {
             slot: route.shard_id as u32,
             dot,
@@ -679,7 +811,8 @@ impl ActiveShardMap {
     fn tombstone(&self, key: &[u8], kind: TombstoneKind) -> Result<SyncToken> {
         self.validate_point(key, &[], None)?;
         let route = self.inner.store.route_key(key);
-        let mut shard = self.inner.shards[route.shard_id].write();
+        let wall_ms = now_millis();
+        let mut shard = self.inner.shards[route.shard_id].lock();
         let mutation = self.local_mutation(
             &mut shard,
             route.shard_id,
@@ -689,16 +822,20 @@ impl ActiveShardMap {
             None,
             None,
             None,
+            wall_ms,
         )?;
-        self.prepare_local_mutation_queue(&mut shard, &mutation)?;
-        self.store_mutation(&mutation);
-        replace_version(
+        let retired = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        self.store_mutation_at(&mutation, wall_ms);
+        replace_version_hashed(
             &mut shard.versions,
+            route.key_hash,
             mutation.key.clone(),
             VersionState::from_mutation(&mutation, None),
         );
         let dot = mutation.dot.clone();
         self.queue_local_mutation(&mut shard, mutation);
+        drop(shard);
+        drop(retired);
         Ok(SyncToken {
             slot: route.shard_id as u32,
             dot,
@@ -736,7 +873,7 @@ impl ActiveShardMap {
         let key = key.as_ref();
         let route = self.inner.store.route_key(key);
         self.inner.shards[route.shard_id]
-            .read()
+            .lock()
             .versions
             .get(key)
             .map(|version| version.dot.clone())
@@ -749,7 +886,7 @@ impl ActiveShardMap {
     ) -> Result<EvictionOutcome> {
         let key = key.as_ref();
         let route = self.inner.store.route_key(key);
-        let mut shard = self.inner.shards[route.shard_id].write();
+        let mut shard = self.inner.shards[route.shard_id].lock();
         let Some(version) = shard.versions.get_mut(key) else {
             return Ok(EvictionOutcome::Missing);
         };
@@ -762,7 +899,7 @@ impl ActiveShardMap {
         if !matches!(version.kind, MutationKind::Set) {
             return Ok(EvictionOutcome::Missing);
         }
-        if version.recovery_peers.is_empty() {
+        if !version.has_recovery_peer() {
             return Ok(EvictionOutcome::NoRecoverySource);
         }
         let generation = match version.residency {
@@ -789,7 +926,8 @@ impl ActiveShardMap {
         let key = key.as_ref();
         self.validate_point(key, &[], None)?;
         let route = self.inner.store.route_key(key);
-        let mut shard = self.inner.shards[route.shard_id].write();
+        let wall_ms = now_millis();
+        let mut shard = self.inner.shards[route.shard_id].lock();
         let Some(version) = shard.versions.get(key) else {
             return Ok(None);
         };
@@ -802,21 +940,25 @@ impl ActiveShardMap {
             route.key_hash,
             key,
             MutationKind::ClusterEvict {
-                target: expected.clone(),
+                target: Box::new(expected.clone()),
             },
             None,
             None,
             None,
+            wall_ms,
         )?;
-        self.prepare_local_mutation_queue(&mut shard, &mutation)?;
-        self.store_mutation(&mutation);
-        replace_version(
+        let retired = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        self.store_mutation_at(&mutation, wall_ms);
+        replace_version_hashed(
             &mut shard.versions,
+            route.key_hash,
             mutation.key.clone(),
             VersionState::from_mutation(&mutation, None),
         );
         let dot = mutation.dot.clone();
         self.queue_local_mutation(&mut shard, mutation);
+        drop(shard);
+        drop(retired);
         Ok(Some(SyncToken {
             slot: route.shard_id as u32,
             dot,
@@ -828,7 +970,7 @@ impl ActiveShardMap {
         let key = key.as_ref();
         let route = self.inner.store.route_key(key);
         let (expected, generation) = {
-            let shard = self.inner.shards[route.shard_id].read();
+            let shard = self.inner.shards[route.shard_id].lock();
             let Some(version) = shard.versions.get(key) else {
                 return Ok(None);
             };
@@ -840,7 +982,7 @@ impl ActiveShardMap {
         let Some(value) = peer.read_exact(key, &expected)? else {
             return Ok(None);
         };
-        let mut shard = self.inner.shards[route.shard_id].write();
+        let mut shard = self.inner.shards[route.shard_id].lock();
         let Some(version) = shard.versions.get_mut(key) else {
             return Ok(None);
         };
@@ -860,13 +1002,13 @@ impl ActiveShardMap {
         };
         self.store_mutation(&mutation);
         version.residency = Residency::Resident;
-        version.recovery_peers.insert(peer.node_id().clone());
+        version.add_recovery_peer(peer.node_id().clone());
         Ok(Some(value))
     }
 
     fn read_exact(&self, key: &[u8], expected: &MutationDot) -> Result<Option<Vec<u8>>> {
         let route = self.inner.store.route_key(key);
-        let shard = self.inner.shards[route.shard_id].read();
+        let shard = self.inner.shards[route.shard_id].lock();
         let Some(version) = shard.versions.get(key) else {
             return Ok(None);
         };
@@ -937,11 +1079,13 @@ impl ActiveShardMap {
     pub fn seal_pending(&self) -> Result<usize> {
         let mut sealed = 0;
         for shard_id in 0..self.shard_count() {
-            let mut shard = self.inner.shards[shard_id].write();
+            let mut shard = self.inner.shards[shard_id].lock();
             if shard.pending.is_empty() {
                 continue;
             }
-            self.seal_shard(&mut shard, shard_id)?;
+            let retired = self.seal_shard(&mut shard, shard_id)?;
+            drop(shard);
+            drop(retired);
             sealed += 1;
         }
         Ok(sealed)
@@ -952,11 +1096,13 @@ impl ActiveShardMap {
             self.inner.shards.get(shard_id).ok_or_else(|| {
                 ShardCacheError::Protocol("active-sync shard is out of range".into())
             })?;
-        let mut shard = shard.write();
+        let mut shard = shard.lock();
         if shard.pending.is_empty() {
             return Ok(false);
         }
-        self.seal_shard(&mut shard, shard_id)?;
+        let retired = self.seal_shard(&mut shard, shard_id)?;
+        drop(shard);
+        drop(retired);
         Ok(true)
     }
 
@@ -966,7 +1112,7 @@ impl ActiveShardMap {
             ..ActiveSyncHealthSnapshot::default()
         };
         for shard in &self.inner.shards {
-            let shard = shard.read();
+            let shard = shard.lock();
             health.pending_records += shard.pending.len();
             health.retained_blocks += shard.blocks.len();
             health.retained_block_bytes += shard.retained_block_bytes;
@@ -1146,11 +1292,11 @@ impl ActiveShardMap {
         let mut block_frontiers = Vec::new();
         let mut estimated_bytes = 0usize;
         for shard in &self.inner.shards {
-            let shard = shard.read();
+            let shard = shard.lock();
             for (origin, sequence) in &shard.block_frontiers {
                 block_frontiers.push(SnapshotFrontier::from_block_origin(origin, *sequence));
             }
-            for (key, version) in &shard.versions {
+            for (key, version) in shard.versions.iter() {
                 let value = match version.kind {
                     MutationKind::Set => {
                         if !matches!(version.residency, Residency::Resident) {
@@ -1200,7 +1346,7 @@ impl ActiveShardMap {
                     "active-sync snapshot frontier is assigned to a missing shard".into(),
                 )
             })?;
-            let mut shard = shard.write();
+            let mut shard = shard.lock();
             if !shard.block_frontiers.contains_key(&origin)
                 && shard.block_frontiers.len() >= self.inner.config.max_causal_origins_per_shard
             {
@@ -1228,7 +1374,7 @@ impl ActiveShardMap {
                 ));
             }
             self.ensure_context_bound(&mutation.context)?;
-            let mut shard = self.inner.shards[route.shard_id].write();
+            let mut shard = self.inner.shards[route.shard_id].lock();
             if shard.versions.contains_key(mutation.key.as_ref()) {
                 return Err(ShardCacheError::Persistence(
                     "active-sync snapshot contains a duplicate key".into(),
@@ -1262,8 +1408,9 @@ impl ActiveShardMap {
         value: Option<SharedBytes>,
         expire_at_ms: Option<u64>,
         governance: Option<&[u8]>,
+        wall_ms: u64,
     ) -> Result<ActiveMutation> {
-        let (context, key) = shard.versions.get_key_value(key).map_or_else(
+        let (context, key) = version_key_value_hashed(&shard.versions, key_hash, key).map_or_else(
             || (CausalContext::default(), SharedBytes::copy_from_slice(key)),
             |(stored_key, version)| (version.full_context(), stored_key.clone()),
         );
@@ -1284,7 +1431,7 @@ impl ActiveShardMap {
         };
         Ok(ActiveMutation {
             dot,
-            hlc: shard.clock.tick(now_millis()),
+            hlc: shard.clock.tick(wall_ms),
             context,
             key_hash,
             key,
@@ -1299,7 +1446,7 @@ impl ActiveShardMap {
         &self,
         shard: &mut ActiveShardState,
         mutation: &ActiveMutation,
-    ) -> Result<()> {
+    ) -> Result<Vec<Arc<SyncBlock>>> {
         let bytes = mutation.estimated_bytes();
         if bytes > self.inner.config.max_block_bytes {
             return Err(ShardCacheError::Protocol(
@@ -1312,9 +1459,9 @@ impl ActiveShardMap {
                 || shard.pending_bytes.saturating_add(bytes) > self.inner.config.max_block_bytes)
         {
             let shard_id = mutation.dot.shard_id as usize;
-            self.seal_shard(shard, shard_id)?;
+            return self.seal_shard(shard, shard_id);
         }
-        Ok(())
+        Ok(Vec::new())
     }
 
     fn queue_local_mutation(&self, shard: &mut ActiveShardState, mutation: ActiveMutation) {
@@ -1323,14 +1470,24 @@ impl ActiveShardMap {
         shard.pending.push(mutation);
     }
 
-    fn seal_shard(&self, shard: &mut ActiveShardState, shard_id: usize) -> Result<()> {
+    fn seal_shard(
+        &self,
+        shard: &mut ActiveShardState,
+        shard_id: usize,
+    ) -> Result<Vec<Arc<SyncBlock>>> {
         if shard.pending.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         shard.next_block_sequence = shard.next_block_sequence.checked_add(1).ok_or_else(|| {
             ShardCacheError::Persistence("active-sync block sequence exhausted".into())
         })?;
-        let records: Arc<[ActiveMutation]> = std::mem::take(&mut shard.pending).into();
+        let records = std::mem::take(&mut shard.pending);
+        let next_capacity = records
+            .len()
+            .min(self.inner.config.max_pending_records_per_shard)
+            .min(self.inner.config.max_block_records);
+        shard.pending = Vec::with_capacity(next_capacity);
+        let records = Arc::new(records);
         let encoded_bytes = shard.pending_bytes;
         shard.pending_bytes = 0;
         let origin = BlockOrigin {
@@ -1349,11 +1506,15 @@ impl ActiveShardMap {
         shard
             .block_frontiers
             .insert(origin, shard.next_block_sequence);
-        self.retain_block(shard, block);
-        Ok(())
+        Ok(self.retain_block(shard, block))
     }
 
-    fn retain_block(&self, shard: &mut ActiveShardState, block: Arc<SyncBlock>) {
+    fn retain_block(
+        &self,
+        shard: &mut ActiveShardState,
+        block: Arc<SyncBlock>,
+    ) -> Vec<Arc<SyncBlock>> {
+        let mut retired = Vec::new();
         shard.retained_block_bytes = shard
             .retained_block_bytes
             .saturating_add(block.encoded_bytes);
@@ -1365,10 +1526,16 @@ impl ActiveShardMap {
             shard.retained_block_bytes = shard
                 .retained_block_bytes
                 .saturating_sub(removed.encoded_bytes);
+            retired.push(removed);
         }
+        retired
     }
 
     fn store_mutation(&self, mutation: &ActiveMutation) {
+        self.store_mutation_at(mutation, now_millis());
+    }
+
+    fn store_mutation_at(&self, mutation: &ActiveMutation, now_ms: u64) {
         let route = self
             .inner
             .store
@@ -1376,23 +1543,32 @@ impl ActiveShardMap {
         match mutation.kind {
             MutationKind::Set => {
                 if let Some(value) = &mutation.value {
-                    self.inner
-                        .store
-                        .set_value_bytes_routed_with_governance_then(
+                    if mutation.governance.is_none() && mutation.expire_at_ms.is_none() {
+                        self.inner.store.set_value_bytes_routed_no_ttl_then(
                             route,
                             &mutation.key,
                             value.clone(),
-                            mutation.governance.clone(),
-                            mutation.expire_at_ms,
-                            now_millis(),
                             || {},
                         );
+                    } else {
+                        self.inner
+                            .store
+                            .set_value_bytes_routed_with_governance_then(
+                                route,
+                                &mutation.key,
+                                value.clone(),
+                                mutation.governance.clone(),
+                                mutation.expire_at_ms,
+                                now_ms,
+                                || {},
+                            );
+                    }
                 }
             }
             MutationKind::Tombstone(_) | MutationKind::ClusterEvict { .. } => {
                 self.inner
                     .store
-                    .delete_routed_then(route, &mutation.key, now_millis(), || {});
+                    .delete_routed_then(route, &mutation.key, now_ms, || {});
             }
         }
     }
@@ -1433,7 +1609,7 @@ impl ActiveShardMap {
             }
             self.validate_incoming_mutation(mutation)?;
         }
-        let mut shard = shard_lock.write();
+        let mut shard = shard_lock.lock();
         if !shard.block_frontiers.contains_key(&block.origin)
             && shard.block_frontiers.len() >= self.inner.config.max_causal_origins_per_shard
         {
@@ -1493,7 +1669,9 @@ impl ActiveShardMap {
             now_millis(),
         );
         observe_block_sequence(&mut shard, &block.origin, block.sequence, block.digest());
-        self.retain_block(&mut shard, block);
+        let retired = self.retain_block(&mut shard, block);
+        drop(shard);
+        drop(retired);
         Ok(stats)
     }
 
@@ -1523,7 +1701,7 @@ impl ActiveShardMap {
         if local.dot == incoming.dot {
             local.context.join(&incoming.context);
             if incoming.value.is_some() {
-                local.recovery_peers.insert(source_peer.clone());
+                local.add_recovery_peer(source_peer.clone());
             }
             stats.duplicates += 1;
             return Ok(());
@@ -1648,7 +1826,7 @@ impl ActiveShardMap {
     fn is_readable_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Result<bool> {
         loop {
             let should_expire = {
-                let shard = self.inner.shards[route.shard_id].read();
+                let shard = self.inner.shards[route.shard_id].lock();
                 let Some(version) = shard.versions.get(key) else {
                     return Ok(false);
                 };
@@ -1676,12 +1854,13 @@ impl ActiveShardMap {
     }
 
     fn expire_if_needed_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Result<bool> {
-        let mut shard = self.inner.shards[route.shard_id].write();
+        let wall_ms = now_millis();
+        let mut shard = self.inner.shards[route.shard_id].lock();
         let should_expire = shard.versions.get(key).is_some_and(|version| {
             matches!(version.kind, MutationKind::Set)
                 && version
                     .expire_at_ms
-                    .is_some_and(|deadline| deadline <= now_millis())
+                    .is_some_and(|deadline| deadline <= wall_ms)
         });
         if !should_expire {
             return Ok(false);
@@ -1695,15 +1874,19 @@ impl ActiveShardMap {
             None,
             None,
             None,
+            wall_ms,
         )?;
-        self.prepare_local_mutation_queue(&mut shard, &mutation)?;
-        self.store_mutation(&mutation);
-        replace_version(
+        let retired = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        self.store_mutation_at(&mutation, wall_ms);
+        replace_version_hashed(
             &mut shard.versions,
+            route.key_hash,
             mutation.key.clone(),
             VersionState::from_mutation(&mutation, None),
         );
         self.queue_local_mutation(&mut shard, mutation);
+        drop(shard);
+        drop(retired);
         Ok(true)
     }
 
@@ -1729,7 +1912,7 @@ impl ActiveShardMap {
     fn frontiers(&self) -> BTreeMap<BlockOrigin, u64> {
         let mut frontiers = BTreeMap::new();
         for shard in &self.inner.shards {
-            for (origin, sequence) in &shard.read().block_frontiers {
+            for (origin, sequence) in &shard.lock().block_frontiers {
                 frontiers
                     .entry(origin.clone())
                     .and_modify(|current: &mut u64| *current = (*current).max(*sequence))
@@ -1744,7 +1927,7 @@ impl ActiveShardMap {
             self.inner.shards.get(shard_id).ok_or_else(|| {
                 ShardCacheError::Protocol("active-sync shard is out of range".into())
             })?;
-        Ok(shard.read().block_frontiers.clone())
+        Ok(shard.lock().block_frontiers.clone())
     }
 
     fn missing_blocks_in_shard(
@@ -1758,7 +1941,7 @@ impl ActiveShardMap {
             self.inner.shards.get(shard_id).ok_or_else(|| {
                 ShardCacheError::Protocol("active-sync shard is out of range".into())
             })?;
-        let shard = shard.read();
+        let shard = shard.lock();
         let mut oldest = BTreeMap::<BlockOrigin, u64>::new();
         for block in &shard.blocks {
             if &block.origin.node_id == origin_node {
@@ -1810,10 +1993,10 @@ impl ActiveShardMap {
             self.inner.shards.get(shard_id).ok_or_else(|| {
                 ShardCacheError::Protocol("active-sync shard is out of range".into())
             })?;
-        let shard = shard.read();
+        let shard = shard.lock();
         let mut records = Vec::new();
         let mut bytes = 0usize;
-        for (key, version) in &shard.versions {
+        for (key, version) in shard.versions.iter() {
             if &version.dot.node_id != origin_node {
                 continue;
             }
@@ -1870,7 +2053,7 @@ impl ActiveShardMap {
         let shard = self.inner.shards.get(shard_id).ok_or_else(|| {
             ShardCacheError::Protocol("active-sync state shard is out of range".into())
         })?;
-        let mut shard = shard.write();
+        let mut shard = shard.lock();
         let mut stats = ApplyStats::default();
         self.apply_remote_mutation(&mut shard, mutation, source_peer, &mut stats)?;
         Ok(stats)
@@ -1884,7 +2067,7 @@ impl ActiveShardMap {
         let shard = self.inner.shards.get(shard_id).ok_or_else(|| {
             ShardCacheError::Protocol("active-sync snapshot shard is out of range".into())
         })?;
-        let mut shard = shard.write();
+        let mut shard = shard.lock();
         if frontiers
             .iter()
             .any(|(origin, sequence)| *sequence == 0 || origin.shard_id as usize != shard_id)
@@ -1927,7 +2110,7 @@ impl ActiveShardMap {
         let mut bytes = 0usize;
         let mut gap = false;
         for shard in &self.inner.shards {
-            let shard = shard.read();
+            let shard = shard.lock();
             let mut oldest = BTreeMap::<BlockOrigin, u64>::new();
             for block in &shard.blocks {
                 oldest.entry(block.origin.clone()).or_insert(block.sequence);
@@ -1961,7 +2144,7 @@ impl ActiveShardMap {
     fn has_missing_blocks(&self, receiver: &BTreeMap<BlockOrigin, u64>) -> bool {
         self.inner.shards.iter().any(|shard| {
             shard
-                .read()
+                .lock()
                 .blocks
                 .iter()
                 .any(|block| block.sequence > receiver.get(&block.origin).copied().unwrap_or(0))
@@ -1972,8 +2155,8 @@ impl ActiveShardMap {
         let mut records = Vec::new();
         let mut bytes = 0usize;
         for (shard_id, shard) in self.inner.shards.iter().enumerate() {
-            let shard = shard.read();
-            for (key, version) in &shard.versions {
+            let shard = shard.lock();
+            for (key, version) in shard.versions.iter() {
                 let value = match version.kind {
                     MutationKind::Set => {
                         if !matches!(version.residency, Residency::Resident) {
@@ -2036,7 +2219,7 @@ impl ActiveShardMap {
                     "active-sync snapshot shard is out of range".into(),
                 ));
             };
-            let mut shard = shard.write();
+            let mut shard = shard.lock();
             let mut stats = ApplyStats::default();
             destination.apply_remote_mutation(&mut shard, mutation, source_peer, &mut stats)?;
             report.applied_mutations += stats.applied;
@@ -2049,7 +2232,7 @@ impl ActiveShardMap {
     fn mark_peer_recovery(&self, peer: &Self) {
         for shard_id in 0..self.shard_count() {
             let peer_versions = {
-                let shard = peer.inner.shards[shard_id].read();
+                let shard = peer.inner.shards[shard_id].lock();
                 shard
                     .versions
                     .iter()
@@ -2060,12 +2243,12 @@ impl ActiveShardMap {
                     .map(|(key, version)| (key.clone(), version.dot.clone()))
                     .collect::<Vec<_>>()
             };
-            let mut shard = self.inner.shards[shard_id].write();
+            let mut shard = self.inner.shards[shard_id].lock();
             for (key, dot) in peer_versions {
                 if let Some(version) = shard.versions.get_mut(&key)
                     && version.dot == dot
                 {
-                    version.recovery_peers.insert(peer.node_id().clone());
+                    version.add_recovery_peer(peer.node_id().clone());
                 }
             }
         }
@@ -2079,7 +2262,7 @@ impl SnapshotVersion {
             MutationKind::Tombstone(TombstoneKind::Delete) => SnapshotKind::Delete,
             MutationKind::Tombstone(TombstoneKind::Expired) => SnapshotKind::Expired,
             MutationKind::ClusterEvict { target } => SnapshotKind::ClusterEvict {
-                target: SnapshotDot::from(target),
+                target: SnapshotDot::from(target.as_ref()),
             },
         };
         Self {
@@ -2128,7 +2311,7 @@ impl SnapshotVersion {
             SnapshotKind::Delete => MutationKind::Tombstone(TombstoneKind::Delete),
             SnapshotKind::Expired => MutationKind::Tombstone(TombstoneKind::Expired),
             SnapshotKind::ClusterEvict { target } => MutationKind::ClusterEvict {
-                target: target.to_dot()?,
+                target: Box::new(target.to_dot()?),
             },
         };
         Ok(ActiveMutation {
@@ -2193,16 +2376,23 @@ impl SnapshotFrontier {
     }
 }
 
-fn replace_version(
-    versions: &mut FastHashMap<SharedBytes, VersionState>,
+#[inline]
+fn version_key_value_hashed<'a>(
+    versions: &'a ActiveVersionMap,
+    hash: u64,
+    key: &[u8],
+) -> Option<(&'a SharedBytes, &'a VersionState)> {
+    versions.get_key_value_hashed(hash, key)
+}
+
+#[inline]
+fn replace_version_hashed(
+    versions: &mut ActiveVersionMap,
+    hash: u64,
     key: SharedBytes,
     replacement: VersionState,
 ) {
-    if let Some(version) = versions.get_mut(key.as_ref()) {
-        *version = replacement;
-    } else {
-        versions.insert(key, replacement);
-    }
+    let _ = versions.replace_hashed(hash, key, replacement);
 }
 
 impl SnapshotDot {
@@ -2231,8 +2421,10 @@ fn concurrent_incoming_wins(local: &VersionState, incoming: &ActiveMutation) -> 
     match (&local.kind, &incoming.kind) {
         (MutationKind::Tombstone(_), MutationKind::Set) => false,
         (MutationKind::Set, MutationKind::Tombstone(_)) => true,
-        (MutationKind::ClusterEvict { target }, MutationKind::Set) => &incoming.dot != target,
-        (MutationKind::Set, MutationKind::ClusterEvict { target }) => &local.dot == target,
+        (MutationKind::ClusterEvict { target }, MutationKind::Set) => {
+            &incoming.dot != target.as_ref()
+        }
+        (MutationKind::Set, MutationKind::ClusterEvict { target }) => &local.dot == target.as_ref(),
         (MutationKind::Tombstone(_), MutationKind::ClusterEvict { .. }) => false,
         (MutationKind::ClusterEvict { .. }, MutationKind::Tombstone(_)) => true,
         _ => {
@@ -2339,6 +2531,32 @@ fn hash_optional_bytes(digest: &mut Sha256, bytes: Option<&[u8]>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_metadata_layout_stays_compact() {
+        assert!(std::mem::size_of::<CausalContext>() <= 32);
+        assert!(std::mem::size_of::<ActiveMutation>() <= 240);
+        assert!(std::mem::size_of::<VersionState>() <= 192);
+        assert!(std::mem::size_of::<MutationKind>() <= 16);
+    }
+
+    #[test]
+    fn sealed_block_capacity_is_reused_for_the_next_interval() {
+        let mut config = ActiveSyncConfig::new("test-cluster", NodeId::new("left").unwrap());
+        config.incarnation_id = IncarnationId(1);
+        config.max_pending_records_per_shard = 2;
+        config.max_block_records = 2;
+        let map = ActiveShardMap::new(1, config).unwrap();
+
+        map.set("one", "1").unwrap();
+        map.set("two", "2").unwrap();
+        map.set("three", "3").unwrap();
+
+        let shard = map.inner.shards[0].lock();
+        assert_eq!(shard.blocks.len(), 1);
+        assert_eq!(shard.pending.len(), 1);
+        assert!(shard.pending.capacity() >= 2);
+    }
 
     fn map(node: &str) -> ActiveShardMap {
         let mut config = ActiveSyncConfig::new("test-cluster", NodeId::new(node).unwrap());
@@ -2461,7 +2679,7 @@ mod tests {
             .unwrap();
         left.seal_pending().unwrap();
         let blocks = left.inner.shards[0]
-            .read()
+            .lock()
             .blocks
             .iter()
             .cloned()
@@ -2577,7 +2795,7 @@ mod tests {
         left.set("three", "3").unwrap();
         left.seal_pending().unwrap();
         let blocks = left.inner.shards[0]
-            .read()
+            .lock()
             .blocks
             .iter()
             .cloned()
@@ -2609,7 +2827,7 @@ mod tests {
             .inner
             .shards
             .iter()
-            .find_map(|shard| shard.read().blocks.front().cloned())
+            .find_map(|shard| shard.lock().blocks.front().cloned())
             .unwrap();
         let valid = original.records[0].clone();
         let mut forged_record = valid.clone();
@@ -2637,7 +2855,7 @@ mod tests {
         left.set("key", "value").unwrap();
         left.seal_pending().unwrap();
         for shard in &left.inner.shards {
-            let mut shard = shard.write();
+            let mut shard = shard.lock();
             shard.blocks.clear();
             shard.retained_block_bytes = 0;
         }
@@ -2663,7 +2881,7 @@ mod tests {
             EvictionOutcome::Evicted
         );
         for shard in &left.inner.shards {
-            let mut shard = shard.write();
+            let mut shard = shard.lock();
             shard.blocks.clear();
             shard.retained_block_bytes = 0;
         }

@@ -1215,7 +1215,7 @@ fn decode_block(payload: &[u8]) -> Result<SyncBlock> {
         origin,
         sequence,
         digest: OnceLock::from(digest),
-        records: records.into(),
+        records: Arc::new(records),
         encoded_bytes: payload.len(),
     })
 }
@@ -1287,7 +1287,7 @@ fn decode_mutation(decoder: &mut Decoder<'_>) -> Result<ActiveMutation> {
         2 => MutationKind::Tombstone(TombstoneKind::Delete),
         3 => MutationKind::Tombstone(TombstoneKind::Expired),
         4 => MutationKind::ClusterEvict {
-            target: decoder.dot()?,
+            target: Box::new(decoder.dot()?),
         },
         _ => {
             return Err(ShardCacheError::Protocol(
@@ -1553,7 +1553,7 @@ mod tests {
         let map = ActiveShardMap::new(1, config).unwrap();
         map.set("key", "value").unwrap();
         map.seal_pending().unwrap();
-        let block = map.inner.shards[0].read().blocks[0].clone();
+        let block = map.inner.shards[0].lock().blocks[0].clone();
         let encoded = encode_block(&block).unwrap();
         let decoded = decode_block(&encoded).unwrap();
         assert_eq!(decoded.digest(), block.digest());
