@@ -141,6 +141,16 @@ causal-sync and 15.16M consensus-sync with the same 2.2us p99. Blossom is not
 called in these conflict-free rows; the result verifies that merely configuring
 the stronger conflict guarantee does not add a read-path penalty.
 
+The conflict-heavy Adam benchmark reaches 330.4K causal versus 195.3K
+consensus conflict pairs/s with a zero-latency deterministic orderer. Local
+admission remains unchanged, but consensus convergence is 41% lower because
+both replicas finalize the ambiguous conflict. At 100us synthetic latency per
+decision, the current two-call sequential path reaches 3.20K pairs/s. See
+[`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md)
+for the exact workload and commands. This confirms that causal eventual is a
+meaningfully cheaper option for conflict-heavy workloads; consensus mode should
+not be selected unless externally finalized conflict order is required.
+
 ## Summary
 
 The complete target is active-active shardmap synchronization in which every member of a slot's

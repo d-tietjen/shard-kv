@@ -89,6 +89,11 @@ path = "src/bin/active_sync_cost.rs"
 required-features = ["active-sync-consensus-ordered-eventual"]
 
 [[bin]]
+name = "active_sync_conflict_cost"
+path = "src/bin/active_sync_conflict_cost.rs"
+required-features = ["active-sync-consensus-ordered-eventual"]
+
+[[bin]]
 name = "replication_tcp_cost"
 path = "src/bin/replication_tcp_cost.rs"
 

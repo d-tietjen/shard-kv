@@ -16,6 +16,7 @@ Two modes, parallel and independent:
 | `run-memcache-comparison.sh` | Docker-isolated cache workload | Head-to-head GET/SET/mixed throughput for shardcache server modes vs Memcached |
 | `semantic_cache_matrix` | Pairwise embedding sweep plus lookup latency | Semantic cache F1/FPR across thresholds and unique/cycling lookup latency |
 | `active_sync_cost` | Embedded active-active A/B | Baseline, local causal metadata, installed conflict orderer, and background convergence cost with a final convergence assertion |
+| `active_sync_conflict_cost` | Embedded concurrent-conflict A/B | Admission, convergence throughput, sync latency, conflict counts, and external-orderer calls under guaranteed same-key conflicts |
 
 The throughput drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `shardcache-lmcache`
@@ -46,6 +47,28 @@ until quiet, and verify every key on both maps before reporting success. Legacy
 aliases. Run modes in separate processes for release comparisons. Curated Adam
 results and known write-path limits are in
 [`ACTIVE_ACTIVE_0_7_BASELINE.md`](ACTIVE_ACTIVE_0_7_BASELINE.md).
+
+Use the conflict driver to measure the path that `active_sync_cost` deliberately
+does not exercise:
+
+```bash
+cargo build --release -p shardcache-benchmarks \
+  --features active-sync-consensus-ordered-eventual \
+  --bin active_sync_conflict_cost
+
+target/release/active_sync_conflict_cost \
+  --modes causal,consensus --shards 8 --conflict-keys 1024 \
+  --value-size 1024 --warmup-rounds 5 --rounds 50 \
+  --orderer-delay-micros 0
+```
+
+Every round writes different values to the same keys on two previously
+synchronized maps. The driver times local mutation admission separately from
+bidirectional convergence, requires sync to report the conflicts, and compares
+every key after each round. Consensus mode shares one deterministic orderer
+between the peers and can inject per-decision latency. The delay is synthetic;
+use it to measure sensitivity, not as a claim about a particular consensus
+deployment. Run each mode in a separate process for release comparisons.
 
 ## Docker Server Suite
 

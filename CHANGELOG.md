@@ -20,7 +20,8 @@
   and immediate node revocation.
 - Added convergence, conflict, compaction, corruption, resource-bound, live
   mTLS, credential-rotation, and revocation tests plus an active-sync cost
-  benchmark and runnable embedded example.
+  benchmark, a guaranteed concurrent-conflict cost benchmark, and a runnable
+  embedded example.
 - Added exclusive shard-owned persistence WAL block appenders and one
   background canonical-log merger. Record and byte thresholds bound blocks,
   partial blocks flush on deadlines and shutdown, and real `sync_data` calls
@@ -90,6 +91,12 @@
   measured 14.90M causal-sync versus 15.16M consensus-sync with identical
   2.2us p99, confirming no conflict-free read penalty from configuring the
   external orderer.
+- The Adam concurrent-conflict benchmark kept local admission effectively
+  unchanged at 2.22M causal versus 2.25M consensus mutations/s. With a
+  zero-latency deterministic orderer, convergence measured 330K causal versus
+  195K consensus conflict pairs/s. A synthetic 100us decision delay reduced
+  consensus to 3.20K pairs/s because each same-key conflict currently requires
+  two serial ordering calls; conflict batching remains future work.
 - Default raw-cache and native ShardMap GET, SET, and 80/20 rows remained within
   2.4% of their recorded Adam baselines with zero errors. The all-feature
   workspace suite passed 421 ShardMap unit tests plus integration, differential,
