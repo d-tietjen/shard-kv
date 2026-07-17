@@ -85,6 +85,60 @@ their selected interval. Neither mode adds networking to local reads or writes.
 Peer fanout accepts only blocks whose origin is the authenticated peer, so
 unsigned multi-hop forwarding is deliberately rejected.
 
+### Performance Impact
+
+Active-active replication is disabled in the default feature set. Applications
+that do not select an `active-sync-*` Cargo feature retain the existing
+`ShardMap` hot path and layout. On the final Adam regression run, feature-disabled
+raw-cache and native `ShardMap` GET, SET, and 80/20 throughput remained within
+2.4% of their recorded baselines with zero errors.
+
+Enabling active sync adds version, causal-history, conflict, and pending-block
+accounting to mutations. Synchronization also retains and circulates mutation
+payloads in the background. The final canonical Adam matrix used eight shards,
+eight clients, 100,000 keys, 1 KiB values, CPUs `0-7`, a 100 ms sync interval,
+and isolated ten-second measurements:
+
+| Workload | Causal local | Consensus local | Causal sync | Consensus sync |
+| --- | ---: | ---: | ---: | ---: |
+| GET | 89.2% | 88.9% | 85.0% | 83.1% |
+| SET | 34.9% | 34.8% | 29.6% | 29.1% |
+| 80% GET / 20% SET | 67.6% | 67.3% | 54.0% | 54.0% |
+
+Percentages are throughput retained relative to the embedded baseline from the
+same run; lower percentages mean greater overhead. GET p99 was 2.1us at
+baseline, 2.2-2.3us in causal modes, and 2.3-2.6us in consensus modes. SET p99
+was 6.0us at baseline and 15.5-19.3us with active sync. Installing a consensus
+orderer without an ambiguous conflict changed local throughput by at most 0.5%,
+because conflict-free writes do not call the orderer.
+
+A subsequent same-load compaction A/B improved causal-local SET throughput by
+30.7%, from 2.761M to 3.608M operations/s, retaining 44.5% of that run's
+embedded baseline. The full synchronized matrix has not been rerun with that
+compaction, so the canonical table above remains the conservative release
+comparison. Value size also changes the relative cost: in the 80/20 matrix,
+causal-local retained 64.6% at 64 B, 67.6% at 1 KiB, and 94.9% at 64 KiB;
+causal-sync retained 52.3%, 54.0%, and 65.5%, respectively.
+
+For deployment decisions:
+
+- Leave active sync disabled when replication is not required; the default path
+  pays no active-sync metadata or networking cost.
+- Read-heavy deployments can expect near-baseline point-read latency, but the
+  measured throughput reduction was 10.8-16.9% depending on mode.
+- Mixed and write-heavy deployments must capacity-plan from active-mode results,
+  not ordinary `ShardMap` throughput. Current SET and 80/20 results do not meet
+  the 90% release target, which is why all active-sync modes remain explicit and
+  disabled by default.
+- Prefer causal eventual unless externally finalized ordering of ambiguous
+  conflicts is required. With a synthetic 100us ordering operation, bounded
+  consensus batching raised convergence from 3.20K to 66.0K conflict pairs/s,
+  but causal convergence remained cheaper when external finality was unnecessary.
+
+See [`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md)
+for absolute throughput, tail latency, conflict tests, value-size sensitivity,
+hardware details, and reproducible commands.
+
 ### Automatic TLS Membership
 
 `ActiveSyncTlsMembership` reconciles an application-provided desired peer set.
@@ -123,33 +177,8 @@ mutation payloads in memory, external topology discovery and persistence,
 multi-hop origin signatures, quorum cold nominations, tombstone garbage
 collection, stronger acknowledgement modes, Redis command-family semantics,
 and automated writer fencing for overlapping replica-group reconfiguration.
-The current local write benchmark also does not meet the 90% throughput target; see
-[`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md).
-
-The final Adam candidate measured conflict-orderer installation within 0.5% of
-`causal-local` throughput when no ambiguous conflict occurred. Causal-sync GET
-was 15.05M ops/s, effectively unchanged from the earlier 15.11M result, while
-SET improved from 1.34M to 2.33M ops/s and the 80/20 workload improved from
-5.36M to 7.94M ops/s. The default raw-cache and native ShardMap surfaces stayed
-within 2.4% of their recorded baselines. These results validate the fail-closed
-ordering hook and absence of a global regression; they do not remove the
-write-heavy opt-in restriction.
-
-The full `consensus-sync` profile measured 14.70M GET/s, 2.29M SET/s, and 7.95M
-80/20 ops/s in the ten-second matrix. A longer GET repeat measured 14.90M
-causal-sync and 15.16M consensus-sync with the same 2.2us p99. Blossom is not
-called in these conflict-free rows; the result verifies that merely configuring
-the stronger conflict guarantee does not add a read-path penalty.
-
-The conflict-heavy Adam benchmark reaches 333.9K causal versus 186.9K batched
-consensus conflict pairs/s with a zero-latency deterministic orderer. Local
-admission remains unchanged. At 100us synthetic latency per external operation,
-batching improves consensus from 3.20K to 66.0K pairs/s and cuts sync p99 from
-80.2ms to 3.9ms. See
-[`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md)
-for the exact workload and commands. This confirms that causal eventual is a
-meaningfully cheaper option for conflict-heavy workloads; consensus mode should
-not be selected unless externally finalized conflict order is required.
+The current local write benchmark also does not meet the 90% throughput target;
+see [Performance Impact](#performance-impact).
 
 ## Summary
 

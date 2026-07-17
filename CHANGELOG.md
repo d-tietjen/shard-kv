@@ -106,6 +106,10 @@
   2.4% of their recorded Adam baselines with zero errors. The all-feature
   workspace suite passed 421 ShardMap unit tests plus integration, differential,
   deterministic-fault, mTLS, overflow, formal-model, and doc tests.
+- Documented the complete opt-in performance impact by consistency profile,
+  including baseline-retained throughput, p99 latency, value-size sensitivity,
+  post-compaction SET improvement, and deployment guidance. Active sync remains
+  absent from the default feature set.
 
 ## 0.6.0 - Unreleased
 
