@@ -227,8 +227,12 @@ pub struct PersistenceConfig {
     pub compress_snapshots: bool,
     /// Compress WAL segments.
     pub compress_wal: bool,
-    /// Bounded channel capacity for WAL append requests.
+    /// Approximate per-shard record capacity of the bounded WAL block queue.
     pub wal_channel_capacity: usize,
+    /// Maximum records accumulated by one shard before publishing a WAL block.
+    pub wal_block_max_records: usize,
+    /// Approximate maximum bytes accumulated in one shard-local WAL block.
+    pub wal_block_max_bytes: usize,
     /// Optional live WAL export over TCP.
     pub tcp_export: WalTcpExportConfig,
 }
@@ -760,6 +764,8 @@ impl Default for PersistenceConfig {
             compress_snapshots: true,
             compress_wal: true,
             wal_channel_capacity: 16_384,
+            wal_block_max_records: 64,
+            wal_block_max_bytes: 256 * 1024,
             tcp_export: WalTcpExportConfig::default(),
         }
     }
@@ -1075,6 +1081,17 @@ mod tests {
             ShardCacheConfig::default().server_endpoint_mode,
             ServerEndpointMode::Fanout
         );
+    }
+
+    #[test]
+    fn persistence_requires_nonzero_wal_block_limits() {
+        let mut config = ShardCacheConfig::default();
+        config.persistence.wal_block_max_records = 0;
+        assert!(config.validate().is_err());
+
+        config.persistence.wal_block_max_records = 64;
+        config.persistence.wal_block_max_bytes = 0;
+        assert!(config.validate().is_err());
     }
 
     #[test]

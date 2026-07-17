@@ -637,6 +637,7 @@ impl ShardWorker {
 
         loop {
             state.flush_replication_due();
+            state.flush_wal_due();
             let timeout = state.next_worker_timeout(next_maintenance);
             match receiver.recv_timeout(timeout) {
                 Ok(ShardMessage::Execute { op, reply }) => {
@@ -653,11 +654,13 @@ impl ShardWorker {
                 }
                 Ok(ShardMessage::Shutdown { reply }) => {
                     state.flush_replication();
+                    state.flush_wal();
                     let _ = reply.send(());
                     break;
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     state.flush_replication_due();
+                    state.flush_wal_due();
                     if Instant::now() >= next_maintenance {
                         state.map.process_maintenance(now_millis());
                         next_maintenance = Instant::now() + maintenance_interval;
@@ -667,6 +670,7 @@ impl ShardWorker {
             }
         }
         state.flush_replication();
+        state.flush_wal();
     }
 
     fn pin_current_thread(shard_id: usize) {
@@ -761,7 +765,7 @@ impl ShardState {
                 expire_at_ms,
                 governance: None,
             };
-            if let Some(wal) = &self.wal {
+            if let Some(wal) = &mut self.wal {
                 wal.append(record.clone())?;
             }
             self.emit_replication(ReplicationMutation::from_record_with_key_hash(
@@ -812,7 +816,7 @@ impl ShardState {
                 expire_at_ms: None,
                 governance: None,
             };
-            if let Some(wal) = &self.wal {
+            if let Some(wal) = &mut self.wal {
                 wal.append(record.clone())?;
             }
             self.emit_replication(ReplicationMutation::from_record_with_key_hash(
@@ -854,7 +858,7 @@ impl ShardState {
                 expire_at_ms: expiration.expire_at_ms(),
                 governance: None,
             };
-            if let Some(wal) = &self.wal {
+            if let Some(wal) = &mut self.wal {
                 wal.append(record.clone())?;
             }
             self.emit_replication(ReplicationMutation::from_record_with_key_hash(
@@ -901,18 +905,43 @@ impl ShardState {
         }
     }
 
+    fn flush_wal_due(&mut self) {
+        if let Some(wal) = &mut self.wal
+            && let Err(error) = wal.flush_due()
+        {
+            tracing::error!(
+                shard_id = self.shard_id,
+                "failed to publish WAL block: {error}"
+            );
+        }
+    }
+
+    fn flush_wal(&mut self) {
+        if let Some(wal) = &mut self.wal
+            && let Err(error) = wal.flush()
+        {
+            tracing::error!(
+                shard_id = self.shard_id,
+                "failed to flush WAL block: {error}"
+            );
+        }
+    }
+
     fn next_worker_timeout(&self, next_maintenance: Instant) -> Duration {
-        let maintenance_timeout = next_maintenance
+        let mut timeout = next_maintenance
             .checked_duration_since(Instant::now())
             .unwrap_or_default();
-        match self
+        if let Some(replication_timeout) = self
             .replication_batch
             .as_ref()
             .and_then(ReplicationBatchBuilder::next_timeout)
         {
-            Some(replication_timeout) => maintenance_timeout.min(replication_timeout),
-            None => maintenance_timeout,
+            timeout = timeout.min(replication_timeout);
         }
+        if let Some(wal_timeout) = self.wal.as_ref().and_then(|wal| wal.next_flush_timeout()) {
+            timeout = timeout.min(wal_timeout);
+        }
+        timeout
     }
 
     fn stats_snapshot(&self) -> ShardStatsSnapshot {
@@ -985,5 +1014,49 @@ mod tests {
         assert_eq!(response, Frame::BlobString(value));
 
         engine.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_flushes_partial_shard_wal_blocks_before_recovery() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut config = ShardCacheConfig {
+            shard_count: 4,
+            ..ShardCacheConfig::default()
+        };
+        config.persistence.data_dir = temp_dir.path().to_path_buf();
+        config.persistence.compress_wal = false;
+        config.persistence.fsync_interval_ms = 60_000;
+        config.persistence.wal_block_max_records = 64;
+
+        let engine = EngineHandle::open(config.clone()).expect("engine");
+        let set = BorrowedCommand::from_parts(&[
+            b"SET".as_slice(),
+            b"partial-block".as_slice(),
+            b"durable".as_slice(),
+        ])
+        .expect("SET command");
+        assert_eq!(
+            engine.execute_borrowed(set).await.expect("SET"),
+            Frame::SimpleString("OK".into())
+        );
+        assert_eq!(
+            engine
+                .stats_snapshot()
+                .await
+                .expect("stats")
+                .wal
+                .entries_written,
+            0
+        );
+        engine.shutdown().await.expect("shutdown");
+
+        let recovered = EngineHandle::open(config).expect("recovered engine");
+        let get = BorrowedCommand::from_parts(&[b"GET".as_slice(), b"partial-block".as_slice()])
+            .expect("GET command");
+        assert_eq!(
+            recovered.execute_borrowed(get).await.expect("GET"),
+            Frame::BlobString(b"durable".to_vec())
+        );
+        recovered.shutdown().await.expect("recovered shutdown");
     }
 }

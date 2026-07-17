@@ -78,6 +78,7 @@ pub struct ObjectOverflowStatsSnapshot {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct WalStatsSnapshot {
     pub enabled: bool,
+    pub blocks_merged: u64,
     pub entries_written: u64,
     pub segments_rotated: u64,
     pub bytes_written: u64,

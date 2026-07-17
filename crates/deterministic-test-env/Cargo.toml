@@ -1,0 +1,13 @@
+[package]
+name = "deterministic-test-env"
+version = "2.0.0-pre-release"
+edition = "2024"
+description = "Generic deterministic testing environment primitives for protocol, system, and hardware fault harnesses."
+license = "MIT"
+publish = false
+repository = "https://github.com/eden-dev-inc/blossom"
+homepage = "https://github.com/eden-dev-inc/blossom"
+documentation = "https://docs.rs/deterministic-test-env"
+
+[dependencies]
+tokio = { version = "1.48", features = ["macros", "rt", "time"] }

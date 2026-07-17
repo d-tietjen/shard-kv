@@ -13,19 +13,19 @@ pkg_version() {
 package_crate() {
   local package="$1"
   shift
-  cargo package -p "$package" --locked "$@"
+  cargo package -p "$package" --locked --allow-dirty "$@"
 }
 
 package_crate_with_local_shardmap_patch() {
   local package="$1"
   shift
-  cargo package -p "$package" --locked \
+  cargo package -p "$package" --locked --allow-dirty \
     --config "patch.crates-io.shardmap.path=\"$root/crates/shardmap\"" \
     "$@"
 }
 
 package_shardmap_with_local_client_patch() {
-  cargo package -p shardmap --locked --all-features \
+  cargo package -p shardmap --locked --allow-dirty --all-features \
     --config "patch.crates-io.shardcache-client-rs.path=\"$root/crates/shardcache-client-rs\""
 }
 
@@ -185,3 +185,37 @@ EOF
 write_patch_table >>"$scnp_tls_consumer/Cargo.toml"
 
 check_consumer scnp-tls-consumer
+
+causal_sync_consumer="$tmp/causal-sync-consumer"
+mkdir -p "$causal_sync_consumer"
+write_consumer_main "$causal_sync_consumer"
+cat >"$causal_sync_consumer/Cargo.toml" <<EOF
+[package]
+name = "shard-kv-publish-causal-sync-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shardmap = { version = "$shardmap_version", default-features = false, features = ["active-sync-causal-eventual"] }
+EOF
+write_patch_table >>"$causal_sync_consumer/Cargo.toml"
+
+check_consumer causal-sync-consumer
+
+consensus_sync_consumer="$tmp/consensus-sync-consumer"
+mkdir -p "$consensus_sync_consumer"
+write_consumer_main "$consensus_sync_consumer"
+cat >"$consensus_sync_consumer/Cargo.toml" <<EOF
+[package]
+name = "shard-kv-publish-consensus-sync-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shardmap = { version = "$shardmap_version", default-features = false, features = ["active-sync-consensus-ordered-eventual", "active-sync-tls"] }
+EOF
+write_patch_table >>"$consensus_sync_consumer/Cargo.toml"
+
+check_consumer consensus-sync-consumer

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError, bounded};
+use crossbeam_channel::{Receiver, Sender, TryRecvError, TrySendError, bounded};
 
 use crate::config::PersistenceConfig;
 #[cfg(feature = "telemetry")]
@@ -11,11 +11,11 @@ use crate::storage::CacheTelemetryHandle;
 use crate::storage::MutationRecord;
 use crate::{Result, ShardCacheError};
 
-use super::{WalAppender, WalFrameBytes, stats::WalStats, tcp_export, wal};
+use super::{WalAppender, WalBlock, WalFrameBytes, stats::WalStats, tcp_export, wal};
 
 struct WalChannels {
     appenders: Vec<WalAppender>,
-    receivers: Vec<Receiver<MutationRecord>>,
+    receivers: Vec<Receiver<WalBlock>>,
 }
 
 pub(super) struct PersistenceStartup {
@@ -30,7 +30,7 @@ pub(super) struct StartedPersistenceRuntime {
     pub(super) stats: Arc<WalStats>,
     pub(super) appenders: Vec<WalAppender>,
     pub(super) stop_tx: Sender<()>,
-    pub(super) join_handle: JoinHandle<()>,
+    pub(super) join_handle: JoinHandle<Result<()>>,
     pub(super) tcp_export: TcpExportRuntime,
 }
 
@@ -60,7 +60,7 @@ enum TcpExportQueueResult {
 }
 
 struct WalWriter {
-    receivers: Vec<Receiver<MutationRecord>>,
+    receivers: Vec<Receiver<WalBlock>>,
     stop_rx: Receiver<()>,
     config: PersistenceConfig,
     stats: Arc<WalStats>,
@@ -82,18 +82,45 @@ enum WalFlushKind {
 }
 
 impl WalChannels {
-    fn new(shard_count: usize, capacity: usize) -> Self {
+    fn new(shard_count: usize, config: &PersistenceConfig) -> Result<Self> {
+        if shard_count == 0 {
+            return Err(ShardCacheError::Config(
+                "persistence shard_count must be > 0".into(),
+            ));
+        }
+        if config.wal_channel_capacity == 0
+            || config.wal_block_max_records == 0
+            || config.wal_block_max_bytes == 0
+            || config.fsync_interval_ms == 0
+        {
+            return Err(ShardCacheError::Config(
+                "persistence WAL channel, block, and flush limits must be > 0".into(),
+            ));
+        }
         let mut appenders = Vec::with_capacity(shard_count);
         let mut receivers = Vec::with_capacity(shard_count);
+        let block_capacity = config
+            .wal_channel_capacity
+            .div_ceil(config.wal_block_max_records)
+            .max(1);
+        let flush_interval = Duration::from_millis(config.fsync_interval_ms.max(1));
         for _ in 0..shard_count {
-            let (tx, rx) = bounded::<MutationRecord>(capacity);
-            appenders.push(WalAppender { sender: tx });
+            let (tx, rx) = bounded::<WalBlock>(block_capacity);
+            appenders.push(WalAppender {
+                sender: tx,
+                pending: Vec::with_capacity(config.wal_block_max_records),
+                pending_bytes: 0,
+                max_records: config.wal_block_max_records,
+                max_bytes: config.wal_block_max_bytes,
+                flush_interval,
+                last_publish: Instant::now(),
+            });
             receivers.push(rx);
         }
-        Self {
+        Ok(Self {
             appenders,
             receivers,
-        }
+        })
     }
 }
 
@@ -101,7 +128,7 @@ impl PersistenceStartup {
     pub(super) fn new(shard_count: usize, config: &PersistenceConfig) -> Result<Self> {
         fs::create_dir_all(&config.data_dir)?;
         let stats = Arc::new(WalStats::enabled());
-        let channels = WalChannels::new(shard_count, config.wal_channel_capacity);
+        let channels = WalChannels::new(shard_count, config)?;
         let (stop_tx, stop_rx) = bounded::<()>(1);
         let tcp_export = TcpExportRuntime::start(config, Arc::clone(&stats))?;
         Ok(Self {
@@ -291,13 +318,13 @@ impl<'a> TcpExportQueueState<'a> {
 impl WalWriter {
     #[cfg(feature = "telemetry")]
     fn spawn(
-        receivers: Vec<Receiver<MutationRecord>>,
+        receivers: Vec<Receiver<WalBlock>>,
         stop_rx: Receiver<()>,
         config: PersistenceConfig,
         stats: Arc<WalStats>,
         tcp_export: TcpExportQueue,
         metrics: Option<CacheTelemetryHandle>,
-    ) -> Result<JoinHandle<()>> {
+    ) -> Result<JoinHandle<Result<()>>> {
         Self::spawn_writer(Self {
             receivers,
             stop_rx,
@@ -312,12 +339,12 @@ impl WalWriter {
 
     #[cfg(not(feature = "telemetry"))]
     fn spawn(
-        receivers: Vec<Receiver<MutationRecord>>,
+        receivers: Vec<Receiver<WalBlock>>,
         stop_rx: Receiver<()>,
         config: PersistenceConfig,
         stats: Arc<WalStats>,
         tcp_export: TcpExportQueue,
-    ) -> Result<JoinHandle<()>> {
+    ) -> Result<JoinHandle<Result<()>>> {
         Self::spawn_writer(Self {
             receivers,
             stop_rx,
@@ -329,60 +356,66 @@ impl WalWriter {
         })
     }
 
-    fn spawn_writer(writer: Self) -> Result<JoinHandle<()>> {
+    fn spawn_writer(writer: Self) -> Result<JoinHandle<Result<()>>> {
         thread::Builder::new()
             .name("shardcache-wal".into())
-            .spawn(move || writer.run())
+            .spawn(move || {
+                let result = writer.run();
+                if let Err(error) = &result {
+                    tracing::error!("WAL writer stopped: {error}");
+                }
+                result
+            })
             .map_err(|error| {
                 ShardCacheError::Persistence(format!("failed to start WAL thread: {error}"))
             })
     }
 
-    fn run(mut self) {
-        match self.open_segment_writer() {
-            Ok(writer) => self.run_with_writer(writer),
-            Err(error) => tracing::error!("failed to open WAL segment: {error}"),
-        }
+    fn run(mut self) -> Result<()> {
+        let writer = self.open_segment_writer()?;
+        self.run_with_writer(writer)
     }
 
     fn open_segment_writer(&self) -> Result<wal::SegmentWriter> {
         wal::SegmentStore::new(&self.config.data_dir).open_writer(self.config.compress_wal)
     }
 
-    fn run_with_writer(&mut self, mut writer: wal::SegmentWriter) {
+    fn run_with_writer(&mut self, mut writer: wal::SegmentWriter) -> Result<()> {
         let mut last_flush = Instant::now();
+        let mut dirty = false;
         while self.is_running() {
-            let progressed = self.poll_receivers(&mut writer);
-            self.flush_if_due(&mut writer, progressed, &mut last_flush);
+            let progressed = self.poll_receivers(&mut writer)?;
+            dirty |= progressed;
+            self.flush_if_due(&mut writer, &mut dirty, &mut last_flush)?;
             self.sleep_when_idle(progressed);
         }
-        self.drain_remaining(&mut writer);
-        self.flush_writer(&mut writer, WalFlushKind::Final, &mut last_flush);
+        self.drain_remaining(&mut writer)?;
+        self.flush_writer(&mut writer, WalFlushKind::Final, &mut last_flush)
     }
 
-    fn poll_receivers(&mut self, writer: &mut wal::SegmentWriter) -> bool {
+    fn poll_receivers(&mut self, writer: &mut wal::SegmentWriter) -> Result<bool> {
         match self.receivers.is_empty() {
-            true => false,
+            true => Ok(false),
             false => self.poll_round_robin(writer),
         }
     }
 
-    fn poll_round_robin(&mut self, writer: &mut wal::SegmentWriter) -> bool {
+    fn poll_round_robin(&mut self, writer: &mut wal::SegmentWriter) -> Result<bool> {
         let mut progressed = false;
         for _ in 0..self.receivers.len() {
-            progressed |= self.poll_next_receiver(writer);
+            progressed |= self.poll_next_receiver(writer)?;
         }
-        progressed
+        Ok(progressed)
     }
 
-    fn poll_next_receiver(&mut self, writer: &mut wal::SegmentWriter) -> bool {
+    fn poll_next_receiver(&mut self, writer: &mut wal::SegmentWriter) -> Result<bool> {
         let index = self.next_receiver_index();
-        match self.receivers[index].recv_timeout(Duration::from_millis(2)) {
-            Ok(record) => {
-                self.append_record(writer, &record);
-                true
+        match self.receivers[index].try_recv() {
+            Ok(block) => {
+                self.append_block(writer, block)?;
+                Ok(true)
             }
-            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => false,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => Ok(false),
         }
     }
 
@@ -392,12 +425,23 @@ impl WalWriter {
         index
     }
 
-    fn append_record(&mut self, writer: &mut wal::SegmentWriter, record: &MutationRecord) {
+    fn append_record(
+        &mut self,
+        writer: &mut wal::SegmentWriter,
+        record: &MutationRecord,
+    ) -> Result<()> {
         let encoded = wal::WalRecordCodec::encode_frame(record, self.config.compress_wal);
-        match writer.append_encoded(&encoded, self.config.segment_size_bytes) {
-            Ok(()) => self.record_append_success(writer, encoded),
-            Err(error) => tracing::error!("failed to append WAL record: {error}"),
+        writer.append_encoded(&encoded, self.config.segment_size_bytes)?;
+        self.record_append_success(writer, encoded);
+        Ok(())
+    }
+
+    fn append_block(&mut self, writer: &mut wal::SegmentWriter, block: WalBlock) -> Result<()> {
+        for record in &block.records {
+            self.append_record(writer, record)?;
         }
+        self.stats.record_block_merged();
+        Ok(())
     }
 
     fn record_append_success(&mut self, writer: &mut wal::SegmentWriter, encoded: Vec<u8>) {
@@ -425,15 +469,17 @@ impl WalWriter {
     fn flush_if_due(
         &mut self,
         writer: &mut wal::SegmentWriter,
-        progressed: bool,
+        dirty: &mut bool,
         last_flush: &mut Instant,
-    ) {
-        match WalFlushDecision::from_progress(progressed, *last_flush, &self.config) {
+    ) -> Result<()> {
+        match WalFlushDecision::from_dirty(*dirty, *last_flush, &self.config) {
             WalFlushDecision::Flush => {
-                self.flush_writer(writer, WalFlushKind::Periodic, last_flush)
+                self.flush_writer(writer, WalFlushKind::Periodic, last_flush)?;
+                *dirty = false;
             }
             WalFlushDecision::Skip => {}
         }
+        Ok(())
     }
 
     fn flush_writer(
@@ -441,11 +487,17 @@ impl WalWriter {
         writer: &mut wal::SegmentWriter,
         kind: WalFlushKind,
         last_flush: &mut Instant,
-    ) {
+    ) -> Result<()> {
         let started = Instant::now();
         match writer.flush() {
-            Ok(()) => self.record_flush_success(kind, started, last_flush),
-            Err(error) => self.record_flush_error(kind, error),
+            Ok(()) => {
+                self.record_flush_success(kind, started, last_flush);
+                Ok(())
+            }
+            Err(error) => {
+                self.record_flush_error(kind, &error);
+                Err(error)
+            }
         }
     }
 
@@ -470,7 +522,7 @@ impl WalWriter {
     #[cfg(not(feature = "telemetry"))]
     fn record_flush_metrics(&self, _started: Instant) {}
 
-    fn record_flush_error(&self, kind: WalFlushKind, error: ShardCacheError) {
+    fn record_flush_error(&self, kind: WalFlushKind, error: &ShardCacheError) {
         match kind {
             WalFlushKind::Periodic => {}
             WalFlushKind::Final => tracing::error!("failed final WAL flush: {error}"),
@@ -497,19 +549,20 @@ impl WalWriter {
         }
     }
 
-    fn drain_remaining(&mut self, writer: &mut wal::SegmentWriter) {
+    fn drain_remaining(&mut self, writer: &mut wal::SegmentWriter) -> Result<()> {
         for receiver in self.receivers.clone() {
-            while let Ok(record) = receiver.try_recv() {
-                self.append_record(writer, &record);
+            while let Ok(block) = receiver.try_recv() {
+                self.append_block(writer, block)?;
             }
         }
+        Ok(())
     }
 }
 
 impl WalFlushDecision {
-    fn from_progress(progressed: bool, last_flush: Instant, config: &PersistenceConfig) -> Self {
+    fn from_dirty(dirty: bool, last_flush: Instant, config: &PersistenceConfig) -> Self {
         let flush_interval = Duration::from_millis(config.fsync_interval_ms.max(1));
-        match progressed || last_flush.elapsed() >= flush_interval {
+        match dirty && last_flush.elapsed() >= flush_interval {
             true => Self::Flush,
             false => Self::Skip,
         }

@@ -1,7 +1,6 @@
 # Operations
 
-This page is the short operational contract for running `shardcache` in
-0.6.x-style deployments.
+This page is the short operational contract for running `shardcache` 0.7.
 
 For the container-specific runbook, see
 [`SHARDCACHE_DOCKER.md`](SHARDCACHE_DOCKER.md).
@@ -10,17 +9,24 @@ For the container-specific runbook, see
 
 | Build | Command | Use When |
 | --- | --- | --- |
-| Embedded crate | `shardmap = "0.6.0"` | In-process Rust cache use. |
-| Server crate | `shardcache = "0.6.0"` | Install or depend on the RESP/SCNP server package. |
-| Native client crate | `shardcache-client-rs = "0.6.0"` | SCNP client access from Rust applications. |
+| Embedded crate | `shardmap = "0.7.0"` | In-process Rust cache use. |
+| Server crate | `shardcache = "0.7.0"` | Install or depend on the RESP/SCNP server package. |
+| Native client crate | `shardcache-client-rs = "0.7.0"` | SCNP client access from Rust applications. |
+| Active-active embedded map | `shardmap` with `active-sync-causal-eventual` or `active-sync-consensus-ordered-eventual` | Opt-in exact point-value synchronization; add `active-sync-tls` for network peers. |
 | Server | `cargo run -p shardcache --features server --bin shardcache -- ...` | RESP/SCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo run -p shardcache --features redis-server --bin shardcache -- ...` | Redis/Valkey-compatible command and object behavior. |
 
 `shardmap`, `shardcache`, and `shardcache-client-rs` are the crates.io crates
-for 0.6.x. Publish `shardcache-client-rs` first, then `shardmap`, then
+for 0.7. Publish `shardcache-client-rs` first, then `shardmap`, then
 `shardcache`; the optional `kv-overflow` adapter makes that order necessary.
 Python, C ABI, runtime, benchmark, and
 integration packages remain source-workspace packages.
+
+Active sync is absent from the default feature set. It is intended for
+read-heavy exact-value deployments that need eventually consistent writable
+replicas. Review [`RELEASE_0_7.md`](RELEASE_0_7.md) for measured overhead and
+[`ACTIVE_ACTIVE_REPLICATION.md`](ACTIVE_ACTIVE_REPLICATION.md) for consistency,
+membership, security, and recovery requirements before enabling it.
 
 `redis-server` implies `server`, `redis`, `redis-functions`, and
 `redis-modules`. Embedded-only builds stay separate from the Redis-compatible
@@ -124,6 +130,19 @@ with `SHARDCACHE_DIRECT_SHARD_BASE_PORT`.
 Use a stable `--data-dir` for persistent deployments. Benchmark and
 compatibility proof runs often pass `--disable-persistence` so the storage path
 does not dominate command measurements.
+
+With persistence enabled, each storage shard exclusively owns a local WAL
+block appender. Mutations accumulate until `wal_block_max_records`,
+`wal_block_max_bytes`, or `fsync_interval_ms` seals the block. Per-shard bounded
+queues feed one background merger, which preserves each shard's mutation order,
+writes the existing canonical segment format, and calls `sync_data` at the
+configured interval. A full shard queue applies backpressure only to that shard;
+there is no producer lock shared by storage workers.
+
+The defaults seal at 64 records or 256 KiB. Smaller blocks reduce the amount of
+data exposed to process failure before handoff but increase channel and merger
+overhead. The fsync interval remains the upper durability window; shutdown
+flushes partial blocks and performs a final data sync before recovery can begin.
 
 ## Logs And Shutdown
 

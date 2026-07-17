@@ -619,6 +619,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
+name = "deterministic-test-env"
+version = "2.0.0-pre-release"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -674,7 +681,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1086,7 +1093,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -1917,7 +1924,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "thiserror",
  "tokio",
  "tracing",
@@ -1956,9 +1963,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.3",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2192,7 +2199,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2259,7 +2266,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2422,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "clap",
  "shardmap",
@@ -2431,7 +2438,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-benchmarks"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "clap",
@@ -2444,8 +2451,11 @@ dependencies = [
  "moka",
  "parking_lot",
  "rand 0.8.6",
+ "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2",
  "shardcache-client-rs",
  "shardmap",
  "tokio",
@@ -2454,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-c"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "shardmap",
@@ -2462,7 +2472,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-client-rs"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "libc",
  "rustls",
@@ -2473,18 +2483,19 @@ dependencies = [
 
 [[package]]
 name = "shardcache-formal"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "creusot-std",
 ]
 
 [[package]]
 name = "shardcache-py"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "core_affinity",
  "dashmap",
  "libc",
+ "parking_lot",
  "pyo3",
  "shardcache-client-rs",
  "shardcache-runtime",
@@ -2494,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-runtime"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "cust",
  "serde",
@@ -2513,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "shardmap"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "bytes",
  "bytes-handoff",
@@ -2523,6 +2534,7 @@ dependencies = [
  "creusot-std",
  "crossbeam-channel",
  "crossbeam-utils",
+ "deterministic-test-env",
  "fast-telemetry",
  "flume",
  "futures-util",
@@ -2725,7 +2737,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3304,7 +3316,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

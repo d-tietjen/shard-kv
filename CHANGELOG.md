@@ -1,6 +1,122 @@
 # Changelog
 
-## 0.6.0 - Unreleased
+## 0.7.0 - 2026-07-16
+
+### Added
+
+- Added the feature-gated `ActiveShardMap` exact point-value API with per-shard
+  causal mutation dots, hybrid logical clocks, remove-wins deletion and expiry,
+  deterministic concurrent SET resolution, governance conflict protection, and
+  exact cluster-eviction commits.
+- Added bounded interval sync blocks, SHA-256 integrity, duplicate and reordered
+  delivery handling, compacted-history state transfer, atomic checksummed
+  snapshots, explicit bidirectional synchronization, and health snapshots.
+- Added independent exact-version local eviction and peer fault-in. Residency
+  changes do not create replicated logical deletes, and payloads remain resident
+  until an exact recovery source is known.
+- Added a dedicated direct-shard Rustls transport behind `active-sync-tls` with
+  mandatory mTLS 1.3, ALPN, certificate-fingerprint authorization, cluster and
+  shard identity validation, bounded frames and deadlines, credential overlap,
+  and immediate node revocation.
+- Added convergence, conflict, compaction, corruption, resource-bound, live
+  mTLS, credential-rotation, and revocation tests plus active-sync cost,
+  guaranteed concurrent-conflict cost, and cross-host mTLS latency benchmarks,
+  and a runnable embedded example.
+- Added exclusive shard-owned persistence WAL block appenders and one
+  background canonical-log merger. Record and byte thresholds bound blocks,
+  partial blocks flush on deadlines and shutdown, and real `sync_data` calls
+  enforce the configured durability interval without a cross-shard producer
+  lock.
+- Added optional consensus-ordered eventual conflict handling behind
+  `active-sync-consensus-ordered-eventual`. Only ambiguous concurrent mutation
+  identities and digests enter the ordering plane; keys, values, and WAL blocks
+  continue to replicate exclusively through active-sync. Consensus waits
+  release the shard lock, stale decisions are retried, and failed decisions
+  leave source blocks unacknowledged. Stable per-candidate finalized-epoch ranks
+  impose a transitive total order, preventing three-way conflict cycles under
+  reordered WAL delivery.
+- Added bounded live conflict batching for consensus-ordered synchronization.
+  Independent claims from one shard block are finalized together without
+  holding the storage-shard lock; repeated keys preserve exact order, stale
+  decisions are revalidated, and failed batches leave the source block
+  unacknowledged. The Blossom bridge writes unresolved claims as multiple
+  transactions in one signed block and returns exact per-claim certificates.
+- Added outcome-oriented active-sync feature flags. Use
+  `active-sync-causal-eventual` for deterministic causal/HLC convergence or
+  `active-sync-consensus-ordered-eventual` for externally finalized ambiguous
+  conflicts; Blossom remains an adapter rather than a public feature name.
+- Added a vendored, revision-pinned deterministic Blossom test environment that
+  injects consensus outages, invalid certificates, node unavailability,
+  latency, duplicate WAL blocks, and different three-way delivery orders, then
+  verifies exact version convergence and event-log replay across 32 fixed seeds.
+- Added the source-only `shardmap-blossom-bridge` production adapter with
+  loopback-only identity-bound endpoints, concurrent supermajority epoch reads,
+  exact validator generations, signer-key reload, hard deadlines, bounded
+  per-group queues and caches, retry backoff, circuit breaking, and health
+  counters. Accepted but omitted claims are resubmitted without sending values
+  or WAL data through consensus.
+- Added checksummed, fsynced, byte- and entry-bounded candidate-rank recovery,
+  a real six-validator Blossom TCP finality/restart test, atomic signer-rotation
+  coverage, and an executable three-way convergence model for reordered
+  duplicate SETs and remove-wins eviction/deletion behavior.
+- Added explicit `CausalEventual` and `ConsensusOrderedEventual` API modes,
+  named constructors, and runtime guarantee introspection. The active-sync
+  benchmark now separates local versus synchronized execution from causal
+  versus consensus conflict ordering and includes the full `consensus-sync`
+  profile.
+- Added revisioned automatic mTLS peer reconciliation for exact active-sync
+  values. One scheduler per local shard performs bounded catch-up outside the
+  GET/SET path; stale or conflicting topology revisions fail closed, joins
+  require complete shard rounds, and removals require revision-checked drain or
+  an explicitly counted force-retirement decision.
+
+### Changed
+
+- Bumped workspace and publishable crate versions to `0.7.0`.
+- Kept the private, pre-release Blossom runtime out of the public Cargo
+  workspace. The production bridge remains a standalone source integration,
+  while the deterministic test harness is vendored and non-published so clean
+  builds, CI, and crates.io packaging do not require private Git credentials.
+
+### Validation
+
+- A local release WAL plus TCP-export A/B with four dedicated shard producers
+  improved 4 KiB append throughput from 155K/s to 204K/s while reducing CPU
+  from 3.47 to 2.32 vCPU. At 64-byte values, throughput remained within 2%
+  while CPU fell from 4.62 to 2.60 vCPU. Neither run dropped export frames or
+  reported transport failures.
+- The final Adam active-sync matrix used eight shards and clients, 1 KiB values,
+  pinned CPUs `0-7`, isolated ten-second mode runs, and convergence validation.
+  Installing conflict ordering without a conflict stayed within 0.5% of
+  `causal-local`. Causal-sync GET measured 15.05M ops/s, SET 2.33M ops/s, and
+  80/20 7.94M ops/s; the latter two improved from 1.34M and 5.36M in the prior
+  Adam run. Write-heavy modes remain below the 90% release gate and stay
+  explicit and disabled by default.
+- The full `consensus-sync` profile measured 14.70M GET/s, 2.29M SET/s, and
+  7.95M 80/20 ops/s in the ten-second Adam matrix. A 20-second GET repeat
+  measured 14.90M causal-sync versus 15.16M consensus-sync with identical
+  2.2us p99, confirming no conflict-free read penalty from configuring the
+  external orderer.
+- The Adam concurrent-conflict benchmark kept local admission effectively
+  unchanged. With a synthetic 100us external operation, bounded batching
+  improved consensus convergence from 3.20K to 66.0K conflict pairs/s and cut
+  sync p99 from 80.2ms to 3.9ms. At zero external latency, batching changed
+  convergence by 2.6% and improved p99 from 6.7ms to 5.5ms.
+- Default raw-cache and native ShardMap GET, SET, and 80/20 rows remained within
+  2.4% of their recorded Adam baselines with zero errors. The all-feature
+  workspace suite passed 424 ShardMap unit tests plus integration, differential,
+  deterministic-fault, mTLS, overflow, formal-model, and doc tests.
+- Three-run Adam medians for the intended read-heavy workload measured 13.78M
+  ops/s (77.5% of baseline) at 2.3us p99 for causal-sync 99/1 and 13.34M
+  (75.1%) at 2.3us for consensus-sync. At 95/5, causal-sync measured 11.88M
+  (67.6%) at 2.7us and consensus-sync measured 11.61M (66.1%) at 2.5us. Every
+  synchronized run drained and verified exact convergence.
+- Documented the complete opt-in performance impact by consistency profile,
+  including baseline-retained throughput, p99 latency, value-size sensitivity,
+  post-compaction SET improvement, and deployment guidance. Active sync remains
+  absent from the default feature set.
+
+## 0.6.0 - 2026-07-14
 
 ### Added
 

@@ -560,6 +560,35 @@ impl ShardCacheServer {
             );
         }
 
+        // Bind every Tokio listener before starting any worker. This makes
+        // startup atomic: a missing direct-shard port is returned to the caller
+        // instead of being logged from a detached worker after fanout starts.
+        let public_listener = if use_monoio {
+            None
+        } else {
+            Some(TcpListener::bind(bind_addr).await?)
+        };
+        let mut direct_listeners = Vec::with_capacity(worker_count);
+        for worker_id in 0..worker_count {
+            let listener = if direct_shard_ports && !use_monoio {
+                let direct_bind_addr = MultiDirectAddress::direct_worker_bind_addr(
+                    bind_addr,
+                    direct_base_port.ok_or_else(|| {
+                        crate::ShardCacheError::Config(
+                            "direct shard ports enabled without a base port".into(),
+                        )
+                    })?,
+                    worker_id,
+                )?;
+                let listener = std::net::TcpListener::bind(direct_bind_addr)?;
+                listener.set_nonblocking(true)?;
+                Some(listener)
+            } else {
+                None
+            };
+            direct_listeners.push(listener);
+        }
+
         if fanout_routes_to_owner {
             tracing::info!(
                 "multi-direct: public fanout routes each request to the owning shard worker"
@@ -618,6 +647,7 @@ impl ShardCacheServer {
                 )?),
                 None => None,
             };
+            let direct_listener = direct_listeners[worker_id].take();
             let handle = std::thread::Builder::new()
                 .name(format!("fc-multi-direct-{worker_id}"))
                 .spawn(move || {
@@ -641,11 +671,12 @@ impl ShardCacheServer {
                         return;
                     }
                     if direct_shard_ports {
-                        match direct_bind_addr {
-                            Some(direct_bind_addr) => MultiDirectWorker::run_hybrid(
+                        match (direct_bind_addr, direct_listener) {
+                            (Some(direct_bind_addr), Some(direct_listener)) => MultiDirectWorker::run_hybrid(
                                 TokioHybridWorkerConfig {
                                     worker_id,
                                     direct_bind_addr,
+                                    direct_listener,
                                     core_id,
                                     single_threaded,
                                     owned_shard_id: worker_id,
@@ -656,8 +687,8 @@ impl ShardCacheServer {
                                 limiter,
                                 rx,
                             ),
-                            None => tracing::error!(
-                                "worker {worker_id} missing direct bind addr despite direct shard ports"
+                            _ => tracing::error!(
+                                "worker {worker_id} missing prebound direct listener despite direct shard ports"
                             ),
                         }
                         return;
@@ -707,7 +738,11 @@ impl ShardCacheServer {
             return Ok(());
         }
 
-        let listener = TcpListener::bind(&bind_addr).await?;
+        let listener = public_listener.ok_or_else(|| {
+            crate::ShardCacheError::Config(
+                "Tokio multi-direct server missing prebound fanout listener".into(),
+            )
+        })?;
         tracing::info!(
             "shardcache listening on {} (multi-direct, {} workers)",
             bind_addr,
