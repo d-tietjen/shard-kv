@@ -3502,6 +3502,7 @@ fn raw_resp_expanded_redis_surface_round_trip() {
             Frame::Array(Vec::new())
         ])]
     );
+    #[cfg(feature = "redis-modules")]
     assert_module_list_frame_matches_features(
         decode_resp_stream(&RespTestHarness::exec_resp(&store, &[b"MODULE", b"LIST"]))
             .into_iter()
@@ -6591,14 +6592,11 @@ fn module_commands_are_accepted_with_empty_registry_semantics() {
     ));
 }
 
-#[cfg(feature = "redis")]
+#[cfg(feature = "redis-modules")]
 fn assert_module_list_frame_matches_features(frame: Frame) {
     match frame {
         Frame::Array(modules) => {
-            #[cfg(feature = "redis-modules")]
             let expected = crate::commands::redis_modules::enabled_modules().len();
-            #[cfg(not(feature = "redis-modules"))]
-            let expected = 0;
             assert_eq!(
                 modules.len(),
                 expected,
