@@ -44,7 +44,7 @@ pub use tls::{
     ActiveSyncTlsServer, ActiveSyncTlsServerCredentials, ActiveSyncTlsServerOptions,
 };
 
-const BLOCK_FORMAT_VERSION: u8 = 1;
+const BLOCK_FORMAT_VERSION: u8 = 2;
 const BLOCK_MAGIC: &[u8; 4] = b"ASB1";
 const SNAPSHOT_MAGIC: &[u8; 4] = b"ASS1";
 const SNAPSHOT_HEADER_BYTES: usize = 4 + 1 + 8 + 32;
@@ -191,6 +191,16 @@ pub struct MutationDot {
 pub struct SyncToken {
     pub slot: u32,
     pub dot: MutationDot,
+}
+
+/// Result of a write to a revision-ordered key.
+///
+/// Revisions are compared lexicographically. Callers must encode their
+/// authoritative version so that byte ordering matches source-of-truth order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VersionedWriteOutcome {
+    Applied(SyncToken),
+    IgnoredNotNewer { current_revision: Vec<u8> },
 }
 
 /// The mutation category exposed to an external conflict-ordering service.
@@ -395,6 +405,7 @@ pub struct ActiveSyncConfig {
     pub max_key_bytes: usize,
     pub max_value_bytes: usize,
     pub max_governance_bytes: usize,
+    pub max_revision_bytes: usize,
     pub max_causal_origins_per_shard: usize,
     pub max_pending_records_per_shard: usize,
     pub max_block_records: usize,
@@ -416,6 +427,7 @@ impl ActiveSyncConfig {
             max_key_bytes: 1024 * 1024,
             max_value_bytes: 64 * 1024 * 1024,
             max_governance_bytes: 1024 * 1024,
+            max_revision_bytes: 1024,
             max_causal_origins_per_shard: 16,
             max_pending_records_per_shard: 65_536,
             max_block_records: 65_536,
@@ -437,6 +449,7 @@ impl ActiveSyncConfig {
         }
         if self.max_key_bytes == 0
             || self.max_value_bytes == 0
+            || self.max_revision_bytes == 0
             || self.max_causal_origins_per_shard == 0
             || self.max_pending_records_per_shard == 0
             || self.max_block_records == 0
@@ -730,10 +743,26 @@ enum TombstoneKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MutationKind {
     Set,
+    RevisionedSet,
     Tombstone(TombstoneKind),
+    RevisionedTombstone(TombstoneKind),
     // Cluster eviction is rare; boxing its large dot keeps every ordinary SET
     // and tombstone record compact.
     ClusterEvict { target: Box<MutationDot> },
+}
+
+impl MutationKind {
+    fn is_set(&self) -> bool {
+        matches!(self, Self::Set | Self::RevisionedSet)
+    }
+
+    fn is_tombstone(&self) -> bool {
+        matches!(self, Self::Tombstone(_) | Self::RevisionedTombstone(_))
+    }
+
+    fn is_revisioned(&self) -> bool {
+        matches!(self, Self::RevisionedSet | Self::RevisionedTombstone(_))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -745,16 +774,29 @@ struct ActiveMutation {
     key: SharedBytes,
     value: Option<SharedBytes>,
     expire_at_ms: CompactExpiration,
-    governance: Option<SharedBytes>,
+    metadata: Option<SharedBytes>,
     kind: MutationKind,
 }
 
 impl ActiveMutation {
+    fn governance(&self) -> Option<&SharedBytes> {
+        (!self.kind.is_revisioned())
+            .then_some(self.metadata.as_ref())
+            .flatten()
+    }
+
+    fn revision(&self) -> Option<&SharedBytes> {
+        self.kind
+            .is_revisioned()
+            .then_some(self.metadata.as_ref())
+            .flatten()
+    }
+
     fn estimated_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             .saturating_add(self.key.len())
             .saturating_add(self.value.as_ref().map_or(0, SharedBytes::len))
-            .saturating_add(self.governance.as_ref().map_or(0, SharedBytes::len))
+            .saturating_add(self.metadata.as_ref().map_or(0, SharedBytes::len))
             .saturating_add(self.context.len().saturating_mul(96))
     }
 }
@@ -793,7 +835,7 @@ struct VersionState {
     context: CausalContext,
     kind: MutationKind,
     expire_at_ms: CompactExpiration,
-    governance: Option<SharedBytes>,
+    metadata: Option<SharedBytes>,
     residency: Residency,
     // Local versions have no recovery peer. Allocate the set only after a
     // remote copy is actually acknowledged.
@@ -807,15 +849,32 @@ struct RecoveryPeerSet {
 }
 
 impl VersionState {
+    fn governance(&self) -> Option<&SharedBytes> {
+        (!self.kind.is_revisioned())
+            .then_some(self.metadata.as_ref())
+            .flatten()
+    }
+
+    fn revision(&self) -> Option<&SharedBytes> {
+        self.kind
+            .is_revisioned()
+            .then_some(self.metadata.as_ref())
+            .flatten()
+    }
+
     fn from_mutation(mutation: &ActiveMutation, source_peer: Option<&NodeId>) -> Self {
         let residency = match mutation.kind {
-            MutationKind::Set if mutation.value.is_some() => Residency::RESIDENT,
-            MutationKind::Set => Residency::evicted(0),
-            MutationKind::Tombstone(_) => Residency::RESIDENT,
+            MutationKind::Set | MutationKind::RevisionedSet if mutation.value.is_some() => {
+                Residency::RESIDENT
+            }
+            MutationKind::Set | MutationKind::RevisionedSet => Residency::evicted(0),
+            MutationKind::Tombstone(_) | MutationKind::RevisionedTombstone(_) => {
+                Residency::RESIDENT
+            }
             MutationKind::ClusterEvict { .. } => Residency::CLUSTER_EVICTED,
         };
         let recovery_peers = if mutation.value.is_some()
-            && matches!(mutation.kind, MutationKind::Set)
+            && mutation.kind.is_set()
             && let Some(peer) = source_peer
         {
             Some(Box::new(RecoveryPeerSet {
@@ -830,7 +889,7 @@ impl VersionState {
             context: mutation.context.clone(),
             kind: mutation.kind.clone(),
             expire_at_ms: mutation.expire_at_ms,
-            governance: mutation.governance.clone(),
+            metadata: mutation.metadata.clone(),
             residency,
             recovery_peers,
             governance_conflict: false,
@@ -1037,6 +1096,8 @@ struct SnapshotVersion {
     kind: SnapshotKind,
     expire_at_ms: Option<u64>,
     governance: Option<Vec<u8>>,
+    #[serde(default)]
+    revision: Option<Vec<u8>>,
     governance_conflict: bool,
 }
 
@@ -1219,6 +1280,21 @@ impl ActiveShardMap {
         )
     }
 
+    /// Stores a value whose source-of-truth revision must increase
+    /// monotonically. Higher revisions win regardless of causal arrival order.
+    pub fn set_versioned(
+        &self,
+        key: impl AsRef<[u8]>,
+        value: impl AsRef<[u8]>,
+        revision: impl AsRef<[u8]>,
+    ) -> Result<VersionedWriteOutcome> {
+        self.set_shared_versioned(
+            key.as_ref(),
+            SharedBytes::copy_from_slice(value.as_ref()),
+            revision.as_ref(),
+        )
+    }
+
     fn set_shared(
         &self,
         key: &[u8],
@@ -1230,6 +1306,7 @@ impl ActiveShardMap {
         let route = self.inner.store.route_key(key);
         let wall_ms = ttl_now_millis();
         let mut shard = self.inner.shards[route.shard_id].lock();
+        self.ensure_local_revision_mode(&shard, key, false)?;
         let mutation = self.local_mutation(
             &mut shard,
             route.shard_id,
@@ -1239,6 +1316,7 @@ impl ActiveShardMap {
             Some(value),
             expire_at_ms,
             governance,
+            None,
             wall_ms,
         )?;
         let (retired, mutation_bytes) = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
@@ -1262,8 +1340,64 @@ impl ActiveShardMap {
         })
     }
 
+    fn set_shared_versioned(
+        &self,
+        key: &[u8],
+        value: SharedBytes,
+        revision: &[u8],
+    ) -> Result<VersionedWriteOutcome> {
+        self.validate_point(key, &value, None)?;
+        self.validate_revision(revision)?;
+        let route = self.inner.store.route_key(key);
+        let wall_ms = ttl_now_millis();
+        let mut shard = self.inner.shards[route.shard_id].lock();
+        if let Some(current_revision) =
+            self.versioned_write_is_not_newer(&shard, key, revision, &MutationKind::Set)?
+        {
+            return Ok(VersionedWriteOutcome::IgnoredNotNewer { current_revision });
+        }
+        let mutation = self.local_mutation(
+            &mut shard,
+            route.shard_id,
+            route.key_hash,
+            key,
+            MutationKind::Set,
+            Some(value),
+            None,
+            None,
+            Some(revision),
+            wall_ms,
+        )?;
+        let (retired, mutation_bytes) = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        self.store_mutation_at(&mutation, wall_ms);
+        replace_version_hashed(
+            &mut shard.versions,
+            route.key_hash,
+            mutation.key.clone(),
+            VersionState::from_mutation(&mutation, None),
+        );
+        let dot = mutation.dot.to_public();
+        self.queue_local_mutation(&mut shard, mutation, mutation_bytes);
+        drop(shard);
+        drop(retired);
+        Ok(VersionedWriteOutcome::Applied(SyncToken {
+            slot: route.shard_id as u32,
+            dot,
+        }))
+    }
+
     pub fn delete(&self, key: impl AsRef<[u8]>) -> Result<SyncToken> {
         self.tombstone(key.as_ref(), TombstoneKind::Delete)
+    }
+
+    /// Deletes a revision-ordered key. A later higher revision may recreate
+    /// the key, while an older delayed value cannot resurrect it.
+    pub fn delete_versioned(
+        &self,
+        key: impl AsRef<[u8]>,
+        revision: impl AsRef<[u8]>,
+    ) -> Result<VersionedWriteOutcome> {
+        self.tombstone_versioned(key.as_ref(), TombstoneKind::Delete, revision.as_ref())
     }
 
     fn tombstone(&self, key: &[u8], kind: TombstoneKind) -> Result<SyncToken> {
@@ -1271,12 +1405,14 @@ impl ActiveShardMap {
         let route = self.inner.store.route_key(key);
         let wall_ms = ttl_now_millis();
         let mut shard = self.inner.shards[route.shard_id].lock();
+        self.ensure_local_revision_mode(&shard, key, false)?;
         let mutation = self.local_mutation(
             &mut shard,
             route.shard_id,
             route.key_hash,
             key,
             MutationKind::Tombstone(kind),
+            None,
             None,
             None,
             None,
@@ -1298,6 +1434,53 @@ impl ActiveShardMap {
             slot: route.shard_id as u32,
             dot,
         })
+    }
+
+    fn tombstone_versioned(
+        &self,
+        key: &[u8],
+        kind: TombstoneKind,
+        revision: &[u8],
+    ) -> Result<VersionedWriteOutcome> {
+        self.validate_point(key, &[], None)?;
+        self.validate_revision(revision)?;
+        let route = self.inner.store.route_key(key);
+        let wall_ms = ttl_now_millis();
+        let mut shard = self.inner.shards[route.shard_id].lock();
+        let mutation_kind = MutationKind::Tombstone(kind);
+        if let Some(current_revision) =
+            self.versioned_write_is_not_newer(&shard, key, revision, &mutation_kind)?
+        {
+            return Ok(VersionedWriteOutcome::IgnoredNotNewer { current_revision });
+        }
+        let mutation = self.local_mutation(
+            &mut shard,
+            route.shard_id,
+            route.key_hash,
+            key,
+            mutation_kind,
+            None,
+            None,
+            None,
+            Some(revision),
+            wall_ms,
+        )?;
+        let (retired, mutation_bytes) = self.prepare_local_mutation_queue(&mut shard, &mutation)?;
+        self.store_mutation_at(&mutation, wall_ms);
+        replace_version_hashed(
+            &mut shard.versions,
+            route.key_hash,
+            mutation.key.clone(),
+            VersionState::from_mutation(&mutation, None),
+        );
+        let dot = mutation.dot.to_public();
+        self.queue_local_mutation(&mut shard, mutation, mutation_bytes);
+        drop(shard);
+        drop(retired);
+        Ok(VersionedWriteOutcome::Applied(SyncToken {
+            slot: route.shard_id as u32,
+            dot,
+        }))
     }
 
     pub fn get(&self, key: impl AsRef<[u8]>) -> Option<Vec<u8>> {
@@ -1354,7 +1537,7 @@ impl ActiveShardMap {
         if version.residency.is_evicted() {
             return Ok(EvictionOutcome::AlreadyEvicted);
         }
-        if !matches!(version.kind, MutationKind::Set) {
+        if !version.kind.is_set() {
             return Ok(EvictionOutcome::Missing);
         }
         if !version.has_recovery_peer() {
@@ -1392,6 +1575,7 @@ impl ActiveShardMap {
         if &version.dot != expected || !matches!(version.kind, MutationKind::Set) {
             return Ok(None);
         }
+        self.ensure_local_revision_mode(&shard, key, false)?;
         let mutation = self.local_mutation(
             &mut shard,
             route.shard_id,
@@ -1400,6 +1584,7 @@ impl ActiveShardMap {
             MutationKind::ClusterEvict {
                 target: Box::new(expected.clone()),
             },
+            None,
             None,
             None,
             None,
@@ -1455,7 +1640,7 @@ impl ActiveShardMap {
             key: SharedBytes::copy_from_slice(key),
             value: Some(SharedBytes::copy_from_slice(&value)),
             expire_at_ms: version.expire_at_ms,
-            governance: version.governance.clone(),
+            metadata: version.metadata.clone(),
             kind: version.kind.clone(),
         };
         self.store_mutation(&mutation);
@@ -1471,7 +1656,7 @@ impl ActiveShardMap {
             return Ok(None);
         };
         if &version.dot != expected
-            || !matches!(version.kind, MutationKind::Set)
+            || !version.kind.is_set()
             || !version.residency.is_resident()
             || version.governance_conflict
         {
@@ -1594,8 +1779,10 @@ impl ActiveShardMap {
             health.retained_block_bytes += shard.retained_block_bytes;
             for version in shard.versions.values() {
                 match version.kind {
-                    MutationKind::Set => health.live_versions += 1,
-                    MutationKind::Tombstone(_) => health.tombstones += 1,
+                    MutationKind::Set | MutationKind::RevisionedSet => health.live_versions += 1,
+                    MutationKind::Tombstone(_) | MutationKind::RevisionedTombstone(_) => {
+                        health.tombstones += 1
+                    }
                     MutationKind::ClusterEvict { .. } => health.evicted_versions += 1,
                 }
                 if version.residency.is_evicted() {
@@ -1763,6 +1950,63 @@ impl ActiveShardMap {
         Ok(())
     }
 
+    fn validate_revision(&self, revision: &[u8]) -> Result<()> {
+        if revision.is_empty() || revision.len() > self.inner.config.max_revision_bytes {
+            return Err(ShardCacheError::Protocol(
+                "active-sync revision must contain bounded ordering bytes".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_local_revision_mode(
+        &self,
+        shard: &ActiveShardState,
+        key: &[u8],
+        versioned: bool,
+    ) -> Result<()> {
+        let Some(current) = shard.versions.get(key) else {
+            return Ok(());
+        };
+        if current.revision().is_some() != versioned {
+            return Err(ShardCacheError::Command(
+                "active-sync key cannot mix ordinary and revision-ordered writes".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn versioned_write_is_not_newer(
+        &self,
+        shard: &ActiveShardState,
+        key: &[u8],
+        revision: &[u8],
+        incoming_kind: &MutationKind,
+    ) -> Result<Option<Vec<u8>>> {
+        self.ensure_local_revision_mode(shard, key, true)?;
+        let Some(current) = shard.versions.get(key) else {
+            return Ok(None);
+        };
+        let current_revision = current.revision().map(Deref::deref).ok_or_else(|| {
+            ShardCacheError::Command(
+                "active-sync revision-ordered key is missing its revision".into(),
+            )
+        })?;
+        match revision.cmp(current_revision) {
+            Ordering::Greater => Ok(None),
+            Ordering::Less => Ok(Some(current_revision.to_vec())),
+            Ordering::Equal => {
+                let incoming_is_tombstone = incoming_kind.is_tombstone();
+                let current_is_tombstone = current.kind.is_tombstone();
+                if incoming_is_tombstone && !current_is_tombstone {
+                    Ok(None)
+                } else {
+                    Ok(Some(current_revision.to_vec()))
+                }
+            }
+        }
+    }
+
     fn snapshot_document(&self) -> Result<ActiveSnapshotDocument> {
         let mut versions = Vec::new();
         let mut block_frontiers = Vec::new();
@@ -1774,7 +2018,7 @@ impl ActiveShardMap {
             }
             for (key, version) in shard.versions.iter() {
                 let value = match version.kind {
-                    MutationKind::Set => {
+                    MutationKind::Set | MutationKind::RevisionedSet => {
                         if !version.residency.is_resident() {
                             return Err(ShardCacheError::Persistence(format!(
                                 "active-sync value for key hash {} is not materialized",
@@ -1788,7 +2032,9 @@ impl ActiveShardMap {
                             ))
                         })?)
                     }
-                    MutationKind::Tombstone(_) | MutationKind::ClusterEvict { .. } => None,
+                    MutationKind::Tombstone(_)
+                    | MutationKind::RevisionedTombstone(_)
+                    | MutationKind::ClusterEvict { .. } => None,
                 };
                 let snapshot = SnapshotVersion::from_state(key, value, version);
                 estimated_bytes = estimated_bytes
@@ -1857,7 +2103,7 @@ impl ActiveShardMap {
                 ));
             }
             if mutation.expire_at_ms.is_some()
-                || mutation.governance.is_some()
+                || mutation.governance().is_some()
                 || governance_conflict
             {
                 self.inner.special_reads[route.shard_id].store(true, AtomicOrdering::Release);
@@ -1884,6 +2130,7 @@ impl ActiveShardMap {
         value: Option<SharedBytes>,
         expire_at_ms: Option<u64>,
         governance: Option<&[u8]>,
+        revision: Option<&[u8]>,
         wall_ms: u64,
     ) -> Result<ActiveMutation> {
         let (context, key) = shard
@@ -1911,6 +2158,29 @@ impl ActiveShardMap {
             &self.inner.local_origins[shard_id],
             shard.next_mutation_sequence,
         );
+        let (kind, metadata) = match (governance, revision) {
+            (Some(_), Some(_)) => {
+                return Err(ShardCacheError::Command(
+                    "active-sync mutation cannot combine governance and revision metadata".into(),
+                ));
+            }
+            (Some(governance), None) => (kind, Some(SharedBytes::copy_from_slice(governance))),
+            (None, Some(revision)) => {
+                let kind = match kind {
+                    MutationKind::Set => MutationKind::RevisionedSet,
+                    MutationKind::Tombstone(kind) => MutationKind::RevisionedTombstone(kind),
+                    MutationKind::RevisionedSet
+                    | MutationKind::RevisionedTombstone(_)
+                    | MutationKind::ClusterEvict { .. } => {
+                        return Err(ShardCacheError::Command(
+                            "active-sync mutation kind cannot carry a revision".into(),
+                        ));
+                    }
+                };
+                (kind, Some(SharedBytes::copy_from_slice(revision)))
+            }
+            (None, None) => (kind, None),
+        };
         Ok(ActiveMutation {
             dot,
             hlc: shard.clock.tick(wall_ms),
@@ -1919,7 +2189,7 @@ impl ActiveShardMap {
             key,
             value,
             expire_at_ms: CompactExpiration::new(expire_at_ms),
-            governance: governance.map(SharedBytes::copy_from_slice),
+            metadata,
             kind,
         })
     }
@@ -2029,9 +2299,9 @@ impl ActiveShardMap {
             .store
             .route_key_prehashed(mutation.key_hash, &mutation.key);
         match mutation.kind {
-            MutationKind::Set => {
+            MutationKind::Set | MutationKind::RevisionedSet => {
                 if let Some(value) = &mutation.value {
-                    if mutation.governance.is_none() && mutation.expire_at_ms.is_none() {
+                    if mutation.governance().is_none() && mutation.expire_at_ms.is_none() {
                         self.inner.store.set_value_bytes_routed_no_ttl_then(
                             route,
                             &mutation.key,
@@ -2045,7 +2315,7 @@ impl ActiveShardMap {
                                 route,
                                 &mutation.key,
                                 value.clone(),
-                                mutation.governance.clone(),
+                                mutation.governance().cloned(),
                                 mutation.expire_at_ms.get(),
                                 now_ms,
                                 || {},
@@ -2053,7 +2323,9 @@ impl ActiveShardMap {
                     }
                 }
             }
-            MutationKind::Tombstone(_) | MutationKind::ClusterEvict { .. } => {
+            MutationKind::Tombstone(_)
+            | MutationKind::RevisionedTombstone(_)
+            | MutationKind::ClusterEvict { .. } => {
                 self.inner
                     .store
                     .delete_routed_then(route, &mutation.key, now_ms, || {});
@@ -2272,7 +2544,7 @@ impl ActiveShardMap {
             .inner
             .store
             .route_key_prehashed(incoming.key_hash, &incoming.key);
-        if incoming.expire_at_ms.is_some() || incoming.governance.is_some() {
+        if incoming.expire_at_ms.is_some() || incoming.governance().is_some() {
             self.inner.special_reads[route.shard_id].store(true, AtomicOrdering::Release);
         }
 
@@ -2290,6 +2562,42 @@ impl ActiveShardMap {
             }
             stats.duplicates += 1;
             return Ok(());
+        }
+
+        match (
+            local.revision().map(Deref::deref),
+            incoming.revision().map(Deref::deref),
+        ) {
+            (Some(local_revision), Some(incoming_revision))
+                if local_revision != incoming_revision =>
+            {
+                let incoming_dominates = incoming.context.observes(&local.dot);
+                let local_dominates = local.context.observes(&incoming.dot);
+                if !incoming_dominates && !local_dominates {
+                    stats.conflicts += 1;
+                }
+                let mut joined = local.full_context();
+                joined.join(&incoming.context);
+                joined.observe(&incoming.dot);
+                self.ensure_context_bound(&joined)?;
+                if incoming_revision > local_revision {
+                    let mut replacement = VersionState::from_mutation(incoming, Some(source_peer));
+                    replacement.context = joined;
+                    self.store_mutation(incoming);
+                    *local = replacement;
+                    stats.applied += 1;
+                } else {
+                    local.context = joined;
+                    stats.duplicates += 1;
+                }
+                return Ok(());
+            }
+            (Some(_), Some(_)) | (None, None) => {}
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ShardCacheError::Protocol(
+                    "active-sync key cannot mix ordinary and revision-ordered mutations".into(),
+                ));
+            }
         }
 
         let incoming_dominates = incoming.context.observes(&local.dot);
@@ -2315,7 +2623,8 @@ impl ActiveShardMap {
         }
 
         stats.conflicts += 1;
-        let governance_conflict = local.governance.as_deref() != incoming.governance.as_deref();
+        let governance_conflict =
+            local.governance().map(Deref::deref) != incoming.governance().map(Deref::deref);
         if governance_conflict {
             self.inner.conflict_reads[route.shard_id].store(true, AtomicOrdering::Release);
         }
@@ -2357,6 +2666,9 @@ impl ActiveShardMap {
         incoming: &ActiveMutation,
     ) -> Option<ConflictClaim> {
         let local = shard.versions.get(incoming.key.as_ref())?;
+        if local.revision().map(Deref::deref) != incoming.revision().map(Deref::deref) {
+            return None;
+        }
         if local.dot == incoming.dot
             || incoming.context.observes(&local.dot)
             || local.context.observes(&incoming.dot)
@@ -2432,8 +2744,11 @@ impl ActiveShardMap {
         self.validate_point(
             &incoming.key,
             incoming.value.as_deref().unwrap_or_default(),
-            incoming.governance.as_deref(),
+            incoming.governance().map(Deref::deref),
         )?;
+        if let Some(revision) = incoming.revision().map(Deref::deref) {
+            self.validate_revision(revision)?;
+        }
         let route = self
             .inner
             .store
@@ -2457,16 +2772,28 @@ impl ActiveShardMap {
             ));
         }
         let shape_is_valid = match &incoming.kind {
-            MutationKind::Set => incoming.value.is_some(),
+            MutationKind::Set => incoming.value.is_some() && incoming.revision().is_none(),
+            MutationKind::RevisionedSet => {
+                incoming.value.is_some()
+                    && incoming.governance().is_none()
+                    && incoming.revision().is_some()
+            }
             MutationKind::Tombstone(_) => {
                 incoming.value.is_none()
                     && incoming.expire_at_ms.is_none()
-                    && incoming.governance.is_none()
+                    && incoming.governance().is_none()
+            }
+            MutationKind::RevisionedTombstone(_) => {
+                incoming.value.is_none()
+                    && incoming.expire_at_ms.is_none()
+                    && incoming.governance().is_none()
+                    && incoming.revision().is_some()
             }
             MutationKind::ClusterEvict { target } => {
                 incoming.value.is_none()
                     && incoming.expire_at_ms.is_none()
-                    && incoming.governance.is_none()
+                    && incoming.governance().is_none()
+                    && incoming.revision().is_none()
                     && target.shard_id == incoming.dot.shard_id
                     && target.sequence != 0
             }
@@ -2509,7 +2836,7 @@ impl ActiveShardMap {
                         "active-sync governance conflict requires explicit resolution".into(),
                     ));
                 }
-                if !matches!(version.kind, MutationKind::Set) || !version.residency.is_resident() {
+                if !version.kind.is_set() || !version.residency.is_resident() {
                     return Ok(false);
                 }
                 version
@@ -2543,6 +2870,7 @@ impl ActiveShardMap {
             route.key_hash,
             key,
             MutationKind::Tombstone(TombstoneKind::Expired),
+            None,
             None,
             None,
             None,
@@ -2673,7 +3001,7 @@ impl ActiveShardMap {
                 continue;
             }
             let value = match version.kind {
-                MutationKind::Set => {
+                MutationKind::Set | MutationKind::RevisionedSet => {
                     if !version.residency.is_resident() {
                         return Err(ShardCacheError::Persistence(
                             "active-sync state transfer requires materialized values".into(),
@@ -2687,7 +3015,9 @@ impl ActiveShardMap {
                         },
                     )?))
                 }
-                MutationKind::Tombstone(_) | MutationKind::ClusterEvict { .. } => None,
+                MutationKind::Tombstone(_)
+                | MutationKind::RevisionedTombstone(_)
+                | MutationKind::ClusterEvict { .. } => None,
             };
             let mutation = ActiveMutation {
                 dot: version.dot.clone(),
@@ -2697,7 +3027,7 @@ impl ActiveShardMap {
                 key: SharedBytes::copy_from_slice(key),
                 value,
                 expire_at_ms: version.expire_at_ms,
-                governance: version.governance.clone(),
+                metadata: version.metadata.clone(),
                 kind: version.kind.clone(),
             };
             let next_bytes = bytes.checked_add(mutation.estimated_bytes()).ok_or(
@@ -2864,7 +3194,7 @@ impl ActiveShardMap {
             let shard = shard.lock();
             for (key, version) in shard.versions.iter() {
                 let value = match version.kind {
-                    MutationKind::Set => {
+                    MutationKind::Set | MutationKind::RevisionedSet => {
                         if !version.residency.is_resident() {
                             return Err(ShardCacheError::Persistence(
                                 "active-sync state transfer requires materialized values".into(),
@@ -2878,7 +3208,9 @@ impl ActiveShardMap {
                             },
                         )?))
                     }
-                    MutationKind::Tombstone(_) | MutationKind::ClusterEvict { .. } => None,
+                    MutationKind::Tombstone(_)
+                    | MutationKind::RevisionedTombstone(_)
+                    | MutationKind::ClusterEvict { .. } => None,
                 };
                 let mutation = ActiveMutation {
                     dot: version.dot.clone(),
@@ -2888,7 +3220,7 @@ impl ActiveShardMap {
                     key: SharedBytes::copy_from_slice(key),
                     value,
                     expire_at_ms: version.expire_at_ms,
-                    governance: version.governance.clone(),
+                    metadata: version.metadata.clone(),
                     kind: version.kind.clone(),
                 };
                 if mutation.dot.shard_id as usize != shard_id {
@@ -2934,9 +3266,7 @@ impl ActiveShardMap {
                 shard
                     .versions
                     .iter()
-                    .filter(|(_, version)| {
-                        matches!(version.kind, MutationKind::Set) && version.residency.is_resident()
-                    })
+                    .filter(|(_, version)| version.kind.is_set() && version.residency.is_resident())
                     .map(|(key, version)| (key.clone(), version.dot.clone()))
                     .collect::<Vec<_>>()
             };
@@ -2955,9 +3285,11 @@ impl ActiveShardMap {
 impl SnapshotVersion {
     fn from_state(key: &[u8], value: Option<Vec<u8>>, version: &VersionState) -> Self {
         let kind = match &version.kind {
-            MutationKind::Set => SnapshotKind::Set,
-            MutationKind::Tombstone(TombstoneKind::Delete) => SnapshotKind::Delete,
-            MutationKind::Tombstone(TombstoneKind::Expired) => SnapshotKind::Expired,
+            MutationKind::Set | MutationKind::RevisionedSet => SnapshotKind::Set,
+            MutationKind::Tombstone(TombstoneKind::Delete)
+            | MutationKind::RevisionedTombstone(TombstoneKind::Delete) => SnapshotKind::Delete,
+            MutationKind::Tombstone(TombstoneKind::Expired)
+            | MutationKind::RevisionedTombstone(TombstoneKind::Expired) => SnapshotKind::Expired,
             MutationKind::ClusterEvict { target } => SnapshotKind::ClusterEvict {
                 target: SnapshotDot::from(target.as_ref()),
             },
@@ -2980,7 +3312,8 @@ impl SnapshotVersion {
                 .collect(),
             kind,
             expire_at_ms: version.expire_at_ms.get(),
-            governance: version.governance.as_deref().map(<[u8]>::to_vec),
+            governance: version.governance().map(|value| value.to_vec()),
+            revision: version.revision().map(|value| value.to_vec()),
             governance_conflict: version.governance_conflict,
         }
     }
@@ -3011,6 +3344,29 @@ impl SnapshotVersion {
                 target: Box::new(target.to_dot()?),
             },
         };
+        let (kind, metadata) = match (self.governance.as_deref(), self.revision.as_deref()) {
+            (Some(_), Some(_)) => {
+                return Err(ShardCacheError::Persistence(
+                    "active-sync snapshot combines governance and revision metadata".into(),
+                ));
+            }
+            (Some(governance), None) => (kind, Some(SharedBytes::copy_from_slice(governance))),
+            (None, Some(revision)) => {
+                let kind = match kind {
+                    MutationKind::Set => MutationKind::RevisionedSet,
+                    MutationKind::Tombstone(kind) => MutationKind::RevisionedTombstone(kind),
+                    MutationKind::RevisionedSet
+                    | MutationKind::RevisionedTombstone(_)
+                    | MutationKind::ClusterEvict { .. } => {
+                        return Err(ShardCacheError::Persistence(
+                            "active-sync snapshot revision has an invalid mutation kind".into(),
+                        ));
+                    }
+                };
+                (kind, Some(SharedBytes::copy_from_slice(revision)))
+            }
+            (None, None) => (kind, None),
+        };
         Ok(ActiveMutation {
             dot,
             hlc: HybridLogicalClock {
@@ -3022,7 +3378,7 @@ impl SnapshotVersion {
             key: SharedBytes::copy_from_slice(&self.key),
             value: self.value.as_deref().map(SharedBytes::copy_from_slice),
             expire_at_ms: CompactExpiration::new(self.expire_at_ms),
-            governance: self.governance.as_deref().map(SharedBytes::copy_from_slice),
+            metadata,
             kind,
         })
     }
@@ -3033,6 +3389,7 @@ impl SnapshotVersion {
             .len()
             .saturating_add(self.value.as_ref().map_or(0, Vec::len))
             .saturating_add(self.governance.as_ref().map_or(0, Vec::len));
+        let binary_bytes = binary_bytes.saturating_add(self.revision.as_ref().map_or(0, Vec::len));
         binary_bytes
             .saturating_mul(4)
             .saturating_add(
@@ -3120,17 +3477,21 @@ fn semantic_concurrent_incoming_wins(
     local: &VersionState,
     incoming: &ActiveMutation,
 ) -> Option<bool> {
+    if local.kind.is_tombstone() && incoming.kind.is_set() {
+        return Some(false);
+    }
+    if local.kind.is_set() && incoming.kind.is_tombstone() {
+        return Some(true);
+    }
     match (&local.kind, &incoming.kind) {
-        (MutationKind::Tombstone(_), MutationKind::Set) => Some(false),
-        (MutationKind::Set, MutationKind::Tombstone(_)) => Some(true),
-        (MutationKind::ClusterEvict { target }, MutationKind::Set) => {
+        (MutationKind::ClusterEvict { target }, kind) if kind.is_set() => {
             Some(&incoming.dot != target.as_ref())
         }
-        (MutationKind::Set, MutationKind::ClusterEvict { target }) => {
+        (kind, MutationKind::ClusterEvict { target }) if kind.is_set() => {
             Some(&local.dot == target.as_ref())
         }
-        (MutationKind::Tombstone(_), MutationKind::ClusterEvict { .. }) => Some(false),
-        (MutationKind::ClusterEvict { .. }, MutationKind::Tombstone(_)) => Some(true),
+        (kind, MutationKind::ClusterEvict { .. }) if kind.is_tombstone() => Some(false),
+        (MutationKind::ClusterEvict { .. }, kind) if kind.is_tombstone() => Some(true),
         _ => None,
     }
 }
@@ -3145,9 +3506,13 @@ fn concurrent_clock_incoming_wins(local: &VersionState, incoming: &ActiveMutatio
 
 fn conflict_mutation_class(kind: &MutationKind) -> ConflictMutationClass {
     match kind {
-        MutationKind::Set => ConflictMutationClass::Set,
-        MutationKind::Tombstone(TombstoneKind::Delete) => ConflictMutationClass::Delete,
-        MutationKind::Tombstone(TombstoneKind::Expired) => ConflictMutationClass::Expired,
+        MutationKind::Set | MutationKind::RevisionedSet => ConflictMutationClass::Set,
+        MutationKind::Tombstone(TombstoneKind::Delete)
+        | MutationKind::RevisionedTombstone(TombstoneKind::Delete) => ConflictMutationClass::Delete,
+        MutationKind::Tombstone(TombstoneKind::Expired)
+        | MutationKind::RevisionedTombstone(TombstoneKind::Expired) => {
+            ConflictMutationClass::Expired
+        }
         MutationKind::ClusterEvict { .. } => ConflictMutationClass::ClusterEvict,
     }
 }
@@ -3220,12 +3585,15 @@ fn block_digest(
         digest.update(record.key_hash.to_le_bytes());
         hash_bytes(&mut digest, &record.key);
         hash_optional_bytes(&mut digest, record.value.as_deref());
-        hash_optional_bytes(&mut digest, record.governance.as_deref());
+        hash_optional_bytes(&mut digest, record.governance().map(Deref::deref));
+        hash_optional_bytes(&mut digest, record.revision().map(Deref::deref));
         digest.update(record.expire_at_ms.unwrap_or(u64::MAX).to_le_bytes());
         match &record.kind {
-            MutationKind::Set => digest.update([1]),
-            MutationKind::Tombstone(TombstoneKind::Delete) => digest.update([2]),
-            MutationKind::Tombstone(TombstoneKind::Expired) => digest.update([3]),
+            MutationKind::Set | MutationKind::RevisionedSet => digest.update([1]),
+            MutationKind::Tombstone(TombstoneKind::Delete)
+            | MutationKind::RevisionedTombstone(TombstoneKind::Delete) => digest.update([2]),
+            MutationKind::Tombstone(TombstoneKind::Expired)
+            | MutationKind::RevisionedTombstone(TombstoneKind::Expired) => digest.update([3]),
             MutationKind::ClusterEvict { target } => {
                 digest.update([4]);
                 hash_bytes(&mut digest, target.node_id.as_str().as_bytes());
@@ -3719,6 +4087,72 @@ mod tests {
     }
 
     #[test]
+    fn revision_order_rejects_a_causally_later_stale_set() {
+        let map = map("left");
+        assert!(matches!(
+            map.set_versioned("key", "old", 41_u64.to_be_bytes())
+                .unwrap(),
+            VersionedWriteOutcome::Applied(_)
+        ));
+        assert!(matches!(
+            map.delete_versioned("key", 42_u64.to_be_bytes()).unwrap(),
+            VersionedWriteOutcome::Applied(_)
+        ));
+
+        assert_eq!(
+            map.set_versioned("key", "stale", 41_u64.to_be_bytes())
+                .unwrap(),
+            VersionedWriteOutcome::IgnoredNotNewer {
+                current_revision: 42_u64.to_be_bytes().to_vec(),
+            }
+        );
+        assert_eq!(map.get("key"), None);
+
+        assert!(matches!(
+            map.set_versioned("key", "new", 43_u64.to_be_bytes())
+                .unwrap(),
+            VersionedWriteOutcome::Applied(_)
+        ));
+        assert_eq!(map.get("key"), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn revision_order_converges_concurrent_update_and_delete() {
+        let left = map("left");
+        let right = map("right");
+        left.set_versioned("key", "old", 40_u64.to_be_bytes())
+            .unwrap();
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+
+        left.delete_versioned("key", 42_u64.to_be_bytes()).unwrap();
+        right
+            .set_versioned("key", "stale", 41_u64.to_be_bytes())
+            .unwrap();
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+
+        assert_eq!(left.get("key"), None);
+        assert_eq!(right.get("key"), None);
+        assert_eq!(left.version_dot("key"), right.version_dot("key"));
+    }
+
+    #[test]
+    fn revision_order_converges_concurrent_sets_to_postgres_order() {
+        let left = map("left");
+        let right = map("right");
+        left.set_versioned("key", "newer", 52_u64.to_be_bytes())
+            .unwrap();
+        right
+            .set_versioned("key", "older", 51_u64.to_be_bytes())
+            .unwrap();
+
+        left.sync_with(&right, SyncOptions::default()).unwrap();
+
+        assert_eq!(left.get("key"), Some(b"newer".to_vec()));
+        assert_eq!(right.get("key"), Some(b"newer".to_vec()));
+        assert_eq!(left.version_dot("key"), right.version_dot("key"));
+    }
+
+    #[test]
     fn duplicate_and_reordered_sync_are_idempotent() {
         let left = map("left");
         let right = map("right");
@@ -4027,6 +4461,12 @@ mod tests {
         source.set("live", "value").unwrap();
         source.set("deleted", "old").unwrap();
         source.delete("deleted").unwrap();
+        source
+            .set_versioned("versioned-deleted", "old", 8_u64.to_be_bytes())
+            .unwrap();
+        source
+            .delete_versioned("versioned-deleted", 9_u64.to_be_bytes())
+            .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("active.snapshot");
         source.save_snapshot(&path).unwrap();
@@ -4036,7 +4476,8 @@ mod tests {
         let restored = ActiveShardMap::load_snapshot(4, config, &path).unwrap();
         assert_eq!(restored.get("live"), Some(b"value".to_vec()));
         assert_eq!(restored.get("deleted"), None);
-        assert_eq!(restored.health_snapshot().tombstones, 1);
+        assert_eq!(restored.get("versioned-deleted"), None);
+        assert_eq!(restored.health_snapshot().tombstones, 2);
         assert_eq!(restored.health_snapshot().pending_records, 0);
 
         let peer = map("right");
@@ -4044,6 +4485,18 @@ mod tests {
         assert_eq!(report.state_snapshot_fallbacks, 1);
         assert_eq!(peer.get("live"), Some(b"value".to_vec()));
         assert_eq!(peer.get("deleted"), None);
+        assert_eq!(peer.get("versioned-deleted"), None);
+
+        assert!(matches!(
+            restored
+                .set_versioned("versioned-deleted", "stale", 8_u64.to_be_bytes())
+                .unwrap(),
+            VersionedWriteOutcome::IgnoredNotNewer { .. }
+        ));
+        restored
+            .set_versioned("versioned-deleted", "new", 10_u64.to_be_bytes())
+            .unwrap();
+        assert_eq!(restored.get("versioned-deleted"), Some(b"new".to_vec()));
 
         let peer = map("right");
         restored.sync_with(&peer, SyncOptions::default()).unwrap();

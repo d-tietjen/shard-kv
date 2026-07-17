@@ -387,8 +387,30 @@ only some are governed, the store preserves the conflict and ordinary GET fails
 closed. A governed conflict API may inspect authorized versions and resolve them
 by writing a new version whose causal context dominates every conflicting dot.
 
-`multi_value` and versioned deterministic custom merge policies are later
-extensions built on the same causal comparison. A custom merge operator must be
+### Source-Revision Ordering
+
+Database-backed caches can use `ActiveShardMap::set_versioned` and
+`delete_versioned` when source-of-truth order must override causal arrival
+order. The application supplies a bounded opaque revision whose lexicographic
+byte order matches authoritative commit order. For one revision-ordered key:
+
+- a greater revision replaces a smaller revision, even if the smaller mutation
+  causally observes the greater one;
+- a smaller or equal local write is ignored;
+- equal-revision SET/DELETE conflicts retain remove-wins behavior;
+- equal-revision ambiguous conflicts retain the configured causal or external
+  ordering behavior; and
+- revision-ordered and ordinary operations cannot be mixed on one key.
+
+This is a max-register over the application revision, not a linearizable write.
+Remote visibility still requires successful active-sync delivery. Use a wide,
+non-wrapping revision such as a big-endian database sequence or a canonical
+timestamp-plus-sequence tuple. An eight-bit wrapping counter is unsafe for
+partitions or drained nodes because values repeat after 256 changes and modular
+ordering is ambiguous beyond half the counter range.
+
+`multi_value` and general custom merge policies are later extensions built on
+the same causal comparison. A custom merge operator must be
 associative, commutative, idempotent, resource-bounded, and free of network or
 storage I/O. Every peer must advertise the same policy ID and version before
 joining a group.

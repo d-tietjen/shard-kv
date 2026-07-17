@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Added revision-ordered active-sync SET and DELETE operations. Applications
+  encode an authoritative, lexicographically sortable revision; the greatest
+  revision wins even when an older mutation arrives later or causally observes
+  a newer delete. Ordinary active-sync keys retain the 0.7 causal semantics and
+  compact metadata layout.
+
+### Changed
+
+- Bumped the active-sync TLS wire and ALPN versions for revision metadata.
+  Revision-aware and 0.7.0 peers must not be mixed in one rolling deployment.
+
 ## 0.7.0 - 2026-07-16
 
 ### Added

@@ -65,6 +65,11 @@ read-your-writes and eventual convergence after finite writes and eventual
 successful delivery. Neither mode provides linearizable reads, serializable
 transactions, or immediate remote visibility.
 
+Revision-ordered SET and DELETE are available for database-backed cache keys.
+They use an application-encoded, lexicographically sortable source revision so
+a delayed stale fill cannot supersede a newer delete. Use a wide non-wrapping
+revision; a `u8` counter is not safe across partitions or drained replicas.
+
 Consensus mode orders only a conflict already observed during synchronization.
 It does not send every write through consensus and does not create a second WAL
 or value replication path.
