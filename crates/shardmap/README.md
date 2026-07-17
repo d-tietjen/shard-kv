@@ -73,6 +73,12 @@ Both modes are eventually consistent. Neither provides linearizable reads or
 cross-node serializable transactions. `consistency_mode()` and the active-sync
 health snapshot report the selected guarantee.
 
+Active sync is disabled by default and is intended for read-heavy durable-cache
+deployments. On Adam, three-run 99% GET / 1% SET medians retained 77.5% of
+baseline throughput in synchronized causal mode and 75.1% in synchronized
+consensus mode, while both measured 2.3us p99 versus 2.1us at baseline. See the
+[`0.7 feature guide`](../../docs/RELEASE_0_7.md) before enabling it.
+
 ## Typed Map Operations
 
 Use `ShardMap<K, V>` for the native typed embedded API. It stores Rust objects

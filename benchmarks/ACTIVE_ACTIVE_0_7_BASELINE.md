@@ -68,6 +68,33 @@ was effectively flat at 15.05M versus 15.11M ops/s, while SET increased from
 background write modes still do not meet the original 90% throughput gate, so
 active sync remains feature-gated and opt-in.
 
+### Intended read-heavy workload
+
+The release target is read-heavy replication rather than the 80/20 diagnostic
+mix. Three additional Adam runs per mode used the same pinned CPUs, key/value
+shape, sync interval, process isolation, convergence check, and timing as the
+canonical matrix. The table reports median throughput and median p99:
+
+| Workload | Mode | Median ops/s | Baseline retained | Median p99 |
+| --- | --- | ---: | ---: | ---: |
+| 99% GET / 1% SET | baseline | 17.77M | 100.0% | 2.1us |
+| 99% GET / 1% SET | causal-local | 15.25M | 85.8% | 2.2us |
+| 99% GET / 1% SET | consensus-local | 15.08M | 84.8% | 2.3us |
+| 99% GET / 1% SET | causal-sync | 13.78M | 77.5% | 2.3us |
+| 99% GET / 1% SET | consensus-sync | 13.34M | 75.1% | 2.3us |
+| 95% GET / 5% SET | baseline | 17.57M | 100.0% | 2.2us |
+| 95% GET / 5% SET | causal-local | 14.56M | 82.9% | 2.3us |
+| 95% GET / 5% SET | consensus-local | 14.09M | 80.2% | 2.4us |
+| 95% GET / 5% SET | causal-sync | 11.88M | 67.6% | 2.7us |
+| 95% GET / 5% SET | consensus-sync | 11.61M | 66.1% | 2.5us |
+
+All 12 synchronized runs drained to quiescence and verified every key on both
+maps. Pure GET remains useful as an upper bound, but these rows include the
+causal admission and block-circulation cost caused by occasional writes and are
+the appropriate 0.7 capacity-planning figures. The three individual runs,
+median p50/p99/p999, commit, and exact command are preserved in
+[`results/adam-active-sync-read-heavy-20260716`](results/adam-active-sync-read-heavy-20260716/README.md).
+
 ### Concurrent-conflict cost
 
 The dedicated conflict driver was run on Adam's CPUs `0-7` with eight shards

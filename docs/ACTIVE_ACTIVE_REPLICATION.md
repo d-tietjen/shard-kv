@@ -93,6 +93,20 @@ that do not select an `active-sync-*` Cargo feature retain the existing
 raw-cache and native `ShardMap` GET, SET, and 80/20 throughput remained within
 2.4% of their recorded baselines with zero errors.
 
+The intended deployment is a read-heavy durable cache with occasional writes.
+Three-run Adam medians for the final PR commit were:
+
+| Workload | Baseline | Causal local | Consensus local | Causal sync | Consensus sync |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 99% GET / 1% SET | 17.77M/s | 15.25M/s (85.8%) | 15.08M/s (84.8%) | 13.78M/s (77.5%) | 13.34M/s (75.1%) |
+| 95% GET / 5% SET | 17.57M/s | 14.56M/s (82.9%) | 14.09M/s (80.2%) | 11.88M/s (67.6%) | 11.61M/s (66.1%) |
+
+At 99/1, median p99 was 2.1us for baseline and 2.3us for both synchronized
+modes. At 95/5, it was 2.2us for baseline, 2.7us for causal sync, and 2.5us for
+consensus sync. Every synchronized run drained to quiescence and verified exact
+convergence. These rows should be used for read-heavy capacity planning; pure
+GET is an upper bound that excludes mutation admission and block circulation.
+
 Enabling active sync adds version, causal-history, conflict, and pending-block
 accounting to mutations. Synchronization also retains and circulates mutation
 payloads in the background. The final canonical Adam matrix used eight shards,
@@ -124,8 +138,8 @@ For deployment decisions:
 
 - Leave active sync disabled when replication is not required; the default path
   pays no active-sync metadata or networking cost.
-- Read-heavy deployments can expect near-baseline point-read latency, but the
-  measured throughput reduction was 10.8-16.9% depending on mode.
+- Pure point-read throughput retained 83.1-89.2%, while synchronized 99/1
+  workloads retained 75.1-77.5%. Point-read p99 remained close to baseline.
 - Mixed and write-heavy deployments must capacity-plan from active-mode results,
   not ordinary `ShardMap` throughput. Current SET and 80/20 results do not meet
   the 90% release target, which is why all active-sync modes remain explicit and
@@ -138,6 +152,8 @@ For deployment decisions:
 See [`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md)
 for absolute throughput, tail latency, conflict tests, value-size sensitivity,
 hardware details, and reproducible commands.
+The three-run read-heavy artifact is
+[`adam-active-sync-read-heavy-20260716`](../benchmarks/results/adam-active-sync-read-heavy-20260716/README.md).
 
 ### Automatic TLS Membership
 
@@ -171,35 +187,36 @@ node still needs direct connectivity to every peer whose mutations it must
 receive. External service discovery, topology persistence, and multi-hop block
 signatures remain separate control-plane work.
 
-The following design items remain release gates rather than implemented
-claims: building sync blocks from durable WAL offsets instead of retaining
-mutation payloads in memory, external topology discovery and persistence,
-multi-hop origin signatures, quorum cold nominations, tombstone garbage
-collection, stronger acknowledgement modes, Redis command-family semantics,
-and automated writer fencing for overlapping replica-group reconfiguration.
+The following design items remain outside the 0.7 release rather than
+implemented claims: building sync blocks from durable WAL offsets instead of
+retaining mutation payloads in memory, external topology discovery and
+persistence, multi-hop origin signatures, quorum cold nominations, tombstone
+garbage collection, stronger acknowledgement modes, Redis command-family
+semantics, and automated writer fencing for overlapping replica-group
+reconfiguration.
 The current local write benchmark also does not meet the 90% throughput target;
 see [Performance Impact](#performance-impact).
 
-## Summary
+## Architecture Summary
 
-The complete target is active-active shardmap synchronization in which every member of a slot's
-replica group may accept local reads and writes while managing its resident
-cache independently. Local LRU/LFU eviction drops payload residency without
-deleting the logical version, and exact-version fault-in restores cold data from
-local overflow, durable state, or a peer. Writes commit to the local WAL and map
-first. At a configured sync interval, each storage shard atomically seals its
-current WAL interval into immutable blocks and starts a new interval.
-Replica-group peers exchange block manifests, circulate missing blocks, and
-replay each verified block idempotently. Network partitions do not stop local
-writes. When peers reconnect, retained WAL blocks or a bounded state snapshot
-bring them back to convergence.
+The 0.7 implementation provides active-active shardmap synchronization in which
+every member of a slot's replica group may accept local reads and writes while
+managing its resident cache independently. Local LRU/LFU eviction drops payload
+residency without deleting the logical version, and exact-version fault-in
+restores cold data from local overflow, durable state, or a peer. Writes commit
+to the local WAL and map first. At a configured sync interval, each storage
+shard atomically seals its current WAL interval into immutable blocks and starts
+a new interval. Replica-group peers exchange block manifests, circulate missing
+blocks, and replay each verified block idempotently. Network partitions do not
+stop local writes. When peers reconnect, retained WAL blocks or a bounded state
+snapshot brings them back to convergence.
 
-The implementation should reuse the 0.6 fixed-slot topology, shard-owned
-networking, bounded pipelines, FCRP frames, WAL, snapshots, TLS, governance
-propagation, and overflow integration. It must add globally unique mutation
-dots, hybrid logical clocks, explicit conflict policies, tombstones,
-content-addressed WAL sync blocks, per-origin block frontiers, bidirectional
-exchange, state-snapshot fallback, and topology-safe replica-group changes.
+Active sync reuses the 0.6 fixed-slot topology, shard-owned networking, bounded
+pipelines, FCRP frames, WAL, snapshots, TLS, governance propagation, and
+overflow integration. It adds globally unique mutation dots, hybrid logical
+clocks, explicit conflict policies, tombstones, content-addressed WAL sync
+blocks, per-origin block frontiers, bidirectional exchange, state-snapshot
+fallback, and revisioned replica-group reconciliation.
 
 This model prioritizes availability and eventual convergence. It does not claim
 linearizability, serializability, or automatic lossless merging for every Redis
@@ -1141,7 +1158,12 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
 - explicit sync partial completions and deadline failures
 - reconfiguration seeding and convergence progress
 
-## Implementation Phases
+## Original Design Work Breakdown
+
+The following phases preserve the original design work breakdown. They are not
+all 0.7 release claims; the implemented public surface is listed in
+[Implementation Status](#implementation-status), and deferred items are listed
+in [Release Boundaries](#release-boundaries).
 
 ### Phase 1: Versioned Point State And Eviction
 
@@ -1213,7 +1235,11 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
   blocks, membership changes, and restart.
 - Add rolling upgrades, fault injection, production benchmarks, and runbooks.
 
-## Test Plan
+## Validation Matrix
+
+This matrix records both completed 0.7 release coverage and the broader
+default-enablement coverage. The executed release evidence is summarized in
+[`RELEASE_0_7.md`](RELEASE_0_7.md).
 
 ### Unit And Model Tests
 
@@ -1352,7 +1378,12 @@ sets. Preserve raw results and commands under `benchmarks/`. The
 defines the comparison surfaces and demonstrates why the existing
 per-mutation replication path cannot stand in for this design.
 
-## Acceptance Gates
+## Default-Enablement Gates
+
+These gates define when active sync may become a default production path. The
+0.7 release intentionally ships the evaluated point-value implementation behind
+explicit Cargo features; an unmet default-enablement gate does not silently
+weaken the selected consistency mode.
 
 - All connected peers converge after finite writes and eventual message delivery.
 - Every built-in conflict policy is deterministic, associative, commutative,
@@ -1421,16 +1452,17 @@ Existing single-primary replication and KV overflow remain supported. Active
 sync uses a separate feature flag and configuration surface until its behavior
 and operational costs are proven.
 
-## Open Decisions
+## Release Boundaries
 
-- Choose the causal-context representation after measuring per-key memory cost.
-- Choose default sync interval, block size, fanout, and retention limits from
-  production measurements.
-- Choose the digest tree shape and rebuild strategy.
-- Define stable merge-policy registration and upgrade compatibility.
-- Define Redis error behavior for unsupported active-active commands.
-- Choose the external topology backend and minimum supported version.
-- Set offline-member retention and clock quarantine defaults from production
-  recovery measurements.
-- Choose the default recovery-source floor, nomination window, confirmation
-  threshold, and eviction-stub budget from durable-cache benchmarks.
+- Sync blocks retain mutation payloads in memory; durable WAL-offset descriptors
+  are deferred.
+- Desired membership is application-provided. External topology discovery and
+  durable topology persistence are not included.
+- Origin authentication requires direct peer connectivity; signed multi-hop
+  forwarding is not included.
+- Automated writer fencing for overlapping replica-group reconfiguration is an
+  external operational responsibility.
+- Quorum cold nomination, tombstone garbage collection, and stronger
+  acknowledgement modes are not implemented claims.
+- Active-active Redis command families, custom merge-policy registration, and
+  operation-specific CRDTs remain separate future features.

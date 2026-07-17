@@ -1,7 +1,6 @@
 # Operations
 
-This page is the short operational contract for running `shardcache` in
-0.6.x-style deployments.
+This page is the short operational contract for running `shardcache` 0.7.
 
 For the container-specific runbook, see
 [`SHARDCACHE_DOCKER.md`](SHARDCACHE_DOCKER.md).
@@ -13,14 +12,21 @@ For the container-specific runbook, see
 | Embedded crate | `shardmap = "0.7.0"` | In-process Rust cache use. |
 | Server crate | `shardcache = "0.7.0"` | Install or depend on the RESP/SCNP server package. |
 | Native client crate | `shardcache-client-rs = "0.7.0"` | SCNP client access from Rust applications. |
+| Active-active embedded map | `shardmap` with `active-sync-causal-eventual` or `active-sync-consensus-ordered-eventual` | Opt-in exact point-value synchronization; add `active-sync-tls` for network peers. |
 | Server | `cargo run -p shardcache --features server --bin shardcache -- ...` | RESP/SCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo run -p shardcache --features redis-server --bin shardcache -- ...` | Redis/Valkey-compatible command and object behavior. |
 
 `shardmap`, `shardcache`, and `shardcache-client-rs` are the crates.io crates
-for 0.6.x. Publish `shardcache-client-rs` first, then `shardmap`, then
+for 0.7. Publish `shardcache-client-rs` first, then `shardmap`, then
 `shardcache`; the optional `kv-overflow` adapter makes that order necessary.
 Python, C ABI, runtime, benchmark, and
 integration packages remain source-workspace packages.
+
+Active sync is absent from the default feature set. It is intended for
+read-heavy exact-value deployments that need eventually consistent writable
+replicas. Review [`RELEASE_0_7.md`](RELEASE_0_7.md) for measured overhead and
+[`ACTIVE_ACTIVE_REPLICATION.md`](ACTIVE_ACTIVE_REPLICATION.md) for consistency,
+membership, security, and recovery requirements before enabling it.
 
 `redis-server` implies `server`, `redis`, `redis-functions`, and
 `redis-modules`. Embedded-only builds stay separate from the Redis-compatible

@@ -106,6 +106,11 @@
   2.4% of their recorded Adam baselines with zero errors. The all-feature
   workspace suite passed 421 ShardMap unit tests plus integration, differential,
   deterministic-fault, mTLS, overflow, formal-model, and doc tests.
+- Three-run Adam medians for the intended read-heavy workload measured 13.78M
+  ops/s (77.5% of baseline) at 2.3us p99 for causal-sync 99/1 and 13.34M
+  (75.1%) at 2.3us for consensus-sync. At 95/5, causal-sync measured 11.88M
+  (67.6%) at 2.7us and consensus-sync measured 11.61M (66.1%) at 2.5us. Every
+  synchronized run drained and verified exact convergence.
 - Documented the complete opt-in performance impact by consistency profile,
   including baseline-retained throughput, p99 latency, value-size sensitivity,
   post-compaction SET improvement, and deployment guidance. Active sync remains
