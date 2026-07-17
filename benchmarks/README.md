@@ -17,6 +17,7 @@ Two modes, parallel and independent:
 | `semantic_cache_matrix` | Pairwise embedding sweep plus lookup latency | Semantic cache F1/FPR across thresholds and unique/cycling lookup latency |
 | `active_sync_cost` | Embedded active-active A/B | Baseline, local causal metadata, installed conflict orderer, and background convergence cost with a final convergence assertion |
 | `active_sync_conflict_cost` | Embedded concurrent-conflict A/B | Admission, convergence throughput, sync latency, conflict counts, and external-orderer calls under guaranteed same-key conflicts |
+| `active_sync_tls_latency` | Cross-host active-sync mTLS | End-to-end write-batch synchronization latency and throughput over the production direct-shard TLS transport |
 
 The throughput drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `shardcache-lmcache`
@@ -75,6 +76,39 @@ between the peers and can inject latency once per batch operation. The delay is
 synthetic; use it to measure sensitivity, not as a claim about a particular
 consensus deployment. Set `--batch-items 1` for the per-claim control. Run each
 mode in a separate process for release comparisons.
+
+## Cross-Host Active-Sync TLS Latency
+
+Build the two-process driver with the production active-sync TLS feature:
+
+```bash
+cargo build --release -p shardcache-benchmarks \
+  --features active-sync-tls --bin active_sync_tls_latency
+```
+
+Start `sink` on the receiving host with its certificate, private key, CA, and
+the source leaf certificate used for node-ID authorization. Then run `source`
+on the sending host with its own credentials and one `--peer` address per
+remote shard. The number of listener and peer addresses must be a nonzero power
+of two and must match on both sides.
+
+```bash
+target/release/active_sync_tls_latency sink \
+  --cert adam.crt --key adam.key --ca ca.crt \
+  --authorized-cert laptop.crt \
+  --listen 0.0.0.0:18443
+
+target/release/active_sync_tls_latency source \
+  --cert laptop.crt --key laptop.key --ca ca.crt \
+  --peer adam.example.com:18443 --server-name adam.example.com \
+  --batch-sizes 1,64 --rounds 200 --warmup-rounds 20 --value-size 1024
+```
+
+The source reports p50, p95, p99, and p99.9 wall-clock latency from local batch
+admission through remote acknowledgement, plus effective writes per second.
+The sink verifies the exact number of applied values before exiting. Use an
+SSH tunnel only when intentionally measuring the tunnel path; direct addresses
+measure the production mTLS transport without tunnel overhead.
 
 ## Docker Server Suite
 

@@ -60,7 +60,7 @@ fn key_for_shard(store: &EmbeddedStore, shard_id: usize) -> Vec<u8> {
     panic!("unable to find key for shard {shard_id}");
 }
 
-fn free_consecutive_ports() -> (u16, u16) {
+fn reserve_consecutive_ports() -> (std::net::TcpListener, std::net::TcpListener) {
     for _ in 0..100 {
         let first = std::net::TcpListener::bind("127.0.0.1:0").expect("bind first port");
         let first_port = first.local_addr().expect("first addr").port();
@@ -68,13 +68,22 @@ fn free_consecutive_ports() -> (u16, u16) {
             continue;
         };
         let second_addr = format!("127.0.0.1:{second_port}");
-        if let Ok(second) = std::net::TcpListener::bind(&second_addr) {
-            drop(second);
-            drop(first);
-            return (first_port, second_port);
+        if let Ok(second) = std::net::TcpListener::bind(second_addr) {
+            return (first, second);
         }
     }
     panic!("unable to find consecutive free ports");
+}
+
+fn free_consecutive_ports() -> (u16, u16) {
+    let (first, second) = reserve_consecutive_ports();
+    let ports = (
+        first.local_addr().expect("first addr").port(),
+        second.local_addr().expect("second addr").port(),
+    );
+    drop(second);
+    drop(first);
+    ports
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -220,6 +229,41 @@ async fn embedded_server_direct_shard_endpoint_shares_store_memory() {
             join.await.unwrap().unwrap();
         })
         .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn embedded_server_reports_direct_shard_bind_failure() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (fanout_reservation, direct_reservation) = reserve_consecutive_ports();
+    let fanout_port = fanout_reservation.local_addr().unwrap().port();
+    let direct_port = direct_reservation.local_addr().unwrap().port();
+    assert_eq!(direct_port, fanout_port + 1);
+    drop(fanout_reservation);
+
+    let mut config = test_config(temp_dir.path().join("embedded-direct-bind-failure"), false);
+    config.bind_addr = format!("127.0.0.1:{fanout_port}");
+    config.shard_count = 1;
+    config.persistence.enabled = false;
+    config.server_endpoint_mode = ServerEndpointMode::DirectShard;
+
+    let server = shardmap::server::ShardCacheServer::from_embedded_store(
+        config,
+        Arc::new(EmbeddedStore::new(1)),
+    );
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        server.run_with_shutdown(std::future::pending()),
+    )
+    .await
+    .expect("direct-shard bind failure should return immediately");
+    let error = result.expect_err("occupied direct-shard port must fail startup");
+    assert!(matches!(
+        error,
+        shardmap::ShardCacheError::Io(ref source)
+            if source.kind() == std::io::ErrorKind::AddrInUse
+    ));
+
+    drop(direct_reservation);
 }
 
 #[tokio::test(flavor = "current_thread")]

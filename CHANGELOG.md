@@ -19,9 +19,9 @@
   shard identity validation, bounded frames and deadlines, credential overlap,
   and immediate node revocation.
 - Added convergence, conflict, compaction, corruption, resource-bound, live
-  mTLS, credential-rotation, and revocation tests plus an active-sync cost
-  benchmark, a guaranteed concurrent-conflict cost benchmark, and a runnable
-  embedded example.
+  mTLS, credential-rotation, and revocation tests plus active-sync cost,
+  guaranteed concurrent-conflict cost, and cross-host mTLS latency benchmarks,
+  and a runnable embedded example.
 - Added exclusive shard-owned persistence WAL block appenders and one
   background canonical-log merger. Record and byte thresholds bound blocks,
   partial blocks flush on deadlines and shutdown, and real `sync_data` calls
@@ -104,7 +104,7 @@
   convergence by 2.6% and improved p99 from 6.7ms to 5.5ms.
 - Default raw-cache and native ShardMap GET, SET, and 80/20 rows remained within
   2.4% of their recorded Adam baselines with zero errors. The all-feature
-  workspace suite passed 421 ShardMap unit tests plus integration, differential,
+  workspace suite passed 424 ShardMap unit tests plus integration, differential,
   deterministic-fault, mTLS, overflow, formal-model, and doc tests.
 - Three-run Adam medians for the intended read-heavy workload measured 13.78M
   ops/s (77.5% of baseline) at 2.3us p99 for causal-sync 99/1 and 13.34M
@@ -116,7 +116,7 @@
   post-compaction SET improvement, and deployment guidance. Active sync remains
   absent from the default feature set.
 
-## 0.6.0 - Unreleased
+## 0.6.0 - 2026-07-14
 
 ### Added
 

@@ -29,7 +29,7 @@ known limits, security requirements, and benchmark commands are in
 `docs/KV_OVERFLOW.md`.
 
 The feature-gated 0.7 active-active API, consistency semantics, security
-contract, benchmark results, and remaining production gates are documented in
+contract, benchmark results, and production boundaries are documented in
 `docs/ACTIVE_ACTIVE_REPLICATION.md` and
 `benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md`.
 
@@ -61,11 +61,15 @@ release policy explicitly call for it.
 ## Publishing
 
 ```bash
-cargo publish -p shardmap --dry-run
 cargo publish -p shardcache-client-rs --dry-run
-cargo publish -p shardcache --dry-run
-cargo publish -p shardmap
 cargo publish -p shardcache-client-rs
+
+# Wait for shardcache-client-rs 0.7.0 to appear in the crates.io index.
+cargo publish -p shardmap --dry-run
+cargo publish -p shardmap
+
+# Wait for shardmap 0.7.0 to appear in the crates.io index.
+cargo publish -p shardcache --dry-run
 cargo publish -p shardcache
 ```
 
@@ -73,4 +77,6 @@ cargo publish -p shardcache
 for this release. `shardcache-runtime`, `shardcache-py`, `shardcache-c`, and
 `shardcache-formal` are workspace support packages with `publish = false`.
 Only publish after the dry runs succeed and the final changelog or performance
-claims have been checked against source artifacts.
+claims have been checked against source artifacts. The order is required:
+`shardmap` has an optional dependency on `shardcache-client-rs`, and
+`shardcache` depends on `shardmap`.
