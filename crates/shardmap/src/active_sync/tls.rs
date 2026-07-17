@@ -13,9 +13,9 @@ use sha2::{Digest, Sha256};
 use super::*;
 
 const WIRE_MAGIC: &[u8; 4] = b"AAS1";
-const WIRE_VERSION: u8 = 1;
+const WIRE_VERSION: u8 = 2;
 const WIRE_HEADER_BYTES: usize = 10;
-const ACTIVE_SYNC_ALPN: &[u8] = b"shardmap-active-sync/1";
+const ACTIVE_SYNC_ALPN: &[u8] = b"shardmap-active-sync/2";
 const MAX_MANIFEST_ORIGINS: usize = 65_536;
 
 type CausalOriginInterner = BTreeMap<CausalOrigin, Arc<CausalOrigin>>;
@@ -1906,11 +1906,14 @@ fn encode_mutation(out: &mut Vec<u8>, mutation: &ActiveMutation) -> Result<()> {
     put_bytes(out, &mutation.key)?;
     put_optional_bytes(out, mutation.value.as_deref())?;
     out.extend_from_slice(&mutation.expire_at_ms.unwrap_or(u64::MAX).to_le_bytes());
-    put_optional_bytes(out, mutation.governance.as_deref())?;
+    put_optional_bytes(out, mutation.governance().map(Deref::deref))?;
+    put_optional_bytes(out, mutation.revision().map(Deref::deref))?;
     match &mutation.kind {
-        MutationKind::Set => out.push(1),
-        MutationKind::Tombstone(TombstoneKind::Delete) => out.push(2),
-        MutationKind::Tombstone(TombstoneKind::Expired) => out.push(3),
+        MutationKind::Set | MutationKind::RevisionedSet => out.push(1),
+        MutationKind::Tombstone(TombstoneKind::Delete)
+        | MutationKind::RevisionedTombstone(TombstoneKind::Delete) => out.push(2),
+        MutationKind::Tombstone(TombstoneKind::Expired)
+        | MutationKind::RevisionedTombstone(TombstoneKind::Expired) => out.push(3),
         MutationKind::ClusterEvict { target } => {
             out.push(4);
             put_dot(out, target)?;
@@ -1959,9 +1962,24 @@ fn decode_mutation(
         deadline => Some(deadline),
     };
     let governance = decoder.optional_bytes()?.map(SharedBytes::copy_from_slice);
+    let revision = decoder.optional_bytes()?.map(SharedBytes::copy_from_slice);
+    let revisioned = revision.is_some();
+    let metadata = match (governance, revision) {
+        (Some(_), Some(_)) => {
+            return Err(ShardCacheError::Protocol(
+                "active-sync mutation combines governance and revision metadata".into(),
+            ));
+        }
+        (Some(governance), None) => Some(governance),
+        (None, Some(revision)) => Some(revision),
+        (None, None) => None,
+    };
     let kind = match decoder.u8()? {
+        1 if revisioned => MutationKind::RevisionedSet,
         1 => MutationKind::Set,
+        2 if revisioned => MutationKind::RevisionedTombstone(TombstoneKind::Delete),
         2 => MutationKind::Tombstone(TombstoneKind::Delete),
+        3 if revisioned => MutationKind::RevisionedTombstone(TombstoneKind::Expired),
         3 => MutationKind::Tombstone(TombstoneKind::Expired),
         4 => MutationKind::ClusterEvict {
             target: Box::new(decoder.dot()?),
@@ -1980,7 +1998,7 @@ fn decode_mutation(
         key,
         value,
         expire_at_ms: CompactExpiration::new(expire_at_ms),
-        governance,
+        metadata,
         kind,
     })
 }
@@ -2250,12 +2268,18 @@ mod tests {
         let map = ActiveShardMap::new(1, config).unwrap();
         map.set("key", "value").unwrap();
         map.set("key", "new-value").unwrap();
+        map.set_versioned("versioned", "value", 7_u64.to_be_bytes())
+            .unwrap();
         map.seal_pending().unwrap();
         let block = map.inner.shards[0].lock().blocks[0].clone();
         let encoded = encode_block(&block).unwrap();
         let decoded = decode_block(&encoded).unwrap();
         assert_eq!(decoded.digest(), block.digest());
-        assert_eq!(decoded.records.len(), 2);
+        assert_eq!(decoded.records.len(), 3);
+        assert_eq!(
+            decoded.records[2].revision().map(Deref::deref),
+            Some(7_u64.to_be_bytes().as_slice())
+        );
         assert!(Arc::ptr_eq(
             &decoded.records[0].dot.origin,
             &decoded.records[1].dot.origin

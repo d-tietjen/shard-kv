@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.7.0"
+shardmap = "0.7.1"
 ```
 
 ## Quick Start
@@ -53,6 +53,7 @@ guard is enough.
 | Governance metadata | Enforce application-owned authorization context on semantic and exact point hits. | [`semantic_cache.rs`](examples/semantic_cache.rs), [`EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) |
 | Causal eventual active-active values | Exchange bounded causal blocks, converge SET/DEL/expiry conflicts with deterministic HLC ordering, and evict local payloads independently. | Enable `active-sync-causal-eventual`; add `active-sync-tls` for networking; see [`active_sync.rs`](examples/active_sync.rs) |
 | Consensus-ordered eventual active-active values | Finalize only ambiguous active-active conflict winners without sending values or WAL blocks to the ordering plane. | Enable `active-sync-consensus-ordered-eventual`; add `active-sync-tls` for networking; see [`ACTIVE_ACTIVE_REPLICATION.md`](../../docs/ACTIVE_ACTIVE_REPLICATION.md) |
+| Revision-ordered active-active values | Order one key by an application-owned source-of-truth revision so delayed stale writes cannot recreate newer deleted state. | Use `ActiveShardMap::set_versioned` and `delete_versioned` with either active-sync mode. |
 | Mini app | A small feature-flag cache combining TTL, prepared keys, and locks. | [`mini_feature_flags.rs`](examples/mini_feature_flags.rs) |
 
 Run any example with:
@@ -72,6 +73,13 @@ For active-active exact values, choose the guarantee explicitly:
 Both modes are eventually consistent. Neither provides linearizable reads or
 cross-node serializable transactions. `consistency_mode()` and the active-sync
 health snapshot report the selected guarantee.
+
+For database-backed cache state, `set_versioned` and `delete_versioned` compare
+opaque revisions lexicographically before applying causal rules. Encode a wide,
+monotonic source revision in order-preserving bytes, such as a big-endian `u64`
+or database timestamp-plus-sequence tuple. Do not use a wrapping `u8`: after 256
+changes an old and new revision are indistinguishable, and modular ordering is
+only safe while every replica stays within 127 changes.
 
 Active sync is disabled by default and is intended for read-heavy durable-cache
 deployments. On Adam, three-run 99% GET / 1% SET medians retained 77.5% of

@@ -64,11 +64,11 @@ release policy explicitly call for it.
 cargo publish -p shardcache-client-rs --dry-run
 cargo publish -p shardcache-client-rs
 
-# Wait for shardcache-client-rs 0.7.0 to appear in the crates.io index.
+# Wait for the new shardcache-client-rs version to appear in the crates.io index.
 cargo publish -p shardmap --dry-run
 cargo publish -p shardmap
 
-# Wait for shardmap 0.7.0 to appear in the crates.io index.
+# Wait for the new shardmap version to appear in the crates.io index.
 cargo publish -p shardcache --dry-run
 cargo publish -p shardcache
 ```

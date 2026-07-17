@@ -51,7 +51,7 @@ Embedded `shardmap`:
 
 ```toml
 [dependencies]
-shardmap = "0.7.0"
+shardmap = "0.7.1"
 ```
 
 ```rust

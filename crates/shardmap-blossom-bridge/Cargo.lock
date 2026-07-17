@@ -939,7 +939,7 @@ dependencies = [
 
 [[package]]
 name = "shardmap"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bytes",
  "core_affinity",
@@ -970,7 +970,7 @@ dependencies = [
 
 [[package]]
 name = "shardmap-blossom-bridge"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "blossom",
  "parking_lot",
