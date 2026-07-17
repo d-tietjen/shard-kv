@@ -51,7 +51,7 @@ results and known write-path limits are in
 For the intended read-heavy deployment, run isolated `--read-percent 99` and
 `--read-percent 95` processes for every mode. The three-run Adam release
 medians, including p99/p999 and exact commands, are preserved in
-[`results/adam-active-sync-read-heavy-20260716`](results/adam-active-sync-read-heavy-20260716/README.md).
+[`evidence/adam-active-sync-read-heavy-20260716`](evidence/adam-active-sync-read-heavy-20260716/README.md).
 
 Use the conflict driver to measure the path that `active_sync_cost` deliberately
 does not exercise:

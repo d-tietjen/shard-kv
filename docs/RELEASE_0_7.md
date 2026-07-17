@@ -52,7 +52,7 @@ pairs/s. Bounded consensus reached 186.9K pairs/s with a zero-latency orderer
 and 66.0K pairs/s with 100us synthetic external latency.
 
 Raw runs and commands are preserved in
-[`adam-active-sync-read-heavy-20260716`](../benchmarks/results/adam-active-sync-read-heavy-20260716/README.md).
+[`adam-active-sync-read-heavy-20260716`](../benchmarks/evidence/adam-active-sync-read-heavy-20260716/README.md).
 The broader value-size, SET, 80/20, conflict, and feature-disabled regression
 matrix is in
 [`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md).

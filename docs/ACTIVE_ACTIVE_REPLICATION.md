@@ -153,7 +153,7 @@ See [`ACTIVE_ACTIVE_0_7_BASELINE.md`](../benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.m
 for absolute throughput, tail latency, conflict tests, value-size sensitivity,
 hardware details, and reproducible commands.
 The three-run read-heavy artifact is
-[`adam-active-sync-read-heavy-20260716`](../benchmarks/results/adam-active-sync-read-heavy-20260716/README.md).
+[`adam-active-sync-read-heavy-20260716`](../benchmarks/evidence/adam-active-sync-read-heavy-20260716/README.md).
 
 ### Automatic TLS Membership
 

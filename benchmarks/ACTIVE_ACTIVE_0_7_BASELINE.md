@@ -93,7 +93,7 @@ maps. Pure GET remains useful as an upper bound, but these rows include the
 causal admission and block-circulation cost caused by occasional writes and are
 the appropriate 0.7 capacity-planning figures. The three individual runs,
 median p50/p99/p999, commit, and exact command are preserved in
-[`results/adam-active-sync-read-heavy-20260716`](results/adam-active-sync-read-heavy-20260716/README.md).
+[`evidence/adam-active-sync-read-heavy-20260716`](evidence/adam-active-sync-read-heavy-20260716/README.md).
 
 ### Concurrent-conflict cost
 
