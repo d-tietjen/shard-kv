@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.1 - Unreleased
 
 ### Added
 
@@ -12,6 +12,8 @@
 
 ### Changed
 
+- Bumped workspace, publishable crate, and standalone Blossom bridge versions
+  to `0.7.1`.
 - Bumped the active-sync TLS wire and ALPN versions for revision metadata.
   Revision-aware and 0.7.0 peers must not be mixed in one rolling deployment.
 
