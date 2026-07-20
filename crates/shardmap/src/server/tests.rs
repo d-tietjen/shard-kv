@@ -6058,7 +6058,9 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
             b"a",
             b"NOQUANT",
             b"SETATTR",
-            b"{\"kind\":\"seed\",\"score\":3}"
+            b"{\"kind\":\"seed\",\"score\":3}",
+            b"GOVERNANCE",
+            b"tenant=acme"
         ]),
         Frame::Integer(1)
     );
@@ -6145,13 +6147,14 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
         b"4",
         b"WITHSCORES",
         b"WITHATTRIBS",
+        b"WITHGOVERNANCE",
         b"COUNT",
         b"2",
         b"FILTER",
         b".kind == \"seed\" && .score >= 3",
     ]) {
         Frame::Array(items) => {
-            assert_eq!(items.len(), 3);
+            assert_eq!(items.len(), 4);
             assert_eq!(items[0], Frame::BlobString(b"a".to_vec()));
             match &items[1] {
                 Frame::BlobString(score) => {
@@ -6164,18 +6167,51 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
                 items[2],
                 Frame::BlobString(b"{\"kind\":\"seed\",\"score\":3}".to_vec())
             );
+            assert_eq!(items[3], Frame::BlobString(b"tenant=acme".to_vec()));
         }
         other => panic!("unexpected VSIM reply: {other:?}"),
     }
 
     assert_eq!(run(&[b"VSETATTR", b"points", b"a", b""]), Frame::Integer(1));
     assert_eq!(run(&[b"VGETATTR", b"points", b"a"]), Frame::Null);
+    assert_eq!(
+        run(&[
+            b"VSIM",
+            b"points",
+            b"ELE",
+            b"a",
+            b"COUNT",
+            b"1",
+            b"WITHGOVERNANCE",
+            b"TRUTH",
+        ]),
+        Frame::Array(vec![
+            Frame::BlobString(b"a".to_vec()),
+            Frame::BlobString(b"tenant=acme".to_vec()),
+        ])
+    );
     assert!(matches!(
         run(&[b"VSETATTR", b"points", b"a", b"not-json"]),
         Frame::Error(_)
     ));
     assert_eq!(run(&[b"VREM", b"points", b"b"]), Frame::Integer(1));
     assert_eq!(run(&[b"VCARD", b"points"]), Frame::Integer(1));
+
+    let oversized_governance = vec![b'x'; 64 * 1024 + 1];
+    assert!(matches!(
+        run(&[
+            b"VADD",
+            b"points",
+            b"VALUES",
+            b"2",
+            b"1",
+            b"0",
+            b"oversized",
+            b"GOVERNANCE",
+            oversized_governance.as_slice(),
+        ]),
+        Frame::Error(message) if message.contains("governance metadata is too large")
+    ));
 }
 
 #[cfg(feature = "redis")]
@@ -6237,7 +6273,17 @@ fn vector_dump_restore_round_trips_across_route_classes() {
 
     for (source, destination) in sources.iter().zip(&destinations) {
         assert_eq!(
-            run(&[b"VADD", source, b"VALUES", b"2", b"1", b"0", b"document",]),
+            run(&[
+                b"VADD",
+                source,
+                b"VALUES",
+                b"2",
+                b"1",
+                b"0",
+                b"document",
+                b"GOVERNANCE",
+                b"tenant=acme",
+            ]),
             Frame::Integer(1)
         );
         let payload = match run(&[b"DUMP", source]) {
@@ -6254,6 +6300,24 @@ fn vector_dump_restore_round_trips_across_route_classes() {
             Frame::SimpleString("vectorset".to_string())
         );
         assert!(matches!(run(&[b"PTTL", destination]), Frame::Integer(ttl) if ttl > 0));
+        assert_eq!(
+            run(&[
+                b"VSIM",
+                destination,
+                b"VALUES",
+                b"2",
+                b"1",
+                b"0",
+                b"COUNT",
+                b"1",
+                b"WITHGOVERNANCE",
+                b"TRUTH",
+            ]),
+            Frame::Array(vec![
+                Frame::BlobString(b"document".to_vec()),
+                Frame::BlobString(b"tenant=acme".to_vec()),
+            ])
+        );
     }
 }
 
@@ -6295,6 +6359,8 @@ fn typed_scnp_vector_commands_return_native_responses() {
                 b"doc-a",
                 b"SETATTR",
                 br#"{"kind":"a"}"#,
+                b"GOVERNANCE",
+                b"tenant=acme",
             ]
         ),
         FastResponse::Integer(1)
@@ -6311,15 +6377,17 @@ fn typed_scnp_vector_commands_return_native_responses() {
             b"1",
             b"WITHSCORES",
             b"WITHATTRIBS",
+            b"WITHGOVERNANCE",
             b"TRUTH",
         ],
     );
     let FastResponse::Array(values) = response else {
         panic!("typed VSIM should return a native SCNP array, got {response:?}");
     };
-    assert_eq!(values.len(), 3);
+    assert_eq!(values.len(), 4);
     assert_eq!(values[0].as_deref(), Some(b"doc-a".as_slice()));
     assert_eq!(values[2].as_deref(), Some(br#"{"kind":"a"}"#.as_slice()));
+    assert_eq!(values[3].as_deref(), Some(b"tenant=acme".as_slice()));
     let score = std::str::from_utf8(values[1].as_deref().unwrap())
         .unwrap()
         .parse::<f64>()

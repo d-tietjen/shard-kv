@@ -328,7 +328,9 @@ async fn typed_scnp_vector_client_round_trips_fanout_and_direct_shard() {
                             &vector_key,
                             b"doc-a",
                             &[1.0, 0.0],
-                            VAddOptions::new().attributes(br#"{"kind":"a"}"#),
+                            VAddOptions::new()
+                                .attributes(br#"{"kind":"a"}"#)
+                                .governance_metadata(b"tenant=acme"),
                         )
                         .unwrap()
                 );
@@ -346,7 +348,10 @@ async fn typed_scnp_vector_client_round_trips_fanout_and_direct_shard() {
                     .vsim(
                         &vector_key,
                         &[1.0, 0.0],
-                        VSimOptions::new().count(2).exact(true),
+                        VSimOptions::new()
+                            .count(2)
+                            .exact(true)
+                            .with_governance(true),
                     )
                     .unwrap();
                 assert_eq!(matches.len(), 2);
@@ -356,6 +361,11 @@ async fn typed_scnp_vector_client_round_trips_fanout_and_direct_shard() {
                     matches[0].attributes.as_deref(),
                     Some(br#"{"kind":"a"}"#.as_slice())
                 );
+                assert_eq!(
+                    matches[0].governance.as_deref(),
+                    Some(b"tenant=acme".as_slice())
+                );
+                assert!(matches[1].governance.is_none());
 
                 let router = ShardCacheDirectRouter::new(&direct_addr, shard_count).unwrap();
                 let mut direct = router

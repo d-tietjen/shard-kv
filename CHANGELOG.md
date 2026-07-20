@@ -18,6 +18,11 @@
   bootstrap while preserving the dedicated vector-shard route. Repeated
   updates to one vector set coalesce to the latest bounded state before flush,
   avoiding quadratic bootstrap traffic.
+- Added bounded opaque governance metadata per vector embedding. Typed SCNP
+  `VADD` stores it independently of JSON attributes and typed `VSIM` can return
+  it in an element/score/attributes/governance result tuple. Canonical
+  serialization preserves it through TTL changes, snapshots, key lifecycle
+  commands, and native read-replica replication.
 - Replaced the native replication flusher's idle sub-millisecond polling with
   event-driven wakeups and exact pending-batch deadlines.
 

@@ -1271,7 +1271,7 @@ mod tests {
     #[cfg(feature = "redis")]
     use crate::commands::redis::RedisCommand;
     #[cfg(feature = "redis")]
-    use crate::commands::vector_set::{VAdd, VCard};
+    use crate::commands::vector_set::{VAdd, VCard, VSim};
     #[cfg(feature = "redis")]
     use crate::commands::{copy::Copy, rename::Rename};
     use crate::config::{ReplicationCompression, ReplicationConfig, ReplicationSendPolicy};
@@ -1305,6 +1305,31 @@ mod tests {
             VAdd::execute(store, &[key, b"VALUES", b"2", b"1", b"0", element]),
             Frame::Integer(1)
         );
+    }
+
+    #[cfg(feature = "redis")]
+    fn vector_governance(store: &EmbeddedStore, key: &[u8]) -> Option<Vec<u8>> {
+        match VSim::execute(
+            store,
+            &[
+                key,
+                b"VALUES",
+                b"2",
+                b"1",
+                b"0",
+                b"COUNT",
+                b"1",
+                b"WITHGOVERNANCE",
+                b"TRUTH",
+            ],
+        ) {
+            Frame::Array(items) => match items.get(1) {
+                Some(Frame::BlobString(governance)) => Some(governance.clone()),
+                Some(Frame::Null) | None => None,
+                frame => panic!("unexpected vector governance response: {frame:?}"),
+            },
+            frame => panic!("unexpected VSIM response: {frame:?}"),
+        }
     }
 
     #[cfg(feature = "redis")]
@@ -1343,13 +1368,32 @@ mod tests {
         let subscriber = primary.primary().subscribe(8);
         let key = vector_key_outside_shard_zero(primary.inner());
 
-        add_vector(primary.inner(), &key, b"document-1");
+        assert_eq!(
+            VAdd::execute(
+                primary.inner(),
+                &[
+                    &key,
+                    b"VALUES",
+                    b"2",
+                    b"1",
+                    b"0",
+                    b"document-1",
+                    b"GOVERNANCE",
+                    b"tenant=acme",
+                ],
+            ),
+            Frame::Integer(1)
+        );
         let frame = subscriber
             .recv_timeout(Duration::from_secs(2))
             .expect("vector replication frame");
         replica.apply_frame(frame).expect("apply vector mutation");
 
         assert_eq!(vector_count(replica.inner(), &key), 1);
+        assert_eq!(
+            vector_governance(replica.inner(), &key).as_deref(),
+            Some(b"tenant=acme".as_slice())
+        );
         assert_eq!(replica.inner().route_vector_key(&key).shard_id, 0);
 
         let expire_at_ms = now_millis().saturating_add(60_000);
@@ -1477,7 +1521,22 @@ mod tests {
         let copied = vector_key_outside_shard_zero(primary.inner());
         let moved = b"vector-moved".to_vec();
 
-        add_vector(primary.inner(), &source, b"document-1");
+        assert_eq!(
+            VAdd::execute(
+                primary.inner(),
+                &[
+                    &source,
+                    b"VALUES",
+                    b"2",
+                    b"1",
+                    b"0",
+                    b"document-1",
+                    b"GOVERNANCE",
+                    b"tenant=acme",
+                ],
+            ),
+            Frame::Integer(1)
+        );
         let expire_at_ms = now_millis().saturating_add(60_000);
         assert!(primary.inner().expire(&source, expire_at_ms));
         assert_eq!(
@@ -1504,6 +1563,10 @@ mod tests {
         assert_eq!(vector_count(replica.inner(), &source), 1);
         assert_eq!(vector_count(replica.inner(), &copied), 0);
         assert_eq!(vector_count(replica.inner(), &moved), 1);
+        assert_eq!(
+            vector_governance(replica.inner(), &moved).as_deref(),
+            Some(b"tenant=acme".as_slice())
+        );
         assert!(replica.inner().pttl_millis(&moved) > 0);
         assert!(replica.inner().get_value_bytes(&moved).is_none());
     }

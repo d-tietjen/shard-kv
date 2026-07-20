@@ -21,7 +21,7 @@ select an active-sync feature.
 | Exact fault-in | Restores an evicted version from local overflow, durable state, or a peer and rejects stale promotion after a racing mutation. | Included in active sync |
 | Persistence and repair | Preserves causal state in checksummed snapshots and repairs compacted block history through bounded state transfer. | Included in active sync |
 | Conflict batching | Finalizes independent ambiguous conflicts in bounded batches while preserving repeated-key mutation order. | Included in consensus mode |
-| Typed vector client | Sends bounded native `PING`, `VADD`, `VSIM`, and `VREM` requests over fanout or direct shard-0 SCNP connections. | `shardcache-client-rs` `vector` feature |
+| Typed vector client | Sends bounded native `PING`, `VADD`, `VSIM`, and `VREM` requests over fanout or direct shard-0 SCNP connections, including opaque per-embedding governance metadata. | `shardcache-client-rs` `vector` feature |
 | Vector read-replica state | Replicates canonical vector-set payloads, deletes, and TTL changes through FCRP and preserves shard-0 placement during live apply and snapshot bootstrap. | `shardmap` `redis` plus `ReplicatedEmbeddedStore` |
 
 Vector read replicas use the single-primary FCRP stream. The active-sync modes
@@ -37,6 +37,15 @@ steady-state replication lag. Snapshot capture, delete, type transition, and
 shutdown force ordered flushes. Retained canonical state is capped by
 `vector_state_pending_max_bytes` (16 MiB by default); an individual larger
 state bypasses the coalescer and is emitted immediately.
+
+`VADD ... GOVERNANCE <bytes>` stores an opaque policy label on one embedding;
+`VSIM ... WITHGOVERNANCE` returns the label next to that match. Typed SCNP
+clients request it with `VSimOptions::with_governance(true)` and expose it as
+`VSimMatch::governance`.
+Metadata is limited to 64 KiB, survives canonical vector serialization and the
+single-primary FCRP path, and remains separate from JSON attributes. It is an
+authorization input, not an authorization engine: services must evaluate it
+before releasing the associated source data.
 
 ## Intended Workload And Performance
 

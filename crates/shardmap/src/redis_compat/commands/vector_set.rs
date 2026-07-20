@@ -22,6 +22,7 @@ use bytes::BytesMut;
 
 const HNSW_VECTOR_SET_FORMAT: u32 = 0x484e_5357; // HNSW
 const HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO: u32 = 0x4853_4e57; // HSNW
+const HNSW_GOVERNED_VECTOR_SET_FORMAT: u32 = 0x484e_5347; // HNSG
 const DEFAULT_HNSW_M: usize = 16;
 const DEFAULT_HNSW_EF_CONSTRUCTION: usize = 64;
 const DEFAULT_HNSW_EF_SEARCH: usize = 64;
@@ -36,6 +37,7 @@ const VECTOR_LOOKUP_CACHE_MAX_ENTRIES: usize = 256;
 const VECTOR_LOOKUP_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const VECTOR_ATTRIBUTE_VALIDATION_CACHE_MAX_ENTRIES: usize = 128;
 const VECTOR_ATTRIBUTE_VALIDATION_CACHE_MAX_VALUE_BYTES: usize = 64 * 1024;
+const MAX_VECTOR_GOVERNANCE_BYTES: usize = 64 * 1024;
 
 macro_rules! define_vector_command {
     ($type:ident, $static_name:ident, $name:literal, $mutates:expr) => {
@@ -131,6 +133,7 @@ struct VectorEntry {
     element: Bytes,
     vector: Vec<f64>,
     attributes: Option<Bytes>,
+    governance: Option<Bytes>,
     links: Vec<Vec<u64>>,
 }
 
@@ -157,6 +160,7 @@ enum VectorEntryLookup {
 struct VectorEntrySnapshot {
     vector: Option<Vec<f64>>,
     attributes: Option<Bytes>,
+    governance: Option<Bytes>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -170,18 +174,23 @@ enum VectorLookupProjection {
     Exists,
     Attributes,
     Vector,
-    VectorAndAttributes,
+    VectorAttributesAndGovernance,
 }
 
 impl VectorLookupProjection {
     #[inline(always)]
     fn include_vector(self) -> bool {
-        matches!(self, Self::Vector | Self::VectorAndAttributes)
+        matches!(self, Self::Vector | Self::VectorAttributesAndGovernance)
     }
 
     #[inline(always)]
     fn include_attributes(self) -> bool {
-        matches!(self, Self::Attributes | Self::VectorAndAttributes)
+        matches!(self, Self::Attributes | Self::VectorAttributesAndGovernance)
+    }
+
+    #[inline(always)]
+    fn include_governance(self) -> bool {
+        matches!(self, Self::VectorAttributesAndGovernance)
     }
 }
 
@@ -483,7 +492,7 @@ impl crate::commands::redis::RedisCommand for VAdd {
                     store,
                     key,
                     &parsed.element,
-                    VectorLookupProjection::VectorAndAttributes,
+                    VectorLookupProjection::VectorAttributesAndGovernance,
                 ) {
                     Ok(VectorEntryLookup::Found(snapshot)) => {
                         let vector_changed =
@@ -492,7 +501,11 @@ impl crate::commands::redis::RedisCommand for VAdd {
                             parsed.attributes.as_deref().is_some_and(|attributes| {
                                 Some(attributes) != snapshot.attributes.as_deref()
                             });
-                        if !vector_changed && !attributes_changed {
+                        let governance_changed =
+                            parsed.governance.as_deref().is_some_and(|governance| {
+                                Some(governance) != snapshot.governance.as_deref()
+                            });
+                        if !vector_changed && !attributes_changed && !governance_changed {
                             return int(0);
                         }
                     }
@@ -545,7 +558,11 @@ impl crate::commands::redis::RedisCommand for VAdd {
                         .attributes
                         .as_deref()
                         .is_some_and(|attributes| Some(attributes) != entry.attributes.as_deref());
-                    if !vector_changed && !attributes_changed {
+                    let governance_changed = parsed
+                        .governance
+                        .as_deref()
+                        .is_some_and(|governance| Some(governance) != entry.governance.as_deref());
+                    if !vector_changed && !attributes_changed && !governance_changed {
                         return VectorWriteResult::Unchanged(int(0));
                     }
                     if vector_changed {
@@ -553,6 +570,9 @@ impl crate::commands::redis::RedisCommand for VAdd {
                     }
                     if attributes_changed {
                         entry.attributes = parsed.attributes;
+                    }
+                    if governance_changed {
+                        entry.governance = parsed.governance;
                     }
                     if vector_changed {
                         set.rebuild_hnsw();
@@ -568,6 +588,7 @@ impl crate::commands::redis::RedisCommand for VAdd {
                         element: parsed.element,
                         vector: parsed.vector,
                         attributes: parsed.attributes,
+                        governance: parsed.governance,
                         links: Vec::new(),
                     });
                     VectorWriteResult::Changed(int(1))
@@ -1127,7 +1148,7 @@ impl crate::commands::redis::RedisCommand for VSim {
         };
         let mut scored = scored;
         scored.truncate(parsed.count);
-        if !parsed.with_scores && !parsed.with_attribs {
+        if !parsed.with_scores && !parsed.with_attribs && !parsed.with_governance {
             return array_bulk(
                 scored
                     .into_iter()
@@ -1143,6 +1164,9 @@ impl crate::commands::redis::RedisCommand for VSim {
             }
             if parsed.with_attribs {
                 out.push(entry.attributes.clone().map_or(Frame::Null, bulk));
+            }
+            if parsed.with_governance {
+                out.push(entry.governance.clone().map_or(Frame::Null, bulk));
             }
         }
         Frame::Array(out)
@@ -1160,6 +1184,7 @@ struct VAddArgs {
     element: Bytes,
     vector: Vec<f64>,
     attributes: Option<Bytes>,
+    governance: Option<Bytes>,
     quantization: Option<Quantization>,
     reduce_dim: Option<usize>,
     hnsw_m: Option<usize>,
@@ -1172,6 +1197,7 @@ struct VSimArgs {
     count: usize,
     with_scores: bool,
     with_attribs: bool,
+    with_governance: bool,
     filter: Option<Bytes>,
     ef_search: Option<usize>,
     truth: bool,
@@ -1666,6 +1692,10 @@ fn collect_vector_lookup(
                             .include_attributes()
                             .then(|| entry.attributes.clone())
                             .flatten(),
+                        governance: projection
+                            .include_governance()
+                            .then(|| entry.governance.clone())
+                            .flatten(),
                     })
                 })
         }),
@@ -1778,6 +1808,7 @@ fn parse_vadd_args(args: &[&[u8]]) -> Result<VAddArgs, Frame> {
     };
     index += 1;
     let mut attributes = None;
+    let mut governance = None;
     let mut quantization = None;
     let mut hnsw_m = None;
     let mut ef_construction = None;
@@ -1820,6 +1851,16 @@ fn parse_vadd_args(args: &[&[u8]]) -> Result<VAddArgs, Frame> {
                 attributes = Some((*raw).to_vec());
                 index += 2;
             }
+            token if eq_ignore_ascii_case(token, b"GOVERNANCE") => {
+                let Some(raw) = args.get(index + 1) else {
+                    return Err(error("ERR syntax error"));
+                };
+                if raw.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                    return Err(error("ERR vector governance metadata is too large"));
+                }
+                governance = Some((*raw).to_vec());
+                index += 2;
+            }
             _ => return Err(error("ERR syntax error")),
         }
     }
@@ -1827,6 +1868,7 @@ fn parse_vadd_args(args: &[&[u8]]) -> Result<VAddArgs, Frame> {
         element: (*element).to_vec(),
         vector,
         attributes,
+        governance,
         quantization,
         reduce_dim,
         hnsw_m,
@@ -1852,6 +1894,7 @@ fn parse_vsim_args(args: &[&[u8]], set: &VectorSetState) -> Result<VSimArgs, Fra
     let mut count = 10usize;
     let mut with_scores = false;
     let mut with_attribs = false;
+    let mut with_governance = false;
     let mut filter = None;
     let mut ef_search = None;
     let mut truth = false;
@@ -1863,6 +1906,10 @@ fn parse_vsim_args(args: &[&[u8]], set: &VectorSetState) -> Result<VSimArgs, Fra
             }
             token if eq_ignore_ascii_case(token, b"WITHATTRIBS") => {
                 with_attribs = true;
+                index += 1;
+            }
+            token if eq_ignore_ascii_case(token, b"WITHGOVERNANCE") => {
+                with_governance = true;
                 index += 1;
             }
             token if eq_ignore_ascii_case(token, b"COUNT") => {
@@ -1911,6 +1958,7 @@ fn parse_vsim_args(args: &[&[u8]], set: &VectorSetState) -> Result<VSimArgs, Fra
         count,
         with_scores,
         with_attribs,
+        with_governance,
         filter,
         ef_search,
         truth,
@@ -2182,7 +2230,8 @@ fn decode_vector_set(existing: Option<&[u8]>) -> Result<VectorSetState, ()> {
         return Err(());
     }
     raw = &raw[VECTOR_SET_PREFIX.len()..];
-    decode_vector_set_payload(raw, VectorPayloadFormat::Hnsw, true)
+    decode_vector_set_payload(raw, VectorPayloadFormat::HnswGoverned, true)
+        .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Hnsw, true))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Current, true))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Quantized, true))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Legacy, true))
@@ -2196,7 +2245,8 @@ fn decode_vector_set_entries(existing: Option<&[u8]>) -> Result<VectorSetState, 
         return Err(());
     }
     raw = &raw[VECTOR_SET_PREFIX.len()..];
-    decode_vector_set_payload(raw, VectorPayloadFormat::Hnsw, false)
+    decode_vector_set_payload(raw, VectorPayloadFormat::HnswGoverned, false)
+        .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Hnsw, false))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Current, false))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Quantized, false))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Legacy, false))
@@ -2341,6 +2391,7 @@ fn vector_lookup_cache_bytes(lookup: &VectorEntryLookup) -> usize {
             .attributes
             .as_ref()
             .map_or(0, Vec::len)
+            .saturating_add(snapshot.governance.as_ref().map_or(0, Vec::len))
             .saturating_add(snapshot.vector.as_ref().map_or(0, |vector| {
                 vector.len().saturating_mul(std::mem::size_of::<f64>())
             })),
@@ -2357,7 +2408,11 @@ fn cache_edge_u64(bytes: &[u8], offset: usize) -> u64 {
 
 fn decode_vector_set_metadata(existing: &[u8]) -> Result<VectorSetMetadata, ()> {
     let mut raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
-    decode_vector_set_metadata_payload(raw, VectorPayloadFormat::Hnsw)
+    decode_vector_set_metadata_payload(raw, VectorPayloadFormat::HnswGoverned)
+        .or_else(|_| {
+            raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
+            decode_vector_set_metadata_payload(raw, VectorPayloadFormat::Hnsw)
+        })
         .or_else(|_| {
             raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
             decode_vector_set_metadata_payload(raw, VectorPayloadFormat::Current)
@@ -2388,6 +2443,10 @@ fn hnsw_find_entry(
                 attributes: projection
                     .include_attributes()
                     .then(|| entry.attributes.map(<[u8]>::to_vec))
+                    .flatten(),
+                governance: projection
+                    .include_governance()
+                    .then(|| entry.governance.map(<[u8]>::to_vec))
                     .flatten(),
             })
         } else {
@@ -2444,11 +2503,21 @@ fn hnsw_collect_lex_range(
 fn validate_hnsw_payload(existing: &[u8]) -> Result<(), ()> {
     let mut raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
     let format = read_u32(&mut raw)?;
-    if format == HNSW_VECTOR_SET_FORMAT || format == HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO {
+    if is_hnsw_format(format) {
         Ok(())
     } else {
         Err(())
     }
+}
+
+#[inline(always)]
+fn is_hnsw_format(format: u32) -> bool {
+    matches!(
+        format,
+        HNSW_VECTOR_SET_FORMAT
+            | HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO
+            | HNSW_GOVERNED_VECTOR_SET_FORMAT
+    )
 }
 
 fn insert_bounded_lex(elements: &mut Vec<Bytes>, element: &[u8], limit: usize) {
@@ -2468,6 +2537,7 @@ struct HnswEntryView<'a> {
     element: &'a [u8],
     vector_raw: &'a [u8],
     attributes: Option<&'a [u8]>,
+    governance: Option<&'a [u8]>,
 }
 
 fn scan_hnsw_entries<T>(
@@ -2476,9 +2546,10 @@ fn scan_hnsw_entries<T>(
 ) -> Result<Option<T>, ()> {
     let mut raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
     let format = read_u32(&mut raw)?;
-    if format != HNSW_VECTOR_SET_FORMAT && format != HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO {
+    if !is_hnsw_format(format) {
         return Err(());
     }
+    let governed = format == HNSW_GOVERNED_VECTOR_SET_FORMAT;
     let _dim = read_u32(&mut raw)?;
     let _quantization = Quantization::from_tag(read_u32(&mut raw)?).ok_or(())?;
     let _original_dim = read_u32(&mut raw)?;
@@ -2504,10 +2575,20 @@ fn scan_hnsw_entries<T>(
         } else {
             None
         };
+        let governance = if governed && read_u32(&mut raw)? != 0 {
+            let governance = read_bytes_slice(&mut raw)?;
+            if governance.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                return Err(());
+            }
+            Some(governance)
+        } else {
+            None
+        };
         if let Some(found) = visit(HnswEntryView {
             element,
             vector_raw,
             attributes,
+            governance,
         }) {
             return Ok(Some(found));
         }
@@ -2518,6 +2599,7 @@ fn scan_hnsw_entries<T>(
 #[derive(Debug, Clone, Copy)]
 enum VectorPayloadFormat {
     Hnsw,
+    HnswGoverned,
     Current,
     Quantized,
     Legacy,
@@ -2528,29 +2610,41 @@ fn decode_vector_set_metadata_payload(
     format: VectorPayloadFormat,
 ) -> Result<VectorSetMetadata, ()> {
     let dim = read_u32(&mut raw)? as usize;
-    if matches!(format, VectorPayloadFormat::Hnsw)
-        && dim as u32 != HNSW_VECTOR_SET_FORMAT
-        && dim as u32 != HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO
+    if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) && !is_hnsw_format(dim as u32)
     {
         return Err(());
     }
-    let dim = if matches!(format, VectorPayloadFormat::Hnsw) {
+    if matches!(format, VectorPayloadFormat::HnswGoverned)
+        && dim as u32 != HNSW_GOVERNED_VECTOR_SET_FORMAT
+    {
+        return Err(());
+    }
+    let dim = if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) {
         read_u32(&mut raw)? as usize
     } else {
         dim
     };
     let quantization = match format {
         VectorPayloadFormat::Hnsw
+        | VectorPayloadFormat::HnswGoverned
         | VectorPayloadFormat::Current
         | VectorPayloadFormat::Quantized => Quantization::from_tag(read_u32(&mut raw)?).ok_or(())?,
         VectorPayloadFormat::Legacy => Quantization::default(),
     };
     let original_dim = match format {
-        VectorPayloadFormat::Hnsw | VectorPayloadFormat::Current => read_u32(&mut raw)? as usize,
+        VectorPayloadFormat::Hnsw
+        | VectorPayloadFormat::HnswGoverned
+        | VectorPayloadFormat::Current => read_u32(&mut raw)? as usize,
         VectorPayloadFormat::Quantized | VectorPayloadFormat::Legacy => dim,
     };
     let (hnsw_m, ef_construction, max_level, next_uid) = match format {
-        VectorPayloadFormat::Hnsw => (
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned => (
             read_u32(&mut raw)? as usize,
             read_u32(&mut raw)? as usize,
             read_u32(&mut raw)? as usize,
@@ -2562,7 +2656,7 @@ fn decode_vector_set_metadata_payload(
     };
     let count = read_u32(&mut raw)? as usize;
     let next_uid = match format {
-        VectorPayloadFormat::Hnsw => next_uid,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned => next_uid,
         VectorPayloadFormat::Current
         | VectorPayloadFormat::Quantized
         | VectorPayloadFormat::Legacy => count as u64 + 1,
@@ -2585,29 +2679,41 @@ fn decode_vector_set_payload(
     decode_links: bool,
 ) -> Result<VectorSetState, ()> {
     let dim = read_u32(&mut raw)? as usize;
-    if matches!(format, VectorPayloadFormat::Hnsw)
-        && dim as u32 != HNSW_VECTOR_SET_FORMAT
-        && dim as u32 != HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO
+    if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) && !is_hnsw_format(dim as u32)
     {
         return Err(());
     }
-    let dim = if matches!(format, VectorPayloadFormat::Hnsw) {
+    if matches!(format, VectorPayloadFormat::HnswGoverned)
+        && dim as u32 != HNSW_GOVERNED_VECTOR_SET_FORMAT
+    {
+        return Err(());
+    }
+    let dim = if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) {
         read_u32(&mut raw)? as usize
     } else {
         dim
     };
     let quantization = match format {
         VectorPayloadFormat::Hnsw
+        | VectorPayloadFormat::HnswGoverned
         | VectorPayloadFormat::Current
         | VectorPayloadFormat::Quantized => Quantization::from_tag(read_u32(&mut raw)?).ok_or(())?,
         VectorPayloadFormat::Legacy => Quantization::default(),
     };
     let original_dim = match format {
-        VectorPayloadFormat::Hnsw | VectorPayloadFormat::Current => read_u32(&mut raw)? as usize,
+        VectorPayloadFormat::Hnsw
+        | VectorPayloadFormat::HnswGoverned
+        | VectorPayloadFormat::Current => read_u32(&mut raw)? as usize,
         VectorPayloadFormat::Quantized | VectorPayloadFormat::Legacy => dim,
     };
     let (hnsw_m, ef_construction, max_level, next_uid) = match format {
-        VectorPayloadFormat::Hnsw => (
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned => (
             read_u32(&mut raw)? as usize,
             read_u32(&mut raw)? as usize,
             read_u32(&mut raw)? as usize,
@@ -2621,7 +2727,9 @@ fn decode_vector_set_payload(
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
         let (uid, level) = match format {
-            VectorPayloadFormat::Hnsw => (read_u64(&mut raw)?, read_u32(&mut raw)? as usize),
+            VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned => {
+                (read_u64(&mut raw)?, read_u32(&mut raw)? as usize)
+            }
             VectorPayloadFormat::Current
             | VectorPayloadFormat::Quantized
             | VectorPayloadFormat::Legacy => {
@@ -2641,17 +2749,33 @@ fn decode_vector_set_payload(
         } else {
             None
         };
+        let governance =
+            if matches!(format, VectorPayloadFormat::HnswGoverned) && read_u32(&mut raw)? != 0 {
+                let governance = read_bytes(&mut raw)?;
+                if governance.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                    return Err(());
+                }
+                Some(governance)
+            } else {
+                None
+            };
         entries.push(VectorEntry {
             uid,
             level,
             element,
             vector,
             attributes,
+            governance,
             links: Vec::new(),
         });
     }
     let mut read_hnsw_links = false;
-    if matches!(format, VectorPayloadFormat::Hnsw) && !raw.is_empty() && decode_links {
+    if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) && !raw.is_empty()
+        && decode_links
+    {
         for entry in &mut entries {
             let layer_count = read_u32(&mut raw)? as usize;
             let mut links = Vec::with_capacity(layer_count);
@@ -2666,7 +2790,11 @@ fn decode_vector_set_payload(
             entry.links = links;
         }
         read_hnsw_links = true;
-    } else if matches!(format, VectorPayloadFormat::Hnsw) && !decode_links {
+    } else if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) && !decode_links
+    {
         raw = &[];
     }
     if !raw.is_empty() {
@@ -2682,7 +2810,10 @@ fn decode_vector_set_payload(
         max_level,
         next_uid,
     };
-    if !matches!(format, VectorPayloadFormat::Hnsw) {
+    if !matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) {
         set.next_uid = set.entries.len() as u64 + 1;
         set.rebuild_hnsw();
     } else if decode_links && !read_hnsw_links {
@@ -2694,7 +2825,13 @@ fn decode_vector_set_payload(
 fn encode_vector_set(set: &VectorSetState) -> Bytes {
     let mut out = Vec::new();
     out.extend_from_slice(VECTOR_SET_PREFIX);
-    out.extend_from_slice(&HNSW_VECTOR_SET_FORMAT.to_le_bytes());
+    let governed = set.entries.iter().any(|entry| entry.governance.is_some());
+    let format = if governed {
+        HNSW_GOVERNED_VECTOR_SET_FORMAT
+    } else {
+        HNSW_VECTOR_SET_FORMAT
+    };
+    out.extend_from_slice(&format.to_le_bytes());
     out.extend_from_slice(&(set.dim as u32).to_le_bytes());
     out.extend_from_slice(&set.quantization.tag().to_le_bytes());
     out.extend_from_slice(&(set.original_dim as u32).to_le_bytes());
@@ -2714,6 +2851,12 @@ fn encode_vector_set(set: &VectorSetState) -> Bytes {
         out.extend_from_slice(&(entry.attributes.is_some() as u32).to_le_bytes());
         if let Some(attributes) = &entry.attributes {
             write_bytes(&mut out, attributes);
+        }
+        if governed {
+            out.extend_from_slice(&(entry.governance.is_some() as u32).to_le_bytes());
+            if let Some(governance) = &entry.governance {
+                write_bytes(&mut out, governance);
+            }
         }
     }
     for entry in &set.entries {
@@ -3533,6 +3676,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn governed_vector_format_round_trips_without_changing_ungoverned_format() {
+        let mut set = VectorSetState {
+            dim: 2,
+            original_dim: 2,
+            quantization: Quantization::NoQuant,
+            hnsw_m: DEFAULT_HNSW_M,
+            ef_construction: DEFAULT_HNSW_EF_CONSTRUCTION,
+            max_level: 0,
+            next_uid: 2,
+            entries: vec![VectorEntry {
+                uid: 1,
+                level: 0,
+                element: b"doc-a".to_vec(),
+                vector: vec![1.0, 0.0],
+                attributes: None,
+                governance: None,
+                links: vec![Vec::new()],
+            }],
+        };
+
+        let ungoverned = encode_vector_set(&set);
+        assert_eq!(
+            u32::from_le_bytes(
+                ungoverned[VECTOR_SET_PREFIX.len()..VECTOR_SET_PREFIX.len() + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            HNSW_VECTOR_SET_FORMAT
+        );
+
+        set.entries[0].governance = Some(b"tenant=acme".to_vec());
+        let governed = encode_vector_set(&set);
+        assert_eq!(
+            u32::from_le_bytes(
+                governed[VECTOR_SET_PREFIX.len()..VECTOR_SET_PREFIX.len() + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            HNSW_GOVERNED_VECTOR_SET_FORMAT
+        );
+        let decoded = decode_vector_set(Some(&governed)).unwrap();
+        assert_eq!(
+            decoded.entries[0].governance.as_deref(),
+            Some(b"tenant=acme".as_slice())
+        );
+    }
+
+    #[test]
     fn exact_vector_scan_uses_parallel_shard_partition_path() {
         let mut entries = Vec::with_capacity(VECTOR_SCAN_PARALLEL_MIN + 1);
         entries.push(VectorEntry {
@@ -3541,6 +3732,7 @@ mod tests {
             element: b"top".to_vec(),
             vector: vec![1.0, 0.0],
             attributes: Some(br#"{"keep":true}"#.to_vec()),
+            governance: Some(b"tenant=acme".to_vec()),
             links: Vec::new(),
         });
         for index in 1..=VECTOR_SCAN_PARALLEL_MIN {
@@ -3550,6 +3742,7 @@ mod tests {
                 element: format!("member:{index:04}").into_bytes(),
                 vector: vec![0.0, 1.0],
                 attributes: Some(br#"{"keep":false}"#.to_vec()),
+                governance: None,
                 links: Vec::new(),
             });
         }

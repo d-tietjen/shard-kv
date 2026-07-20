@@ -13,7 +13,9 @@ const VREM_OPCODE: u8 = 241;
 const VSIM_OPCODE: u8 = 243;
 const ROUTE_PREFIX_BYTES: usize = 20;
 const DEFAULT_VSIM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_VSIM_RESULTS: usize = 65_536 / 3;
+const MAX_TYPED_ARRAY_ITEMS: usize = 65_536;
+const MAX_VSIM_RESULTS: usize = MAX_TYPED_ARRAY_ITEMS / 3;
+const MAX_VECTOR_GOVERNANCE_BYTES: usize = 64 * 1024;
 
 /// Vector quantization selected when a vector set is created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,7 @@ impl VectorQuantization {
 #[derive(Debug, Clone, Default)]
 pub struct VAddOptions<'a> {
     attributes: Option<&'a [u8]>,
+    governance: Option<&'a [u8]>,
     quantization: Option<VectorQuantization>,
     reduce_dim: Option<usize>,
     hnsw_m: Option<usize>,
@@ -52,6 +55,12 @@ impl<'a> VAddOptions<'a> {
     /// Stores JSON attributes alongside the vector element.
     pub fn attributes(mut self, attributes: &'a [u8]) -> Self {
         self.attributes = Some(attributes);
+        self
+    }
+
+    /// Stores opaque governance metadata alongside this vector element.
+    pub fn governance_metadata(mut self, metadata: &'a [u8]) -> Self {
+        self.governance = Some(metadata);
         self
     }
 
@@ -83,14 +92,15 @@ impl<'a> VAddOptions<'a> {
 
 /// Options for typed SCNP `VSIM` requests.
 ///
-/// Typed requests always ask the server for scores and attributes so the
-/// response has one stable shape.
+/// Typed requests always ask the server for scores and attributes. Governance
+/// metadata can be included after all vector servers are on 0.7.2.
 #[derive(Debug, Clone)]
 pub struct VSimOptions<'a> {
     count: usize,
     filter: Option<&'a [u8]>,
     ef_search: Option<usize>,
     truth: bool,
+    with_governance: bool,
     max_response_bytes: usize,
 }
 
@@ -101,6 +111,7 @@ impl Default for VSimOptions<'_> {
             filter: None,
             ef_search: None,
             truth: false,
+            with_governance: false,
             max_response_bytes: DEFAULT_VSIM_RESPONSE_BYTES,
         }
     }
@@ -131,6 +142,12 @@ impl<'a> VSimOptions<'a> {
         self
     }
 
+    /// Includes opaque governance metadata in every returned match.
+    pub fn with_governance(mut self, enabled: bool) -> Self {
+        self.with_governance = enabled;
+        self
+    }
+
     /// Bounds the response body before the client allocates it.
     pub fn max_response_bytes(mut self, bytes: usize) -> Self {
         self.max_response_bytes = bytes;
@@ -138,12 +155,13 @@ impl<'a> VSimOptions<'a> {
     }
 }
 
-/// One scored and attributed `VSIM` result.
+/// One scored, attributed, and governed `VSIM` result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VSimMatch {
     pub element: Vec<u8>,
     pub score: f64,
     pub attributes: Option<Vec<u8>>,
+    pub governance: Option<Vec<u8>>,
 }
 
 pub(crate) struct Ping;
@@ -212,6 +230,14 @@ impl VAdd {
         validate_positive("VADD REDUCE", options.reduce_dim)?;
         validate_positive("VADD M", options.hnsw_m)?;
         validate_positive("VADD EF", options.ef_construction)?;
+        if options
+            .governance
+            .is_some_and(|metadata| metadata.len() > MAX_VECTOR_GOVERNANCE_BYTES)
+        {
+            return Err(ShardCacheClientError::Config(format!(
+                "VADD governance metadata exceeds {MAX_VECTOR_GOVERNANCE_BYTES} bytes"
+            )));
+        }
 
         let mut args = Vec::with_capacity(14);
         args.push(key.to_vec());
@@ -239,6 +265,10 @@ impl VAdd {
         if let Some(attributes) = options.attributes {
             args.push(b"SETATTR".to_vec());
             args.push(attributes.to_vec());
+        }
+        if let Some(governance) = options.governance {
+            args.push(b"GOVERNANCE".to_vec());
+            args.push(governance.to_vec());
         }
         Ok(Self {
             request: VectorRequest {
@@ -328,6 +358,7 @@ pub(crate) struct VSim {
     request: VectorRequest,
     count: usize,
     max_response_bytes: usize,
+    tuple_width: usize,
 }
 
 impl VSim {
@@ -354,10 +385,11 @@ impl VSim {
                 "VSIM max response bytes must be positive".into(),
             ));
         }
-        let max_items = options.count.checked_mul(3).ok_or_else(|| {
+        let tuple_width = if options.with_governance { 4 } else { 3 };
+        let max_items = options.count.checked_mul(tuple_width).ok_or_else(|| {
             ShardCacheClientError::Config("VSIM count exceeds the client limit".into())
         })?;
-        if max_items > u32::MAX as usize {
+        if max_items > MAX_TYPED_ARRAY_ITEMS {
             return Err(ShardCacheClientError::Config(
                 "VSIM count exceeds the protocol limit".into(),
             ));
@@ -371,6 +403,9 @@ impl VSim {
         args.push(options.count.to_string().into_bytes());
         args.push(b"WITHSCORES".to_vec());
         args.push(b"WITHATTRIBS".to_vec());
+        if options.with_governance {
+            args.push(b"WITHGOVERNANCE".to_vec());
+        }
         if let Some(filter) = options.filter {
             args.push(b"FILTER".to_vec());
             args.push(filter.to_vec());
@@ -391,6 +426,7 @@ impl VSim {
             },
             count: options.count,
             max_response_bytes: options.max_response_bytes,
+            tuple_width,
         })
     }
 }
@@ -418,15 +454,20 @@ impl ScnpCommand for VSim {
     }
 
     fn read_response(self, conn: &mut ScnpConnection) -> Result<Self::Output> {
-        let max_items = self.count.saturating_mul(3);
+        let max_items = self.count.saturating_mul(self.tuple_width);
         let values =
             conn.read_typed_array(self.request.name, self.max_response_bytes, max_items)?;
-        if !values.len().is_multiple_of(3) {
-            return Err(ShardCacheClientError::Protocol(
-                "VSIM response did not contain element/score/attributes triplets".into(),
-            ));
+        if !values.len().is_multiple_of(self.tuple_width) {
+            let shape = if self.tuple_width == 4 {
+                "element/score/attributes/governance tuples"
+            } else {
+                "element/score/attributes triplets"
+            };
+            return Err(ShardCacheClientError::Protocol(format!(
+                "VSIM response did not contain {shape}"
+            )));
         }
-        let mut matches = Vec::with_capacity(values.len() / 3);
+        let mut matches = Vec::with_capacity(values.len() / self.tuple_width);
         let mut values = values.into_iter();
         while let Some(element) = values.next() {
             let raw_score = values.next().ok_or_else(|| {
@@ -435,6 +476,13 @@ impl ScnpCommand for VSim {
             let attributes = values.next().ok_or_else(|| {
                 ShardCacheClientError::Protocol("VSIM response is missing attributes".into())
             })?;
+            let governance = if self.tuple_width == 4 {
+                values.next().ok_or_else(|| {
+                    ShardCacheClientError::Protocol("VSIM response is missing governance".into())
+                })?
+            } else {
+                None
+            };
             let element = element.ok_or_else(|| {
                 ShardCacheClientError::Protocol("VSIM returned a null element".into())
             })?;
@@ -454,6 +502,7 @@ impl ScnpCommand for VSim {
                 element,
                 score,
                 attributes,
+                governance,
             });
         }
         Ok(matches)
@@ -502,33 +551,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn vadd_uses_fp32_and_attributes_without_public_opcodes() {
+    fn vadd_uses_fp32_attributes_and_governance_without_public_opcodes() {
         let command = VAdd::new(
             None,
             b"objects",
             b"doc-1",
             &[1.0, 0.5],
-            VAddOptions::new().attributes(br#"{"source":"test"}"#),
+            VAddOptions::new()
+                .attributes(br#"{"source":"test"}"#)
+                .governance_metadata(b"tenant=acme"),
         )
         .unwrap();
         assert_eq!(command.request.args[0], b"objects");
         assert_eq!(command.request.args[1], b"FP32");
         assert_eq!(command.request.args[3], b"doc-1");
         assert_eq!(command.request.args[4], b"SETATTR");
+        assert!(command.request.args.iter().any(|arg| arg == b"GOVERNANCE"));
+        assert!(command.request.args.iter().any(|arg| arg == b"tenant=acme"));
     }
 
     #[test]
-    fn vsim_always_requests_stable_scored_attribute_triplets() {
-        let command =
+    fn vsim_always_requests_stable_governed_result_tuples() {
+        let compatible =
             VSim::new(None, b"objects", &[1.0, 0.5], VSimOptions::new().count(7)).unwrap();
+        assert_eq!(compatible.tuple_width, 3);
+        assert!(
+            !compatible
+                .request
+                .args
+                .iter()
+                .any(|arg| arg == b"WITHGOVERNANCE")
+        );
+
+        let command = VSim::new(
+            None,
+            b"objects",
+            &[1.0, 0.5],
+            VSimOptions::new().count(7).with_governance(true),
+        )
+        .unwrap();
         assert!(command.request.args.iter().any(|arg| arg == b"WITHSCORES"));
         assert!(command.request.args.iter().any(|arg| arg == b"WITHATTRIBS"));
+        assert!(
+            command
+                .request
+                .args
+                .iter()
+                .any(|arg| arg == b"WITHGOVERNANCE")
+        );
         assert_eq!(command.count, 7);
+        assert_eq!(command.tuple_width, 4);
     }
 
     #[test]
     fn invalid_vectors_fail_before_network_io() {
         assert!(VAdd::new(None, b"k", b"e", &[], VAddOptions::new()).is_err());
+        let oversized_governance = vec![0; MAX_VECTOR_GOVERNANCE_BYTES + 1];
+        assert!(
+            VAdd::new(
+                None,
+                b"k",
+                b"e",
+                &[1.0],
+                VAddOptions::new().governance_metadata(&oversized_governance),
+            )
+            .is_err()
+        );
         assert!(VSim::new(None, b"k", &[f32::NAN], VSimOptions::new()).is_err());
         assert!(VSim::new(None, b"k", &[1.0], VSimOptions::new().count(0)).is_err());
         assert!(

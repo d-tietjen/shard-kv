@@ -204,9 +204,10 @@ shardcache-client-rs = { version = "0.7.2", features = ["vector"] }
 ```
 
 `VSIM` always requests `WITHSCORES WITHATTRIBS`, giving every successful query
-one stable typed result shape. FP32 vectors are encoded directly as
-little-endian binary values. Response bodies and result counts are checked
-before allocation.
+one stable typed result shape. Add `.with_governance(true)` on 0.7.2 servers to
+include opaque governance metadata as a fourth field. FP32 vectors are encoded
+directly as little-endian binary values. Response bodies and result counts are
+checked before allocation.
 
 ```rust,no_run
 use std::time::Duration;
@@ -226,14 +227,23 @@ fn main() -> shardcache_client_rs::Result<()> {
         b"objects",
         b"doc:42",
         &[0.25, 0.5, 0.75],
-        VAddOptions::new().attributes(br#"{"source":"catalog"}"#),
+        VAddOptions::new()
+            .attributes(br#"{"source":"catalog"}"#)
+            .governance_metadata(b"tenant=acme;classification=private"),
     )?;
     let matches = client.vsim(
         b"objects",
         &[0.25, 0.5, 0.75],
-        VSimOptions::new().count(10).ef_search(64),
+        VSimOptions::new()
+            .count(10)
+            .ef_search(64)
+            .with_governance(true),
     )?;
     assert_eq!(matches[0].element, b"doc:42");
+    assert_eq!(
+        matches[0].governance.as_deref(),
+        Some(b"tenant=acme;classification=private".as_slice())
+    );
     assert!(client.vrem(b"objects", b"doc:42")?);
     Ok(())
 }
@@ -244,6 +254,17 @@ The same methods are available on `ShardCacheDirectClient` and
 automatic direct client selects that connection regardless of the ordinary key
 hash, and an individual shard client rejects vector calls unless it is attached
 to shard 0.
+
+Governance metadata is opaque and limited to 64 KiB per embedding. It is
+distinct from filterable JSON attributes and is preserved by vector updates,
+TTL changes, snapshots, key lifecycle commands, and native read-replica
+replication. Shardcache returns the label with each typed match but does not
+interpret authorization policy; applications must authorize the label before
+releasing the corresponding document or generated context.
+
+Leave `with_governance` disabled while a client can reach a 0.7.1 server; the
+0.7.1 vector parser does not recognize the new option. Governed `VADD` requests
+likewise require a 0.7.2 server.
 
 Add the `tls` feature and use `connect_with_timeouts_auth_and_tls` on a fanout
 client or router when the connection crosses a trust boundary. Token auth and
