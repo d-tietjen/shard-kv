@@ -12,7 +12,7 @@ use crate::protocol::Frame;
 use crate::server::wire::ServerWire;
 #[cfg(feature = "server")]
 use crate::storage::hash_key_tag_from_hash;
-use crate::storage::{EmbeddedStore, RedisKeyStore, now_millis};
+use crate::storage::{EmbeddedStore, RedisKeyStore, VECTOR_SET_PREFIX, now_millis};
 
 define_redis_command!(Restore, "RESTORE", true, aliases: ["RESTORE-ASKING"]);
 
@@ -163,6 +163,9 @@ fn restore_key(store: &EmbeddedStore, args: &[&[u8]]) -> Result<(), RestoreError
     };
 
     match value {
+        DumpRestoreValue::String(value) if value.starts_with(VECTOR_SET_PREFIX) => {
+            store.set_pinned_vector_value(key, value.into(), ttl_ms);
+        }
         DumpRestoreValue::String(value) => store.set_value_bytes(key, value.into(), ttl_ms),
         DumpRestoreValue::Object(value) => store.set_object_value(key, value, ttl_ms),
     }
@@ -193,6 +196,9 @@ fn restore_key_owned_shard(
         Ok(value) => value,
         Err(_) => return None,
     };
+    if value.starts_with(VECTOR_SET_PREFIX) {
+        return None;
+    }
     let route = store.route_key(key);
     if route.shard_id != owned_shard_id {
         return None;

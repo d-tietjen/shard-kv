@@ -84,12 +84,12 @@ fn copy_existing_key(store: &EmbeddedStore, source: &[u8], dest: &[u8], replace:
         -1 => None,
         _ => return false,
     };
-    if let Some(value) = store.get_value_bytes(source) {
-        store.set_value_bytes(dest, value, ttl_ms);
+    if let Some(value) = store.clone_vector_key_value(source) {
+        store.set_pinned_vector_value(dest, value, ttl_ms);
         return true;
     }
-    if let Some(value) = store.clone_pinned_vector_value(source) {
-        store.set_pinned_vector_value(dest, value, ttl_ms);
+    if let Some(value) = store.get_value_bytes(source) {
+        store.set_value_bytes(dest, value, ttl_ms);
         return true;
     }
     if let Some(value) = store.clone_object_value(source) {

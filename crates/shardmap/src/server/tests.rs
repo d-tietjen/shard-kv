@@ -6180,6 +6180,85 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
 
 #[cfg(feature = "redis")]
 #[test]
+fn vector_mutations_preserve_ttl_on_pinned_and_natural_routes() {
+    let store = EmbeddedStore::new(4);
+    let keys = [key_for_shard(&store, 0), key_for_shard(&store, 2)];
+    let run = |parts: &[&[u8]]| -> Frame {
+        let raw =
+            RespTestHarness::exec_resp_sequence_raw(&store, &[parts], TransactionMode::Disabled);
+        decode_resp_stream(&raw)
+            .into_iter()
+            .next()
+            .expect("one frame")
+    };
+
+    for key in &keys {
+        assert_eq!(
+            run(&[b"VADD", key, b"VALUES", b"2", b"1", b"0", b"a"]),
+            Frame::Integer(1)
+        );
+        assert_eq!(
+            run(&[b"VADD", key, b"VALUES", b"2", b"0", b"1", b"b"]),
+            Frame::Integer(1)
+        );
+        assert_eq!(run(&[b"PEXPIRE", key, b"60000"]), Frame::Integer(1));
+
+        assert_eq!(
+            run(&[b"VADD", key, b"VALUES", b"2", b"1", b"1", b"c"]),
+            Frame::Integer(1)
+        );
+        assert!(matches!(run(&[b"PTTL", key]), Frame::Integer(ttl) if ttl > 0));
+
+        assert_eq!(
+            run(&[b"VSETATTR", key, b"a", b"{\"kind\":\"seed\"}"]),
+            Frame::Integer(1)
+        );
+        assert!(matches!(run(&[b"PTTL", key]), Frame::Integer(ttl) if ttl > 0));
+
+        assert_eq!(run(&[b"VREM", key, b"b"]), Frame::Integer(1));
+        assert!(matches!(run(&[b"PTTL", key]), Frame::Integer(ttl) if ttl > 0));
+    }
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn vector_dump_restore_round_trips_across_route_classes() {
+    let store = EmbeddedStore::new(4);
+    let sources = [key_for_shard(&store, 0), key_for_shard(&store, 2)];
+    let destinations = [key_for_shard(&store, 1), key_for_shard(&store, 3)];
+    let run = |parts: &[&[u8]]| -> Frame {
+        let raw =
+            RespTestHarness::exec_resp_sequence_raw(&store, &[parts], TransactionMode::Disabled);
+        decode_resp_stream(&raw)
+            .into_iter()
+            .next()
+            .expect("one frame")
+    };
+
+    for (source, destination) in sources.iter().zip(&destinations) {
+        assert_eq!(
+            run(&[b"VADD", source, b"VALUES", b"2", b"1", b"0", b"document",]),
+            Frame::Integer(1)
+        );
+        let payload = match run(&[b"DUMP", source]) {
+            Frame::BlobString(payload) => payload,
+            frame => panic!("unexpected vector DUMP response: {frame:?}"),
+        };
+        assert_eq!(
+            run(&[b"RESTORE", destination, b"60000", &payload]),
+            Frame::SimpleString("OK".to_string())
+        );
+        assert_eq!(run(&[b"VCARD", destination]), Frame::Integer(1));
+        assert_eq!(
+            run(&[b"TYPE", destination]),
+            Frame::SimpleString("vectorset".to_string())
+        );
+        assert!(matches!(run(&[b"PTTL", destination]), Frame::Integer(ttl) if ttl > 0));
+    }
+}
+
+#[cfg(feature = "redis")]
+#[test]
 fn typed_scnp_vector_commands_return_native_responses() {
     let store = EmbeddedStore::new(1);
     let run = |kind: FastCommandKind, args: Vec<&[u8]>| {

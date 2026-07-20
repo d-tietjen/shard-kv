@@ -3,7 +3,7 @@ use super::super::*;
 #[allow(dead_code)]
 pub(crate) trait RedisKeyStore {
     fn clone_object_value(&self, key: &[u8]) -> Option<RedisObjectValue>;
-    fn clone_pinned_vector_value(&self, key: &[u8]) -> Option<bytes::Bytes>;
+    fn clone_vector_key_value(&self, key: &[u8]) -> Option<bytes::Bytes>;
     fn set_object_value(&self, key: &[u8], value: RedisObjectValue, ttl_ms: Option<u64>);
     fn set_pinned_vector_value(&self, key: &[u8], value: bytes::Bytes, ttl_ms: Option<u64>);
     fn rename_key(
@@ -32,19 +32,8 @@ impl RedisKeyStore for EmbeddedStore {
         bucket.clone_value(key, now_millis())
     }
 
-    fn clone_pinned_vector_value(&self, key: &[u8]) -> Option<bytes::Bytes> {
-        let primary_route = self.route_key(key);
-        let vector_route = self.route_vector_key(key);
-        if primary_route.shard_id == vector_route.shard_id {
-            return None;
-        }
-        let mut value = None;
-        self.with_shared_value_bytes_routed(vector_route, key, &mut |bytes| {
-            if bytes.starts_with(crate::storage::VECTOR_SET_PREFIX) {
-                value = Some(bytes.clone());
-            }
-        });
-        value
+    fn clone_vector_key_value(&self, key: &[u8]) -> Option<bytes::Bytes> {
+        self.clone_vector_value(key)
     }
 
     fn set_object_value(&self, key: &[u8], value: RedisObjectValue, ttl_ms: Option<u64>) {
@@ -70,7 +59,19 @@ impl RedisKeyStore for EmbeddedStore {
             self.delete_routed_then(primary_route, key, now_ms, || {});
         }
         let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
-        self.set_value_bytes_routed_expire_at(vector_route, key, value, expire_at_ms, now_ms);
+        self.set_value_bytes_routed_expire_at(
+            vector_route,
+            key,
+            value.clone(),
+            expire_at_ms,
+            now_ms,
+        );
+        self.notify_vector_mutation(
+            crate::storage::VectorMutationKind::Set,
+            key,
+            Some(value),
+            expire_at_ms,
+        );
     }
 
     fn rename_key(
@@ -92,14 +93,14 @@ impl RedisKeyStore for EmbeddedStore {
             ttl if ttl >= 0 => Some(ttl as u64),
             _ => None,
         };
-        if let Some(value) = self.get_value_bytes(source) {
-            self.set_value_bytes(dest, value, ttl_ms);
+        if let Some(value) = self.clone_vector_key_value(source) {
+            self.delete(dest);
+            self.set_pinned_vector_value(dest, value, ttl_ms);
             self.delete(source);
             return Ok(true);
         }
-        if let Some(value) = self.clone_pinned_vector_value(source) {
-            self.delete(dest);
-            self.set_pinned_vector_value(dest, value, ttl_ms);
+        if let Some(value) = self.get_value_bytes(source) {
+            self.set_value_bytes(dest, value, ttl_ms);
             self.delete(source);
             return Ok(true);
         }

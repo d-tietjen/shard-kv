@@ -1200,7 +1200,13 @@ impl ReplicationReplica {
     ) {
         #[cfg(feature = "redis")]
         let route = if value.starts_with(crate::storage::VECTOR_SET_PREFIX) {
-            self.store.route_vector_key(key)
+            let primary_route = self.store.route_key_prehashed(key_hash, key);
+            let vector_route = self.store.route_vector_key(key);
+            if primary_route.shard_id != vector_route.shard_id {
+                self.store
+                    .delete_routed_then(primary_route, key, now_millis(), || {});
+            }
+            vector_route
         } else {
             self.store.route_key_prehashed(key_hash, key)
         };
@@ -1266,6 +1272,8 @@ mod tests {
     use crate::commands::redis::RedisCommand;
     #[cfg(feature = "redis")]
     use crate::commands::vector_set::{VAdd, VCard};
+    #[cfg(feature = "redis")]
+    use crate::commands::{copy::Copy, rename::Rename};
     use crate::config::{ReplicationCompression, ReplicationConfig, ReplicationSendPolicy};
     #[cfg(feature = "redis")]
     use crate::protocol::Frame;
@@ -1453,6 +1461,51 @@ mod tests {
 
         assert_eq!(vector_count(replica.inner(), &key), 2);
         assert!(replica.inner().pttl_millis(&key) > 0);
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn vector_copy_and_rename_replicate_state_and_ttl() {
+        let mut replication = config(ReplicationSendPolicy::Immediate);
+        replication.vector_state_flush_ms = 60_000;
+        let primary = ReplicatedEmbeddedStore::new(4, replication).expect("primary");
+        let subscriber = primary.primary().subscribe(8);
+        let source = (0_u64..)
+            .map(|index| format!("vector-shard-zero:{index}").into_bytes())
+            .find(|key| primary.inner().route_key(key).shard_id == 0)
+            .expect("key on vector shard");
+        let copied = vector_key_outside_shard_zero(primary.inner());
+        let moved = b"vector-moved".to_vec();
+
+        add_vector(primary.inner(), &source, b"document-1");
+        let expire_at_ms = now_millis().saturating_add(60_000);
+        assert!(primary.inner().expire(&source, expire_at_ms));
+        assert_eq!(
+            Copy::execute(primary.inner(), &[&source, &copied]),
+            Frame::Integer(1)
+        );
+        assert_eq!(
+            Rename::execute(primary.inner(), &[&copied, &moved]),
+            Frame::SimpleString("OK".to_string())
+        );
+        let _snapshot = primary.snapshot();
+
+        let mut replica = ReplicationReplica::new(4);
+        replica
+            .inner()
+            .set_value_bytes(&moved, bytes::Bytes::from_static(b"stale"), None);
+        let mut applied = 0;
+        while let Ok(frame) = subscriber.try_recv() {
+            replica.apply_frame(frame).expect("apply lifecycle frame");
+            applied += 1;
+        }
+
+        assert!(applied > 0);
+        assert_eq!(vector_count(replica.inner(), &source), 1);
+        assert_eq!(vector_count(replica.inner(), &copied), 0);
+        assert_eq!(vector_count(replica.inner(), &moved), 1);
+        assert!(replica.inner().pttl_millis(&moved) > 0);
+        assert!(replica.inner().get_value_bytes(&moved).is_none());
     }
 
     #[cfg(feature = "redis")]
