@@ -37,6 +37,11 @@ file and the retiring token in `previous_auth_token_path`, reconnect replicas,
 then remove the previous token. Certificate and CA files are loaded for each
 new connection, so reconnect after atomically replacing them.
 
+Size `replication.snapshot_receive_max_bytes` and
+`snapshot_receive_max_entries` above the largest expected bootstrap while
+leaving headroom for the resident replica. Exceeding either limit or receiving
+reordered/mismatched chunks disconnects the peer without replacing local data.
+
 `redis-server` implies `server`, `redis`, `redis-functions`, and
 `redis-modules`. Embedded-only builds stay separate from the Redis-compatible
 server feature set; guard this with `./scripts/check-feature-matrix.sh`.

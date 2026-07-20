@@ -45,6 +45,21 @@ const FCRP_ALPN: &[u8] = b"fcrp/2";
 trait ReplicationIo: Read + Write {}
 impl<T: Read + Write> ReplicationIo for T {}
 
+fn validate_primary_hello(payload: &[u8]) -> Result<ReplicationHello> {
+    let hello = decode_hello(payload)?;
+    if hello.version != FCRP_VERSION || hello.role != HelloRole::Primary {
+        return Err(ShardCacheError::Protocol(
+            "replication peer returned an invalid primary Hello acknowledgement".into(),
+        ));
+    }
+    if hello.auth_token.is_some() || hello.since.is_none() {
+        return Err(ShardCacheError::Protocol(
+            "replication primary Hello acknowledgement contains invalid fields".into(),
+        ));
+    }
+    Ok(hello)
+}
+
 fn read_replication_token(path: &std::path::Path) -> Result<String> {
     let token = std::fs::read_to_string(path).map_err(|error| {
         ShardCacheError::Config(format!(
@@ -567,6 +582,12 @@ fn serve_replica(
             hello.version
         )));
     }
+    if hello.role != HelloRole::Replica {
+        send_error(&mut stream, "invalid replication Hello role")?;
+        return Err(ShardCacheError::Protocol(format!(
+            "replica {peer} sent an invalid Hello role"
+        )));
+    }
     if !replication_auth_ok(&config, hello.auth_token.as_deref())? {
         send_error(&mut stream, "invalid auth token")?;
         return Err(ShardCacheError::Protocol(format!(
@@ -575,7 +596,7 @@ fn serve_replica(
     }
     let ack = ReplicationHello {
         version: FCRP_VERSION,
-        role: HelloRole::Replica,
+        role: HelloRole::Primary,
         auth_token: None,
         since: Some(primary.current_watermarks()),
     };
@@ -804,9 +825,10 @@ fn read_frame_inner(
         }
     }
     let payload_len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-    if payload_len > max_payload_bytes {
+    let uncompressed_len = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+    if payload_len > max_payload_bytes || uncompressed_len > max_payload_bytes {
         return Err(ShardCacheError::Protocol(format!(
-            "FCRP frame payload exceeds limit ({payload_len} bytes)"
+            "FCRP frame payload exceeds limit ({payload_len}/{uncompressed_len} bytes)"
         )));
     }
     let frame_len = FRAME_HEADER_LEN
@@ -1034,7 +1056,9 @@ fn connect_and_stream(
     let ack_bytes = read_frame_bytes(&mut stream)?;
     let ack = decode_frame(&ack_bytes)?;
     match ack.kind {
-        FrameKind::Hello => {}
+        FrameKind::Hello => {
+            let _ = validate_primary_hello(&ack.payload)?;
+        }
         FrameKind::Error => {
             let message = decode_error(&ack.payload).unwrap_or_else(|_| "unknown".to_string());
             return Err(ShardCacheError::Protocol(format!(
@@ -1064,15 +1088,26 @@ fn connect_and_stream(
         let frame = decode_frame_payload_bytes(bytes::Bytes::from(bytes))?;
         match frame.kind {
             FrameKind::MutationBatch => {
+                if pending_snapshot.is_some() {
+                    return Err(ShardCacheError::Protocol(
+                        "MutationBatch arrived during snapshot bootstrap".into(),
+                    ));
+                }
                 let mut replica = state.lock();
                 replica.apply_frame_bytes_payload(frame)?;
             }
             FrameKind::SnapshotBegin => {
+                if pending_snapshot.is_some() {
+                    return Err(ShardCacheError::Protocol(
+                        "duplicate SnapshotBegin during snapshot bootstrap".into(),
+                    ));
+                }
                 let watermarks = decode_ack(frame.payload.as_ref())?;
-                pending_snapshot = Some(PendingSnapshot {
+                pending_snapshot = Some(PendingSnapshot::new(
                     watermarks,
-                    entries: Vec::new(),
-                });
+                    config.snapshot_receive_max_bytes,
+                    config.snapshot_receive_max_entries,
+                ));
             }
             FrameKind::SnapshotChunk => {
                 let chunk = decode_snapshot_chunk(frame.payload.as_ref())?;
@@ -1081,25 +1116,23 @@ fn connect_and_stream(
                         "SnapshotChunk arrived without SnapshotBegin".into(),
                     ));
                 };
-                slot.entries.extend(chunk.entries);
+                slot.push(chunk)?;
             }
             FrameKind::SnapshotEnd => {
+                let end_watermarks = decode_ack(frame.payload.as_ref())?;
                 let Some(snapshot) = pending_snapshot.take() else {
                     return Err(ShardCacheError::Protocol(
                         "SnapshotEnd arrived without SnapshotBegin".into(),
                     ));
                 };
+                let snapshot = snapshot.finish(end_watermarks)?;
                 let mut replica = state.lock();
-                replica.try_replace_with_snapshot(super::protocol::ReplicationSnapshot {
-                    entries: snapshot.entries,
-                    watermarks: snapshot.watermarks,
-                })?;
+                replica.try_replace_with_snapshot(snapshot)?;
             }
-            FrameKind::Hello => {
-                // Ignore unexpected mid-stream Hello frames.
-            }
-            FrameKind::Ack => {
-                // Replica doesn't act on Ack frames today.
+            FrameKind::Hello | FrameKind::Ack => {
+                return Err(ShardCacheError::Protocol(
+                    "unexpected control frame after replication handshake".into(),
+                ));
             }
             FrameKind::Error => {
                 let message =
@@ -1113,9 +1146,109 @@ fn connect_and_stream(
     Ok(())
 }
 
-struct PendingSnapshot {
+pub(super) struct PendingSnapshot {
     watermarks: ShardWatermarks,
     entries: Vec<StoredEntry>,
+    next_chunk_index: u64,
+    saw_last: bool,
+    retained_bytes: usize,
+    max_bytes: usize,
+    max_entries: usize,
+}
+
+impl PendingSnapshot {
+    pub(super) fn new(watermarks: ShardWatermarks, max_bytes: usize, max_entries: usize) -> Self {
+        Self {
+            watermarks,
+            entries: Vec::new(),
+            next_chunk_index: 0,
+            saw_last: false,
+            retained_bytes: 0,
+            max_bytes,
+            max_entries,
+        }
+    }
+
+    pub(super) fn push(&mut self, chunk: ReplicationSnapshotChunk) -> Result<()> {
+        if self.saw_last {
+            return Err(ShardCacheError::Protocol(
+                "SnapshotChunk arrived after terminal chunk".into(),
+            ));
+        }
+        if chunk.chunk_index != self.next_chunk_index {
+            return Err(ShardCacheError::Protocol(format!(
+                "out-of-order SnapshotChunk: expected {}, received {}",
+                self.next_chunk_index, chunk.chunk_index
+            )));
+        }
+        if chunk.watermarks != self.watermarks {
+            return Err(ShardCacheError::Protocol(
+                "SnapshotChunk watermarks do not match SnapshotBegin".into(),
+            ));
+        }
+        let next_entries = self
+            .entries
+            .len()
+            .checked_add(chunk.entries.len())
+            .ok_or_else(|| ShardCacheError::Protocol("snapshot entry count overflow".into()))?;
+        if next_entries > self.max_entries {
+            return Err(ShardCacheError::Protocol(format!(
+                "replication snapshot exceeds configured entry limit {}",
+                self.max_entries
+            )));
+        }
+        let chunk_bytes = chunk.entries.iter().try_fold(0usize, |total, entry| {
+            total
+                .checked_add(std::mem::size_of::<StoredEntry>())
+                .and_then(|total| total.checked_add(entry.key.len()))
+                .and_then(|total| total.checked_add(entry.value.len()))
+                .and_then(|total| {
+                    total.checked_add(entry.governance.as_ref().map_or(0, |value| value.len()))
+                })
+                .ok_or_else(|| ShardCacheError::Protocol("snapshot byte count overflow".into()))
+        })?;
+        let next_bytes = self
+            .retained_bytes
+            .checked_add(chunk_bytes)
+            .ok_or_else(|| ShardCacheError::Protocol("snapshot byte count overflow".into()))?;
+        if next_bytes > self.max_bytes {
+            return Err(ShardCacheError::Protocol(format!(
+                "replication snapshot exceeds configured byte limit {}",
+                self.max_bytes
+            )));
+        }
+        self.entries
+            .try_reserve(chunk.entries.len())
+            .map_err(|_| ShardCacheError::Protocol("snapshot entry allocation failed".into()))?;
+        self.entries.extend(chunk.entries);
+        self.retained_bytes = next_bytes;
+        self.next_chunk_index = self
+            .next_chunk_index
+            .checked_add(1)
+            .ok_or_else(|| ShardCacheError::Protocol("snapshot chunk index overflow".into()))?;
+        self.saw_last = chunk.is_last;
+        Ok(())
+    }
+
+    pub(super) fn finish(
+        self,
+        end_watermarks: ShardWatermarks,
+    ) -> Result<super::protocol::ReplicationSnapshot> {
+        if !self.saw_last {
+            return Err(ShardCacheError::Protocol(
+                "SnapshotEnd arrived before terminal SnapshotChunk".into(),
+            ));
+        }
+        if end_watermarks != self.watermarks {
+            return Err(ShardCacheError::Protocol(
+                "SnapshotEnd watermarks do not match SnapshotBegin".into(),
+            ));
+        }
+        Ok(super::protocol::ReplicationSnapshot {
+            entries: self.entries,
+            watermarks: self.watermarks,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1131,6 +1264,100 @@ mod tests {
     use crate::config::{ScnpTlsClientConfig, ScnpTlsServerConfig};
 
     use super::*;
+
+    fn snapshot_entry(key: &'static [u8], value: &'static [u8]) -> StoredEntry {
+        StoredEntry {
+            key: key.to_vec(),
+            value: value.to_vec(),
+            expire_at_ms: None,
+            governance: None,
+        }
+    }
+
+    #[test]
+    fn snapshot_receiver_rejects_reordering_mismatched_watermarks_and_missing_terminal_chunk() {
+        let watermarks = ShardWatermarks::from_vec(vec![3, 7]);
+        let mut reordered = PendingSnapshot::new(watermarks.clone(), 4096, 4);
+        assert!(
+            reordered
+                .push(ReplicationSnapshotChunk {
+                    watermarks: watermarks.clone(),
+                    chunk_index: 1,
+                    is_last: true,
+                    entries: vec![snapshot_entry(b"a", b"value")],
+                })
+                .is_err()
+        );
+
+        let mut mismatched = PendingSnapshot::new(watermarks.clone(), 4096, 4);
+        assert!(
+            mismatched
+                .push(ReplicationSnapshotChunk {
+                    watermarks: ShardWatermarks::from_vec(vec![3, 8]),
+                    chunk_index: 0,
+                    is_last: true,
+                    entries: vec![snapshot_entry(b"a", b"value")],
+                })
+                .is_err()
+        );
+
+        let mut incomplete = PendingSnapshot::new(watermarks.clone(), 4096, 4);
+        incomplete
+            .push(ReplicationSnapshotChunk {
+                watermarks: watermarks.clone(),
+                chunk_index: 0,
+                is_last: false,
+                entries: vec![snapshot_entry(b"a", b"value")],
+            })
+            .unwrap();
+        assert!(incomplete.finish(watermarks).is_err());
+    }
+
+    #[test]
+    fn snapshot_receiver_enforces_entry_and_retained_byte_limits() {
+        let watermarks = ShardWatermarks::from_vec(vec![1]);
+        let entry = snapshot_entry(b"key", b"value");
+        let retained = std::mem::size_of::<StoredEntry>() + entry.key.len() + entry.value.len();
+
+        let mut entry_limited = PendingSnapshot::new(watermarks.clone(), retained * 2, 1);
+        assert!(
+            entry_limited
+                .push(ReplicationSnapshotChunk {
+                    watermarks: watermarks.clone(),
+                    chunk_index: 0,
+                    is_last: true,
+                    entries: vec![entry.clone(), entry.clone()],
+                })
+                .is_err()
+        );
+
+        let mut byte_limited = PendingSnapshot::new(watermarks.clone(), retained - 1, 2);
+        assert!(
+            byte_limited
+                .push(ReplicationSnapshotChunk {
+                    watermarks,
+                    chunk_index: 0,
+                    is_last: true,
+                    entries: vec![entry],
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn primary_hello_acknowledgement_is_role_and_field_checked() {
+        let valid = ReplicationHello {
+            version: FCRP_VERSION,
+            role: HelloRole::Primary,
+            auth_token: None,
+            since: Some(ShardWatermarks::from_vec(vec![0, 0])),
+        };
+        assert!(validate_primary_hello(&encode_hello(&valid)).is_ok());
+
+        let mut invalid = valid;
+        invalid.role = HelloRole::Replica;
+        assert!(validate_primary_hello(&encode_hello(&invalid)).is_err());
+    }
 
     fn ephemeral_addr() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
@@ -1282,6 +1509,19 @@ mod tests {
         header.extend_from_slice(&0_u32.to_le_bytes());
         let mut stream = std::io::Cursor::new(header);
         let stop = Arc::new(AtomicBool::new(false));
+        assert!(
+            read_frame_bytes_interruptible_limited(&mut stream, &stop, MAX_HELLO_FRAME_BYTES,)
+                .is_err()
+        );
+        assert_eq!(stream.position(), FRAME_HEADER_LEN as u64);
+
+        let mut compressed_header = Vec::from(*b"FCRP");
+        compressed_header.push(FCRP_VERSION);
+        compressed_header.push(FrameKind::Hello as u8);
+        compressed_header.extend_from_slice(&[1, 0]);
+        compressed_header.extend_from_slice(&1_u32.to_le_bytes());
+        compressed_header.extend_from_slice(&((MAX_HELLO_FRAME_BYTES as u32) + 1).to_le_bytes());
+        let mut stream = std::io::Cursor::new(compressed_header);
         assert!(
             read_frame_bytes_interruptible_limited(&mut stream, &stop, MAX_HELLO_FRAME_BYTES,)
                 .is_err()

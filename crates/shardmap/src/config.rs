@@ -637,6 +637,10 @@ pub struct ReplicationConfig {
     pub backlog_bytes: usize,
     /// Snapshot chunk size before compression.
     pub snapshot_chunk_bytes: usize,
+    /// Maximum retained bytes while receiving one replication snapshot.
+    pub snapshot_receive_max_bytes: usize,
+    /// Maximum entries accepted in one replication snapshot.
+    pub snapshot_receive_max_entries: usize,
     /// Per-shard bounded queue capacity for ready replication batches.
     ///
     /// The shard worker builds ordered mutation batches locally. When this
@@ -682,6 +686,14 @@ impl std::fmt::Debug for ReplicationConfig {
             )
             .field("backlog_bytes", &self.backlog_bytes)
             .field("snapshot_chunk_bytes", &self.snapshot_chunk_bytes)
+            .field(
+                "snapshot_receive_max_bytes",
+                &self.snapshot_receive_max_bytes,
+            )
+            .field(
+                "snapshot_receive_max_entries",
+                &self.snapshot_receive_max_entries,
+            )
             .field("queue_capacity", &self.queue_capacity)
             .field("max_replicas", &self.max_replicas)
             .field("connect_timeout_ms", &self.connect_timeout_ms)
@@ -965,6 +977,8 @@ impl Default for ReplicationConfig {
             vector_state_pending_max_bytes: 16 * 1024 * 1024,
             backlog_bytes: 64 * 1024 * 1024,
             snapshot_chunk_bytes: 1024 * 1024,
+            snapshot_receive_max_bytes: 1024 * 1024 * 1024,
+            snapshot_receive_max_entries: 10_000_000,
             queue_capacity: 16_384,
             max_replicas: 16,
             connect_timeout_ms: 500,

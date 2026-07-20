@@ -6315,17 +6315,7 @@ fn vector_dump_restore_round_trips_across_route_classes() {
 
     for (source, destination) in sources.iter().zip(&destinations) {
         assert_eq!(
-            run(&[
-                b"VADD",
-                source,
-                b"VALUES",
-                b"2",
-                b"1",
-                b"0",
-                b"document",
-                b"GOVERNANCE",
-                b"tenant=acme",
-            ]),
+            run(&[b"VADD", source, b"VALUES", b"2", b"1", b"0", b"document",]),
             Frame::Integer(1)
         );
         let payload = match run(&[b"DUMP", source]) {
@@ -6352,17 +6342,31 @@ fn vector_dump_restore_round_trips_across_route_classes() {
                 b"0",
                 b"COUNT",
                 b"1",
-                b"WITHGOVERNANCE",
-                b"GOVERNANCE",
-                b"tenant=acme",
                 b"TRUTH",
             ]),
-            Frame::Array(vec![
-                Frame::BlobString(b"document".to_vec()),
-                Frame::BlobString(b"tenant=acme".to_vec()),
-            ])
+            Frame::Array(vec![Frame::BlobString(b"document".to_vec())])
         );
     }
+
+    let governed = b"governed-vectors";
+    assert_eq!(
+        run(&[
+            b"VADD",
+            governed,
+            b"VALUES",
+            b"2",
+            b"1",
+            b"0",
+            b"document",
+            b"GOVERNANCE",
+            b"tenant=acme",
+        ]),
+        Frame::Integer(1)
+    );
+    assert!(matches!(
+        run(&[b"DUMP", governed]),
+        Frame::Error(message) if message.contains("NOPERM")
+    ));
 }
 
 #[cfg(feature = "redis")]

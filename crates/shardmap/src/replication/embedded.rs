@@ -1071,7 +1071,11 @@ impl ReplicationReplica {
         Ok(())
     }
 
-    pub fn apply_mutation(&mut self, mutation: ReplicationMutation) -> Result<()> {
+    pub fn apply_mutation(&mut self, mutation: ReplicationMutation) {
+        let _ = self.try_apply_mutation(mutation);
+    }
+
+    pub fn try_apply_mutation(&mut self, mutation: ReplicationMutation) -> Result<()> {
         let started = Instant::now();
         let applied = self.apply_mutation_inner(mutation, &mut None)?;
         self.metrics
@@ -1479,7 +1483,7 @@ mod tests {
             expire_at_ms: None,
             governance: None,
         };
-        assert!(replica.apply_mutation(mutation).is_err());
+        assert!(replica.try_apply_mutation(mutation).is_err());
         assert_eq!(replica.watermarks().get(0), 0);
         assert!(replica.inner().clone_vector_value(b"vectors").is_none());
 
@@ -1498,6 +1502,12 @@ mod tests {
         assert!(replica.try_replace_with_snapshot(snapshot).is_err());
         assert_eq!(replica.get(b"sentinel"), Some(b"preserved".to_vec()));
         assert_eq!(replica.watermarks().get(0), 0);
+    }
+
+    #[test]
+    fn apply_mutation_preserves_the_infallible_public_signature() {
+        let _: fn(&mut ReplicationReplica, ReplicationMutation) =
+            ReplicationReplica::apply_mutation;
     }
 
     #[cfg(feature = "redis")]

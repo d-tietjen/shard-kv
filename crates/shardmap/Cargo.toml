@@ -144,7 +144,7 @@ log = { workspace = true }
 libc = { workspace = true }
 lz4_flex = { workspace = true }
 memchr = "2"
-object_store = { version = "0.14", default-features = false, features = ["aws"], optional = true }
+object_store = { version = "0.14.1", default-features = false, features = ["aws"], optional = true }
 parking_lot = { workspace = true }
 rblock = { workspace = true }
 redis-client = { workspace = true, optional = true }

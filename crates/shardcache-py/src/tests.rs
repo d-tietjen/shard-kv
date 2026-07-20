@@ -90,7 +90,7 @@ fn py_store_namespace_view_cannot_change_engine_eviction_mode() {
     )
     .expect("resident store should build");
 
-    pyo3::prepare_freethreaded_python();
+    pyo3::Python::initialize();
     let err = match store.with_service_namespace("cache", Some(false)) {
         Ok(_) => panic!("namespace view cannot change engine residency"),
         Err(err) => err,

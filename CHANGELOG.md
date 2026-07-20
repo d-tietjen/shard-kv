@@ -31,6 +31,10 @@
 - Added TLS 1.3 mTLS for native FCRP read-replica streams with dedicated
   `fcrp/2` ALPN, non-loopback TLS enforcement, reloadable current/previous
   token files, and redacted replication configuration output.
+- Bounded FCRP snapshot receive memory and reject reordered, interleaved, or
+  watermark-inconsistent bootstrap frames in both blocking and Monoio paths.
+- Bound `VSIM` response items and bytes, preserve HNSW search for governed
+  collections, and reject raw `DUMP` export of governed vector sets.
 - Replaced the native replication flusher's idle sub-millisecond polling with
   event-driven wakeups and exact pending-batch deadlines.
 

@@ -1004,6 +1004,8 @@ impl<'a> ReplicationValidation<'a> {
                 self.config.batch_max_bytes,
                 self.config.backlog_bytes,
                 self.config.snapshot_chunk_bytes,
+                self.config.snapshot_receive_max_bytes,
+                self.config.snapshot_receive_max_entries,
             ]
             .into_iter()
             .all(|limit| limit > 0),

@@ -54,10 +54,24 @@ label matching is a storage-layer guard, not user authentication or a policy
 language. Authenticate the connection and derive allowed labels in the
 service authorization layer.
 
+`DUMP` is rejected for governed vector sets so a client cannot bypass element
+reads by exporting canonical state. Whole-key `DEL`, expiry, and eviction remain
+available because governed vectors are still cache entries. Restrict lifecycle
+and overwrite commands to trusted service identities; governance labels do not
+replace connection ACLs or command authorization.
+
+Vector state is supported by the single-primary FCRP read-replica path. Active
+sync treats values as point-key versions and does not merge concurrent `VADD`
+operations from multiple writers. Do not use active-active replication for
+multi-writer vector sets in 0.7.2.
+
 Native vector read replicas use FCRP v2 in 0.7.2. Non-loopback replication
 requires TLS 1.3 mTLS plus token authentication, advertises only `fcrp/2`, and
 supports current/previous token files for rolling rotation. FCRP v2 rejects
 0.7.1 peers, so upgrade a replica pair together rather than mixing versions.
+Replica bootstrap validates ordered snapshot chunks and matching watermarks and
+is bounded by `snapshot_receive_max_bytes` and
+`snapshot_receive_max_entries` (1 GiB and 10 million by default).
 
 ## Intended Workload And Performance
 

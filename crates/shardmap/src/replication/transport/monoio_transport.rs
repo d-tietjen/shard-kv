@@ -12,7 +12,6 @@ use parking_lot::Mutex;
 
 use crate::config::ReplicationConfig;
 use crate::monoio_runtime::MonoioRuntime;
-use crate::storage::StoredEntry;
 use crate::{Result, ShardCacheError};
 
 use super::super::ReplicationFrameBytes;
@@ -26,8 +25,9 @@ use super::super::protocol::{
     encode_frame, encode_hello, encode_snapshot_chunk,
 };
 use super::{
-    FRAME_HEADER_LEN, MAX_FRAME_BYTES, ReplicationPrimaryServer, ReplicationReplicaClient,
-    SnapshotProvider, auth_ok,
+    FRAME_HEADER_LEN, MAX_FRAME_BYTES, MAX_HELLO_FRAME_BYTES, PendingSnapshot,
+    ReplicationPrimaryServer, ReplicationReplicaClient, SnapshotProvider, auth_ok,
+    validate_primary_hello,
 };
 
 const USE_MONOIO_ENV: &str = "SHARDCACHE_REPLICATION_USE_MONOIO";
@@ -169,7 +169,12 @@ async fn serve_replica(
 ) -> Result<()> {
     stream.set_nodelay(true).ok();
     let timeout = Duration::from_millis(config.connect_timeout_ms.max(1));
-    let hello_frame = match monoio::time::timeout(timeout, read_frame_bytes(&mut stream)).await {
+    let hello_frame = match monoio::time::timeout(
+        timeout,
+        read_frame_bytes_limited(&mut stream, MAX_HELLO_FRAME_BYTES),
+    )
+    .await
+    {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(error)) => return Err(error),
         Err(_) => return Ok(()),
@@ -196,6 +201,12 @@ async fn serve_replica(
             )));
         }
     }
+    if hello.role != HelloRole::Replica {
+        send_error(&mut stream, "invalid replication Hello role").await?;
+        return Err(ShardCacheError::Protocol(format!(
+            "replica {peer} sent an invalid Hello role"
+        )));
+    }
     match auth_ok(config.auth_token.as_deref(), hello.auth_token.as_deref()) {
         true => {}
         false => {
@@ -208,7 +219,7 @@ async fn serve_replica(
 
     let ack = ReplicationHello {
         version: FCRP_VERSION,
-        role: HelloRole::Replica,
+        role: HelloRole::Primary,
         auth_token: None,
         since: Some(primary.current_watermarks()),
     };
@@ -391,11 +402,19 @@ where
 }
 
 async fn read_frame_bytes(stream: &mut monoio::net::TcpStream) -> Result<Vec<u8>> {
+    read_frame_bytes_limited(stream, MAX_FRAME_BYTES).await
+}
+
+async fn read_frame_bytes_limited(
+    stream: &mut monoio::net::TcpStream,
+    max_payload_bytes: usize,
+) -> Result<Vec<u8>> {
     let header = read_exact_vec(stream, FRAME_HEADER_LEN).await?;
     let payload_len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-    if payload_len > MAX_FRAME_BYTES {
+    let uncompressed_len = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+    if payload_len > max_payload_bytes || uncompressed_len > max_payload_bytes {
         return Err(ShardCacheError::Protocol(format!(
-            "FCRP frame payload exceeds limit ({payload_len} bytes)"
+            "FCRP frame payload exceeds limit ({payload_len}/{uncompressed_len} bytes)"
         )));
     }
     let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload_len);
@@ -475,7 +494,9 @@ async fn connect_and_stream(
     let ack_bytes = read_frame_bytes(&mut stream).await?;
     let ack = decode_frame(&ack_bytes)?;
     match ack.kind {
-        FrameKind::Hello => {}
+        FrameKind::Hello => {
+            let _ = validate_primary_hello(&ack.payload)?;
+        }
         FrameKind::Error => {
             let message = decode_error(&ack.payload).unwrap_or_else(|_| "unknown".to_string());
             return Err(ShardCacheError::Protocol(format!(
@@ -489,11 +510,12 @@ async fn connect_and_stream(
         }
     }
 
-    stream_replica_frames(&mut stream, state, stop).await
+    stream_replica_frames(&mut stream, config, state, stop).await
 }
 
 async fn stream_replica_frames(
     stream: &mut monoio::net::TcpStream,
+    config: &ReplicationConfig,
     state: &Arc<Mutex<ReplicationReplica>>,
     stop: &Arc<AtomicBool>,
 ) -> Result<()> {
@@ -515,15 +537,26 @@ async fn stream_replica_frames(
         let frame = decode_frame_payload_bytes(Bytes::from(bytes))?;
         match frame.kind {
             FrameKind::MutationBatch => {
+                if pending_snapshot.is_some() {
+                    return Err(ShardCacheError::Protocol(
+                        "MutationBatch arrived during snapshot bootstrap".into(),
+                    ));
+                }
                 let mut replica = state.lock();
                 replica.apply_frame_bytes_payload(frame)?;
             }
             FrameKind::SnapshotBegin => {
+                if pending_snapshot.is_some() {
+                    return Err(ShardCacheError::Protocol(
+                        "duplicate SnapshotBegin during snapshot bootstrap".into(),
+                    ));
+                }
                 let watermarks = decode_ack(frame.payload.as_ref())?;
-                pending_snapshot = Some(PendingSnapshot {
+                pending_snapshot = Some(PendingSnapshot::new(
                     watermarks,
-                    entries: Vec::new(),
-                });
+                    config.snapshot_receive_max_bytes,
+                    config.snapshot_receive_max_entries,
+                ));
             }
             FrameKind::SnapshotChunk => {
                 let chunk = decode_snapshot_chunk(frame.payload.as_ref())?;
@@ -532,21 +565,24 @@ async fn stream_replica_frames(
                         "SnapshotChunk arrived without SnapshotBegin".into(),
                     ));
                 };
-                slot.entries.extend(chunk.entries);
+                slot.push(chunk)?;
             }
             FrameKind::SnapshotEnd => {
+                let end_watermarks = decode_ack(frame.payload.as_ref())?;
                 let Some(snapshot) = pending_snapshot.take() else {
                     return Err(ShardCacheError::Protocol(
                         "SnapshotEnd arrived without SnapshotBegin".into(),
                     ));
                 };
+                let snapshot = snapshot.finish(end_watermarks)?;
                 let mut replica = state.lock();
-                replica.replace_with_snapshot(super::super::protocol::ReplicationSnapshot {
-                    entries: snapshot.entries,
-                    watermarks: snapshot.watermarks,
-                });
+                replica.try_replace_with_snapshot(snapshot)?;
             }
-            FrameKind::Hello | FrameKind::Ack => {}
+            FrameKind::Hello | FrameKind::Ack => {
+                return Err(ShardCacheError::Protocol(
+                    "unexpected control frame after replication handshake".into(),
+                ));
+            }
             FrameKind::Error => {
                 let message =
                     decode_error(frame.payload.as_ref()).unwrap_or_else(|_| "unknown".to_string());
@@ -568,9 +604,4 @@ async fn sleep_backoff(backoff_ms: u64, stop: &Arc<AtomicBool>) {
         monoio::time::sleep(sleep_for).await;
         slept = slept.saturating_add(sleep_for);
     }
-}
-
-struct PendingSnapshot {
-    watermarks: ShardWatermarks,
-    entries: Vec<StoredEntry>,
 }

@@ -60,6 +60,10 @@ vector_state_flush_ms = 10
 vector_state_pending_max_bytes = 16777216
 backlog_bytes = 67108864
 snapshot_chunk_bytes = 1048576
+# Bound replica bootstrap memory. Raise deliberately for larger authoritative
+# snapshots; a peer exceeding either limit is disconnected before replacement.
+snapshot_receive_max_bytes = 1073741824
+snapshot_receive_max_entries = 10000000
 queue_capacity = 16384
 max_replicas = 16
 connect_timeout_ms = 500

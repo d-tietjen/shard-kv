@@ -26,7 +26,7 @@ use pyo3::exceptions::{PyBufferError, PyIndexError, PyTypeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyEllipsis, PyMemoryView, PyModule, PySlice};
 #[cfg(feature = "gpu-direct-api")]
 use shardcache_runtime_crate::GpuDirectProxy;
@@ -87,7 +87,7 @@ struct VllmTorchRestoreSymbols {
     uint8_dtype: Py<PyAny>,
 }
 
-static VLLM_TORCH_RESTORE_SYMBOLS: GILOnceCell<VllmTorchRestoreSymbols> = GILOnceCell::new();
+static VLLM_TORCH_RESTORE_SYMBOLS: PyOnceLock<VllmTorchRestoreSymbols> = PyOnceLock::new();
 
 fn vllm_torch_restore_symbols(py: Python<'_>) -> PyResult<&VllmTorchRestoreSymbols> {
     VLLM_TORCH_RESTORE_SYMBOLS.get_or_try_init(py, || {
@@ -297,7 +297,7 @@ fn extract_vllm_layer_payloads(
 ///
 /// The underlying payload is still copied today, but the binding can expose one
 /// packed batch object instead of creating one Python `bytes` object per chunk.
-#[pyclass(name = "PackedBatchResult")]
+#[pyclass(name = "PackedBatchResult", skip_from_py_object)]
 #[derive(Debug, Clone)]
 struct PyPackedBatchResult {
     inner: PackedBatch,
@@ -2591,7 +2591,7 @@ impl PyDirectVllmRestoreHandle {
         })?;
         let store = Arc::clone(&self.store);
         let report = py
-            .allow_threads(move || store.peek_vllm_paged_restore_report(ticket))
+            .detach(move || store.peek_vllm_paged_restore_report(ticket))
             .map_err(runtime_error_to_py)?;
         direct_vllm_restore_report_dict(py, report)
     }
@@ -2601,7 +2601,7 @@ impl PyDirectVllmRestoreHandle {
             return Ok(false);
         };
         let store = Arc::clone(&self.store);
-        py.allow_threads(move || store.is_vllm_paged_restore_ready(ticket))
+        py.detach(move || store.is_vllm_paged_restore_ready(ticket))
             .map_err(runtime_error_to_py)
     }
 
@@ -2610,7 +2610,7 @@ impl PyDirectVllmRestoreHandle {
             return Ok(false);
         };
         let store = Arc::clone(&self.store);
-        py.allow_threads(move || store.wait_vllm_paged_restore_on_stream(ticket, stream_ptr))
+        py.detach(move || store.wait_vllm_paged_restore_on_stream(ticket, stream_ptr))
             .map_err(runtime_error_to_py)
     }
 
@@ -2620,7 +2620,7 @@ impl PyDirectVllmRestoreHandle {
         };
         let store = Arc::clone(&self.store);
         let maybe_report = py
-            .allow_threads(move || store.try_wait_vllm_paged_restore(ticket))
+            .detach(move || store.try_wait_vllm_paged_restore(ticket))
             .map_err(runtime_error_to_py)?;
         let Some(report) = maybe_report else {
             return Ok(None);
@@ -2635,7 +2635,7 @@ impl PyDirectVllmRestoreHandle {
         })?;
         let store = Arc::clone(&self.store);
         let report = py
-            .allow_threads(move || store.wait_vllm_paged_restore(ticket))
+            .detach(move || store.wait_vllm_paged_restore(ticket))
             .map_err(runtime_error_to_py)?;
         direct_vllm_restore_report_dict(py, report)
     }
@@ -3143,7 +3143,7 @@ impl PyLmcacheRecordBatch {
         }))
     }
 
-    fn metadata_at(&self, py: Python<'_>, index: usize) -> PyResult<Option<PyObject>> {
+    fn metadata_at(&self, py: Python<'_>, index: usize) -> PyResult<Option<Py<PyAny>>> {
         let Some(decoded) = self
             .decoded
             .get(index)
@@ -3296,7 +3296,7 @@ impl PyStore {
         let ttl_ms = ttl.map(|seconds| seconds.saturating_mul(1_000));
         let key = self.namespaced_key(key);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.set(key, value, ttl_ms));
+        py.detach(move || inner.set(key, value, ttl_ms));
     }
 
     #[pyo3(signature = (items, ttl=None))]
@@ -3304,7 +3304,7 @@ impl PyStore {
         let ttl_ms = ttl.map(|seconds| seconds.saturating_mul(1_000));
         let items = self.namespaced_items(items);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.batch_set(items, ttl_ms));
+        py.detach(move || inner.batch_set(items, ttl_ms));
     }
 
     fn batch_set_session_no_ttl(
@@ -3316,7 +3316,7 @@ impl PyStore {
         let session_prefix = self.namespaced_key(session_prefix);
         let items = self.namespaced_items(items);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.batch_set_session_owned_no_ttl(session_prefix, items));
+        py.detach(move || inner.batch_set_session_owned_no_ttl(session_prefix, items));
     }
 
     fn batch_set_session_packed_no_ttl(
@@ -3328,9 +3328,7 @@ impl PyStore {
         let session_prefix = self.namespaced_key(session_prefix);
         let items = self.namespaced_items(items);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || {
-            inner.batch_set_session_packed_items_no_ttl(session_prefix, items)
-        });
+        py.detach(move || inner.batch_set_session_packed_items_no_ttl(session_prefix, items));
     }
 
     fn batch_set_vllm_pages_no_ttl(
@@ -3362,7 +3360,7 @@ impl PyStore {
         let item_count = items.len();
         let inner = Arc::clone(&self.inner);
         let _ = session_prefix;
-        py.allow_threads(move || inner.batch_set(items, None));
+        py.detach(move || inner.batch_set(items, None));
         Ok(item_count)
     }
 
@@ -3400,7 +3398,7 @@ impl PyStore {
         let item_count = items.len();
         let _ = self.namespaced_key_ref(session_prefix.as_ref());
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.batch_set(items, None));
+        py.detach(move || inner.batch_set(items, None));
         Ok(item_count)
     }
 
@@ -3411,7 +3409,7 @@ impl PyStore {
         layer_index: u32,
         block_hashes: Vec<PyBackedBytes>,
         block_ids: Vec<usize>,
-        kv_layer: PyObject,
+        kv_layer: Py<PyAny>,
     ) -> PyResult<usize> {
         if block_hashes.len() != block_ids.len() {
             return Err(PyValueError::new_err(format!(
@@ -3434,16 +3432,16 @@ impl PyStore {
         let item_count = items.len();
         let _ = self.namespaced_key_ref(session_prefix.as_ref());
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.batch_set(items, None));
+        py.detach(move || inner.batch_set(items, None));
         Ok(item_count)
     }
 
     fn extract_vllm_layer_payload_bytes(
         &self,
         py: Python<'_>,
-        kv_layer: PyObject,
+        kv_layer: Py<PyAny>,
         block_ids: Vec<usize>,
-    ) -> PyResult<Vec<PyObject>> {
+    ) -> PyResult<Vec<Py<PyAny>>> {
         let payloads = extract_vllm_layer_payloads(py, kv_layer.bind(py), &block_ids)?;
         Ok(payloads
             .into_iter()
@@ -3454,7 +3452,7 @@ impl PyStore {
     fn get(&self, py: Python<'_>, key: Vec<u8>) -> Option<Vec<u8>> {
         let key = self.namespaced_key(key);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.get(&key))
+        py.detach(move || inner.get(&key))
     }
 
     /// Returns a zero-copy read guard for one key.
@@ -3467,7 +3465,7 @@ impl PyStore {
             let this = slf.borrow();
             (Arc::clone(&this.inner), this.namespaced_key(key))
         };
-        let inner = py.allow_threads(move || store.get_view(&key));
+        let inner = py.detach(move || store.get_view(&key));
         if !inner.is_hit() {
             return Ok(None);
         }
@@ -3484,7 +3482,7 @@ impl PyStore {
     fn batch_get(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> Vec<Option<Vec<u8>>> {
         let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.batch_get(keys))
+        py.detach(move || inner.batch_get(keys))
     }
 
     /// Returns a zero-copy generic batch guard.
@@ -3497,7 +3495,7 @@ impl PyStore {
             let this = slf.borrow();
             (Arc::clone(&this.inner), this.namespaced_keys(keys))
         };
-        let inner = py.allow_threads(move || store.batch_get_view(&keys));
+        let inner = py.detach(move || store.batch_get_view(&keys));
         Py::new(
             py,
             PyReadBatch {
@@ -3517,7 +3515,7 @@ impl PyStore {
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         keys: Vec<Vec<u8>>,
-    ) -> PyResult<Vec<Option<PyObject>>> {
+    ) -> PyResult<Vec<Option<Py<PyAny>>>> {
         let keys = slf.borrow().namespaced_keys(keys);
         build_lmcache_memory_objs(slf, py, Arc::new(prepare_encoded_lmcache_keys(keys)))
     }
@@ -3527,8 +3525,8 @@ impl PyStore {
     fn batch_get_lmcache_memory_objs_from_engine_keys(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
-        keys: Vec<PyObject>,
-    ) -> PyResult<Vec<Option<PyObject>>> {
+        keys: Vec<Py<PyAny>>,
+    ) -> PyResult<Vec<Option<Py<PyAny>>>> {
         let key_prefix = slf.borrow().key_prefix().map(<[u8]>::to_vec);
         let prepared_keys = encode_lmcache_engine_keys(py, &keys, key_prefix.as_deref())?;
         build_lmcache_memory_objs(slf, py, Arc::new(prepared_keys))
@@ -3551,7 +3549,7 @@ impl PyStore {
     fn batch_get_lmcache_record_batch_from_engine_keys(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
-        keys: Vec<PyObject>,
+        keys: Vec<Py<PyAny>>,
     ) -> PyResult<Py<PyLmcacheRecordBatch>> {
         let key_prefix = slf.borrow().key_prefix().map(<[u8]>::to_vec);
         let prepared_keys = encode_lmcache_engine_keys(py, &keys, key_prefix.as_deref())?;
@@ -3565,7 +3563,7 @@ impl PyStore {
         keys: Vec<Vec<u8>>,
     ) -> PyPreparedLmcacheKeys {
         let keys = self.namespaced_keys(keys);
-        py.allow_threads(|| PyPreparedLmcacheKeys {
+        py.detach(|| PyPreparedLmcacheKeys {
             inner: Arc::new(prepare_encoded_lmcache_keys(keys)),
         })
     }
@@ -3577,7 +3575,7 @@ impl PyStore {
         metadata_blobs: Vec<PyBackedBytes>,
     ) -> PyResult<PyPreparedLmcachePutBatch> {
         let keys = self.namespaced_pybacked_keys(&keys);
-        py.allow_threads(|| {
+        py.detach(|| {
             Ok(PyPreparedLmcachePutBatch {
                 inner: Arc::new(prepare_lmcache_put_batch_from_encoded_parts(
                     &keys,
@@ -3591,7 +3589,7 @@ impl PyStore {
     fn prepare_lmcache_engine_keys(
         &self,
         py: Python<'_>,
-        keys: Vec<PyObject>,
+        keys: Vec<Py<PyAny>>,
     ) -> PyResult<PyPreparedLmcacheKeys> {
         let prepared = encode_lmcache_engine_keys(py, &keys, self.key_prefix())?;
         Ok(PyPreparedLmcacheKeys {
@@ -3605,12 +3603,12 @@ impl PyStore {
     fn batch_put_lmcache_memory_objs_from_engine_keys(
         &self,
         py: Python<'_>,
-        keys: Vec<PyObject>,
-        objs: Vec<PyObject>,
+        keys: Vec<Py<PyAny>>,
+        objs: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         let batch = encode_lmcache_put_batch(py, &keys, &objs, self.key_prefix())?;
-        py.allow_threads(move || inner.batch_put_lmcache_encoded_batch(batch));
+        py.detach(move || inner.batch_put_lmcache_encoded_batch(batch));
         Ok(())
     }
 
@@ -3619,12 +3617,12 @@ impl PyStore {
         &self,
         py: Python<'_>,
         keys: Vec<PyBackedBytes>,
-        objs: Vec<PyObject>,
+        objs: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         let keys = self.namespaced_pybacked_keys(&keys);
         let batch = encode_lmcache_put_batch_from_encoded_keys(py, &keys, &objs)?;
-        py.allow_threads(move || inner.batch_put_lmcache_encoded_batch(batch));
+        py.detach(move || inner.batch_put_lmcache_encoded_batch(batch));
         Ok(())
     }
 
@@ -3635,14 +3633,14 @@ impl PyStore {
         &self,
         py: Python<'_>,
         keys: Vec<PyBackedBytes>,
-        payloads: Vec<PyObject>,
+        payloads: Vec<Py<PyAny>>,
         metadata_blobs: Vec<PyBackedBytes>,
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         let keys = self.namespaced_pybacked_keys(&keys);
         let batch =
             encode_lmcache_put_batch_from_encoded_parts(py, &keys, &payloads, &metadata_blobs)?;
-        py.allow_threads(move || inner.batch_put_lmcache_encoded_batch(batch));
+        py.detach(move || inner.batch_put_lmcache_encoded_batch(batch));
         Ok(())
     }
 
@@ -3655,7 +3653,7 @@ impl PyStore {
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         let keys = self.namespaced_pybacked_keys(&keys);
-        py.allow_threads(move || {
+        py.detach(move || {
             let batch = encode_lmcache_put_batch_from_encoded_byte_parts(
                 &keys,
                 &payloads,
@@ -3670,12 +3668,12 @@ impl PyStore {
         &self,
         py: Python<'_>,
         prepared: &Bound<'_, PyPreparedLmcachePutBatch>,
-        payloads: Vec<PyObject>,
+        payloads: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         let prepared = Arc::clone(&prepared.borrow().inner);
         let batch = encode_lmcache_put_batch_from_prepared_parts(py, &prepared, &payloads)?;
-        py.allow_threads(move || inner.batch_put_lmcache_encoded_batch(batch));
+        py.detach(move || inner.batch_put_lmcache_encoded_batch(batch));
         Ok(())
     }
 
@@ -3687,7 +3685,7 @@ impl PyStore {
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         let prepared = Arc::clone(&prepared.borrow().inner);
-        py.allow_threads(move || {
+        py.detach(move || {
             let batch = encode_lmcache_put_batch_from_prepared_byte_parts(&prepared, &payloads)?;
             inner.batch_put_lmcache_encoded_batch(batch);
             Ok(())
@@ -3698,12 +3696,12 @@ impl PyStore {
         &self,
         py: Python<'_>,
         prepared: &Bound<'_, PyPreparedLmcachePutBatch>,
-        objs: Vec<PyObject>,
+        objs: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let inner = Arc::clone(&self.inner);
         let prepared = Arc::clone(&prepared.borrow().inner);
         let payloads = extract_lmcache_memory_obj_bytes_payloads(py, &objs)?;
-        py.allow_threads(move || {
+        py.detach(move || {
             let batch = encode_lmcache_put_batch_from_prepared_byte_parts(&prepared, &payloads)?;
             inner.batch_put_lmcache_encoded_batch(batch);
             Ok(())
@@ -3715,7 +3713,7 @@ impl PyStore {
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         prepared: &Bound<'_, PyPreparedLmcacheKeys>,
-    ) -> PyResult<Vec<Option<PyObject>>> {
+    ) -> PyResult<Vec<Option<Py<PyAny>>>> {
         let prepared = Arc::clone(&prepared.borrow().inner);
         build_lmcache_memory_objs(slf, py, prepared)
     }
@@ -3734,8 +3732,8 @@ impl PyStore {
     fn get_lmcache_memory_obj_from_engine_key(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
-        key: PyObject,
-    ) -> PyResult<Option<PyObject>> {
+        key: Py<PyAny>,
+    ) -> PyResult<Option<Py<PyAny>>> {
         let mut results = Self::batch_get_lmcache_memory_objs_from_engine_keys(slf, py, vec![key])?;
         Ok(results.pop().flatten())
     }
@@ -3750,7 +3748,7 @@ impl PyStore {
         let session_prefix = self.namespaced_key(session_prefix);
         let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || PyPackedBatchResult {
+        py.detach(move || PyPackedBatchResult {
             inner: inner.batch_get_session_packed(&session_prefix, &keys),
         })
     }
@@ -3759,7 +3757,7 @@ impl PyStore {
     fn batch_get_packed(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> PyPackedBatchResult {
         let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || PyPackedBatchResult {
+        py.detach(move || PyPackedBatchResult {
             inner: inner.batch_get_packed(&keys),
         })
     }
@@ -3780,7 +3778,7 @@ impl PyStore {
                 this.namespaced_keys(keys),
             )
         };
-        let inner = py.allow_threads(move || store.batch_get_session_view(&session_prefix, &keys));
+        let inner = py.detach(move || store.batch_get_session_view(&session_prefix, &keys));
         Py::new(
             py,
             PySessionReadBatch {
@@ -3805,7 +3803,7 @@ impl PyStore {
             )
         };
         let _ = slf.borrow().namespaced_key_ref(session_prefix.as_ref());
-        let inner = py.allow_threads(move || store.batch_get_view(&keys));
+        let inner = py.detach(move || store.batch_get_view(&keys));
         Py::new(
             py,
             PyReadBatch {
@@ -3822,7 +3820,7 @@ impl PyStore {
         layer_index: u32,
         block_hashes: Vec<PyBackedBytes>,
         block_ids: Vec<usize>,
-        kv_layer: PyObject,
+        kv_layer: Py<PyAny>,
     ) -> PyResult<(usize, usize, usize, bool)> {
         let target_count = block_hashes.len().min(block_ids.len());
         if target_count == 0 {
@@ -3840,7 +3838,7 @@ impl PyStore {
             )
         };
         let _ = slf.borrow().namespaced_key_ref(session_prefix.as_ref());
-        let inner = py.allow_threads(move || store.batch_get_view(&keys));
+        let inner = py.detach(move || store.batch_get_view(&keys));
         let batch = Py::new(
             py,
             PyReadBatch {
@@ -3884,7 +3882,7 @@ impl PyStore {
         layer_indices: Vec<u32>,
         block_hashes: Vec<PyBackedBytes>,
         block_ids: Vec<usize>,
-        kv_layers: Vec<PyObject>,
+        kv_layers: Vec<Py<PyAny>>,
     ) -> PyResult<Vec<VllmLayerRestoreSummary>> {
         if layer_indices.len() != kv_layers.len() {
             return Err(PyValueError::new_err(format!(
@@ -3914,7 +3912,7 @@ impl PyStore {
             (Arc::clone(&this.inner), this.namespaced_keys(keys))
         };
         let _ = slf.borrow().namespaced_key_ref(session_prefix.as_ref());
-        let inner = py.allow_threads(move || store.batch_get_view(&keys));
+        let inner = py.detach(move || store.batch_get_view(&keys));
         let batch = Py::new(
             py,
             PyReadBatch {
@@ -3974,7 +3972,7 @@ impl PyStore {
         let session_prefix = self.namespaced_key(session_prefix);
         let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || {
+        py.detach(move || {
             let packed = inner.batch_get_session_packed(&session_prefix, &keys);
             (packed.total_bytes(), packed.all_hit())
         })
@@ -4000,7 +3998,7 @@ impl PyStore {
         let layer_count = layer_indices.len();
         let _ = self.namespaced_key_ref(session_prefix.as_ref());
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || {
+        py.detach(move || {
             let packed = inner.batch_get_packed(&keys);
             let mut matched_blocks = 0usize;
             for block_lengths in packed.lengths.chunks(layer_count) {
@@ -4093,7 +4091,7 @@ impl PyStore {
         cuda.device_ordinal = device_ordinal;
         let inner = Arc::clone(&self.inner);
         let ticket = py
-            .allow_threads(move || {
+            .detach(move || {
                 inner.submit_vllm_paged_restore_with_path(spec, cuda, cpu_fallback, path_version)
             })
             .map_err(runtime_error_to_py)?;
@@ -4177,7 +4175,7 @@ impl PyStore {
         cuda.device_ordinal = device_ordinal;
         let inner = Arc::clone(&self.inner);
         let report = py
-            .allow_threads(move || {
+            .detach(move || {
                 inner.restore_vllm_paged_with_path(spec, cuda, cpu_fallback, path_version)
             })
             .map_err(runtime_error_to_py)?;
@@ -4188,7 +4186,7 @@ impl PyStore {
     fn batch_get_stats(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> (usize, bool) {
         let keys = self.namespaced_keys(keys);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || {
+        py.detach(move || {
             let packed = inner.batch_get_packed(&keys);
             (packed.total_bytes(), packed.all_hit())
         })
@@ -4197,13 +4195,13 @@ impl PyStore {
     fn delete(&self, py: Python<'_>, key: Vec<u8>) -> bool {
         let key = self.namespaced_key(key);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.delete(&key))
+        py.detach(move || inner.delete(&key))
     }
 
     fn exists(&self, py: Python<'_>, key: Vec<u8>) -> bool {
         let key = self.namespaced_key(key);
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.exists(&key))
+        py.detach(move || inner.exists(&key))
     }
 
     fn len(&self) -> usize {
@@ -4212,7 +4210,7 @@ impl PyStore {
 
     fn process_maintenance(&self, py: Python<'_>) -> usize {
         let inner = Arc::clone(&self.inner);
-        py.allow_threads(move || inner.process_maintenance())
+        py.detach(move || inner.process_maintenance())
     }
 
     fn export_metrics_prometheus(&self) -> PyResult<String> {
@@ -4284,7 +4282,7 @@ impl PyStore {
             let shard_ops = PyDict::new(py);
             for metric in snapshot.shard_ops {
                 let nested = match shard_ops.get_item(metric.shard_id)? {
-                    Some(existing) => existing.downcast_into::<PyDict>()?,
+                    Some(existing) => existing.cast_into::<PyDict>()?,
                     None => {
                         let created = PyDict::new(py);
                         shard_ops.set_item(metric.shard_id, &created)?;
@@ -4347,7 +4345,7 @@ impl PyDashMapStore {
     fn set(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>, ttl: Option<u64>) {
         let expire_at_ms =
             ttl.map(|seconds| now_millis().saturating_add(seconds.saturating_mul(1_000)));
-        py.allow_threads(|| {
+        py.detach(|| {
             self.inner.insert(
                 key,
                 DashEntry {
@@ -4362,7 +4360,7 @@ impl PyDashMapStore {
     fn batch_set(&self, py: Python<'_>, items: Vec<(Vec<u8>, Vec<u8>)>, ttl: Option<u64>) {
         let expire_at_ms =
             ttl.map(|seconds| now_millis().saturating_add(seconds.saturating_mul(1_000)));
-        py.allow_threads(|| {
+        py.detach(|| {
             for (key, value) in items {
                 self.inner.insert(
                     key,
@@ -4376,34 +4374,34 @@ impl PyDashMapStore {
     }
 
     fn get(&self, py: Python<'_>, key: Vec<u8>) -> Option<Vec<u8>> {
-        py.allow_threads(|| self.get_inner(&key))
+        py.detach(|| self.get_inner(&key))
     }
 
     fn batch_get(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> Vec<Option<Vec<u8>>> {
-        py.allow_threads(|| keys.into_iter().map(|key| self.get_inner(&key)).collect())
+        py.detach(|| keys.into_iter().map(|key| self.get_inner(&key)).collect())
     }
 
     /// Returns one packed result object for a generic batch.
     fn batch_get_packed(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> PyPackedBatchResult {
-        py.allow_threads(|| PyPackedBatchResult {
+        py.detach(|| PyPackedBatchResult {
             inner: self.build_packed_batch(keys),
         })
     }
 
     /// Benchmark-oriented fast path that avoids building Python result objects.
     fn batch_get_stats(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> (usize, bool) {
-        py.allow_threads(|| {
+        py.detach(|| {
             let packed = self.build_packed_batch(keys);
             (packed.total_bytes(), packed.all_hit())
         })
     }
 
     fn delete(&self, py: Python<'_>, key: Vec<u8>) -> bool {
-        py.allow_threads(|| self.inner.remove(&key).is_some())
+        py.detach(|| self.inner.remove(&key).is_some())
     }
 
     fn exists(&self, py: Python<'_>, key: Vec<u8>) -> bool {
-        py.allow_threads(|| self.get_inner(&key).is_some())
+        py.detach(|| self.get_inner(&key).is_some())
     }
 
     fn len(&self) -> usize {
@@ -4411,7 +4409,7 @@ impl PyDashMapStore {
     }
 
     fn process_maintenance(&self, py: Python<'_>) -> usize {
-        py.allow_threads(|| {
+        py.detach(|| {
             let now_ms = now_millis();
             let expired = self
                 .inner
@@ -4834,7 +4832,7 @@ thread_local! {
         RefCell::new(FastHashMap::default());
 }
 
-static LMCACHE_PYTHON_SYMBOLS: GILOnceCell<LmcachePythonSymbols> = GILOnceCell::new();
+static LMCACHE_PYTHON_SYMBOLS: PyOnceLock<LmcachePythonSymbols> = PyOnceLock::new();
 
 struct LmcacheMetadataBinaryCacheEntry {
     owner: Py<PyAny>,
@@ -4975,7 +4973,7 @@ fn decode_lmcache_record_v2_cached(
     })
 }
 
-fn encode_lmcache_engine_key_bytes(py: Python<'_>, keys: &[PyObject]) -> PyResult<Vec<Vec<u8>>> {
+fn encode_lmcache_engine_key_bytes(py: Python<'_>, keys: &[Py<PyAny>]) -> PyResult<Vec<Vec<u8>>> {
     let mut encoded = Vec::with_capacity(keys.len());
     for key in keys {
         let key_string = key
@@ -4989,7 +4987,7 @@ fn encode_lmcache_engine_key_bytes(py: Python<'_>, keys: &[PyObject]) -> PyResul
 
 fn encode_lmcache_engine_keys(
     py: Python<'_>,
-    keys: &[PyObject],
+    keys: &[Py<PyAny>],
     key_prefix: Option<&[u8]>,
 ) -> PyResult<PreparedLmcacheKeys> {
     let encoded = namespace_owned_keys(key_prefix, encode_lmcache_engine_key_bytes(py, keys)?);
@@ -4998,8 +4996,8 @@ fn encode_lmcache_engine_keys(
 
 fn encode_lmcache_put_batch(
     py: Python<'_>,
-    keys: &[PyObject],
-    objs: &[PyObject],
+    keys: &[Py<PyAny>],
+    objs: &[Py<PyAny>],
     key_prefix: Option<&[u8]>,
 ) -> PyResult<EncodedLmcachePutBatch> {
     let encoded_keys = namespace_owned_keys(key_prefix, encode_lmcache_engine_key_bytes(py, keys)?);
@@ -5009,7 +5007,7 @@ fn encode_lmcache_put_batch(
 fn encode_lmcache_put_batch_from_encoded_keys(
     py: Python<'_>,
     keys: &[Vec<u8>],
-    objs: &[PyObject],
+    objs: &[Py<PyAny>],
 ) -> PyResult<EncodedLmcachePutBatch> {
     if keys.len() != objs.len() {
         return Err(PyValueError::new_err(format!(
@@ -5046,7 +5044,7 @@ fn encode_lmcache_put_batch_from_encoded_keys(
 fn encode_lmcache_put_batch_from_encoded_parts(
     py: Python<'_>,
     keys: &[Vec<u8>],
-    payloads: &[PyObject],
+    payloads: &[Py<PyAny>],
     metadata_blobs: &[PyBackedBytes],
 ) -> PyResult<EncodedLmcachePutBatch> {
     if keys.len() != payloads.len() || keys.len() != metadata_blobs.len() {
@@ -5193,7 +5191,7 @@ fn prepare_lmcache_put_batch_from_pybacked_parts(
 fn encode_lmcache_put_batch_from_prepared_parts(
     py: Python<'_>,
     prepared: &PreparedLmcachePutBatch,
-    payloads: &[PyObject],
+    payloads: &[Py<PyAny>],
 ) -> PyResult<EncodedLmcachePutBatch> {
     if prepared.keys.len() != payloads.len() {
         return Err(PyValueError::new_err(format!(
@@ -5290,7 +5288,7 @@ fn encode_lmcache_memory_obj(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult
 
 fn extract_lmcache_memory_obj_bytes_payloads(
     py: Python<'_>,
-    objs: &[PyObject],
+    objs: &[Py<PyAny>],
 ) -> PyResult<Vec<PyBackedBytes>> {
     let mut payloads = Vec::with_capacity(objs.len());
     for obj in objs {
@@ -5601,9 +5599,9 @@ fn build_lmcache_memory_objs(
     slf: &Bound<'_, PyStore>,
     py: Python<'_>,
     keys: Arc<PreparedLmcacheKeys>,
-) -> PyResult<Vec<Option<PyObject>>> {
+) -> PyResult<Vec<Option<Py<PyAny>>>> {
     let store = Arc::clone(&slf.borrow().inner);
-    let prepared = py.allow_threads(move || prepare_lmcache_batch(store.as_ref(), &keys))?;
+    let prepared = py.detach(move || prepare_lmcache_batch(store.as_ref(), &keys))?;
     let symbols = lmcache_python_symbols(py)?;
     let batch = Py::new(
         py,
@@ -5642,7 +5640,7 @@ fn build_lmcache_record_batch(
     keys: Arc<PreparedLmcacheKeys>,
 ) -> PyResult<Py<PyLmcacheRecordBatch>> {
     let store = Arc::clone(&slf.borrow().inner);
-    let prepared = py.allow_threads(move || prepare_lmcache_batch(store.as_ref(), &keys))?;
+    let prepared = py.detach(move || prepare_lmcache_batch(store.as_ref(), &keys))?;
     let batch = Py::new(
         py,
         PyReadBatch {
@@ -5821,7 +5819,7 @@ fn build_lmcache_metadata(
     py: Python<'_>,
     metadata: &DecodedLmcacheMetadata,
     symbols: &LmcachePythonSymbols,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let template = cached_lmcache_metadata_template(py, metadata, symbols)?;
     let torch_tensor_fn = symbols.torch_tensor_fn.bind(py);
     let torch_int64 = symbols.torch_int64.bind(py);
@@ -5859,7 +5857,7 @@ fn build_torch_size(
     py: Python<'_>,
     torch_size_cls: &Bound<'_, PyAny>,
     dims: &[i64],
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     Ok(torch_size_cls
         .call1((dims.to_vec(),))?
         .into_pyobject(py)?
@@ -5870,7 +5868,7 @@ fn build_torch_dtype(
     py: Python<'_>,
     torch_module: &Bound<'_, PyModule>,
     raw: Option<&[u8]>,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyAny>> {
     let Some(raw) = raw else {
         return Ok(py.None());
     };

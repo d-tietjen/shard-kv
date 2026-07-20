@@ -42,6 +42,8 @@ const MAX_VECTOR_DIMENSIONS: usize = 65_536;
 const MAX_VECTOR_SET_ENTRIES: usize = 1_000_000;
 const MAX_HNSW_M: usize = 1_024;
 const MAX_HNSW_EF_CONSTRUCTION: usize = 1_000_000;
+const MAX_VECTOR_RESPONSE_ITEMS: usize = 65_536;
+const MAX_VECTOR_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 macro_rules! define_vector_command {
     ($type:ident, $static_name:ident, $name:literal, $mutates:expr) => {
@@ -753,7 +755,7 @@ impl crate::commands::redis::RedisCommand for VEmb {
             VectorLookupProjection::VectorAndGovernance,
         ) {
             Ok(VectorEntryLookup::Found(snapshot))
-                if governance_mutation_authorized(
+                if governance_read_authorized(
                     snapshot.governance.as_deref(),
                     expected_governance.as_deref(),
                 ) =>
@@ -795,7 +797,7 @@ impl crate::commands::redis::RedisCommand for VGetAttr {
             VectorLookupProjection::AttributesAndGovernance,
         ) {
             Ok(VectorEntryLookup::Found(snapshot))
-                if governance_mutation_authorized(
+                if governance_read_authorized(
                     snapshot.governance.as_deref(),
                     expected_governance.as_deref(),
                 ) =>
@@ -894,7 +896,7 @@ impl crate::commands::redis::RedisCommand for VIsMember {
         };
         match vector_lookup_entry(store, key, element, VectorLookupProjection::Governance) {
             Ok(VectorEntryLookup::Found(snapshot))
-                if governance_mutation_authorized(
+                if governance_read_authorized(
                     snapshot.governance.as_deref(),
                     expected_governance.as_deref(),
                 ) =>
@@ -1247,8 +1249,7 @@ impl crate::commands::redis::RedisCommand for VSim {
         if parsed.vector.len() != set.dim {
             return error("ERR vector dimension mismatch");
         }
-        let has_governed_entries = set.entries.iter().any(|entry| entry.governance.is_some());
-        let scored = if parsed.truth || parsed.filter.is_some() || has_governed_entries {
+        let scored = if parsed.truth || parsed.filter.is_some() {
             exact_vector_scores(
                 &set,
                 &parsed.vector,
@@ -1262,10 +1263,16 @@ impl crate::commands::redis::RedisCommand for VSim {
                 &parsed.vector,
                 parsed.count,
                 parsed.ef_search.unwrap_or(DEFAULT_HNSW_EF_SEARCH),
+                &parsed.allowed_governance,
             )
         };
         let mut scored = scored;
         scored.truncate(parsed.count);
+        if vsim_response_bytes(&scored, &parsed)
+            .is_none_or(|bytes| bytes > MAX_VECTOR_RESPONSE_BYTES)
+        {
+            return error("ERR VSIM response exceeds the server byte limit");
+        }
         if !parsed.with_scores && !parsed.with_attribs && !parsed.with_governance {
             return array_bulk(
                 scored
@@ -1329,6 +1336,10 @@ fn governance_mutation_authorized(stored: Option<&[u8]>, expected: Option<&[u8]>
         Some(stored) => expected == Some(stored),
         None => expected.is_none(),
     }
+}
+
+fn governance_read_authorized(stored: Option<&[u8]>, expected: Option<&[u8]>) -> bool {
+    stored.is_none() || expected == stored
 }
 
 fn governance_visible(stored: Option<&[u8]>, allowed: &[Bytes]) -> bool {
@@ -2134,6 +2145,11 @@ fn parse_vsim_args(args: &[&[u8]], set: &VectorSetState) -> Result<VSimArgs, Fra
     if !governance_visible(source_governance.as_deref(), &allowed_governance) {
         return Err(error("ERR no such element"));
     }
+    let tuple_width =
+        1 + usize::from(with_scores) + usize::from(with_attribs) + usize::from(with_governance);
+    if count > MAX_VECTOR_RESPONSE_ITEMS / tuple_width {
+        return Err(error("ERR VSIM count exceeds the server result limit"));
+    }
     Ok(VSimArgs {
         vector,
         count,
@@ -2297,6 +2313,7 @@ fn hnsw_search<'a>(
     query: &[f64],
     count: usize,
     ef_search: usize,
+    allowed_governance: &[Bytes],
 ) -> Vec<(&'a VectorEntry, f64)> {
     if set.entries.is_empty() {
         return Vec::new();
@@ -2356,15 +2373,57 @@ fn hnsw_search<'a>(
         }
     }
 
+    let mut authorized = visited
+        .iter()
+        .filter(|index| {
+            governance_visible(
+                set.entries[**index].governance.as_deref(),
+                allowed_governance,
+            )
+        })
+        .count();
+    if authorized < count {
+        for (index, was_seen) in seen.iter_mut().enumerate() {
+            if *was_seen
+                || !governance_visible(set.entries[index].governance.as_deref(), allowed_governance)
+            {
+                continue;
+            }
+            *was_seen = true;
+            visited.push(index);
+            authorized += 1;
+            if authorized >= count {
+                break;
+            }
+        }
+    }
+
     sorted_scores(
         visited
             .into_iter()
-            .map(|index| {
+            .filter_map(|index| {
                 let entry = &set.entries[index];
-                (entry, cosine_similarity(&entry.vector, query))
+                governance_visible(entry.governance.as_deref(), allowed_governance)
+                    .then(|| (entry, cosine_similarity(&entry.vector, query)))
             })
             .collect(),
     )
+}
+
+fn vsim_response_bytes(scored: &[(&VectorEntry, f64)], parsed: &VSimArgs) -> Option<usize> {
+    scored.iter().try_fold(0usize, |total, (entry, _)| {
+        let mut bytes = entry.element.len().checked_add(16)?;
+        if parsed.with_scores {
+            bytes = bytes.checked_add(32)?;
+        }
+        if parsed.with_attribs {
+            bytes = bytes.checked_add(entry.attributes.as_ref().map_or(0, Vec::len) + 16)?;
+        }
+        if parsed.with_governance {
+            bytes = bytes.checked_add(entry.governance.as_ref().map_or(0, Vec::len) + 16)?;
+        }
+        total.checked_add(bytes)
+    })
 }
 
 fn build_uid_index(set: &VectorSetState) -> Vec<Option<usize>> {
@@ -2444,6 +2503,11 @@ fn decode_vector_set(existing: Option<&[u8]>) -> Result<VectorSetState, ()> {
 
 pub(crate) fn validate_vector_set_bytes(existing: &[u8]) -> Result<(), ()> {
     decode_vector_set(Some(existing)).map(|_| ())
+}
+
+pub(crate) fn vector_set_contains_governance(existing: &[u8]) -> Result<bool, ()> {
+    decode_vector_set_entries(Some(existing))
+        .map(|set| set.entries.iter().any(|entry| entry.governance.is_some()))
 }
 
 fn decode_vector_set_entries(existing: Option<&[u8]>) -> Result<VectorSetState, ()> {
@@ -4144,6 +4208,23 @@ mod tests {
             ),
             Frame::Array(vec![bulk(b"doc-a".to_vec()), bulk(b"tenant=acme".to_vec()),])
         );
+        assert_eq!(
+            VSim::execute(
+                &store,
+                &[
+                    b"objects",
+                    b"VALUES",
+                    b"2",
+                    b"1",
+                    b"0",
+                    b"COUNT",
+                    b"1",
+                    b"GOVERNANCE",
+                    b"tenant=acme",
+                ],
+            ),
+            Frame::Array(vec![bulk(b"doc-a".to_vec())])
+        );
 
         let denied = VAdd::execute(
             &store,
@@ -4213,6 +4294,72 @@ mod tests {
             VEmb::execute(&store, &[b"objects", b"doc-a"]),
             Frame::Array(_)
         ));
+
+        assert_eq!(
+            VAdd::execute(
+                &store,
+                &[b"objects", b"VALUES", b"2", b"1", b"0", b"public"],
+            ),
+            Frame::Integer(1)
+        );
+        assert!(matches!(
+            VEmb::execute(
+                &store,
+                &[b"objects", b"public", b"GOVERNANCE", b"tenant=beta"],
+            ),
+            Frame::Array(_)
+        ));
+    }
+
+    #[test]
+    fn vsim_bounds_result_items_and_retained_response_bytes() {
+        let store = EmbeddedStore::new(1);
+        assert_eq!(
+            VAdd::execute(&store, &[b"objects", b"VALUES", b"2", b"1", b"0", b"doc-a"],),
+            Frame::Integer(1)
+        );
+        let excessive_count = (MAX_VECTOR_RESPONSE_ITEMS + 1).to_string();
+        assert!(matches!(
+            VSim::execute(
+                &store,
+                &[
+                    b"objects",
+                    b"VALUES",
+                    b"2",
+                    b"1",
+                    b"0",
+                    b"COUNT",
+                    excessive_count.as_bytes(),
+                ],
+            ),
+            Frame::Error(message) if message.contains("result limit")
+        ));
+
+        let entry = VectorEntry {
+            uid: 1,
+            level: 0,
+            element: b"doc-a".to_vec(),
+            vector: vec![1.0, 0.0],
+            attributes: None,
+            governance: Some(vec![b'x'; MAX_VECTOR_GOVERNANCE_BYTES]),
+            links: Vec::new(),
+        };
+        let scored = vec![(&entry, 1.0); 300];
+        let parsed = VSimArgs {
+            vector: vec![1.0, 0.0],
+            count: scored.len(),
+            with_scores: false,
+            with_attribs: false,
+            with_governance: true,
+            allowed_governance: vec![entry.governance.clone().unwrap()],
+            filter: None,
+            ef_search: None,
+            truth: false,
+        };
+        assert!(
+            vsim_response_bytes(&scored, &parsed)
+                .is_some_and(|bytes| bytes > MAX_VECTOR_RESPONSE_BYTES)
+        );
     }
 
     #[test]

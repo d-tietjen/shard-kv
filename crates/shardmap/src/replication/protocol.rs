@@ -759,6 +759,7 @@ where
 pub enum HelloRole {
     Replica = 1,
     ServiceSubscriber = 2,
+    Primary = 3,
 }
 
 impl HelloRole {
@@ -770,6 +771,7 @@ impl HelloRole {
         match value {
             1 => Ok(Self::Replica),
             2 => Ok(Self::ServiceSubscriber),
+            3 => Ok(Self::Primary),
             other => Err(ShardCacheError::Protocol(format!(
                 "unsupported FCRP hello role: {other}"
             ))),

@@ -29,5 +29,5 @@ parking_lot = { workspace = true }
 shardmap = { workspace = true, default-features = false, features = ["sharded"] }
 shardcache-runtime = { path = "../shardcache-runtime", version = "0.7.2" }
 shardcache-client-rs = { workspace = true }
-pyo3 = { version = "0.23", features = ["abi3-py311"] }
+pyo3 = { version = "0.29", features = ["abi3-py311"] }
 xxhash-rust = { workspace = true }
