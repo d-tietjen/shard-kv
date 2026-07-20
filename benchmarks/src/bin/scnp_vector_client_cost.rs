@@ -38,7 +38,7 @@ struct Args {
     #[arg(long, default_value_t = 1_024)]
     entries: usize,
 
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, alias = "dimensions", default_value_t = 16)]
     dims: usize,
 
     #[arg(long, default_value_t = 64)]
@@ -50,10 +50,10 @@ struct Args {
     #[arg(long, default_value_t = 64)]
     ef_search: usize,
 
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, alias = "warmup", default_value_t = 1)]
     warmup_seconds: u64,
 
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, alias = "duration", default_value_t = 5)]
     duration_seconds: u64,
 
     /// Resolve the authentication token from this environment variable.
@@ -362,8 +362,26 @@ fn deterministic_vector(seed: usize, dims: usize) -> Vec<f32> {
         .map(|value| f64::from(*value) * f64::from(*value))
         .sum::<f64>()
         .sqrt();
+    if norm == 0.0 {
+        vector[0] = 1.0;
+        return vector;
+    }
     for value in &mut vector {
         *value = (f64::from(*value) / norm) as f32;
     }
     vector
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_vectors_are_finite_and_nonzero_for_a_full_cycle() {
+        for seed in 0..194 {
+            let vector = deterministic_vector(seed, 16);
+            assert!(vector.iter().all(|value| value.is_finite()));
+            assert!(vector.iter().any(|value| *value != 0.0));
+        }
+    }
 }
