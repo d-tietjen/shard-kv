@@ -13,7 +13,7 @@ cargo run -p shardcache -- --bind-addr 127.0.0.1:6380 --disable-persistence
 Install the binary from crates.io:
 
 ```sh
-cargo install shardcache --version 0.7.1 --locked
+cargo install shardcache --version 0.7.2 --locked
 ```
 
 Install the binary from a checkout:

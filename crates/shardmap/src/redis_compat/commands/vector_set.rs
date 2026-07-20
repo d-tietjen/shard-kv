@@ -8,8 +8,8 @@ use crate::commands::redis::{
 };
 #[cfg(feature = "server")]
 use crate::commands::redis::{
-    write_frame, write_resp_array_header, write_resp_null, write_resp_wrong_arity,
-    write_resp_wrongtype,
+    write_fast_frame, write_frame, write_resp_array_header, write_resp_null,
+    write_resp_wrong_arity, write_resp_wrongtype,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
@@ -444,7 +444,9 @@ fn vector_attribute_validation_cache() -> &'static Mutex<VectorAttributeValidati
 
 impl crate::commands::redis::RedisCommand for VAdd {
     #[cfg(feature = "server")]
-    vector_write_fast_from_resp!();
+    fn write_fast(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_fast_frame(out, &Self::execute(store, args));
+    }
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         let [key, rest @ ..] = args else {
@@ -786,7 +788,9 @@ impl crate::commands::redis::RedisCommand for VIsMember {
 
 impl crate::commands::redis::RedisCommand for VRem {
     #[cfg(feature = "server")]
-    vector_write_fast_from_resp!();
+    fn write_fast(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_fast_frame(out, &Self::execute(store, args));
+    }
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         let [key, element] = args else {
@@ -1075,7 +1079,9 @@ impl crate::commands::redis::RedisCommand for VRange {
 
 impl crate::commands::redis::RedisCommand for VSim {
     #[cfg(feature = "server")]
-    vector_write_fast_from_resp!();
+    fn write_fast(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_vector_array_fast(Self::execute(store, args), out);
+    }
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         let [key, rest @ ..] = args else {
@@ -1486,6 +1492,37 @@ fn write_vector_fast_value(
     let start = ServerWire::begin_fast_value(out);
     write(store, args, out);
     ServerWire::finish_fast_value(out, start);
+}
+
+#[cfg(feature = "server")]
+fn write_vector_array_fast(frame: Frame, out: &mut BytesMut) {
+    let Frame::Array(items) = frame else {
+        write_fast_frame(out, &frame);
+        return;
+    };
+    if items.iter().any(|item| {
+        !matches!(
+            item,
+            Frame::BlobString(_) | Frame::SimpleString(_) | Frame::Null
+        )
+    }) {
+        write_fast_frame(out, &Frame::Array(items));
+        return;
+    }
+    let mut values = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Frame::BlobString(value) => values.push(Some(value)),
+            Frame::SimpleString(value) => values.push(Some(value.into_bytes())),
+            Frame::Null => values.push(None),
+            _ => unreachable!("vector array item shape was validated"),
+        }
+    }
+    let start = ServerWire::begin_fast_array(out, values.len());
+    for value in &values {
+        ServerWire::write_fast_array_item(out, value.as_deref());
+    }
+    ServerWire::finish_fast_array(out, start);
 }
 
 #[cfg(feature = "server")]

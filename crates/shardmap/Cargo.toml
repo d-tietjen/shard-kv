@@ -168,6 +168,7 @@ zstd = { workspace = true }
 [dev-dependencies]
 deterministic-test-env = { path = "../deterministic-test-env" }
 rcgen = "0.14"
+shardcache-client-rs = { workspace = true, features = ["vector"] }
 tempfile = { workspace = true }
 
 # Runtime-agnostic mpsc used by the tokio fanout acceptor. Monoio and tokio

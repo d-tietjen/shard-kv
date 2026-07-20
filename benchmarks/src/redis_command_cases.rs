@@ -524,6 +524,23 @@ pub const REDIS_COMMAND_CASES: &[RedisCommandCase] = &[
     case_with_setup!(
         Vector,
         "VSIM",
+        "VSIM typed object rag",
+        [
+            "VSIM",
+            "$key:vset-sim-typed",
+            "$vector-fp32:16:1",
+            "COUNT",
+            "10",
+            "WITHSCORES",
+            "WITHATTRIBS",
+            "EF",
+            "64"
+        ],
+        [["$vector-fixture:vset-sim-typed:1024:16"]]
+    ),
+    case_with_setup!(
+        Vector,
+        "VSIM",
         "VSIM filter exact",
         [
             "VSIM",

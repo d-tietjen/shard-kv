@@ -15,6 +15,7 @@ Two modes, parallel and independent:
 | `redis_embedded_command_matrix` | Prepared embedded Redis commands, per command | In-process command throughput for the full shardcache Redis command surface |
 | `run-memcache-comparison.sh` | Docker-isolated cache workload | Head-to-head GET/SET/mixed throughput for shardcache server modes vs Memcached |
 | `semantic_cache_matrix` | Pairwise embedding sweep plus lookup latency | Semantic cache F1/FPR across thresholds and unique/cycling lookup latency |
+| `scnp_vector_client_cost` | Typed Rust Object RAG client against SCNP | End-to-end `VSIM COUNT ... WITHSCORES WITHATTRIBS` throughput and latency over fanout or direct-shard transport |
 | `active_sync_cost` | Embedded active-active A/B | Baseline, local causal metadata, installed conflict orderer, and background convergence cost with a final convergence assertion |
 | `active_sync_conflict_cost` | Embedded concurrent-conflict A/B | Admission, convergence throughput, sync latency, conflict counts, and external-orderer calls under guaranteed same-key conflicts |
 | `active_sync_tls_latency` | Cross-host active-sync mTLS | End-to-end write-batch synchronization latency and throughput over the production direct-shard TLS transport |

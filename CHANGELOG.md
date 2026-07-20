@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.2 - 2026-07-19
+
+### Added
+
+- Added the independent `vector` feature to `shardcache-client-rs`, with typed
+  SCNP `PING`, `VADD`, `VSIM COUNT ... WITHSCORES WITHATTRIBS`, and `VREM`
+  methods for fanout, automatically routed direct, and shard-pinned clients.
+- Added FP32 request encoding, typed vector options and results, bounded native
+  array decoding, legacy 0.7.1 RESP-envelope compatibility, explicit connect
+  and operation deadlines, optional token authentication, and existing Rustls
+  client support for typed vector calls.
+- Added a reproducible typed Object RAG benchmark plus matching Redis-compatible
+  and embedded ShardMap vector cases.
+
+### Fixed
+
+- Return native SCNP value, integer, and array responses for typed `PING`,
+  `VADD`, `VREM`, and `VSIM` requests instead of wrapping RESP bytes.
+- Route vector opcodes consistently to the dedicated vector shard on fanout and
+  direct-shard listeners, including keys whose ordinary hash belongs elsewhere.
+- Added command-name/opcode uniqueness coverage to prevent duplicate optional
+  Redis command-table entries.
+
 ## 0.7.1 - 2026-07-17
 
 ### Added

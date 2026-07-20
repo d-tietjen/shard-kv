@@ -10,6 +10,8 @@ use crate::connection::ScnpConnection;
 use crate::error::Result;
 
 pub(crate) mod common;
+#[cfg(any(feature = "redis", feature = "vector"))]
+pub(crate) mod compact;
 pub(crate) mod del;
 pub(crate) mod exists;
 pub(crate) mod expire;
@@ -21,6 +23,8 @@ pub(crate) mod resp;
 pub(crate) mod set;
 pub(crate) mod setex;
 pub(crate) mod ttl;
+#[cfg(feature = "vector")]
+pub(crate) mod vector;
 
 pub(crate) trait ScnpCommand {
     type Output;

@@ -63,6 +63,17 @@ impl ShardCacheDirectRouter {
         }
     }
 
+    /// Computes the pinned route used by Redis vector-set commands.
+    #[cfg(any(feature = "redis", feature = "vector"))]
+    pub(crate) fn route_vector_key(&self, key: &[u8]) -> ShardCacheRoute {
+        let key_hash = hash_key(key);
+        ShardCacheRoute {
+            key_hash,
+            key_tag: hash_key_tag_from_hash(key_hash),
+            shard_id: 0,
+        }
+    }
+
     /// Returns the socket address for `shard_id`.
     pub fn shard_addr(&self, shard_id: usize) -> Result<SocketAddr> {
         if shard_id >= self.shard_count {

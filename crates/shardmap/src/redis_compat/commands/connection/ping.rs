@@ -1,6 +1,8 @@
 #[cfg(feature = "server")]
 use bytes::BytesMut;
 
+#[cfg(feature = "server")]
+use crate::commands::redis::write_fast_frame;
 use crate::commands::redis::{bulk, define_redis_command, simple, write_frame, wrong_arity};
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
@@ -16,6 +18,11 @@ impl crate::commands::redis::RedisCommand for Ping {
             [payload] => bulk((*payload).to_vec()),
             _ => wrong_arity("PING"),
         }
+    }
+
+    #[cfg(feature = "server")]
+    fn write_fast(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_fast_frame(out, &Self::execute(store, args));
     }
 
     #[cfg(feature = "server")]

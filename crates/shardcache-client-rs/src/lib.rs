@@ -16,6 +16,8 @@ pub use client::{
 };
 #[cfg(feature = "redis")]
 pub use commands::redis::{RedisCommandKind, RedisResponse};
+#[cfg(feature = "vector")]
+pub use commands::vector::{VAddOptions, VSimMatch, VSimOptions, VectorQuantization};
 pub use error::{Result, ShardCacheClientError};
 #[cfg(feature = "redis")]
 pub use redis::{Redis, RedisArg, RedisCmd, RedisCommandExecutor};

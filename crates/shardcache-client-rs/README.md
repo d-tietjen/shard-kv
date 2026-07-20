@@ -8,7 +8,7 @@ server ports. This crate is intentionally small and synchronous: one client owns
 one or more TCP connections and is meant to be used directly from worker
 threads.
 
-This is one of the three publishable crates in the 0.5.x release line alongside
+This is one of the three publishable crates in the 0.7.x release line alongside
 `shardmap` and `shardcache`.
 
 ## Install
@@ -17,7 +17,7 @@ Use the published crate from crates.io:
 
 ```toml
 [dependencies]
-shardcache-client-rs = "0.7.1"
+shardcache-client-rs = "0.7.2"
 ```
 
 From a workspace checkout, use a path dependency:
@@ -193,6 +193,64 @@ fn main() -> shardcache_client_rs::Result<()> {
 }
 ```
 
+## Typed Vector Commands
+
+Enable `vector` for Object RAG clients that need native SCNP vector operations
+without enabling the complete optional Redis command API:
+
+```toml
+[dependencies]
+shardcache-client-rs = { version = "0.7.2", features = ["vector"] }
+```
+
+`VSIM` always requests `WITHSCORES WITHATTRIBS`, giving every successful query
+one stable typed result shape. FP32 vectors are encoded directly as
+little-endian binary values. Response bodies and result counts are checked
+before allocation.
+
+```rust,no_run
+use std::time::Duration;
+use shardcache_client_rs::{ShardCacheClient, VAddOptions, VSimOptions};
+
+fn main() -> shardcache_client_rs::Result<()> {
+    let timeout = Duration::from_secs(2);
+    let mut client = ShardCacheClient::connect_with_timeouts_and_auth(
+        "127.0.0.1:6380",
+        timeout,
+        timeout,
+        std::env::var("SHARDCACHE_TOKEN").ok().as_deref().map(str::as_bytes),
+    )?;
+
+    client.ping()?;
+    client.vadd(
+        b"objects",
+        b"doc:42",
+        &[0.25, 0.5, 0.75],
+        VAddOptions::new().attributes(br#"{"source":"catalog"}"#),
+    )?;
+    let matches = client.vsim(
+        b"objects",
+        &[0.25, 0.5, 0.75],
+        VSimOptions::new().count(10).ef_search(64),
+    )?;
+    assert_eq!(matches[0].element, b"doc:42");
+    assert!(client.vrem(b"objects", b"doc:42")?);
+    Ok(())
+}
+```
+
+The same methods are available on `ShardCacheDirectClient` and
+`ShardCacheDirectShardClient`. Vector sets are pinned to direct shard 0; the
+automatic direct client selects that connection regardless of the ordinary key
+hash, and an individual shard client rejects vector calls unless it is attached
+to shard 0.
+
+Add the `tls` feature and use `connect_with_timeouts_auth_and_tls` on a fanout
+client or router when the connection crosses a trust boundary. Token auth and
+operation deadlines apply before any typed vector request is sent. The 0.7.2
+client accepts native 0.7.2 responses and the RESP-enveloped vector responses
+returned by 0.7.1 servers for rolling upgrades.
+
 ## Native Redis Commands
 
 Enable the optional `redis` feature to use native SCNP Redis commands. Commands
@@ -203,7 +261,7 @@ building RESP request frames in user code.
 
 ```toml
 [dependencies]
-shardcache-client-rs = { version = "0.7.1", features = ["redis"] }
+shardcache-client-rs = { version = "0.7.2", features = ["redis"] }
 ```
 
 The primary API is the first-party Redis namespace on the client. Common
@@ -313,6 +371,7 @@ This release supports the native hot-path commands currently implemented by
 - `EXISTS`
 - `TTL`, returning Redis-compatible seconds
 - `EXPIRE` with millisecond TTLs
+- typed `PING`, `VADD`, `VSIM`, and `VREM` with the `vector` feature
 
 With the `redis` feature enabled, it also supports the Redis-compatible command
 surface through `client.redis()` on the fanout client. The low-level

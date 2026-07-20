@@ -9,6 +9,13 @@ The complete Redis 8 suite is registered as `redis-v8` and also includes the
 Redis 8 hash helpers `HGETDEL`, `HGETEX`, and `HSETEX`. Use `redis-v8` for full
 coverage runs and `redis-v8-vector` for focused vector-only sweeps.
 
+The `VSIM typed object rag` case is the release comparison for the 0.7.2
+client. It searches a 1,024-entry, 16-dimensional FP32 vector set with
+`COUNT 10 WITHSCORES WITHATTRIBS EF 64`. The command-matrix driver sends the
+same binary vector and options to Redis, shardcache RESP, shared-port SCNP, and
+direct-shard SCNP. This isolates server and transport cost while retaining the
+response shape required by Object RAG.
+
 ## Server Summary
 
 The current server vector sweeps used the standardized server benchmark runner
@@ -64,3 +71,29 @@ Compare rows only when `suite`, `category`, `case`, `clients`,
 `pipeline_depth`, `vcpus`, and `resolved_plan_id` match. Direct SCNP rows are
 best used for routed command subsets; shared-port RESP/SCNP rows are the full
 protocol comparison.
+
+## Typed Rust Client
+
+The typed client driver performs setup with `VADD`, then repeatedly calls the
+typed `VSIM` API and validates every native response. Run fanout and direct
+transport separately so their connection and routing costs remain visible:
+
+```bash
+cargo build --release -p shardcache-benchmarks \
+  --features typed-vector-client --bin scnp_vector_client_cost
+
+target/release/scnp_vector_client_cost \
+  --addr 127.0.0.1:6380 --mode fanout --workers 1 \
+  --entries 1024 --dimensions 16 --count 10 --ef 64 \
+  --warmup 2 --duration 10
+
+target/release/scnp_vector_client_cost \
+  --addr 127.0.0.1:6381 --mode direct --workers 1 \
+  --entries 1024 --dimensions 16 --count 10 --ef 64 \
+  --warmup 2 --duration 10
+```
+
+For direct mode, `--addr` is shard 0's direct listener. Vector commands are
+intentionally pinned there by both the client and server. Set
+`SHARDCACHE_AUTH_TOKEN` when the server requires authentication; the driver
+uses the production typed auth and request-deadline path.

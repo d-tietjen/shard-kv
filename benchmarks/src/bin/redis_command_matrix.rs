@@ -1752,6 +1752,13 @@ fn scnp_route_metadata(
     };
 
     let first_hash = xxh3_64(route_keys[0]);
+    if kind.uses_vector_shard() {
+        return Some(ShardCacheRouteMetadata {
+            key_hash: first_hash,
+            shard_lane: 0,
+            key_tag: first_hash >> 56,
+        });
+    }
     let shift = shift_for(namespace.key_shards);
     let shard_lane = stripe_index(first_hash, shift);
     if route_keys
@@ -1872,6 +1879,12 @@ fn append_rewritten_parts(
         out.extend(values.into_iter().map(String::into_bytes));
         return Ok(());
     }
+    if let Some(spec) = part.strip_prefix("$vector-fp32:") {
+        let (dim, seed) = parse_vector_values_spec(spec)?;
+        out.push(b"FP32".to_vec());
+        out.push(vector_fp32(dim, seed));
+        return Ok(());
+    }
     if let Some(count) = part.strip_prefix("$kvpairs:") {
         for index in 0..parse_token_count("$kvpairs", count)? {
             out.push(rewrite_key(&format!("ks:{index:06}"), namespace)?);
@@ -1905,6 +1918,15 @@ fn push_vector_values(parts: &mut Vec<String>, dim: usize, seed: usize) {
     for component in 0..dim {
         parts.push(format!("{:.6}", vector_component(seed, component)));
     }
+}
+
+fn vector_fp32(dim: usize, seed: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(dim.saturating_mul(4));
+    for index in 0..dim {
+        let value = vector_component(seed, index) as f32;
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
 }
 
 fn vector_component(seed: usize, component: usize) -> f64 {

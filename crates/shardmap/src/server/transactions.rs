@@ -509,6 +509,10 @@ pub(super) fn command_shards(store: &EmbeddedStore, parts: &[&[u8]]) -> Vec<usiz
 pub(super) fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'_>) -> Vec<usize> {
     match &request.command {
         FastCommand::RespCommand { parts } => command_shards(store, parts),
+        #[cfg(feature = "redis")]
+        FastCommand::RedisCommand { kind, .. } if kind.uses_vector_shard() => {
+            vec![store.vector_shard_id()]
+        }
         command => route_keys_to_shards(store, command.route_keys()),
     }
 }
