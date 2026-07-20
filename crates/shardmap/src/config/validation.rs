@@ -892,11 +892,96 @@ impl<'a> ReplicationValidation<'a> {
                     self.config.auth_token.as_deref(),
                     "replication.auth_token must not be empty",
                 )?;
+                ConfigCheck::require(
+                    self.config.auth_token.is_none() || self.config.auth_token_path.is_none(),
+                    "configure only one of replication.auth_token or auth_token_path",
+                )?;
+                ConfigCheck::require(
+                    self.config.previous_auth_token_path.is_none()
+                        || self.config.auth_token_path.is_some(),
+                    "replication.previous_auth_token_path requires auth_token_path",
+                )?;
+                self.validate_tls()?;
                 self.validate_batch_limits()?;
                 self.validate_export_limits()?;
                 self.validate_timeouts()
             }
         }
+    }
+
+    fn validate_tls(&self) -> Result<()> {
+        let server = &self.config.tls_server;
+        let client = &self.config.tls_client;
+        if server.enabled || client.enabled {
+            #[cfg(not(feature = "scnp-tls"))]
+            return Err(ShardCacheError::Config(
+                "replication TLS requires the scnp-tls feature".into(),
+            ));
+        }
+        #[cfg(feature = "scnp-tls")]
+        {
+            if server.enabled {
+                ConfigCheck::require(
+                    !server.cert_path.as_os_str().is_empty()
+                        && !server.key_path.as_os_str().is_empty()
+                        && server.client_ca_path.is_some(),
+                    "replication.tls_server requires cert_path, key_path, and client_ca_path for mTLS",
+                )?;
+                ConfigCheck::require(
+                    server.handshake_timeout_ms > 0
+                        && server.reload_interval_ms > 0
+                        && server.max_concurrent_handshakes > 0,
+                    "replication TLS handshake and reload limits must be > 0",
+                )?;
+                ConfigCheck::require(
+                    self.config.max_replicas <= server.max_concurrent_handshakes,
+                    "replication max_replicas must not exceed TLS max_concurrent_handshakes",
+                )?;
+                ConfigCheck::require(
+                    server.client_cert_sha256.iter().all(|fingerprint| {
+                        let compact = fingerprint.replace(':', "");
+                        compact.len() == 64 && compact.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    }),
+                    "replication TLS client fingerprints must be SHA-256 hexadecimal values",
+                )?;
+            }
+            if client.enabled {
+                ConfigCheck::require(
+                    !client.ca_path.as_os_str().is_empty()
+                        && client
+                            .server_name
+                            .as_deref()
+                            .is_some_and(|name| !name.trim().is_empty()),
+                    "replication.tls_client requires ca_path and server_name",
+                )?;
+                ConfigCheck::require(
+                    client.client_cert_path.is_some() && client.client_key_path.is_some(),
+                    "replication.tls_client requires a client certificate and key for mTLS",
+                )?;
+            }
+        }
+        let primary_non_loopback = self.config.role == ReplicationRole::Primary
+            && !is_loopback_replication_endpoint(&self.config.bind_addr);
+        let replica_non_loopback = self.config.role == ReplicationRole::Replica
+            && self
+                .config
+                .replica_of
+                .as_deref()
+                .is_some_and(|address| !is_loopback_replication_endpoint(address));
+        ConfigCheck::require(
+            !primary_non_loopback || server.enabled,
+            "non-loopback replication primary listeners require TLS",
+        )?;
+        ConfigCheck::require(
+            !replica_non_loopback || client.enabled,
+            "non-loopback replication replica connections require TLS",
+        )?;
+        ConfigCheck::require(
+            !(primary_non_loopback || replica_non_loopback)
+                || self.config.auth_token.is_some()
+                || self.config.auth_token_path.is_some(),
+            "non-loopback replication requires token authentication in addition to mTLS",
+        )
     }
 
     fn validate_role(&self) -> Result<()> {
@@ -951,6 +1036,15 @@ impl<'a> ReplicationValidation<'a> {
             "replication timeouts must be > 0",
         )
     }
+}
+
+fn is_loopback_replication_endpoint(endpoint: &str) -> bool {
+    endpoint
+        .parse::<std::net::SocketAddr>()
+        .is_ok_and(|address| address.ip().is_loopback())
+        || endpoint
+            .strip_prefix("localhost:")
+            .is_some_and(|port| port.parse::<u16>().is_ok())
 }
 
 impl ConfigCheck {

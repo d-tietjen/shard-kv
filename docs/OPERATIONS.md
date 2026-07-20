@@ -29,6 +29,14 @@ replicas. Review [`RELEASE_0_7.md`](RELEASE_0_7.md) for measured overhead and
 [`ACTIVE_ACTIVE_REPLICATION.md`](ACTIVE_ACTIVE_REPLICATION.md) for consistency,
 membership, security, and recovery requirements before enabling it.
 
+Native vector read-replica FCRP is a separate single-primary transport. FCRP
+v2 requires both peers to run 0.7.2. On non-loopback addresses configure TLS
+1.3 mTLS on both sides and a replication token. Prefer
+`replication.auth_token_path`; during rotation, place the new token in that
+file and the retiring token in `previous_auth_token_path`, reconnect replicas,
+then remove the previous token. Certificate and CA files are loaded for each
+new connection, so reconnect after atomically replacing them.
+
 `redis-server` implies `server`, `redis`, `redis-functions`, and
 `redis-modules`. Embedded-only builds stay separate from the Redis-compatible
 server feature set; guard this with `./scripts/check-feature-matrix.sh`.

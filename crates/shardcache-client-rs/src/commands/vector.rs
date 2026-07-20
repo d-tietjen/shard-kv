@@ -16,6 +16,9 @@ const DEFAULT_VSIM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TYPED_ARRAY_ITEMS: usize = 65_536;
 const MAX_VSIM_RESULTS: usize = MAX_TYPED_ARRAY_ITEMS / 3;
 const MAX_VECTOR_GOVERNANCE_BYTES: usize = 64 * 1024;
+const MAX_VECTOR_DIMENSIONS: usize = 65_536;
+const MAX_HNSW_M: usize = 1_024;
+const MAX_HNSW_EF_CONSTRUCTION: usize = 1_000_000;
 
 /// Vector quantization selected when a vector set is created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +43,8 @@ impl VectorQuantization {
 pub struct VAddOptions<'a> {
     attributes: Option<&'a [u8]>,
     governance: Option<&'a [u8]>,
+    expected_governance: Option<&'a [u8]>,
+    clear_governance: bool,
     quantization: Option<VectorQuantization>,
     reduce_dim: Option<usize>,
     hnsw_m: Option<usize>,
@@ -61,6 +66,18 @@ impl<'a> VAddOptions<'a> {
     /// Stores opaque governance metadata alongside this vector element.
     pub fn governance_metadata(mut self, metadata: &'a [u8]) -> Self {
         self.governance = Some(metadata);
+        self
+    }
+
+    /// Requires an existing governed element to carry this exact label.
+    pub fn if_governance(mut self, metadata: &'a [u8]) -> Self {
+        self.expected_governance = Some(metadata);
+        self
+    }
+
+    /// Clears governance after `if_governance` authorizes the current label.
+    pub fn clear_governance(mut self, enabled: bool) -> Self {
+        self.clear_governance = enabled;
         self
     }
 
@@ -101,6 +118,7 @@ pub struct VSimOptions<'a> {
     ef_search: Option<usize>,
     truth: bool,
     with_governance: bool,
+    allowed_governance: Vec<&'a [u8]>,
     max_response_bytes: usize,
 }
 
@@ -112,6 +130,7 @@ impl Default for VSimOptions<'_> {
             ef_search: None,
             truth: false,
             with_governance: false,
+            allowed_governance: Vec::new(),
             max_response_bytes: DEFAULT_VSIM_RESPONSE_BYTES,
         }
     }
@@ -145,6 +164,13 @@ impl<'a> VSimOptions<'a> {
     /// Includes opaque governance metadata in every returned match.
     pub fn with_governance(mut self, enabled: bool) -> Self {
         self.with_governance = enabled;
+        self
+    }
+
+    /// Allows matches carrying exactly this opaque governance label.
+    /// Governed embeddings are hidden unless their label is allowed.
+    pub fn allow_governance(mut self, metadata: &'a [u8]) -> Self {
+        self.allowed_governance.push(metadata);
         self
     }
 
@@ -230,6 +256,19 @@ impl VAdd {
         validate_positive("VADD REDUCE", options.reduce_dim)?;
         validate_positive("VADD M", options.hnsw_m)?;
         validate_positive("VADD EF", options.ef_construction)?;
+        if options.hnsw_m.is_some_and(|value| value > MAX_HNSW_M) {
+            return Err(ShardCacheClientError::Config(format!(
+                "VADD M exceeds the client limit of {MAX_HNSW_M}"
+            )));
+        }
+        if options
+            .ef_construction
+            .is_some_and(|value| value > MAX_HNSW_EF_CONSTRUCTION)
+        {
+            return Err(ShardCacheClientError::Config(format!(
+                "VADD EF exceeds the client limit of {MAX_HNSW_EF_CONSTRUCTION}"
+            )));
+        }
         if options
             .governance
             .is_some_and(|metadata| metadata.len() > MAX_VECTOR_GOVERNANCE_BYTES)
@@ -237,6 +276,24 @@ impl VAdd {
             return Err(ShardCacheClientError::Config(format!(
                 "VADD governance metadata exceeds {MAX_VECTOR_GOVERNANCE_BYTES} bytes"
             )));
+        }
+        if options
+            .expected_governance
+            .is_some_and(|metadata| metadata.len() > MAX_VECTOR_GOVERNANCE_BYTES)
+        {
+            return Err(ShardCacheClientError::Config(format!(
+                "VADD expected governance metadata exceeds {MAX_VECTOR_GOVERNANCE_BYTES} bytes"
+            )));
+        }
+        if options.governance.is_some() && options.clear_governance {
+            return Err(ShardCacheClientError::Config(
+                "VADD cannot set and clear governance in one request".into(),
+            ));
+        }
+        if options.clear_governance && options.expected_governance.is_none() {
+            return Err(ShardCacheClientError::Config(
+                "VADD clear_governance requires if_governance".into(),
+            ));
         }
 
         let mut args = Vec::with_capacity(14);
@@ -269,6 +326,13 @@ impl VAdd {
         if let Some(governance) = options.governance {
             args.push(b"GOVERNANCE".to_vec());
             args.push(governance.to_vec());
+        }
+        if let Some(governance) = options.expected_governance {
+            args.push(b"IFGOVERNANCE".to_vec());
+            args.push(governance.to_vec());
+        }
+        if options.clear_governance {
+            args.push(b"CLEARGOVERNANCE".to_vec());
         }
         Ok(Self {
             request: VectorRequest {
@@ -314,15 +378,30 @@ pub(crate) struct VRem {
 }
 
 impl VRem {
-    pub(crate) fn new(route: Option<ShardCacheRoute>, key: &[u8], element: &[u8]) -> Self {
-        Self {
+    pub(crate) fn new(
+        route: Option<ShardCacheRoute>,
+        key: &[u8],
+        element: &[u8],
+        governance: Option<&[u8]>,
+    ) -> Result<Self> {
+        if governance.is_some_and(|metadata| metadata.len() > MAX_VECTOR_GOVERNANCE_BYTES) {
+            return Err(ShardCacheClientError::Config(format!(
+                "VREM governance metadata exceeds {MAX_VECTOR_GOVERNANCE_BYTES} bytes"
+            )));
+        }
+        let mut args = vec![key.to_vec(), element.to_vec()];
+        if let Some(governance) = governance {
+            args.push(b"GOVERNANCE".to_vec());
+            args.push(governance.to_vec());
+        }
+        Ok(Self {
             request: VectorRequest {
                 opcode: VREM_OPCODE,
                 name: "VREM",
                 route,
-                args: vec![key.to_vec(), element.to_vec()],
+                args,
             },
-        }
+        })
     }
 }
 
@@ -385,6 +464,15 @@ impl VSim {
                 "VSIM max response bytes must be positive".into(),
             ));
         }
+        if options
+            .allowed_governance
+            .iter()
+            .any(|metadata| metadata.len() > MAX_VECTOR_GOVERNANCE_BYTES)
+        {
+            return Err(ShardCacheClientError::Config(format!(
+                "VSIM governance metadata exceeds {MAX_VECTOR_GOVERNANCE_BYTES} bytes"
+            )));
+        }
         let tuple_width = if options.with_governance { 4 } else { 3 };
         let max_items = options.count.checked_mul(tuple_width).ok_or_else(|| {
             ShardCacheClientError::Config("VSIM count exceeds the client limit".into())
@@ -405,6 +493,10 @@ impl VSim {
         args.push(b"WITHATTRIBS".to_vec());
         if options.with_governance {
             args.push(b"WITHGOVERNANCE".to_vec());
+        }
+        for governance in options.allowed_governance {
+            args.push(b"GOVERNANCE".to_vec());
+            args.push(governance.to_vec());
         }
         if let Some(filter) = options.filter {
             args.push(b"FILTER".to_vec());
@@ -515,6 +607,11 @@ fn validate_vector(vector: &[f32]) -> Result<()> {
             "vector dimensions must be positive".into(),
         ));
     }
+    if vector.len() > MAX_VECTOR_DIMENSIONS {
+        return Err(ShardCacheClientError::Config(format!(
+            "vector dimensions exceed the client limit of {MAX_VECTOR_DIMENSIONS}"
+        )));
+    }
     if vector.iter().any(|value| !value.is_finite()) {
         return Err(ShardCacheClientError::Config(
             "vector values must be finite".into(),
@@ -601,6 +698,64 @@ mod tests {
         );
         assert_eq!(command.count, 7);
         assert_eq!(command.tuple_width, 4);
+
+        let governed = VSim::new(
+            None,
+            b"objects",
+            &[1.0, 0.5],
+            VSimOptions::new()
+                .allow_governance(b"tenant=acme")
+                .allow_governance(b"tenant=beta"),
+        )
+        .unwrap();
+        assert_eq!(
+            governed
+                .request
+                .args
+                .iter()
+                .filter(|arg| arg.as_slice() == b"GOVERNANCE")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn governance_rotation_and_removal_are_explicit_on_the_wire() {
+        let rotate = VAdd::new(
+            None,
+            b"objects",
+            b"doc-1",
+            &[1.0],
+            VAddOptions::new()
+                .if_governance(b"tenant=old")
+                .governance_metadata(b"tenant=new"),
+        )
+        .unwrap();
+        assert!(rotate.request.args.iter().any(|arg| arg == b"IFGOVERNANCE"));
+        assert!(rotate.request.args.iter().any(|arg| arg == b"tenant=old"));
+        assert!(rotate.request.args.iter().any(|arg| arg == b"tenant=new"));
+
+        let clear = VAdd::new(
+            None,
+            b"objects",
+            b"doc-1",
+            &[1.0],
+            VAddOptions::new()
+                .if_governance(b"tenant=new")
+                .clear_governance(true),
+        )
+        .unwrap();
+        assert!(
+            clear
+                .request
+                .args
+                .iter()
+                .any(|arg| arg == b"CLEARGOVERNANCE")
+        );
+
+        let remove = VRem::new(None, b"objects", b"doc-1", Some(b"tenant=new")).unwrap();
+        assert!(remove.request.args.iter().any(|arg| arg == b"GOVERNANCE"));
+        assert!(remove.request.args.iter().any(|arg| arg == b"tenant=new"));
     }
 
     #[test]
@@ -628,5 +783,27 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            VAdd::new(
+                None,
+                b"k",
+                b"e",
+                &[1.0],
+                VAddOptions::new().clear_governance(true),
+            )
+            .is_err()
+        );
+        assert!(
+            VAdd::new(
+                None,
+                b"k",
+                b"e",
+                &[1.0],
+                VAddOptions::new().hnsw_m(MAX_HNSW_M + 1),
+            )
+            .is_err()
+        );
+        let oversized_vector = vec![1.0; MAX_VECTOR_DIMENSIONS + 1];
+        assert!(VAdd::new(None, b"k", b"e", &oversized_vector, VAddOptions::new()).is_err());
     }
 }

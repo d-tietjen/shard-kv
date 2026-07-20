@@ -8,7 +8,7 @@ use crate::storage::{MutationOp, MutationRecord, StoredEntry, hash_key, hash_key
 use crate::{Result, ShardCacheError};
 
 pub const FCRP_MAGIC: &[u8; 4] = b"FCRP";
-pub const FCRP_VERSION: u8 = 1;
+pub const FCRP_VERSION: u8 = 2;
 
 const HEADER_LEN: usize = 16;
 pub(crate) const FRAME_HEADER_LEN: usize = HEADER_LEN;
@@ -1215,5 +1215,22 @@ mod tests {
         frame[6] = 0x80;
         frame[12..16].copy_from_slice(&0u32.to_le_bytes());
         assert!(decode_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn rejects_pre_governance_fcrp_peers_instead_of_silently_dropping_metadata() {
+        let frame = encode_frame(
+            FrameKind::Ack,
+            ReplicationCompressionMode::None,
+            0,
+            &encode_ack(&ShardWatermarks::from_vec(vec![1])),
+        )
+        .unwrap();
+        let mut old_version = frame;
+        old_version[4] = FCRP_VERSION - 1;
+        assert!(matches!(
+            decode_frame(&old_version),
+            Err(ShardCacheError::Protocol(message)) if message.contains("unsupported FCRP version")
+        ));
     }
 }

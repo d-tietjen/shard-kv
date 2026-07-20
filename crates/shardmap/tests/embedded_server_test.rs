@@ -351,6 +351,7 @@ async fn typed_scnp_vector_client_round_trips_fanout_and_direct_shard() {
                         VSimOptions::new()
                             .count(2)
                             .exact(true)
+                            .allow_governance(b"tenant=acme")
                             .with_governance(true),
                     )
                     .unwrap();
@@ -380,7 +381,12 @@ async fn typed_scnp_vector_client_round_trips_fanout_and_direct_shard() {
                     )
                     .unwrap();
                 assert_eq!(direct_matches[0].element, b"doc-b");
-                assert!(direct.vrem(&vector_key, b"doc-a").unwrap());
+                assert!(!direct.vrem(&vector_key, b"doc-a").unwrap());
+                assert!(
+                    direct
+                        .vrem_governed(&vector_key, b"doc-a", b"tenant=acme")
+                        .unwrap()
+                );
                 assert!(!direct.vrem(&vector_key, b"doc-a").unwrap());
             })
             .await

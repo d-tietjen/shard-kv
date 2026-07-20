@@ -23,6 +23,14 @@
   it in an element/score/attributes/governance result tuple. Canonical
   serialization preserves it through TTL changes, snapshots, key lifecycle
   commands, and native read-replica replication.
+- Added fail-closed vector governance guards. Protected embeddings are omitted
+  from `VSIM`, `VRANGE`, `VRANDMEMBER`, and `VLINKS`, point reads appear
+  missing, and mutations are denied unless the caller supplies the exact
+  opaque label. `VADD IFGOVERNANCE` supports guarded label rotation and
+  `CLEARGOVERNANCE`; typed clients expose matching options.
+- Added TLS 1.3 mTLS for native FCRP read-replica streams with dedicated
+  `fcrp/2` ALPN, non-loopback TLS enforcement, reloadable current/previous
+  token files, and redacted replication configuration output.
 - Replaced the native replication flusher's idle sub-millisecond polling with
   event-driven wakeups and exact pending-batch deadlines.
 
@@ -38,6 +46,12 @@
   vector payloads by ordinary key hash; they now use dedicated pinned shard 0.
 - Fixed `VADD`, `VREM`, and `VSETATTR` clearing an existing vector-set TTL;
   vector collection mutations now preserve the deadline like Redis 8.
+- Reject malformed or allocation-amplifying vector state at RESTORE and FCRP
+  ingress, bound vector dimensions and HNSW parameters, account decoded heap
+  state in the vector cache, and cap unauthenticated FCRP Hello allocation.
+- Bumped native read-replica FCRP to v2. Version 0.7.2 peers fail closed when
+  connected to pre-governance FCRP peers; mixed 0.7.1/0.7.2 replication is not
+  supported.
 
 ## 0.7.1 - 2026-07-17
 

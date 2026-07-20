@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+#[cfg(feature = "scnp-tls")]
+use std::time::Instant;
 
 use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use parking_lot::Mutex;
@@ -36,6 +38,322 @@ mod monoio_transport;
 
 const FRAME_HEADER_LEN: usize = 16;
 const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+const MAX_HELLO_FRAME_BYTES: usize = 128 * 1024;
+#[cfg(feature = "scnp-tls")]
+const FCRP_ALPN: &[u8] = b"fcrp/2";
+
+trait ReplicationIo: Read + Write {}
+impl<T: Read + Write> ReplicationIo for T {}
+
+fn read_replication_token(path: &std::path::Path) -> Result<String> {
+    let token = std::fs::read_to_string(path).map_err(|error| {
+        ShardCacheError::Config(format!(
+            "failed to read replication auth token {}: {error}",
+            path.display()
+        ))
+    })?;
+    let token = token.trim_end_matches(['\r', '\n']).to_string();
+    if token.is_empty() || token.len() > u16::MAX as usize {
+        return Err(ShardCacheError::Config(format!(
+            "replication auth token {} must contain 1..=65535 bytes",
+            path.display()
+        )));
+    }
+    Ok(token)
+}
+
+fn current_replication_token(config: &ReplicationConfig) -> Result<Option<String>> {
+    match config.auth_token_path.as_deref() {
+        Some(path) => read_replication_token(path).map(Some),
+        None => Ok(config.auth_token.clone()),
+    }
+}
+
+fn replication_auth_ok(config: &ReplicationConfig, presented: Option<&str>) -> Result<bool> {
+    let current = current_replication_token(config)?;
+    if auth_ok(current.as_deref(), presented) {
+        return Ok(true);
+    }
+    match config.previous_auth_token_path.as_deref() {
+        Some(path) => {
+            let previous = read_replication_token(path)?;
+            Ok(presented.is_some_and(|presented| {
+                constant_time_equal(presented.as_bytes(), previous.as_bytes())
+            }))
+        }
+        None => Ok(false),
+    }
+}
+
+fn validate_replication_credentials(config: &ReplicationConfig) -> Result<()> {
+    let _ = current_replication_token(config)?;
+    if let Some(path) = config.previous_auth_token_path.as_deref() {
+        let _ = read_replication_token(path)?;
+    }
+    Ok(())
+}
+
+fn wrap_server_stream(
+    socket: TcpStream,
+    config: &ReplicationConfig,
+) -> Result<Box<dyn ReplicationIo>> {
+    if !config.tls_server.enabled {
+        return Ok(Box::new(socket));
+    }
+    #[cfg(not(feature = "scnp-tls"))]
+    return Err(ShardCacheError::Config(
+        "replication TLS requires the scnp-tls feature".into(),
+    ));
+    #[cfg(feature = "scnp-tls")]
+    {
+        let mut socket = socket;
+        let tls = build_replication_server_tls_config(&config.tls_server)?;
+        let mut connection = rustls::ServerConnection::new(tls).map_err(|error| {
+            ShardCacheError::Config(format!("failed to create replication TLS server: {error}"))
+        })?;
+        let deadline =
+            Instant::now() + Duration::from_millis(config.tls_server.handshake_timeout_ms.max(1));
+        while connection.is_handshaking() {
+            match connection.complete_io(&mut socket) {
+                Ok(_) => {}
+                Err(error) if is_timeout(&error) && Instant::now() < deadline => continue,
+                Err(error) => return Err(ShardCacheError::Io(error)),
+            }
+        }
+        if connection.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
+            || connection.alpn_protocol() != Some(FCRP_ALPN)
+        {
+            return Err(ShardCacheError::Protocol(
+                "replication TLS requires TLS 1.3 and fcrp/2 ALPN".into(),
+            ));
+        }
+        authorize_replication_client_certificate(&connection, &config.tls_server)?;
+        Ok(Box::new(rustls::StreamOwned::new(connection, socket)))
+    }
+}
+
+#[cfg(feature = "scnp-tls")]
+fn authorize_replication_client_certificate(
+    connection: &rustls::ServerConnection,
+    tls: &crate::config::ScnpTlsServerConfig,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    if tls.client_cert_sha256.is_empty() {
+        return Ok(());
+    }
+    let certificate = connection
+        .peer_certificates()
+        .and_then(|certificates| certificates.first())
+        .ok_or_else(|| {
+            ShardCacheError::Protocol("replication mTLS client certificate is required".into())
+        })?;
+    let actual: [u8; 32] = Sha256::digest(certificate.as_ref()).into();
+    let authorized = tls.client_cert_sha256.iter().try_fold(
+        false,
+        |authorized, configured| -> Result<bool> {
+            let compact = configured.replace(':', "");
+            if compact.len() != 64 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(ShardCacheError::Config(
+                    "replication TLS client fingerprints must contain 64 hexadecimal digits".into(),
+                ));
+            }
+            let mut expected = [0_u8; 32];
+            for (index, byte) in expected.iter_mut().enumerate() {
+                *byte =
+                    u8::from_str_radix(&compact[index * 2..index * 2 + 2], 16).map_err(|_| {
+                        ShardCacheError::Config(
+                            "invalid replication TLS client certificate fingerprint".into(),
+                        )
+                    })?;
+            }
+            Ok(authorized || constant_time_equal(&actual, &expected))
+        },
+    )?;
+    if !authorized {
+        return Err(ShardCacheError::Protocol(
+            "replication mTLS client identity is not authorized".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "scnp-tls")]
+fn build_replication_server_tls_config(
+    tls: &crate::config::ScnpTlsServerConfig,
+) -> Result<Arc<rustls::ServerConfig>> {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    use rustls::RootCertStore;
+    use rustls::server::WebPkiClientVerifier;
+
+    if tls.client_cert_sha256.iter().any(|fingerprint| {
+        let compact = fingerprint.replace(':', "");
+        compact.len() != 64 || !compact.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
+        return Err(ShardCacheError::Config(
+            "replication TLS client fingerprints must contain 64 hexadecimal digits".into(),
+        ));
+    }
+
+    let client_ca_path = tls.client_ca_path.as_deref().ok_or_else(|| {
+        ShardCacheError::Config("replication TLS requires client_ca_path for mTLS".into())
+    })?;
+    let mut cert_reader = BufReader::new(File::open(&tls.cert_path)?);
+    let certs = rustls_pemfile::certs(&mut cert_reader).collect::<io::Result<Vec<_>>>()?;
+    if certs.is_empty() {
+        return Err(ShardCacheError::Config(
+            "replication TLS certificate file contains no certificates".into(),
+        ));
+    }
+    let mut key_reader = BufReader::new(File::open(&tls.key_path)?);
+    let key = rustls_pemfile::private_key(&mut key_reader)?.ok_or_else(|| {
+        ShardCacheError::Config("replication TLS key file contains no private key".into())
+    })?;
+
+    let mut roots = RootCertStore::empty();
+    let mut ca_reader = BufReader::new(File::open(client_ca_path)?);
+    let client_certs = rustls_pemfile::certs(&mut ca_reader).collect::<io::Result<Vec<_>>>()?;
+    if client_certs.is_empty() {
+        return Err(ShardCacheError::Config(
+            "replication TLS client CA file contains no certificates".into(),
+        ));
+    }
+    for certificate in client_certs {
+        roots.add(certificate).map_err(|error| {
+            ShardCacheError::Config(format!(
+                "invalid replication TLS client CA certificate: {error}"
+            ))
+        })?;
+    }
+    let verifier = WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(rustls::crypto::ring::default_provider()),
+    )
+    .build()
+    .map_err(|error| {
+        ShardCacheError::Config(format!("invalid replication TLS client verifier: {error}"))
+    })?;
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(|error| {
+        ShardCacheError::Config(format!("invalid replication TLS protocol config: {error}"))
+    })?
+    .with_client_cert_verifier(verifier)
+    .with_single_cert(certs, key)
+    .map_err(|error| {
+        ShardCacheError::Config(format!("invalid replication TLS server identity: {error}"))
+    })?;
+    config.alpn_protocols = vec![FCRP_ALPN.to_vec()];
+    Ok(Arc::new(config))
+}
+
+#[cfg(feature = "scnp-tls")]
+fn build_replication_client_tls_config(
+    tls: &crate::config::ScnpTlsClientConfig,
+) -> Result<(
+    Arc<rustls::ClientConfig>,
+    rustls::pki_types::ServerName<'static>,
+)> {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    use rustls::RootCertStore;
+
+    let server_name = tls.server_name.as_deref().ok_or_else(|| {
+        ShardCacheError::Config("replication TLS requires tls_client.server_name".into())
+    })?;
+    let server_name =
+        rustls::pki_types::ServerName::try_from(server_name.to_owned()).map_err(|error| {
+            ShardCacheError::Config(format!("invalid replication TLS server name: {error}"))
+        })?;
+    let mut roots = RootCertStore::empty();
+    let mut ca_reader = BufReader::new(File::open(&tls.ca_path)?);
+    let certificates = rustls_pemfile::certs(&mut ca_reader).collect::<io::Result<Vec<_>>>()?;
+    if certificates.is_empty() {
+        return Err(ShardCacheError::Config(
+            "replication TLS CA file contains no certificates".into(),
+        ));
+    }
+    for certificate in certificates {
+        roots.add(certificate).map_err(|error| {
+            ShardCacheError::Config(format!("invalid replication TLS CA certificate: {error}"))
+        })?;
+    }
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(|error| {
+        ShardCacheError::Config(format!("invalid replication TLS protocol config: {error}"))
+    })?
+    .with_root_certificates(roots);
+    let cert_path = tls.client_cert_path.as_deref().ok_or_else(|| {
+        ShardCacheError::Config("replication TLS requires a client certificate for mTLS".into())
+    })?;
+    let key_path = tls.client_key_path.as_deref().ok_or_else(|| {
+        ShardCacheError::Config("replication TLS requires a client key for mTLS".into())
+    })?;
+    let mut cert_reader = BufReader::new(File::open(cert_path)?);
+    let certs = rustls_pemfile::certs(&mut cert_reader).collect::<io::Result<Vec<_>>>()?;
+    if certs.is_empty() {
+        return Err(ShardCacheError::Config(
+            "replication TLS client certificate file contains no certificates".into(),
+        ));
+    }
+    let mut key_reader = BufReader::new(File::open(key_path)?);
+    let key = rustls_pemfile::private_key(&mut key_reader)?.ok_or_else(|| {
+        ShardCacheError::Config("replication TLS client key file contains no private key".into())
+    })?;
+    let mut config = builder.with_client_auth_cert(certs, key).map_err(|error| {
+        ShardCacheError::Config(format!("invalid replication TLS client identity: {error}"))
+    })?;
+    config.alpn_protocols = vec![FCRP_ALPN.to_vec()];
+    Ok((Arc::new(config), server_name))
+}
+
+fn wrap_client_stream(
+    socket: TcpStream,
+    config: &ReplicationConfig,
+) -> Result<Box<dyn ReplicationIo>> {
+    if !config.tls_client.enabled {
+        return Ok(Box::new(socket));
+    }
+    #[cfg(not(feature = "scnp-tls"))]
+    return Err(ShardCacheError::Config(
+        "replication TLS requires the scnp-tls feature".into(),
+    ));
+    #[cfg(feature = "scnp-tls")]
+    {
+        let mut socket = socket;
+        let (tls, server_name) = build_replication_client_tls_config(&config.tls_client)?;
+        let mut connection = rustls::ClientConnection::new(tls, server_name).map_err(|error| {
+            ShardCacheError::Config(format!("failed to create replication TLS client: {error}"))
+        })?;
+        let deadline = Instant::now() + Duration::from_millis(config.connect_timeout_ms.max(1));
+        while connection.is_handshaking() {
+            match connection.complete_io(&mut socket) {
+                Ok(_) => {}
+                Err(error) if is_timeout(&error) && Instant::now() < deadline => continue,
+                Err(error) => return Err(ShardCacheError::Io(error)),
+            }
+        }
+        if connection.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3)
+            || connection.alpn_protocol() != Some(FCRP_ALPN)
+        {
+            return Err(ShardCacheError::Protocol(
+                "replication TLS requires TLS 1.3 and fcrp/2 ALPN".into(),
+            ));
+        }
+        socket
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .ok();
+        Ok(Box::new(rustls::StreamOwned::new(connection, socket)))
+    }
+}
 
 /// Provides consistent snapshots to the replication transport.
 pub trait SnapshotProvider: Send + Sync + 'static {
@@ -69,8 +387,17 @@ impl ReplicationPrimaryServer {
                 "replication primary server requires replication.enabled = true".into(),
             ));
         }
+        validate_replication_credentials(&config)?;
+        #[cfg(feature = "scnp-tls")]
+        if config.tls_server.enabled {
+            let _ = build_replication_server_tls_config(&config.tls_server)?;
+        }
         #[cfg(all(target_os = "linux", feature = "monoio"))]
-        if monoio_transport::should_use() {
+        if monoio_transport::should_use()
+            && !config.tls_server.enabled
+            && config.auth_token_path.is_none()
+            && config.previous_auth_token_path.is_none()
+        {
             return monoio_transport::start_primary(config, primary, snapshots);
         }
 
@@ -80,6 +407,11 @@ impl ReplicationPrimaryServer {
                 config.bind_addr
             ))
         })?;
+        if !listener.local_addr()?.ip().is_loopback() && !config.tls_server.enabled {
+            return Err(ShardCacheError::Config(
+                "non-loopback replication primary listeners require TLS".into(),
+            ));
+        }
         listener.set_nonblocking(true).map_err(|error| {
             ShardCacheError::Config(format!(
                 "replication primary set_nonblocking failed: {error}"
@@ -138,7 +470,14 @@ fn run_listener(
                 // Cap simultaneous replicas. Drain finished workers first.
                 let mut handles = active.lock();
                 handles.retain(|h| !h.is_finished());
-                if handles.len() >= config.max_replicas {
+                let connection_limit = if config.tls_server.enabled {
+                    config
+                        .max_replicas
+                        .min(config.tls_server.max_concurrent_handshakes.max(1))
+                } else {
+                    config.max_replicas
+                };
+                if handles.len() >= connection_limit {
                     drop(handles);
                     tracing::warn!(
                         "rejecting replication client {peer}: max_replicas {} reached",
@@ -182,7 +521,7 @@ fn run_listener(
 }
 
 fn serve_replica(
-    mut stream: TcpStream,
+    stream: TcpStream,
     peer: SocketAddr,
     config: ReplicationConfig,
     primary: Arc<ReplicationPrimary>,
@@ -199,10 +538,19 @@ fn serve_replica(
         .set_write_timeout(Some(Duration::from_millis(config.write_timeout_ms.max(1))))
         .ok();
 
-    let hello_frame = match read_frame_bytes_interruptible(&mut stream, &stop)? {
-        Some(bytes) => bytes,
-        None => return Ok(()),
-    };
+    if config.tls_server.enabled {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(
+                config.tls_server.handshake_timeout_ms.max(1),
+            )))
+            .ok();
+    }
+    let mut stream = wrap_server_stream(stream, &config)?;
+    let hello_frame =
+        match read_frame_bytes_interruptible_limited(&mut stream, &stop, MAX_HELLO_FRAME_BYTES)? {
+            Some(bytes) => bytes,
+            None => return Ok(()),
+        };
     let frame = decode_frame(&hello_frame)?;
     if frame.kind != FrameKind::Hello {
         send_error(&mut stream, "expected Hello frame")?;
@@ -219,15 +567,12 @@ fn serve_replica(
             hello.version
         )));
     }
-    if !auth_ok(config.auth_token.as_deref(), hello.auth_token.as_deref()) {
+    if !replication_auth_ok(&config, hello.auth_token.as_deref())? {
         send_error(&mut stream, "invalid auth token")?;
         return Err(ShardCacheError::Protocol(format!(
             "replica {peer} sent invalid auth token"
         )));
     }
-    // After authentication clear the read timeout so the worker can wait
-    // indefinitely on the (silent) reverse channel without spuriously dying.
-    stream.set_read_timeout(None).ok();
     let ack = ReplicationHello {
         version: FCRP_VERSION,
         role: HelloRole::Replica,
@@ -279,7 +624,7 @@ fn serve_replica(
 }
 
 fn drain_buffered(
-    stream: &mut TcpStream,
+    stream: &mut (impl Read + Write),
     subscription: &crossbeam_channel::Receiver<ReplicationFrameBytes>,
     bootstrap_high: &ShardWatermarks,
     primary: &Arc<ReplicationPrimary>,
@@ -304,7 +649,7 @@ fn drain_buffered(
 }
 
 fn stream_snapshot(
-    stream: &mut TcpStream,
+    stream: &mut (impl Read + Write),
     snapshot: &super::protocol::ReplicationSnapshot,
     config: &ReplicationConfig,
 ) -> Result<()> {
@@ -373,7 +718,7 @@ fn stream_snapshot(
     Ok(())
 }
 
-fn send_error(stream: &mut TcpStream, message: &str) -> Result<()> {
+fn send_error(stream: &mut (impl Read + Write), message: &str) -> Result<()> {
     write_full_frame(
         stream,
         FrameKind::Error,
@@ -386,13 +731,23 @@ fn send_error(stream: &mut TcpStream, message: &str) -> Result<()> {
 fn auth_ok(expected: Option<&str>, presented: Option<&str>) -> bool {
     match (expected, presented) {
         (None, _) => true,
-        (Some(want), Some(got)) => want == got,
+        (Some(want), Some(got)) => constant_time_equal(want.as_bytes(), got.as_bytes()),
         (Some(_), None) => false,
     }
 }
 
+fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
 fn write_full_frame(
-    stream: &mut TcpStream,
+    stream: &mut (impl Read + Write),
     kind: FrameKind,
     compression: ReplicationCompressionMode,
     zstd_level: i32,
@@ -402,12 +757,12 @@ fn write_full_frame(
     write_raw(stream, &frame)
 }
 
-fn write_raw(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
+fn write_raw(stream: &mut (impl Read + Write), bytes: &[u8]) -> Result<()> {
     stream.write_all(bytes).map_err(ShardCacheError::Io)
 }
 
-fn read_frame_bytes(stream: &mut TcpStream) -> Result<Vec<u8>> {
-    read_frame_inner(stream, None).and_then(|opt| {
+fn read_frame_bytes(stream: &mut (impl Read + Write)) -> Result<Vec<u8>> {
+    read_frame_inner(stream, None, MAX_FRAME_BYTES).and_then(|opt| {
         opt.ok_or_else(|| {
             ShardCacheError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -418,15 +773,24 @@ fn read_frame_bytes(stream: &mut TcpStream) -> Result<Vec<u8>> {
 }
 
 fn read_frame_bytes_interruptible(
-    stream: &mut TcpStream,
+    stream: &mut (impl Read + Write),
     stop: &Arc<AtomicBool>,
 ) -> Result<Option<Vec<u8>>> {
-    read_frame_inner(stream, Some(stop))
+    read_frame_inner(stream, Some(stop), MAX_FRAME_BYTES)
+}
+
+fn read_frame_bytes_interruptible_limited(
+    stream: &mut (impl Read + Write),
+    stop: &Arc<AtomicBool>,
+    max_payload_bytes: usize,
+) -> Result<Option<Vec<u8>>> {
+    read_frame_inner(stream, Some(stop), max_payload_bytes)
 }
 
 fn read_frame_inner(
-    stream: &mut TcpStream,
+    stream: &mut (impl Read + Write),
     stop: Option<&Arc<AtomicBool>>,
+    max_payload_bytes: usize,
 ) -> Result<Option<Vec<u8>>> {
     let mut header = [0_u8; FRAME_HEADER_LEN];
     match read_fully(stream, &mut header, stop)? {
@@ -440,14 +804,20 @@ fn read_frame_inner(
         }
     }
     let payload_len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-    if payload_len > MAX_FRAME_BYTES {
+    if payload_len > max_payload_bytes {
         return Err(ShardCacheError::Protocol(format!(
             "FCRP frame payload exceeds limit ({payload_len} bytes)"
         )));
     }
-    let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload_len);
+    let frame_len = FRAME_HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or_else(|| ShardCacheError::Protocol("FCRP frame length overflow".into()))?;
+    let mut frame = Vec::new();
+    frame.try_reserve_exact(frame_len).map_err(|_| {
+        ShardCacheError::Protocol(format!("FCRP frame allocation failed ({frame_len} bytes)"))
+    })?;
     frame.extend_from_slice(&header);
-    frame.resize(FRAME_HEADER_LEN + payload_len, 0);
+    frame.resize(frame_len, 0);
     match read_fully(stream, &mut frame[FRAME_HEADER_LEN..], stop)? {
         ReadResult::Done => Ok(Some(frame)),
         ReadResult::Stopped => Ok(None),
@@ -465,7 +835,7 @@ enum ReadResult {
 }
 
 fn read_fully(
-    stream: &mut TcpStream,
+    stream: &mut (impl Read + Write),
     buffer: &mut [u8],
     stop: Option<&Arc<AtomicBool>>,
 ) -> Result<ReadResult> {
@@ -513,11 +883,20 @@ impl ReplicationReplicaClient {
                 "replication replica requires replication.enabled = true".into(),
             ));
         }
+        validate_replication_credentials(&config)?;
+        #[cfg(feature = "scnp-tls")]
+        if config.tls_client.enabled {
+            let _ = build_replication_client_tls_config(&config.tls_client)?;
+        }
         let upstream = config.replica_of.clone().ok_or_else(|| {
             ShardCacheError::Config("replication.replica_of is required for replica role".into())
         })?;
         #[cfg(all(target_os = "linux", feature = "monoio"))]
-        if monoio_transport::should_use() {
+        if monoio_transport::should_use()
+            && !config.tls_client.enabled
+            && config.auth_token_path.is_none()
+            && config.previous_auth_token_path.is_none()
+        {
             return monoio_transport::start_replica(upstream, config);
         }
 
@@ -616,7 +995,12 @@ fn connect_and_stream(
         .ok_or_else(|| {
             ShardCacheError::Config(format!("replica address {upstream} had no entries"))
         })?;
-    let mut stream = TcpStream::connect_timeout(
+    if !addr.ip().is_loopback() && !config.tls_client.enabled {
+        return Err(ShardCacheError::Config(
+            "non-loopback replication replica connections require TLS".into(),
+        ));
+    }
+    let stream = TcpStream::connect_timeout(
         &addr,
         Duration::from_millis(config.connect_timeout_ms.max(1)),
     )?;
@@ -630,11 +1014,12 @@ fn connect_and_stream(
         .set_write_timeout(Some(Duration::from_millis(config.write_timeout_ms.max(1))))
         .ok();
 
+    let mut stream = wrap_client_stream(stream, config)?;
     let since = state.lock().watermarks().clone();
     let hello = ReplicationHello {
         version: FCRP_VERSION,
         role: HelloRole::Replica,
-        auth_token: config.auth_token.clone(),
+        auth_token: current_replication_token(config)?,
         since: Some(since),
     };
     write_full_frame(
@@ -663,11 +1048,6 @@ fn connect_and_stream(
         }
     }
 
-    // Use a short read timeout so the loop polls the stop flag without
-    // blocking indefinitely.
-    stream
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .ok();
     let mut pending_snapshot: Option<PendingSnapshot> = None;
     while !stop.load(Ordering::SeqCst) {
         let bytes = match read_frame_bytes_interruptible(&mut stream, stop) {
@@ -710,10 +1090,10 @@ fn connect_and_stream(
                     ));
                 };
                 let mut replica = state.lock();
-                replica.replace_with_snapshot(super::protocol::ReplicationSnapshot {
+                replica.try_replace_with_snapshot(super::protocol::ReplicationSnapshot {
                     entries: snapshot.entries,
                     watermarks: snapshot.watermarks,
-                });
+                })?;
             }
             FrameKind::Hello => {
                 // Ignore unexpected mid-stream Hello frames.
@@ -746,6 +1126,9 @@ mod tests {
     use crate::config::{
         ReplicationCompression, ReplicationConfig, ReplicationRole, ReplicationSendPolicy,
     };
+
+    #[cfg(feature = "scnp-tls")]
+    use crate::config::{ScnpTlsClientConfig, ScnpTlsServerConfig};
 
     use super::*;
 
@@ -887,5 +1270,174 @@ mod tests {
         assert!(client.replica().lock().get(b"alpha").is_none());
         client.shutdown().ok();
         server.shutdown().ok();
+    }
+
+    #[test]
+    fn unauthenticated_hello_payload_is_bounded_before_body_allocation() {
+        let mut header = Vec::from(*b"FCRP");
+        header.push(FCRP_VERSION);
+        header.push(FrameKind::Hello as u8);
+        header.extend_from_slice(&[0, 0]);
+        header.extend_from_slice(&((MAX_HELLO_FRAME_BYTES as u32) + 1).to_le_bytes());
+        header.extend_from_slice(&0_u32.to_le_bytes());
+        let mut stream = std::io::Cursor::new(header);
+        let stop = Arc::new(AtomicBool::new(false));
+        assert!(
+            read_frame_bytes_interruptible_limited(&mut stream, &stop, MAX_HELLO_FRAME_BYTES,)
+                .is_err()
+        );
+        assert_eq!(stream.position(), FRAME_HEADER_LEN as u64);
+    }
+
+    #[test]
+    fn auth_token_files_support_overlap_rotation_and_are_redacted() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current-token");
+        let previous = directory.path().join("previous-token");
+        let old_client_token = directory.path().join("old-client-token");
+        let new_client_token = directory.path().join("new-client-token");
+        std::fs::write(&current, "new-secret\n").unwrap();
+        std::fs::write(&previous, "old-secret\n").unwrap();
+        std::fs::write(&old_client_token, "old-secret\n").unwrap();
+        std::fs::write(&new_client_token, "new-secret\n").unwrap();
+
+        let addr = ephemeral_addr();
+        let mut server_config = primary_config(&addr, None);
+        server_config.auth_token_path = Some(current.clone());
+        server_config.previous_auth_token_path = Some(previous.clone());
+        let debug = format!("{server_config:?}");
+        assert!(!debug.contains("new-secret"));
+        assert!(!debug.contains("old-secret"));
+
+        let primary =
+            Arc::new(ReplicatedEmbeddedStore::new(1, server_config.clone()).expect("primary"));
+        let server = ReplicationPrimaryServer::start(
+            server_config,
+            primary.primary(),
+            Arc::clone(&primary) as Arc<dyn SnapshotProvider>,
+        )
+        .expect("server");
+
+        let mut old_config = replica_config(&addr, None);
+        old_config.auth_token_path = Some(old_client_token.clone());
+        let old_client = ReplicationReplicaClient::start(old_config.clone()).expect("old client");
+        primary.set(b"during-overlap".to_vec(), b"accepted".to_vec(), None);
+        assert_eq!(
+            await_value(&old_client, b"during-overlap", Duration::from_secs(3)),
+            Some(b"accepted".to_vec())
+        );
+        old_client.shutdown().unwrap();
+
+        std::fs::write(&previous, "retired-secret\n").unwrap();
+        let rejected = ReplicationReplicaClient::start(old_config).expect("rejected client loop");
+        primary.set(b"after-retirement".to_vec(), b"hidden".to_vec(), None);
+        thread::sleep(Duration::from_millis(300));
+        assert!(rejected.replica().lock().get(b"after-retirement").is_none());
+        rejected.shutdown().unwrap();
+
+        let mut new_config = replica_config(&addr, None);
+        new_config.auth_token_path = Some(new_client_token);
+        let new_client = ReplicationReplicaClient::start(new_config).expect("new client");
+        assert_eq!(
+            await_value(&new_client, b"after-retirement", Duration::from_secs(3)),
+            Some(b"hidden".to_vec())
+        );
+        new_client.shutdown().unwrap();
+        server.shutdown().unwrap();
+    }
+
+    #[cfg(feature = "scnp-tls")]
+    #[test]
+    fn tls13_mtls_replication_negotiates_fcrp_alpn_and_streams_data() {
+        use rcgen::{
+            BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
+            KeyPair, KeyUsagePurpose,
+        };
+        use sha2::{Digest, Sha256};
+
+        let directory = tempfile::tempdir().unwrap();
+        let ca_path = directory.path().join("ca.pem");
+        let server_cert_path = directory.path().join("server-cert.pem");
+        let server_key_path = directory.path().join("server-key.pem");
+        let client_cert_path = directory.path().join("client-cert.pem");
+        let client_key_path = directory.path().join("client-key.pem");
+
+        let mut ca_params = CertificateParams::new(vec!["replication-test-ca".into()]).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![
+            KeyUsagePurpose::KeyCertSign,
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::CrlSign,
+        ];
+        let ca = CertifiedIssuer::self_signed(ca_params, KeyPair::generate().unwrap()).unwrap();
+        let mut server_params = CertificateParams::new(vec!["localhost".into()]).unwrap();
+        server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let server_key = KeyPair::generate().unwrap();
+        let server_cert = server_params.signed_by(&server_key, &ca).unwrap();
+        let mut client_params = CertificateParams::new(vec!["replication-client".into()]).unwrap();
+        client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let client_key = KeyPair::generate().unwrap();
+        let client_cert = client_params.signed_by(&client_key, &ca).unwrap();
+        let mut unauthorized_params =
+            CertificateParams::new(vec!["unauthorized-client".into()]).unwrap();
+        unauthorized_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let unauthorized_key = KeyPair::generate().unwrap();
+        let unauthorized_cert = unauthorized_params
+            .signed_by(&unauthorized_key, &ca)
+            .unwrap();
+        let client_fingerprint = Sha256::digest(client_cert.der())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        std::fs::write(&ca_path, ca.pem()).unwrap();
+        std::fs::write(&server_cert_path, server_cert.pem()).unwrap();
+        std::fs::write(&server_key_path, server_key.serialize_pem()).unwrap();
+        std::fs::write(&client_cert_path, client_cert.pem()).unwrap();
+        std::fs::write(&client_key_path, client_key.serialize_pem()).unwrap();
+
+        let addr = ephemeral_addr();
+        let mut server_config = primary_config(&addr, Some("replication-secret"));
+        server_config.tls_server = ScnpTlsServerConfig {
+            enabled: true,
+            cert_path: server_cert_path,
+            key_path: server_key_path,
+            client_ca_path: Some(ca_path.clone()),
+            client_cert_sha256: vec![client_fingerprint],
+            ..ScnpTlsServerConfig::default()
+        };
+        let primary =
+            Arc::new(ReplicatedEmbeddedStore::new(1, server_config.clone()).expect("primary"));
+        let server = ReplicationPrimaryServer::start(
+            server_config,
+            primary.primary(),
+            Arc::clone(&primary) as Arc<dyn SnapshotProvider>,
+        )
+        .expect("TLS server");
+
+        let mut client_config = replica_config(&addr, Some("replication-secret"));
+        client_config.tls_client = ScnpTlsClientConfig {
+            enabled: true,
+            ca_path,
+            client_cert_path: Some(client_cert_path.clone()),
+            client_key_path: Some(client_key_path.clone()),
+            server_name: Some("localhost".into()),
+        };
+        let client = ReplicationReplicaClient::start(client_config.clone()).expect("TLS client");
+        primary.set(b"encrypted".to_vec(), b"replicated".to_vec(), None);
+        assert_eq!(
+            await_value(&client, b"encrypted", Duration::from_secs(3)),
+            Some(b"replicated".to_vec())
+        );
+        client.shutdown().unwrap();
+
+        std::fs::write(&client_cert_path, unauthorized_cert.pem()).unwrap();
+        std::fs::write(&client_key_path, unauthorized_key.serialize_pem()).unwrap();
+        let rejected = ReplicationReplicaClient::start(client_config).expect("rejected TLS loop");
+        primary.set(b"pinned".to_vec(), b"must-not-replicate".to_vec(), None);
+        thread::sleep(Duration::from_millis(300));
+        assert!(rejected.replica().lock().get(b"pinned").is_none());
+        rejected.shutdown().unwrap();
+        server.shutdown().unwrap();
     }
 }

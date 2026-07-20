@@ -1035,7 +1035,7 @@ impl ReplicationReplica {
         let mut applied = 0_u64;
         let mut skipped = 0_u64;
         visit_mutation_batch_payload(payload, |mutation| {
-            if self.apply_borrowed_mutation_inner(mutation, &mut now_ms) {
+            if self.apply_borrowed_mutation_inner(mutation, &mut now_ms)? {
                 applied += 1;
             } else {
                 skipped += 1;
@@ -1056,7 +1056,7 @@ impl ReplicationReplica {
         let mut applied = 0_u64;
         let mut skipped = 0_u64;
         visit_mutation_batch_payload_bytes(payload, |mutation| {
-            if self.apply_frame_backed_mutation_inner(mutation, &mut now_ms) {
+            if self.apply_frame_backed_mutation_inner(mutation, &mut now_ms)? {
                 applied += 1;
             } else {
                 skipped += 1;
@@ -1071,20 +1071,21 @@ impl ReplicationReplica {
         Ok(())
     }
 
-    pub fn apply_mutation(&mut self, mutation: ReplicationMutation) {
+    pub fn apply_mutation(&mut self, mutation: ReplicationMutation) -> Result<()> {
         let started = Instant::now();
-        let applied = self.apply_mutation_inner(mutation, &mut None);
+        let applied = self.apply_mutation_inner(mutation, &mut None)?;
         self.metrics
             .record_replica_apply(applied, started.elapsed().as_nanos() as u64);
+        Ok(())
     }
 
     fn apply_mutation_inner(
         &mut self,
         mutation: ReplicationMutation,
         now_ms: &mut Option<u64>,
-    ) -> bool {
+    ) -> Result<bool> {
         if mutation.sequence <= self.watermarks.get(mutation.shard_id) {
-            return false;
+            return Ok(false);
         }
 
         match mutation.op {
@@ -1096,7 +1097,7 @@ impl ReplicationReplica {
                     mutation.expire_at_ms,
                     mutation.governance,
                     now_ms,
-                );
+                )?;
             }
             ReplicationMutationOp::Del => {
                 self.store.delete(&mutation.key);
@@ -1112,16 +1113,16 @@ impl ReplicationReplica {
         }
         self.watermarks
             .observe(mutation.shard_id, mutation.sequence);
-        true
+        Ok(true)
     }
 
     fn apply_frame_backed_mutation_inner(
         &mut self,
         mutation: FrameBackedReplicationMutation<'_>,
         now_ms: &mut Option<u64>,
-    ) -> bool {
+    ) -> Result<bool> {
         if mutation.sequence <= self.watermarks.get(mutation.shard_id) {
-            return false;
+            return Ok(false);
         }
 
         match mutation.op {
@@ -1133,7 +1134,7 @@ impl ReplicationReplica {
                     mutation.expire_at_ms,
                     mutation.governance,
                     now_ms,
-                );
+                )?;
             }
             ReplicationMutationOp::Del => {
                 self.store.delete(mutation.key);
@@ -1149,16 +1150,16 @@ impl ReplicationReplica {
         }
         self.watermarks
             .observe(mutation.shard_id, mutation.sequence);
-        true
+        Ok(true)
     }
 
     fn apply_borrowed_mutation_inner(
         &mut self,
         mutation: BorrowedReplicationMutation<'_>,
         now_ms: &mut Option<u64>,
-    ) -> bool {
+    ) -> Result<bool> {
         if mutation.sequence <= self.watermarks.get(mutation.shard_id) {
-            return false;
+            return Ok(false);
         }
 
         match mutation.op {
@@ -1170,7 +1171,7 @@ impl ReplicationReplica {
                     mutation.expire_at_ms,
                     mutation.governance.map(bytes::Bytes::copy_from_slice),
                     now_ms,
-                );
+                )?;
             }
             ReplicationMutationOp::Del => {
                 self.store.delete(mutation.key);
@@ -1186,7 +1187,7 @@ impl ReplicationReplica {
         }
         self.watermarks
             .observe(mutation.shard_id, mutation.sequence);
-        true
+        Ok(true)
     }
 
     fn apply_set(
@@ -1197,9 +1198,12 @@ impl ReplicationReplica {
         expire_at_ms: Option<u64>,
         governance: Option<bytes::Bytes>,
         now_ms: &mut Option<u64>,
-    ) {
+    ) -> Result<()> {
         #[cfg(feature = "redis")]
         let route = if value.starts_with(crate::storage::VECTOR_SET_PREFIX) {
+            crate::commands::vector_set::validate_vector_set_bytes(&value).map_err(|_| {
+                ShardCacheError::Protocol("replica rejected malformed vector-set state".into())
+            })?;
             let primary_route = self.store.route_key_prehashed(key_hash, key);
             let vector_route = self.store.route_vector_key(key);
             if primary_route.shard_id != vector_route.shard_id {
@@ -1216,7 +1220,7 @@ impl ReplicationReplica {
             Some(expire_at_ms) => {
                 let now_ms = *now_ms.get_or_insert_with(now_millis);
                 if expire_at_ms <= now_ms {
-                    return;
+                    return Ok(());
                 }
                 self.store.set_value_bytes_routed_expire_at_with_governance(
                     route,
@@ -1237,15 +1241,34 @@ impl ReplicationReplica {
                 || {},
             ),
         }
+        Ok(())
     }
 
     pub fn replace_with_snapshot(&mut self, snapshot: ReplicationSnapshot) {
+        self.try_replace_with_snapshot(snapshot)
+            .expect("trusted local replication snapshot must contain valid vector state");
+    }
+
+    pub fn try_replace_with_snapshot(&mut self, snapshot: ReplicationSnapshot) -> Result<()> {
+        #[cfg(feature = "redis")]
+        for entry in &snapshot.entries {
+            if entry.value.starts_with(crate::storage::VECTOR_SET_PREFIX) {
+                crate::commands::vector_set::validate_vector_set_bytes(&entry.value).map_err(
+                    |_| {
+                        ShardCacheError::Protocol(
+                            "replica rejected malformed vector-set snapshot state".into(),
+                        )
+                    },
+                )?;
+            }
+        }
         let route_mode = self.store.route_mode();
         let shard_count = self.store.shard_count();
         let store = EmbeddedStore::with_route_mode(shard_count, route_mode);
         store.restore_entries(snapshot.entries);
         self.store = store;
         self.watermarks = snapshot.watermarks;
+        Ok(())
     }
 
     pub fn inner(&self) -> &EmbeddedStore {
@@ -1277,6 +1300,8 @@ mod tests {
     use crate::config::{ReplicationCompression, ReplicationConfig, ReplicationSendPolicy};
     #[cfg(feature = "redis")]
     use crate::protocol::Frame;
+    #[cfg(feature = "redis")]
+    use crate::storage::StoredEntry;
 
     use super::*;
 
@@ -1320,6 +1345,8 @@ mod tests {
                 b"COUNT",
                 b"1",
                 b"WITHGOVERNANCE",
+                b"GOVERNANCE",
+                b"tenant=acme",
                 b"TRUTH",
             ],
         ) {
@@ -1425,6 +1452,52 @@ mod tests {
 
         assert_eq!(vector_count(replica.inner(), &key), 1);
         assert!(replica.inner().clone_vector_value(&key).is_some());
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn malformed_replicated_vector_state_is_rejected_without_advancing_watermark() {
+        let source = EmbeddedStore::new(1);
+        add_vector(&source, b"vectors", b"document-1");
+        let mut malformed = source
+            .clone_vector_value(b"vectors")
+            .expect("canonical vector state")
+            .to_vec();
+        malformed.pop();
+
+        let key_hash = crate::storage::hash_key(b"vectors");
+        let mut replica = ReplicationReplica::new(1);
+        let mutation = ReplicationMutation {
+            shard_id: 0,
+            sequence: 1,
+            timestamp_ms: now_millis(),
+            op: ReplicationMutationOp::Set,
+            key_hash,
+            key_tag: hash_key_tag_from_hash(key_hash),
+            key: bytes::Bytes::from_static(b"vectors"),
+            value: bytes::Bytes::from(malformed.clone()),
+            expire_at_ms: None,
+            governance: None,
+        };
+        assert!(replica.apply_mutation(mutation).is_err());
+        assert_eq!(replica.watermarks().get(0), 0);
+        assert!(replica.inner().clone_vector_value(b"vectors").is_none());
+
+        replica
+            .inner()
+            .set_value_bytes(b"sentinel", bytes::Bytes::from_static(b"preserved"), None);
+        let snapshot = ReplicationSnapshot {
+            entries: vec![StoredEntry {
+                key: b"vectors".to_vec(),
+                value: malformed,
+                expire_at_ms: None,
+                governance: None,
+            }],
+            watermarks: ShardWatermarks::from_vec(vec![1]),
+        };
+        assert!(replica.try_replace_with_snapshot(snapshot).is_err());
+        assert_eq!(replica.get(b"sentinel"), Some(b"preserved".to_vec()));
+        assert_eq!(replica.watermarks().get(0), 0);
     }
 
     #[cfg(feature = "redis")]

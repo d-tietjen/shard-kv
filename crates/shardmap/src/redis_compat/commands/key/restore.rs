@@ -164,6 +164,8 @@ fn restore_key(store: &EmbeddedStore, args: &[&[u8]]) -> Result<(), RestoreError
 
     match value {
         DumpRestoreValue::String(value) if value.starts_with(VECTOR_SET_PREFIX) => {
+            crate::commands::vector_set::validate_vector_set_bytes(&value)
+                .map_err(|_| RestoreError::BadPayload)?;
             store.set_pinned_vector_value(key, value.into(), ttl_ms);
         }
         DumpRestoreValue::String(value) => store.set_value_bytes(key, value.into(), ttl_ms),
@@ -286,5 +288,25 @@ fn validate_freq_value(value: &[u8]) -> Result<(), RestoreError> {
     match parse_i64(value).map_err(|_| RestoreError::InvalidIdleOrFreq)? {
         value if (0..=255).contains(&value) => Ok(()),
         _ => Err(RestoreError::InvalidIdleOrFreq),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::dump_restore::encode_string_dump_value;
+
+    #[test]
+    fn restore_rejects_checksum_valid_malformed_vector_state() {
+        let store = EmbeddedStore::new(1);
+        let mut malformed = VECTOR_SET_PREFIX.to_vec();
+        malformed.extend_from_slice(b"malformed-vector-state");
+        let payload = encode_string_dump_value(&malformed);
+
+        assert_eq!(
+            restore_key(&store, &[b"vectors", b"0", &payload]),
+            Err(RestoreError::BadPayload)
+        );
+        assert!(!store.exists(b"vectors"));
     }
 }

@@ -174,6 +174,9 @@ impl ShardCacheClient {
     }
 
     /// Adds or updates one vector element through the native SCNP `VADD` opcode.
+    ///
+    /// Returns `true` only when a new element was inserted. A successful update
+    /// returns `false`, matching Redis `VADD` integer reply semantics.
     #[cfg(feature = "vector")]
     pub fn vadd(
         &mut self,
@@ -200,7 +203,14 @@ impl ShardCacheClient {
     /// Removes one vector element through the native SCNP `VREM` opcode.
     #[cfg(feature = "vector")]
     pub fn vrem(&mut self, key: &[u8], element: &[u8]) -> Result<bool> {
-        self.conn.execute(VRem::new(None, key, element))
+        self.conn.execute(VRem::new(None, key, element, None)?)
+    }
+
+    /// Removes a governed vector element when its current label matches.
+    #[cfg(feature = "vector")]
+    pub fn vrem_governed(&mut self, key: &[u8], element: &[u8], governance: &[u8]) -> Result<bool> {
+        self.conn
+            .execute(VRem::new(None, key, element, Some(governance))?)
     }
 
     /// Returns the first-party Redis command namespace.
@@ -687,6 +697,7 @@ impl ShardCacheDirectClient {
     }
 
     /// Adds or updates one vector element on the dedicated vector shard.
+    /// Returns `true` only for insertion; successful updates return `false`.
     #[cfg(feature = "vector")]
     pub fn vadd(
         &mut self,
@@ -715,7 +726,14 @@ impl ShardCacheDirectClient {
     #[cfg(feature = "vector")]
     pub fn vrem(&mut self, key: &[u8], element: &[u8]) -> Result<bool> {
         let route = self.router.route_vector_key(key);
-        self.conns[route.shard_id].execute(VRem::new(Some(route), key, element))
+        self.conns[route.shard_id].execute(VRem::new(Some(route), key, element, None)?)
+    }
+
+    /// Removes a governed vector element from the dedicated vector shard.
+    #[cfg(feature = "vector")]
+    pub fn vrem_governed(&mut self, key: &[u8], element: &[u8], governance: &[u8]) -> Result<bool> {
+        let route = self.router.route_vector_key(key);
+        self.conns[route.shard_id].execute(VRem::new(Some(route), key, element, Some(governance))?)
     }
 
     /// Returns the first-party Redis command namespace for direct shard routing.
@@ -869,6 +887,7 @@ impl ShardCacheDirectShardClient {
     }
 
     /// Adds or updates one vector element on the dedicated vector shard.
+    /// Returns `true` only for insertion; successful updates return `false`.
     #[cfg(feature = "vector")]
     pub fn vadd(
         &mut self,
@@ -899,7 +918,16 @@ impl ShardCacheDirectShardClient {
     #[cfg(feature = "vector")]
     pub fn vrem(&mut self, key: &[u8], element: &[u8]) -> Result<bool> {
         let route = self.checked_vector_route(key)?;
-        self.conn.execute(VRem::new(Some(route), key, element))
+        self.conn
+            .execute(VRem::new(Some(route), key, element, None)?)
+    }
+
+    /// Removes a governed vector element from this dedicated vector shard.
+    #[cfg(feature = "vector")]
+    pub fn vrem_governed(&mut self, key: &[u8], element: &[u8], governance: &[u8]) -> Result<bool> {
+        let route = self.checked_vector_route(key)?;
+        self.conn
+            .execute(VRem::new(Some(route), key, element, Some(governance))?)
     }
 
     /// Returns the first-party Redis command namespace for this shard.

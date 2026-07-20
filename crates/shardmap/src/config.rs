@@ -588,7 +588,7 @@ pub struct WalTcpExportConfig {
 }
 
 /// Native replication configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReplicationConfig {
     /// Enable native mutation-stream replication.
@@ -601,6 +601,14 @@ pub struct ReplicationConfig {
     pub replica_of: Option<String>,
     /// Optional plaintext authentication token for native replication.
     pub auth_token: Option<String>,
+    /// File containing the current reloadable replication authentication token.
+    pub auth_token_path: Option<PathBuf>,
+    /// Optional previous-token file retained during a bounded rolling rotation.
+    pub previous_auth_token_path: Option<PathBuf>,
+    /// TLS identity used while serving native replication connections.
+    pub tls_server: ScnpTlsServerConfig,
+    /// TLS trust and mTLS identity used while connecting to a primary.
+    pub tls_client: ScnpTlsClientConfig,
     /// Compression algorithm for mutation batches and snapshot chunks.
     pub compression: ReplicationCompression,
     /// zstd compression level used when `compression = "zstd"`.
@@ -646,6 +654,45 @@ pub struct ReplicationConfig {
     pub reconnect_backoff_ms: u64,
     /// Per-subscriber outbound channel capacity.
     pub subscriber_channel_capacity: usize,
+}
+
+impl std::fmt::Debug for ReplicationConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReplicationConfig")
+            .field("enabled", &self.enabled)
+            .field("role", &self.role)
+            .field("bind_addr", &self.bind_addr)
+            .field("replica_of", &self.replica_of)
+            .field("auth_token_configured", &self.auth_token.is_some())
+            .field("auth_token_path", &self.auth_token_path)
+            .field("previous_auth_token_path", &self.previous_auth_token_path)
+            .field("tls_server", &self.tls_server)
+            .field("tls_client", &self.tls_client)
+            .field("compression", &self.compression)
+            .field("zstd_level", &self.zstd_level)
+            .field("send_policy", &self.send_policy)
+            .field("batch_max_records", &self.batch_max_records)
+            .field("batch_max_bytes", &self.batch_max_bytes)
+            .field("batch_max_delay_us", &self.batch_max_delay_us)
+            .field("vector_state_flush_ms", &self.vector_state_flush_ms)
+            .field(
+                "vector_state_pending_max_bytes",
+                &self.vector_state_pending_max_bytes,
+            )
+            .field("backlog_bytes", &self.backlog_bytes)
+            .field("snapshot_chunk_bytes", &self.snapshot_chunk_bytes)
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_replicas", &self.max_replicas)
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("write_timeout_ms", &self.write_timeout_ms)
+            .field("reconnect_backoff_ms", &self.reconnect_backoff_ms)
+            .field(
+                "subscriber_channel_capacity",
+                &self.subscriber_channel_capacity,
+            )
+            .finish()
+    }
 }
 
 /// Native replication role.
@@ -904,6 +951,10 @@ impl Default for ReplicationConfig {
             bind_addr: "127.0.0.1:7631".to_string(),
             replica_of: None,
             auth_token: None,
+            auth_token_path: None,
+            previous_auth_token_path: None,
+            tls_server: ScnpTlsServerConfig::default(),
+            tls_client: ScnpTlsClientConfig::default(),
             compression: ReplicationCompression::None,
             zstd_level: 3,
             send_policy: ReplicationSendPolicy::Batch,
@@ -1052,8 +1103,9 @@ mod tests {
         EvictionPolicy, KvOverflowConfig, KvOverflowReplica, KvOverflowReplicaServerConfig,
         MAX_KV_OVERFLOW_SLOT_COUNT, ScnpTlsClientConfig,
     };
-    use super::{ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser};
-    #[cfg(all(feature = "kv-overflow", feature = "scnp-tls"))]
+    use super::{
+        ReplicationConfig, ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -1106,6 +1158,44 @@ mod tests {
         config.persistence.wal_block_max_records = 64;
         config.persistence.wal_block_max_bytes = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn replication_token_rotation_configuration_requires_a_current_file() {
+        let config = ShardCacheConfig {
+            replication: ReplicationConfig {
+                enabled: true,
+                previous_auth_token_path: Some(PathBuf::from("/run/secrets/old-token")),
+                ..ReplicationConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(feature = "scnp-tls")]
+    #[test]
+    fn non_loopback_replication_requires_mtls_and_token_authentication() {
+        let mut config = ShardCacheConfig {
+            replication: ReplicationConfig {
+                enabled: true,
+                role: super::ReplicationRole::Replica,
+                replica_of: Some("10.0.0.10:7631".into()),
+                ..ReplicationConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        config.replication.auth_token_path = Some(PathBuf::from("/run/secrets/token"));
+        config.replication.tls_client = ScnpTlsClientConfig {
+            enabled: true,
+            ca_path: PathBuf::from("/run/secrets/ca.pem"),
+            client_cert_path: Some(PathBuf::from("/run/secrets/client.pem")),
+            client_key_path: Some(PathBuf::from("/run/secrets/client-key.pem")),
+            server_name: Some("primary.internal".into()),
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]

@@ -6090,13 +6090,25 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
     );
     assert_eq!(run(&[b"VCARD", b"points"]), Frame::Integer(2));
     assert_eq!(run(&[b"VDIM", b"points"]), Frame::Integer(2));
-    assert_eq!(run(&[b"VISMEMBER", b"points", b"a"]), Frame::Integer(1));
+    assert_eq!(run(&[b"VISMEMBER", b"points", b"a"]), Frame::Integer(0));
     assert_eq!(
-        run(&[b"VGETATTR", b"points", b"a"]),
+        run(&[b"VISMEMBER", b"points", b"a", b"GOVERNANCE", b"tenant=acme",]),
+        Frame::Integer(1)
+    );
+    assert_eq!(run(&[b"VGETATTR", b"points", b"a"]), Frame::Null);
+    assert_eq!(
+        run(&[b"VGETATTR", b"points", b"a", b"GOVERNANCE", b"tenant=acme",]),
         Frame::BlobString(b"{\"kind\":\"seed\",\"score\":3}".to_vec())
     );
 
-    match run(&[b"VEMB", b"points", b"a", b"RAW"]) {
+    match run(&[
+        b"VEMB",
+        b"points",
+        b"a",
+        b"RAW",
+        b"GOVERNANCE",
+        b"tenant=acme",
+    ]) {
         Frame::Array(items) => {
             assert_eq!(items[0], Frame::SimpleString("fp32".to_string()));
             assert!(matches!(&items[1], Frame::BlobString(bytes) if bytes.len() == 8));
@@ -6123,7 +6135,15 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
     }
 
     assert_eq!(
-        run(&[b"VRANGE", b"points", b"[a", b"[z", b"1"]),
+        run(&[
+            b"VRANGE",
+            b"points",
+            b"[a",
+            b"[z",
+            b"1",
+            b"GOVERNANCE",
+            b"tenant=acme",
+        ]),
         Frame::Array(vec![Frame::BlobString(b"a".to_vec())])
     );
     assert_eq!(
@@ -6148,6 +6168,8 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
         b"WITHSCORES",
         b"WITHATTRIBS",
         b"WITHGOVERNANCE",
+        b"GOVERNANCE",
+        b"tenant=acme",
         b"COUNT",
         b"2",
         b"FILTER",
@@ -6172,7 +6194,18 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
         other => panic!("unexpected VSIM reply: {other:?}"),
     }
 
-    assert_eq!(run(&[b"VSETATTR", b"points", b"a", b""]), Frame::Integer(1));
+    assert_eq!(run(&[b"VSETATTR", b"points", b"a", b""]), Frame::Integer(0));
+    assert_eq!(
+        run(&[
+            b"VSETATTR",
+            b"points",
+            b"a",
+            b"",
+            b"GOVERNANCE",
+            b"tenant=acme",
+        ]),
+        Frame::Integer(1)
+    );
     assert_eq!(run(&[b"VGETATTR", b"points", b"a"]), Frame::Null);
     assert_eq!(
         run(&[
@@ -6183,6 +6216,8 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
             b"COUNT",
             b"1",
             b"WITHGOVERNANCE",
+            b"GOVERNANCE",
+            b"tenant=acme",
             b"TRUTH",
         ]),
         Frame::Array(vec![
@@ -6191,7 +6226,14 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
         ])
     );
     assert!(matches!(
-        run(&[b"VSETATTR", b"points", b"a", b"not-json"]),
+        run(&[
+            b"VSETATTR",
+            b"points",
+            b"a",
+            b"not-json",
+            b"GOVERNANCE",
+            b"tenant=acme",
+        ]),
         Frame::Error(_)
     ));
     assert_eq!(run(&[b"VREM", b"points", b"b"]), Frame::Integer(1));
@@ -6311,6 +6353,8 @@ fn vector_dump_restore_round_trips_across_route_classes() {
                 b"COUNT",
                 b"1",
                 b"WITHGOVERNANCE",
+                b"GOVERNANCE",
+                b"tenant=acme",
                 b"TRUTH",
             ]),
             Frame::Array(vec![
@@ -6378,6 +6422,8 @@ fn typed_scnp_vector_commands_return_native_responses() {
             b"WITHSCORES",
             b"WITHATTRIBS",
             b"WITHGOVERNANCE",
+            b"GOVERNANCE",
+            b"tenant=acme",
             b"TRUTH",
         ],
     );
@@ -6394,7 +6440,10 @@ fn typed_scnp_vector_commands_return_native_responses() {
         .unwrap();
     assert!((score - 1.0).abs() < 1e-6);
     assert_eq!(
-        run(FastCommandKind::VRem, vec![b"points", b"doc-a"]),
+        run(
+            FastCommandKind::VRem,
+            vec![b"points", b"doc-a", b"GOVERNANCE", b"tenant=acme"],
+        ),
         FastResponse::Integer(1)
     );
 }

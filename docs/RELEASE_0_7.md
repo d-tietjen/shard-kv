@@ -38,14 +38,26 @@ shutdown force ordered flushes. Retained canonical state is capped by
 `vector_state_pending_max_bytes` (16 MiB by default); an individual larger
 state bypasses the coalescer and is emitted immediately.
 
-`VADD ... GOVERNANCE <bytes>` stores an opaque policy label on one embedding;
-`VSIM ... WITHGOVERNANCE` returns the label next to that match. Typed SCNP
-clients request it with `VSimOptions::with_governance(true)` and expose it as
-`VSimMatch::governance`.
+`VADD ... GOVERNANCE <bytes>` stores an opaque policy label on one embedding.
+Governed embeddings fail closed: ordinary point reads appear missing, list and
+similarity commands omit them, and `VADD`, `VREM`, and `VSETATTR` cannot mutate
+them. Supply the exact label with `GOVERNANCE` for reads/search/removal or
+`IFGOVERNANCE` for `VADD`; guarded `VADD` can rotate the label with
+`GOVERNANCE <new>` or remove it with `CLEARGOVERNANCE`. Typed SCNP clients use
+`VSimOptions::allow_governance`, `VAddOptions::if_governance`, and
+`vrem_governed`. `WITHGOVERNANCE` only controls whether an already-authorized
+result includes its label.
+
 Metadata is limited to 64 KiB, survives canonical vector serialization and the
-single-primary FCRP path, and remains separate from JSON attributes. It is an
-authorization input, not an authorization engine: services must evaluate it
-before releasing the associated source data.
+single-primary FCRP path, and remains separate from JSON attributes. Exact
+label matching is a storage-layer guard, not user authentication or a policy
+language. Authenticate the connection and derive allowed labels in the
+service authorization layer.
+
+Native vector read replicas use FCRP v2 in 0.7.2. Non-loopback replication
+requires TLS 1.3 mTLS plus token authentication, advertises only `fcrp/2`, and
+supports current/previous token files for rolling rotation. FCRP v2 rejects
+0.7.1 peers, so upgrade a replica pair together rather than mixing versions.
 
 ## Intended Workload And Performance
 
