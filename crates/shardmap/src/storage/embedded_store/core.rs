@@ -36,6 +36,8 @@ impl EmbeddedStore {
                 shift,
                 #[cfg(feature = "redis")]
                 objects: RedisObjectStore::new(shard_count),
+                #[cfg(feature = "redis")]
+                vector_mutation_observer: RwLock::new(None),
                 #[cfg(feature = "redis-modules")]
                 module_state: modules::RedisModuleState::new(shard_count),
                 #[cfg(feature = "redis-module-topk")]
@@ -114,6 +116,8 @@ impl EmbeddedStore {
             shift,
             #[cfg(feature = "redis")]
             objects: RedisObjectStore::new(shard_count),
+            #[cfg(feature = "redis")]
+            vector_mutation_observer: RwLock::new(None),
             #[cfg(feature = "redis-modules")]
             module_state: modules::RedisModuleState::new(shard_count),
             #[cfg(feature = "redis-module-topk")]
@@ -437,6 +441,48 @@ impl EmbeddedStore {
     #[inline(always)]
     pub const fn vector_shard_id(&self) -> usize {
         0
+    }
+
+    #[cfg(feature = "redis")]
+    pub(crate) fn configure_vector_mutation_observer(
+        &self,
+        observer: Option<Arc<VectorMutationFn>>,
+    ) {
+        *self.vector_mutation_observer.write() = observer.map(VectorMutationObserver);
+    }
+
+    #[cfg(feature = "redis")]
+    pub(crate) fn notify_vector_mutation(
+        &self,
+        kind: VectorMutationKind,
+        key: &[u8],
+        value: Option<bytes::Bytes>,
+        expire_at_ms: Option<u64>,
+    ) {
+        let observer = self.vector_mutation_observer.read().clone();
+        if let Some(observer) = observer {
+            (observer.0)(kind, key, value, expire_at_ms);
+        }
+    }
+
+    #[cfg(feature = "redis")]
+    pub(crate) fn clone_vector_value(&self, key: &[u8]) -> Option<bytes::Bytes> {
+        self.clone_vector_value_state(key).map(|(value, _)| value)
+    }
+
+    #[cfg(feature = "redis")]
+    pub(crate) fn clone_vector_value_state(
+        &self,
+        key: &[u8],
+    ) -> Option<(bytes::Bytes, Option<u64>)> {
+        let route = self.route_vector_key(key);
+        let now_ms = now_millis();
+        let mut shard = self.shards[route.shard_id].write();
+        let expire_at_ms = shard.entry_expire_at_hashed(route.key_hash, key, now_ms)?;
+        let value = shard.get_shared_value_bytes_hashed(route.key_hash, key, now_ms)?;
+        value
+            .starts_with(crate::storage::VECTOR_SET_PREFIX)
+            .then(|| (value.clone(), expire_at_ms))
     }
 
     /// Computes the pinned storage route for Redis vector-set data.

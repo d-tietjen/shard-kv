@@ -1170,6 +1170,16 @@ impl OwnedEmbeddedWorkerShards {
             {
                 continue;
             }
+            #[cfg(feature = "redis")]
+            let route = if entry.value.starts_with(crate::storage::VECTOR_SET_PREFIX) {
+                EmbeddedKeyRoute {
+                    shard_id: 0,
+                    key_hash: hash_key(&entry.key),
+                }
+            } else {
+                self.route_key(&entry.key)
+            };
+            #[cfg(not(feature = "redis"))]
             let route = self.route_key(&entry.key);
             let shard = self.shard_for_route_mut(route.shard_id);
             if let Some(session_prefix) = point_write_session_storage_prefix(&entry.key) {

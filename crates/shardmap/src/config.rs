@@ -613,6 +613,18 @@ pub struct ReplicationConfig {
     pub batch_max_bytes: usize,
     /// Maximum time a non-empty batch may wait before flush.
     pub batch_max_delay_us: u64,
+    /// Maximum time canonical vector-set updates may be coalesced per key.
+    ///
+    /// Coalescing prevents repeated `VADD` calls from replicating every
+    /// increasingly large intermediate HNSW payload. Deletes, type changes,
+    /// and snapshots force an ordered flush before continuing.
+    pub vector_state_flush_ms: u64,
+    /// Maximum canonical vector-state bytes retained by the coalescer.
+    ///
+    /// A single state larger than this limit bypasses coalescing and is sent
+    /// immediately. Zero uses a one-byte limit, effectively disabling retained
+    /// vector state without disabling vector replication.
+    pub vector_state_pending_max_bytes: usize,
     /// Approximate retained in-memory backlog size for partial catch-up.
     pub backlog_bytes: usize,
     /// Snapshot chunk size before compression.
@@ -898,6 +910,8 @@ impl Default for ReplicationConfig {
             batch_max_records: 512,
             batch_max_bytes: 1024 * 1024,
             batch_max_delay_us: 750,
+            vector_state_flush_ms: 10,
+            vector_state_pending_max_bytes: 16 * 1024 * 1024,
             backlog_bytes: 64 * 1024 * 1024,
             snapshot_chunk_bytes: 1024 * 1024,
             queue_capacity: 16_384,

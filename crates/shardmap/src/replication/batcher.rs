@@ -283,6 +283,18 @@ impl EncodedReplicationBatchBuilder {
         self.should_flush_due().then(|| self.flush()).flatten()
     }
 
+    pub(crate) fn next_timeout(&self) -> Option<Duration> {
+        match (self.record_count, self.first_pending_at) {
+            (0, _) => None,
+            (_, None) => Some(Duration::ZERO),
+            (_, Some(start)) => Some(
+                self.max_delay()
+                    .checked_sub(start.elapsed())
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+
     pub(crate) fn flush(&mut self) -> Option<EncodedReplicationBatch> {
         if self.record_count == 0 {
             return None;

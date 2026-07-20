@@ -25,6 +25,29 @@ use crate::storage::{
     RedisObjectResult, RedisObjectStore, RedisObjectValue, RedisObjectWriteAttempt,
     RedisObjectZSetRangeItem, RedisStringLookup,
 };
+
+#[cfg(feature = "redis")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorMutationKind {
+    Set,
+    Delete,
+    Expire,
+}
+
+#[cfg(feature = "redis")]
+pub(crate) type VectorMutationFn =
+    dyn Fn(VectorMutationKind, &[u8], Option<bytes::Bytes>, Option<u64>) + Send + Sync;
+
+#[cfg(feature = "redis")]
+#[derive(Clone)]
+struct VectorMutationObserver(Arc<VectorMutationFn>);
+
+#[cfg(feature = "redis")]
+impl std::fmt::Debug for VectorMutationObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VectorMutationObserver(..)")
+    }
+}
 #[cfg(feature = "embedded")]
 use crate::storage::{ShardStatsSnapshot, TierStatsSnapshot};
 
@@ -369,6 +392,8 @@ pub struct EmbeddedStore {
     shift: u32,
     #[cfg(feature = "redis")]
     objects: RedisObjectStore,
+    #[cfg(feature = "redis")]
+    vector_mutation_observer: RwLock<Option<VectorMutationObserver>>,
     #[cfg(feature = "redis-modules")]
     module_state: modules::RedisModuleState,
     #[cfg(feature = "redis-module-topk")]

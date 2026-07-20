@@ -24,6 +24,29 @@ impl FlatMap {
         now_ms: u64,
         transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
     ) -> std::result::Result<R, E> {
+        self.transform_value_hashed(hash, key, now_ms, true, transform)
+    }
+
+    #[cfg(feature = "redis")]
+    pub(crate) fn transform_value_hashed_preserve_ttl<R, E>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
+    ) -> std::result::Result<R, E> {
+        self.transform_value_hashed(hash, key, now_ms, false, transform)
+    }
+
+    #[cfg(feature = "redis")]
+    fn transform_value_hashed<R, E>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        clear_ttl: bool,
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
+    ) -> std::result::Result<R, E> {
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         if self.ttl_entries != 0 && self.entry_is_expired_hashed(hash, key, now_ms) {
@@ -57,8 +80,10 @@ impl FlatMap {
                     .stored_bytes
                     .saturating_sub(previous_entry_bytes)
                     .saturating_add(entry.stored_bytes());
-                entry.expire_at_ms = None;
-                self.adjust_ttl_count(had_ttl, false);
+                if clear_ttl {
+                    entry.expire_at_ms = None;
+                    self.adjust_ttl_count(had_ttl, false);
+                }
                 self.retire_value(retired_value);
                 self.enforce_memory_limit(now_ms);
                 Ok(result)

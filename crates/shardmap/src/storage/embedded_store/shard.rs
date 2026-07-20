@@ -154,6 +154,19 @@ impl EmbeddedShard {
             .transform_value_hashed_no_ttl(hash, key, now_ms, transform)
     }
 
+    #[cfg(feature = "redis")]
+    #[inline(always)]
+    pub(crate) fn transform_value_hashed_preserve_ttl<R, E>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
+    ) -> std::result::Result<R, E> {
+        self.map
+            .transform_value_hashed_preserve_ttl(hash, key, now_ms, transform)
+    }
+
     #[inline(always)]
     pub(crate) fn get_ref_hashed_shared(
         &self,

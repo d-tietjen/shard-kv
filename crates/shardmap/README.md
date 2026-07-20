@@ -503,8 +503,27 @@ let replica = ReplicationReplicaClient::start(ReplicationConfig {
 
 Native replication v1 streams byte-string cache mutations and consistent
 snapshots. It is intended for read replicas, sidecar cache mirrors, and service
-subscribers that consume shardcache's FCRP frames; Redis object-family
-replication is outside this embedded replication surface.
+subscribers that consume shardcache's FCRP frames. Canonically serialized vector
+sets are included: `VADD`, `VREM`, `VSETATTR`, vector-key deletion, and TTL
+changes use the pinned shard-0 mutation stream, and snapshot restore preserves
+that route. Other Redis object families remain outside this embedded
+replication surface.
+
+`ReplicationConfig::vector_state_flush_ms` defaults to 10 ms. Within that
+window, repeated writes to one vector set replace its pending canonical state
+instead of retaining every intermediate HNSW payload. The pending key count is
+bounded by the existing per-shard replication queue capacity and retained state
+is independently bounded by `vector_state_pending_max_bytes` (16 MiB by
+default). A state larger than that byte limit bypasses coalescing. Deletes,
+vector-to-string transitions, explicit snapshot capture, and shutdown flush
+the required state in shard-0 sequence order.
+
+Use `ReplicatedEmbeddedStore::shared_inner()` when an SCNP/RESP endpoint must
+serve the same writable primary memory. Keep the `ReplicatedEmbeddedStore`
+alive for the lifetime of the server so its bounded replication exporters and
+vector observer remain active. Replica promotion and client endpoint selection
+remain orchestration responsibilities; wait for replica catch-up before
+redirecting vector reads or promoting a node.
 
 For capacity scaling without full replica copies, enable `kv-overflow` and use
 `KvOverflowStore`. It mirrors each fixed logical key slot to one shardcache

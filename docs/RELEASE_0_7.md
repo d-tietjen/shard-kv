@@ -21,6 +21,22 @@ select an active-sync feature.
 | Exact fault-in | Restores an evicted version from local overflow, durable state, or a peer and rejects stale promotion after a racing mutation. | Included in active sync |
 | Persistence and repair | Preserves causal state in checksummed snapshots and repairs compacted block history through bounded state transfer. | Included in active sync |
 | Conflict batching | Finalizes independent ambiguous conflicts in bounded batches while preserving repeated-key mutation order. | Included in consensus mode |
+| Typed vector client | Sends bounded native `PING`, `VADD`, `VSIM`, and `VREM` requests over fanout or direct shard-0 SCNP connections. | `shardcache-client-rs` `vector` feature |
+| Vector read-replica state | Replicates canonical vector-set payloads, deletes, and TTL changes through FCRP and preserves shard-0 placement during live apply and snapshot bootstrap. | `shardmap` `redis` plus `ReplicatedEmbeddedStore` |
+
+Vector read replicas use the single-primary FCRP stream. The active-sync modes
+in this release synchronize exact `ActiveShardMap` point values only; they do
+not merge concurrent `VADD`, `VREM`, or `VSETATTR` operations. Do not place the
+same vector set behind multiple writable vector primaries. Promote a caught-up
+replica under an external writer fence, then redirect clients.
+
+Canonical vector state is coalesced per key for at most
+`vector_state_flush_ms` (10 ms by default), so bulk VADD does not publish every
+increasingly large intermediate index. This interval is part of the maximum
+steady-state replication lag. Snapshot capture, delete, type transition, and
+shutdown force ordered flushes. Retained canonical state is capped by
+`vector_state_pending_max_bytes` (16 MiB by default); an individual larger
+state bypasses the coalescer and is emitted immediately.
 
 ## Intended Workload And Performance
 

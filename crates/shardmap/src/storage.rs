@@ -54,6 +54,8 @@ pub use embedded_store::ShardArcEmbeddedStore;
 pub(crate) use embedded_store::TimeSeriesMultiRangeWriter;
 #[cfg(feature = "redis-module-topk")]
 pub(crate) use embedded_store::TopKError;
+#[cfg(feature = "redis")]
+pub(crate) use embedded_store::VectorMutationKind;
 pub(crate) use embedded_store::overflow_slot_shard;
 #[cfg(feature = "redis")]
 pub(crate) use embedded_store::{

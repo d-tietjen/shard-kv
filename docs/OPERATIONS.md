@@ -13,6 +13,7 @@ For the container-specific runbook, see
 | Server crate | `shardcache = "0.7.2"` | Install or depend on the RESP/SCNP server package. |
 | Native client crate | `shardcache-client-rs = "0.7.2"` | SCNP client access from Rust applications. |
 | Active-active embedded map | `shardmap` with `active-sync-causal-eventual` or `active-sync-consensus-ordered-eventual` | Opt-in exact point-value synchronization; add `active-sync-tls` for network peers. |
+| Vector read replica | `shardmap` with `redis` and `ReplicatedEmbeddedStore` | Single-writer FCRP replication of canonical vector-set state; fence promotion after catch-up. |
 | Server | `cargo run -p shardcache --features server --bin shardcache -- ...` | RESP/SCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo run -p shardcache --features redis-server --bin shardcache -- ...` | Redis/Valkey-compatible command and object behavior. |
 

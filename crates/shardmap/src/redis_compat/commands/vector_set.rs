@@ -1359,7 +1359,7 @@ fn vector_write_maybe(
     key: &[u8],
     op: impl FnOnce(&mut VectorSetState) -> VectorWriteResult,
 ) -> Frame {
-    match store.transform_raw_vector_value_no_ttl(
+    let result = store.transform_raw_vector_value_preserve_ttl(
         key,
         |existing| {
             let mut set = match decode_vector_set(existing) {
@@ -1367,19 +1367,30 @@ fn vector_write_maybe(
                 Err(()) => return Err(wrongtype()),
             };
             match op(&mut set) {
-                VectorWriteResult::Changed(frame) => Ok((frame, encode_vector_set(&set))),
+                VectorWriteResult::Changed(frame) => Ok(((frame, true), encode_vector_set(&set))),
                 VectorWriteResult::Unchanged(frame) => {
                     let value = existing
                         .map(<[u8]>::to_vec)
                         .unwrap_or_else(|| encode_vector_set(&set));
-                    Ok((frame, value))
+                    Ok(((frame, false), value))
                 }
             }
         },
         wrongtype,
-    ) {
-        Ok(frame) => frame,
-        Err(frame) => frame,
+    );
+    match result {
+        Ok((frame, true)) => {
+            if let Some((value, expire_at_ms)) = store.clone_vector_value_state(key) {
+                store.notify_vector_mutation(
+                    crate::storage::VectorMutationKind::Set,
+                    key,
+                    Some(value),
+                    expire_at_ms,
+                );
+            }
+            frame
+        }
+        Ok((frame, false)) | Err(frame) => frame,
     }
 }
 

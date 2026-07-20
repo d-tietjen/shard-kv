@@ -1,3 +1,5 @@
+#[cfg(feature = "redis")]
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -7,6 +9,8 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, bounded};
 use parking_lot::Mutex;
 
 use crate::config::ReplicationConfig;
+#[cfg(feature = "redis")]
+use crate::storage::VectorMutationKind;
 use crate::storage::{
     Bytes, EmbeddedRouteMode, EmbeddedStore, MutationOp, hash_key_tag_from_hash, now_millis,
     ttl_now_millis,
@@ -33,7 +37,7 @@ const DIRECT_ENCODED_SET_MAX_VALUE_LEN: usize = 128;
 
 #[derive(Debug)]
 pub struct ReplicatedEmbeddedStore {
-    store: EmbeddedStore,
+    store: Arc<EmbeddedStore>,
     primary: Arc<ReplicationPrimary>,
     emitters: Arc<ReplicatedEmbeddedEmitters>,
 }
@@ -53,7 +57,24 @@ struct ReplicatedEmbeddedEmitters {
     exporter_stop: Arc<AtomicBool>,
     flusher_join: Mutex<Option<JoinHandle<()>>>,
     exporter_joins: Mutex<Vec<JoinHandle<()>>>,
-    flush_interval: Duration,
+    flush_wake_tx: Sender<()>,
+    flush_wake_rx: Receiver<()>,
+    #[cfg(feature = "redis")]
+    vector_pending: Mutex<VectorPendingState>,
+    #[cfg(feature = "redis")]
+    vector_pending_capacity: usize,
+    #[cfg(feature = "redis")]
+    vector_pending_max_bytes: usize,
+    #[cfg(feature = "redis")]
+    vector_flush_interval: Duration,
+}
+
+#[cfg(feature = "redis")]
+#[derive(Debug)]
+struct VectorPendingState {
+    mutations: HashMap<bytes::Bytes, ReplicationMutation>,
+    retained_bytes: usize,
+    last_flush: Instant,
 }
 
 #[derive(Debug)]
@@ -97,10 +118,47 @@ impl ReplicatedEmbeddedStore {
                 "ReplicatedEmbeddedStore requires replication.enabled = true".into(),
             ));
         }
-        let store = EmbeddedStore::with_route_mode(shard_count, route_mode);
+        let store = Arc::new(EmbeddedStore::with_route_mode(shard_count, route_mode));
         let primary = Arc::new(ReplicationPrimary::start(shard_count, config.clone())?);
         let emitters =
             ReplicatedEmbeddedEmitters::start(Arc::clone(&primary), shard_count, config)?;
+        #[cfg(feature = "redis")]
+        {
+            let vector_emitters = Arc::clone(&emitters);
+            store.configure_vector_mutation_observer(Some(Arc::new(
+                move |kind, key, value, expire_at_ms| {
+                    let op = match kind {
+                        VectorMutationKind::Set => ReplicationMutationOp::Set,
+                        VectorMutationKind::Delete => ReplicationMutationOp::Del,
+                        VectorMutationKind::Expire => ReplicationMutationOp::Expire,
+                    };
+                    let value = match (kind, value) {
+                        (VectorMutationKind::Set, Some(value)) => value,
+                        (VectorMutationKind::Set, None) => {
+                            tracing::error!(
+                                "rejecting vector replication event without canonical state"
+                            );
+                            return;
+                        }
+                        (_, _) => bytes::Bytes::new(),
+                    };
+                    let key_hash = crate::storage::hash_key(key);
+                    let timestamp_ms = ttl_now_millis();
+                    vector_emitters.queue_vector_mutation(ReplicationMutation {
+                        shard_id: 0,
+                        sequence: 0,
+                        timestamp_ms,
+                        op,
+                        key_hash,
+                        key_tag: hash_key_tag_from_hash(key_hash),
+                        key: bytes::Bytes::copy_from_slice(key),
+                        value,
+                        expire_at_ms,
+                        governance: None,
+                    });
+                },
+            )));
+        }
         Ok(Self {
             store,
             primary,
@@ -123,6 +181,22 @@ impl ReplicatedEmbeddedStore {
 
     pub fn set(&self, key: Bytes, value: Bytes, ttl_ms: Option<u64>) {
         let route = self.store.route_key(&key);
+        #[cfg(feature = "redis")]
+        let was_vector = self.store.clone_vector_value(&key).is_some();
+        #[cfg(feature = "redis")]
+        if was_vector {
+            self.store.delete(&key);
+        }
+        #[cfg(feature = "redis")]
+        let had_pending_vector = self.emitters.flush_vector_key(&key);
+        #[cfg(feature = "redis")]
+        let replication_shard_id = if was_vector || had_pending_vector {
+            self.store.vector_shard_id()
+        } else {
+            route.shard_id
+        };
+        #[cfg(not(feature = "redis"))]
+        let replication_shard_id = route.shard_id;
         let key = bytes::Bytes::from(key);
         let value = bytes::Bytes::from(value);
         let direct_encode = direct_encoded_set_enabled(value.len());
@@ -138,7 +212,7 @@ impl ReplicatedEmbeddedStore {
                     now_ms,
                     || match direct_encode {
                         true => self.emitters.emit_borrowed_set(BorrowedSetReplication {
-                            shard_id: route.shard_id,
+                            shard_id: replication_shard_id,
                             timestamp_ms: now_ms,
                             key_hash: route.key_hash,
                             key_tag: hash_key_tag_from_hash(route.key_hash),
@@ -148,9 +222,9 @@ impl ReplicatedEmbeddedStore {
                             governance: None,
                         }),
                         false => self.emitters.emit(
-                            route.shard_id,
+                            replication_shard_id,
                             ReplicationMutation {
-                                shard_id: route.shard_id,
+                                shard_id: replication_shard_id,
                                 sequence: 0,
                                 timestamp_ms: now_ms,
                                 op: ReplicationMutationOp::Set,
@@ -173,7 +247,7 @@ impl ReplicatedEmbeddedStore {
                     value.clone(),
                     || match direct_encode {
                         true => self.emitters.emit_borrowed_set(BorrowedSetReplication {
-                            shard_id: route.shard_id,
+                            shard_id: replication_shard_id,
                             timestamp_ms,
                             key_hash: route.key_hash,
                             key_tag: hash_key_tag_from_hash(route.key_hash),
@@ -183,9 +257,9 @@ impl ReplicatedEmbeddedStore {
                             governance: None,
                         }),
                         false => self.emitters.emit(
-                            route.shard_id,
+                            replication_shard_id,
                             ReplicationMutation {
-                                shard_id: route.shard_id,
+                                shard_id: replication_shard_id,
                                 sequence: 0,
                                 timestamp_ms,
                                 op: ReplicationMutationOp::Set,
@@ -211,6 +285,22 @@ impl ReplicatedEmbeddedStore {
         governance: Bytes,
     ) {
         let route = self.store.route_key(&key);
+        #[cfg(feature = "redis")]
+        let was_vector = self.store.clone_vector_value(&key).is_some();
+        #[cfg(feature = "redis")]
+        if was_vector {
+            self.store.delete(&key);
+        }
+        #[cfg(feature = "redis")]
+        let had_pending_vector = self.emitters.flush_vector_key(&key);
+        #[cfg(feature = "redis")]
+        let replication_shard_id = if was_vector || had_pending_vector {
+            self.store.vector_shard_id()
+        } else {
+            route.shard_id
+        };
+        #[cfg(not(feature = "redis"))]
+        let replication_shard_id = route.shard_id;
         let key = bytes::Bytes::from(key);
         let value = bytes::Bytes::from(value);
         let governance = bytes::Bytes::from(governance);
@@ -226,7 +316,7 @@ impl ReplicatedEmbeddedStore {
             now_ms,
             || match direct_encode {
                 true => self.emitters.emit_borrowed_set(BorrowedSetReplication {
-                    shard_id: route.shard_id,
+                    shard_id: replication_shard_id,
                     timestamp_ms: now_ms,
                     key_hash: route.key_hash,
                     key_tag: hash_key_tag_from_hash(route.key_hash),
@@ -236,9 +326,9 @@ impl ReplicatedEmbeddedStore {
                     governance: Some(governance.as_ref()),
                 }),
                 false => self.emitters.emit(
-                    route.shard_id,
+                    replication_shard_id,
                     ReplicationMutation {
-                        shard_id: route.shard_id,
+                        shard_id: replication_shard_id,
                         sequence: 0,
                         timestamp_ms: now_ms,
                         op: ReplicationMutationOp::Set,
@@ -255,6 +345,10 @@ impl ReplicatedEmbeddedStore {
     }
 
     pub fn delete(&self, key: &[u8]) -> bool {
+        #[cfg(feature = "redis")]
+        if self.store.clone_vector_value(key).is_some() {
+            return self.store.delete(key);
+        }
         let route = self.store.route_key(key);
         let now_ms = now_millis();
         self.store.delete_routed_then(route, key, now_ms, || {
@@ -277,6 +371,10 @@ impl ReplicatedEmbeddedStore {
     }
 
     pub fn expire(&self, key: &[u8], expire_at_ms: u64) -> bool {
+        #[cfg(feature = "redis")]
+        if self.store.clone_vector_value(key).is_some() {
+            return self.store.expire(key, expire_at_ms);
+        }
         let route = self.store.route_key(key);
         let now_ms = now_millis();
         self.store
@@ -371,7 +469,16 @@ impl ReplicatedEmbeddedStore {
     }
 
     pub fn inner(&self) -> &EmbeddedStore {
-        &self.store
+        self.store.as_ref()
+    }
+
+    /// Returns the shared store used by protocol servers.
+    ///
+    /// Keep this `ReplicatedEmbeddedStore` alive while serving the returned
+    /// handle so its replication exporters and vector mutation observer remain
+    /// active.
+    pub fn shared_inner(&self) -> Arc<EmbeddedStore> {
+        Arc::clone(&self.store)
     }
 }
 
@@ -381,6 +488,8 @@ fn direct_encoded_set_enabled(value_len: usize) -> bool {
 
 impl Drop for ReplicatedEmbeddedStore {
     fn drop(&mut self) {
+        #[cfg(feature = "redis")]
+        self.store.configure_vector_mutation_observer(None);
         self.emitters.shutdown();
     }
 }
@@ -392,8 +501,8 @@ impl ReplicatedEmbeddedEmitters {
         config: ReplicationConfig,
     ) -> Result<Arc<Self>> {
         let shard_count = shard_count.max(1);
-        let flush_interval = Duration::from_micros(config.batch_max_delay_us.max(1));
         let exporter_stop = Arc::new(AtomicBool::new(false));
+        let (flush_wake_tx, flush_wake_rx) = bounded(1);
         let mut shards = Vec::with_capacity(shard_count);
         let mut exporter_joins = Vec::with_capacity(shard_count);
         for shard_id in 0..shard_count {
@@ -421,7 +530,20 @@ impl ReplicatedEmbeddedEmitters {
             exporter_stop,
             flusher_join: Mutex::new(None),
             exporter_joins: Mutex::new(exporter_joins),
-            flush_interval,
+            flush_wake_tx,
+            flush_wake_rx,
+            #[cfg(feature = "redis")]
+            vector_pending: Mutex::new(VectorPendingState {
+                mutations: HashMap::new(),
+                retained_bytes: 0,
+                last_flush: Instant::now(),
+            }),
+            #[cfg(feature = "redis")]
+            vector_pending_capacity: config.queue_capacity.max(1),
+            #[cfg(feature = "redis")]
+            vector_pending_max_bytes: config.vector_state_pending_max_bytes.max(1),
+            #[cfg(feature = "redis")]
+            vector_flush_interval: Duration::from_millis(config.vector_state_flush_ms.max(1)),
         });
         let flusher = Arc::clone(&emitters);
         let join = thread::Builder::new()
@@ -445,6 +567,130 @@ impl ReplicatedEmbeddedEmitters {
             let mut emitter = shard.lock();
             emitter.emit(mutation);
         }
+        let _ = self.flush_wake_tx.try_send(());
+    }
+
+    #[cfg(feature = "redis")]
+    fn queue_vector_mutation(&self, mutation: ReplicationMutation) {
+        let mut forced = Vec::new();
+        {
+            let mut pending = self.vector_pending.lock();
+            match mutation.op {
+                ReplicationMutationOp::Set | ReplicationMutationOp::Del => {
+                    if let Some(replaced) = pending.mutations.remove(&mutation.key) {
+                        pending.retained_bytes = pending
+                            .retained_bytes
+                            .saturating_sub(vector_mutation_retained_bytes(&replaced));
+                    }
+                    let mutation_bytes = vector_mutation_retained_bytes(&mutation);
+                    if mutation_bytes > self.vector_pending_max_bytes {
+                        forced.push(mutation);
+                    } else {
+                        if pending.mutations.len() >= self.vector_pending_capacity
+                            || pending.retained_bytes.saturating_add(mutation_bytes)
+                                > self.vector_pending_max_bytes
+                        {
+                            forced.extend(pending.mutations.drain().map(|(_, mutation)| mutation));
+                            pending.retained_bytes = 0;
+                            pending.last_flush = Instant::now();
+                        }
+                        pending.retained_bytes =
+                            pending.retained_bytes.saturating_add(mutation_bytes);
+                        pending.mutations.insert(mutation.key.clone(), mutation);
+                    }
+                }
+                ReplicationMutationOp::Expire => match pending.mutations.get_mut(&mutation.key) {
+                    Some(existing) if existing.op == ReplicationMutationOp::Set => {
+                        existing.timestamp_ms = mutation.timestamp_ms;
+                        existing.expire_at_ms = mutation.expire_at_ms;
+                    }
+                    Some(existing) if existing.op == ReplicationMutationOp::Del => {}
+                    _ => {
+                        let mutation_bytes = vector_mutation_retained_bytes(&mutation);
+                        if mutation_bytes > self.vector_pending_max_bytes {
+                            forced.push(mutation);
+                        } else {
+                            if pending.mutations.len() >= self.vector_pending_capacity
+                                || pending.retained_bytes.saturating_add(mutation_bytes)
+                                    > self.vector_pending_max_bytes
+                            {
+                                forced.extend(
+                                    pending.mutations.drain().map(|(_, mutation)| mutation),
+                                );
+                                pending.retained_bytes = 0;
+                                pending.last_flush = Instant::now();
+                            }
+                            pending.retained_bytes =
+                                pending.retained_bytes.saturating_add(mutation_bytes);
+                            pending.mutations.insert(mutation.key.clone(), mutation);
+                        }
+                    }
+                },
+            }
+        }
+        self.emit_vector_mutations(forced);
+        let _ = self.flush_wake_tx.try_send(());
+    }
+
+    #[cfg(feature = "redis")]
+    fn flush_vector_key(&self, key: &[u8]) -> bool {
+        let mutation = {
+            let mut pending = self.vector_pending.lock();
+            let mutation = pending.mutations.remove(key);
+            if let Some(mutation) = mutation.as_ref() {
+                pending.retained_bytes = pending
+                    .retained_bytes
+                    .saturating_sub(vector_mutation_retained_bytes(mutation));
+            }
+            mutation
+        };
+        if let Some(mutation) = mutation {
+            self.emit(0, mutation);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(feature = "redis")]
+    fn flush_vector_due(&self) {
+        let mutations = {
+            let mut pending = self.vector_pending.lock();
+            if pending.last_flush.elapsed() < self.vector_flush_interval {
+                return;
+            }
+            pending.last_flush = Instant::now();
+            pending.retained_bytes = 0;
+            pending
+                .mutations
+                .drain()
+                .map(|(_, mutation)| mutation)
+                .collect()
+        };
+        self.emit_vector_mutations(mutations);
+    }
+
+    #[cfg(feature = "redis")]
+    fn flush_vector_pending(&self) {
+        let mutations = {
+            let mut pending = self.vector_pending.lock();
+            pending.last_flush = Instant::now();
+            pending.retained_bytes = 0;
+            pending
+                .mutations
+                .drain()
+                .map(|(_, mutation)| mutation)
+                .collect()
+        };
+        self.emit_vector_mutations(mutations);
+    }
+
+    #[cfg(feature = "redis")]
+    fn emit_vector_mutations(&self, mut mutations: Vec<ReplicationMutation>) {
+        mutations.sort_unstable_by(|left, right| left.key.cmp(&right.key));
+        for mutation in mutations {
+            self.emit(0, mutation);
+        }
     }
 
     fn emit_borrowed_set(&self, set: BorrowedSetReplication<'_>) {
@@ -465,17 +711,46 @@ impl ReplicatedEmbeddedEmitters {
         };
         let mut emitter = shard.lock();
         emitter.emit_borrowed_set(set);
+        let _ = self.flush_wake_tx.try_send(());
     }
 
     fn run_flusher(&self) {
         while !self.flusher_stop.load(Ordering::Relaxed) {
-            thread::sleep(self.flush_interval);
             self.flush_due();
+            let timeout = self
+                .next_flush_timeout()
+                .unwrap_or(Duration::from_millis(100));
+            match self.flush_wake_rx.recv_timeout(timeout) {
+                Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
         }
         self.flush_all();
     }
 
+    fn next_flush_timeout(&self) -> Option<Duration> {
+        let mut timeout = None;
+        for shard in &self.shards {
+            let emitter = shard.lock();
+            timeout = min_timeout(timeout, emitter.next_timeout());
+        }
+        #[cfg(feature = "redis")]
+        {
+            let pending = self.vector_pending.lock();
+            if !pending.mutations.is_empty() {
+                let vector_timeout = self
+                    .vector_flush_interval
+                    .checked_sub(pending.last_flush.elapsed())
+                    .unwrap_or_default();
+                timeout = min_timeout(timeout, Some(vector_timeout));
+            }
+        }
+        timeout
+    }
+
     fn flush_due(&self) {
+        #[cfg(feature = "redis")]
+        self.flush_vector_due();
         for shard in &self.shards {
             if let Some(mut emitter) = shard.try_lock() {
                 emitter.flush_due();
@@ -484,6 +759,8 @@ impl ReplicatedEmbeddedEmitters {
     }
 
     fn flush_all(&self) -> Vec<u64> {
+        #[cfg(feature = "redis")]
+        self.flush_vector_pending();
         let mut targets = Vec::with_capacity(self.shards.len());
         for shard in &self.shards {
             let mut emitter = shard.lock();
@@ -506,6 +783,7 @@ impl ReplicatedEmbeddedEmitters {
 
     fn shutdown(&self) {
         self.flusher_stop.store(true, Ordering::Relaxed);
+        let _ = self.flush_wake_tx.try_send(());
         if let Some(join) = self.flusher_join.lock().take()
             && join.thread().id() != thread::current().id()
         {
@@ -560,6 +838,10 @@ impl ReplicatedEmbeddedShardEmitter {
         }
     }
 
+    fn next_timeout(&self) -> Option<Duration> {
+        min_timeout(self.batch.next_timeout(), self.encoded_batch.next_timeout())
+    }
+
     fn flush(&mut self) {
         self.flush_owned();
         self.flush_encoded();
@@ -590,6 +872,23 @@ impl ReplicatedEmbeddedShardEmitter {
             tracing::warn!("dropping replicated embedded batch because exporter stopped");
         }
     }
+}
+
+fn min_timeout(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(timeout), None) | (None, Some(timeout)) => Some(timeout),
+        (None, None) => None,
+    }
+}
+
+#[cfg(feature = "redis")]
+fn vector_mutation_retained_bytes(mutation: &ReplicationMutation) -> usize {
+    mutation
+        .key
+        .len()
+        .saturating_add(mutation.value.len())
+        .saturating_add(mutation.governance.as_ref().map_or(0, bytes::Bytes::len))
 }
 
 fn start_embedded_exporter(
@@ -897,6 +1196,13 @@ impl ReplicationReplica {
         governance: Option<bytes::Bytes>,
         now_ms: &mut Option<u64>,
     ) {
+        #[cfg(feature = "redis")]
+        let route = if value.starts_with(crate::storage::VECTOR_SET_PREFIX) {
+            self.store.route_vector_key(key)
+        } else {
+            self.store.route_key_prehashed(key_hash, key)
+        };
+        #[cfg(not(feature = "redis"))]
         let route = self.store.route_key_prehashed(key_hash, key);
         match expire_at_ms {
             Some(expire_at_ms) => {
@@ -954,7 +1260,13 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    #[cfg(feature = "redis")]
+    use crate::commands::redis::RedisCommand;
+    #[cfg(feature = "redis")]
+    use crate::commands::vector_set::{VAdd, VCard};
     use crate::config::{ReplicationCompression, ReplicationConfig, ReplicationSendPolicy};
+    #[cfg(feature = "redis")]
+    use crate::protocol::Frame;
 
     use super::*;
 
@@ -966,6 +1278,30 @@ mod tests {
             batch_max_records: 2,
             batch_max_delay_us: 1_000,
             ..ReplicationConfig::default()
+        }
+    }
+
+    #[cfg(feature = "redis")]
+    fn vector_key_outside_shard_zero(store: &EmbeddedStore) -> Vec<u8> {
+        (0_u64..)
+            .map(|index| format!("vectors:{index}").into_bytes())
+            .find(|key| store.route_key(key).shard_id != store.vector_shard_id())
+            .expect("key outside vector shard")
+    }
+
+    #[cfg(feature = "redis")]
+    fn add_vector(store: &EmbeddedStore, key: &[u8], element: &[u8]) {
+        assert_eq!(
+            VAdd::execute(store, &[key, b"VALUES", b"2", b"1", b"0", element]),
+            Frame::Integer(1)
+        );
+    }
+
+    #[cfg(feature = "redis")]
+    fn vector_count(store: &EmbeddedStore, key: &[u8]) -> i64 {
+        match VCard::execute(store, &[key]) {
+            Frame::Integer(count) => count,
+            frame => panic!("unexpected VCARD response: {frame:?}"),
         }
     }
 
@@ -986,6 +1322,168 @@ mod tests {
             .get_value_bytes(b"alpha")
             .expect("stored value");
         assert!(bytes_points_inside(&stored, &frame));
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn vector_mutations_replicate_on_the_pinned_shard() {
+        let primary = ReplicatedEmbeddedStore::new(4, config(ReplicationSendPolicy::Immediate))
+            .expect("primary");
+        let mut replica = ReplicationReplica::new(4);
+        let subscriber = primary.primary().subscribe(8);
+        let key = vector_key_outside_shard_zero(primary.inner());
+
+        add_vector(primary.inner(), &key, b"document-1");
+        let frame = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("vector replication frame");
+        replica.apply_frame(frame).expect("apply vector mutation");
+
+        assert_eq!(vector_count(replica.inner(), &key), 1);
+        assert_eq!(replica.inner().route_vector_key(&key).shard_id, 0);
+
+        let expire_at_ms = now_millis().saturating_add(60_000);
+        assert!(primary.inner().expire(&key, expire_at_ms));
+        let frame = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("vector expiry frame");
+        replica.apply_frame(frame).expect("apply vector expiry");
+        assert!(replica.inner().pttl_millis(&key) > 0);
+
+        assert!(primary.inner().delete(&key));
+        let frame = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("vector delete frame");
+        replica.apply_frame(frame).expect("apply vector delete");
+        assert_eq!(vector_count(replica.inner(), &key), 0);
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn vector_snapshot_restore_preserves_the_pinned_route() {
+        let primary = ReplicatedEmbeddedStore::new(4, config(ReplicationSendPolicy::Immediate))
+            .expect("primary");
+        let key = vector_key_outside_shard_zero(primary.inner());
+        add_vector(primary.inner(), &key, b"document-1");
+
+        let mut replica = ReplicationReplica::new(4);
+        replica.replace_with_snapshot(primary.snapshot());
+
+        assert_eq!(vector_count(replica.inner(), &key), 1);
+        assert!(replica.inner().clone_vector_value(&key).is_some());
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn vector_updates_coalesce_to_the_latest_snapshot_state() {
+        let mut replication = config(ReplicationSendPolicy::Immediate);
+        replication.vector_state_flush_ms = 60_000;
+        let primary = ReplicatedEmbeddedStore::new(4, replication).expect("primary");
+        let subscriber = primary.primary().subscribe(8);
+        let key = vector_key_outside_shard_zero(primary.inner());
+
+        add_vector(primary.inner(), &key, b"document-1");
+        add_vector(primary.inner(), &key, b"document-2");
+        add_vector(primary.inner(), &key, b"document-3");
+        assert!(subscriber.try_recv().is_err());
+
+        let snapshot = primary.snapshot();
+        let mut replica = ReplicationReplica::new(4);
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("coalesced vector frame"),
+            )
+            .expect("apply coalesced vector state");
+        assert!(subscriber.try_recv().is_err());
+        assert_eq!(vector_count(replica.inner(), &key), 3);
+
+        let mut snapshot_replica = ReplicationReplica::new(4);
+        snapshot_replica.replace_with_snapshot(snapshot);
+        assert_eq!(vector_count(snapshot_replica.inner(), &key), 3);
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn oversized_vector_state_bypasses_the_bounded_coalescer() {
+        let mut replication = config(ReplicationSendPolicy::Immediate);
+        replication.vector_state_flush_ms = 60_000;
+        replication.vector_state_pending_max_bytes = 1;
+        let primary = ReplicatedEmbeddedStore::new(4, replication).expect("primary");
+        let subscriber = primary.primary().subscribe(8);
+        let key = vector_key_outside_shard_zero(primary.inner());
+
+        add_vector(primary.inner(), &key, b"document-1");
+        let frame = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("oversized vector frame");
+        let mut replica = ReplicationReplica::new(4);
+        replica.apply_frame(frame).expect("apply vector state");
+
+        assert_eq!(vector_count(replica.inner(), &key), 1);
+        assert!(primary.emitters.vector_pending.lock().mutations.is_empty());
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn vector_update_after_expire_preserves_the_absolute_deadline() {
+        let mut replication = config(ReplicationSendPolicy::Immediate);
+        replication.vector_state_flush_ms = 60_000;
+        let primary = ReplicatedEmbeddedStore::new(4, replication).expect("primary");
+        let subscriber = primary.primary().subscribe(8);
+        let key = vector_key_outside_shard_zero(primary.inner());
+
+        add_vector(primary.inner(), &key, b"document-1");
+        let expire_at_ms = now_millis().saturating_add(60_000);
+        assert!(primary.inner().expire(&key, expire_at_ms));
+        add_vector(primary.inner(), &key, b"document-2");
+
+        let mut replica = ReplicationReplica::new(4);
+        let _snapshot = primary.snapshot();
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("coalesced vector frame"),
+            )
+            .expect("apply vector state");
+
+        assert_eq!(vector_count(replica.inner(), &key), 2);
+        assert!(replica.inner().pttl_millis(&key) > 0);
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn vector_to_string_replacement_keeps_one_ordering_stream() {
+        let primary = ReplicatedEmbeddedStore::new(4, config(ReplicationSendPolicy::Immediate))
+            .expect("primary");
+        let mut replica = ReplicationReplica::new(4);
+        let subscriber = primary.primary().subscribe(8);
+        let key = vector_key_outside_shard_zero(primary.inner());
+
+        add_vector(primary.inner(), &key, b"document-1");
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("vector set frame"),
+            )
+            .expect("apply vector set");
+
+        primary.set(key.clone(), b"plain-string".to_vec(), None);
+        let delete = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("vector delete frame");
+        let replacement = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("string replacement frame");
+
+        // Out-of-order delivery still converges because both mutations use the
+        // pinned vector shard's sequence stream during the type transition.
+        replica.apply_frame(replacement).expect("apply replacement");
+        replica.apply_frame(delete).expect("apply stale delete");
+        assert_eq!(replica.get(&key), Some(b"plain-string".to_vec()));
     }
 
     #[test]
@@ -1038,6 +1536,23 @@ mod tests {
             .get_value_bytes(&first_key)
             .expect("stored value");
         assert!(!bytes_points_inside(&stored, &frame));
+    }
+
+    #[test]
+    fn idle_flusher_wakes_and_honors_a_single_batch_deadline() {
+        let mut replication = config(ReplicationSendPolicy::Batch);
+        replication.batch_max_records = 512;
+        replication.batch_max_delay_us = 5_000;
+        let primary = ReplicatedEmbeddedStore::new(4, replication).expect("primary");
+        let subscriber = primary.primary().subscribe(8);
+
+        primary.set(b"single".to_vec(), b"value".to_vec(), None);
+        let frame = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("single delayed batch");
+        let mut replica = ReplicationReplica::new(4);
+        replica.apply_frame(frame).expect("apply delayed batch");
+        assert_eq!(replica.get(b"single"), Some(b"value".to_vec()));
     }
 
     #[test]

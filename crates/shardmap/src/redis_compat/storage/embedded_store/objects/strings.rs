@@ -33,7 +33,7 @@ pub(crate) trait RedisStringStore {
         wrong_type: fn() -> E,
     ) -> std::result::Result<R, E>;
 
-    fn transform_raw_vector_value_no_ttl<R, E>(
+    fn transform_raw_vector_value_preserve_ttl<R, E>(
         &self,
         key: &[u8],
         transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
@@ -188,7 +188,7 @@ impl RedisStringStore for EmbeddedStore {
         Ok(result)
     }
 
-    fn transform_raw_vector_value_no_ttl<R, E>(
+    fn transform_raw_vector_value_preserve_ttl<R, E>(
         &self,
         key: &[u8],
         transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
@@ -198,7 +198,7 @@ impl RedisStringStore for EmbeddedStore {
         if vector_key_conflicts_with_primary_route(self, route, key) {
             return Err(wrong_type());
         }
-        transform_raw_string_value_routed_no_ttl(self, route, key, transform, wrong_type)
+        transform_raw_vector_value_routed(self, route, key, transform, wrong_type)
     }
 }
 
@@ -218,7 +218,7 @@ where
     object_lookup_for_string_route(store, route, key).unwrap_or(RedisStringLookup::Miss)
 }
 
-fn transform_raw_string_value_routed_no_ttl<R, E>(
+fn transform_raw_vector_value_routed<R, E>(
     store: &EmbeddedStore,
     route: EmbeddedKeyRoute,
     key: &[u8],
@@ -234,7 +234,8 @@ fn transform_raw_string_value_routed_no_ttl<R, E>(
 
     let now_ms = now_millis();
     let mut shard = store.shards[route.shard_id].write();
-    let result = shard.transform_value_hashed_no_ttl(route.key_hash, key, now_ms, transform)?;
+    let result =
+        shard.transform_value_hashed_preserve_ttl(route.key_hash, key, now_ms, transform)?;
     store.refresh_string_key_count(route.shard_id, &shard);
     Ok(result)
 }

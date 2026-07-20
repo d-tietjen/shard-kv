@@ -15,6 +15,14 @@ exact byte keys and values. The consensus-ordered feature implies the causal
 replication core, so callers select one outcome flag rather than naming an
 ordering implementation. They include:
 
+Redis object commands, including vector-set mutations, are not part of the
+active-active merge surface in 0.7.2. Vector high availability uses the
+single-primary `ReplicatedEmbeddedStore` FCRP path, which transfers each
+canonical vector set atomically and preserves its pinned shard-0 route. Run one
+writable vector primary at a time and fence promotion after replica catch-up;
+concurrent vector writers require operation-level conflict semantics that this
+release does not claim.
+
 - per-shard mutation dots, hybrid logical clocks, compact causal contexts, and
   deterministic convergence for SET, DEL, expiry, and governed SET;
 - remove-wins tombstones, exact-version cluster-eviction commits, independent

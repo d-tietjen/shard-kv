@@ -13,6 +13,13 @@
   client support for typed vector calls.
 - Added a reproducible typed Object RAG benchmark plus matching Redis-compatible
   and embedded ShardMap vector cases.
+- Added native read-replica replication for canonical vector-set state,
+  including live updates, deletes, TTL changes, backlog replay, and snapshot
+  bootstrap while preserving the dedicated vector-shard route. Repeated
+  updates to one vector set coalesce to the latest bounded state before flush,
+  avoiding quadratic bootstrap traffic.
+- Replaced the native replication flusher's idle sub-millisecond polling with
+  event-driven wakeups and exact pending-batch deadlines.
 
 ### Fixed
 
@@ -22,6 +29,10 @@
   direct-shard listeners, including keys whose ordinary hash belongs elsewhere.
 - Added command-name/opcode uniqueness coverage to prevent duplicate optional
   Redis command-table entries.
+- Fixed multi-shard snapshot restore and replica apply incorrectly routing
+  vector payloads by ordinary key hash; they now use dedicated pinned shard 0.
+- Fixed `VADD`, `VREM`, and `VSETATTR` clearing an existing vector-set TTL;
+  vector collection mutations now preserve the deadline like Redis 8.
 
 ## 0.7.1 - 2026-07-17
 
