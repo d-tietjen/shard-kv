@@ -1939,13 +1939,16 @@ mod tests {
         replica
             .inner()
             .set_value_bytes(&moved, bytes::Bytes::from_static(b"stale"), None);
-        let mut applied = 0;
+        let first = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first lifecycle frame");
+        replica
+            .apply_frame(first)
+            .expect("apply first lifecycle frame");
         while let Ok(frame) = subscriber.try_recv() {
             replica.apply_frame(frame).expect("apply lifecycle frame");
-            applied += 1;
         }
 
-        assert!(applied > 0);
         assert_eq!(vector_count(replica.inner(), &source), 1);
         assert_eq!(vector_count(replica.inner(), &copied), 0);
         assert_eq!(vector_count(replica.inner(), &moved), 1);
