@@ -426,33 +426,37 @@ impl ScnpCommand for VSim {
                 "VSIM response did not contain element/score/attributes triplets".into(),
             ));
         }
-        values
-            .chunks_exact(3)
-            .map(|match_values| {
-                let element = match_values[0].clone().ok_or_else(|| {
-                    ShardCacheClientError::Protocol("VSIM returned a null element".into())
-                })?;
-                let raw_score = match_values[1].as_deref().ok_or_else(|| {
-                    ShardCacheClientError::Protocol("VSIM returned a null score".into())
-                })?;
-                let score = std::str::from_utf8(raw_score)
-                    .map_err(|_| ShardCacheClientError::Protocol("VSIM score is not UTF-8".into()))?
-                    .parse::<f64>()
-                    .map_err(|_| {
-                        ShardCacheClientError::Protocol("VSIM score is not a float".into())
-                    })?;
-                if !score.is_finite() {
-                    return Err(ShardCacheClientError::Protocol(
-                        "VSIM score is not finite".into(),
-                    ));
-                }
-                Ok(VSimMatch {
-                    element,
-                    score,
-                    attributes: match_values[2].clone(),
-                })
-            })
-            .collect()
+        let mut matches = Vec::with_capacity(values.len() / 3);
+        let mut values = values.into_iter();
+        while let Some(element) = values.next() {
+            let raw_score = values.next().ok_or_else(|| {
+                ShardCacheClientError::Protocol("VSIM response is missing a score".into())
+            })?;
+            let attributes = values.next().ok_or_else(|| {
+                ShardCacheClientError::Protocol("VSIM response is missing attributes".into())
+            })?;
+            let element = element.ok_or_else(|| {
+                ShardCacheClientError::Protocol("VSIM returned a null element".into())
+            })?;
+            let raw_score = raw_score.as_deref().ok_or_else(|| {
+                ShardCacheClientError::Protocol("VSIM returned a null score".into())
+            })?;
+            let score = std::str::from_utf8(raw_score)
+                .map_err(|_| ShardCacheClientError::Protocol("VSIM score is not UTF-8".into()))?
+                .parse::<f64>()
+                .map_err(|_| ShardCacheClientError::Protocol("VSIM score is not a float".into()))?;
+            if !score.is_finite() {
+                return Err(ShardCacheClientError::Protocol(
+                    "VSIM score is not finite".into(),
+                ));
+            }
+            matches.push(VSimMatch {
+                element,
+                score,
+                attributes,
+            });
+        }
+        Ok(matches)
     }
 }
 
