@@ -1006,10 +1006,19 @@ impl<'a> ReplicationValidation<'a> {
                 self.config.snapshot_chunk_bytes,
                 self.config.snapshot_receive_max_bytes,
                 self.config.snapshot_receive_max_entries,
+                self.config.receive_max_frame_bytes,
             ]
             .into_iter()
             .all(|limit| limit > 0),
             "replication batch, backlog, and snapshot limits must be > 0",
+        )?;
+        ConfigCheck::require(
+            self.config.read_timeout_ms > 0,
+            "replication.read_timeout_ms must be > 0",
+        )?;
+        ConfigCheck::require(
+            self.config.receive_max_frame_bytes <= 256 * 1024 * 1024,
+            "replication.receive_max_frame_bytes cannot exceed the FCRP protocol limit",
         )
     }
 

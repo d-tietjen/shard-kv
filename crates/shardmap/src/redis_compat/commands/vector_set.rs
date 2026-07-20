@@ -2373,31 +2373,6 @@ fn hnsw_search<'a>(
         }
     }
 
-    let mut authorized = visited
-        .iter()
-        .filter(|index| {
-            governance_visible(
-                set.entries[**index].governance.as_deref(),
-                allowed_governance,
-            )
-        })
-        .count();
-    if authorized < count {
-        for (index, was_seen) in seen.iter_mut().enumerate() {
-            if *was_seen
-                || !governance_visible(set.entries[index].governance.as_deref(), allowed_governance)
-            {
-                continue;
-            }
-            *was_seen = true;
-            visited.push(index);
-            authorized += 1;
-            if authorized >= count {
-                break;
-            }
-        }
-    }
-
     sorted_scores(
         visited
             .into_iter()
@@ -4360,6 +4335,36 @@ mod tests {
             vsim_response_bytes(&scored, &parsed)
                 .is_some_and(|bytes| bytes > MAX_VECTOR_RESPONSE_BYTES)
         );
+    }
+
+    #[test]
+    fn governed_hnsw_does_not_scan_arbitrary_unvisited_entries() {
+        let entry = |uid, element: &'static [u8], governance: Option<&'static [u8]>| VectorEntry {
+            uid,
+            level: 0,
+            element: element.to_vec(),
+            vector: vec![1.0, 0.0],
+            attributes: None,
+            governance: governance.map(<[u8]>::to_vec),
+            links: vec![Vec::new()],
+        };
+        let set = VectorSetState {
+            dim: 2,
+            original_dim: 2,
+            quantization: Quantization::NoQuant,
+            hnsw_m: DEFAULT_HNSW_M,
+            ef_construction: DEFAULT_HNSW_EF_CONSTRUCTION,
+            max_level: 0,
+            next_uid: 4,
+            entries: vec![
+                entry(1, b"allowed-but-unvisited", Some(b"tenant=allowed")),
+                entry(2, b"denied-a", Some(b"tenant=denied")),
+                entry(3, b"denied-entrypoint", Some(b"tenant=denied")),
+            ],
+        };
+
+        let results = hnsw_search(&set, &[1.0, 0.0], 1, 1, &[b"tenant=allowed".to_vec()]);
+        assert!(results.is_empty());
     }
 
     #[test]

@@ -11,9 +11,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
-#[cfg(feature = "scnp-tls")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::{RecvTimeoutError, TryRecvError};
 use parking_lot::Mutex;
@@ -29,8 +27,8 @@ use super::embedded::{ReplicatedEmbeddedStore, ReplicationReplica};
 use super::protocol::{
     FCRP_VERSION, FrameKind, HelloRole, ReplicationCompressionMode, ReplicationHello,
     ReplicationSnapshotChunk, ShardWatermarks, decode_ack, decode_error, decode_frame,
-    decode_frame_payload_bytes, decode_hello, decode_snapshot_chunk, encode_ack, encode_error,
-    encode_frame, encode_hello, encode_snapshot_chunk,
+    decode_frame_payload_bytes, decode_hello, decode_snapshot_chunk_limited, encode_ack,
+    encode_error, encode_frame, encode_hello, encode_snapshot_chunk,
 };
 
 #[cfg(all(target_os = "linux", feature = "monoio"))]
@@ -143,6 +141,9 @@ fn wrap_server_stream(
             ));
         }
         authorize_replication_client_certificate(&connection, &config.tls_server)?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .ok();
         Ok(Box::new(rustls::StreamOwned::new(connection, socket)))
     }
 }
@@ -561,11 +562,15 @@ fn serve_replica(
             .ok();
     }
     let mut stream = wrap_server_stream(stream, &config)?;
-    let hello_frame =
-        match read_frame_bytes_interruptible_limited(&mut stream, &stop, MAX_HELLO_FRAME_BYTES)? {
-            Some(bytes) => bytes,
-            None => return Ok(()),
-        };
+    let hello_frame = match read_frame_bytes_interruptible_limited(
+        &mut stream,
+        &stop,
+        MAX_HELLO_FRAME_BYTES,
+        Duration::from_millis(config.connect_timeout_ms.max(1)),
+    )? {
+        Some(bytes) => bytes,
+        None => return Ok(()),
+    };
     let frame = decode_frame(&hello_frame)?;
     if frame.kind != FrameKind::Hello {
         send_error(&mut stream, "expected Hello frame")?;
@@ -586,6 +591,21 @@ fn serve_replica(
         send_error(&mut stream, "invalid replication Hello role")?;
         return Err(ShardCacheError::Protocol(format!(
             "replica {peer} sent an invalid Hello role"
+        )));
+    }
+    if hello
+        .since
+        .as_ref()
+        .is_some_and(|watermarks| watermarks.as_slice().len() != primary.shard_count())
+    {
+        send_error(&mut stream, "replica shard topology does not match primary")?;
+        return Err(ShardCacheError::Protocol(format!(
+            "replica {peer} sent {} watermarks for a {}-shard primary",
+            hello
+                .since
+                .as_ref()
+                .map_or(0, |value| value.as_slice().len()),
+            primary.shard_count()
         )));
     }
     if !replication_auth_ok(&config, hello.auth_token.as_deref())? {
@@ -782,39 +802,28 @@ fn write_raw(stream: &mut (impl Read + Write), bytes: &[u8]) -> Result<()> {
     stream.write_all(bytes).map_err(ShardCacheError::Io)
 }
 
-fn read_frame_bytes(stream: &mut (impl Read + Write)) -> Result<Vec<u8>> {
-    read_frame_inner(stream, None, MAX_FRAME_BYTES).and_then(|opt| {
-        opt.ok_or_else(|| {
-            ShardCacheError::Io(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "FCRP stream closed before frame completed",
-            ))
-        })
-    })
-}
-
-fn read_frame_bytes_interruptible(
-    stream: &mut (impl Read + Write),
-    stop: &Arc<AtomicBool>,
-) -> Result<Option<Vec<u8>>> {
-    read_frame_inner(stream, Some(stop), MAX_FRAME_BYTES)
-}
-
 fn read_frame_bytes_interruptible_limited(
     stream: &mut (impl Read + Write),
     stop: &Arc<AtomicBool>,
     max_payload_bytes: usize,
+    timeout: Duration,
 ) -> Result<Option<Vec<u8>>> {
-    read_frame_inner(stream, Some(stop), max_payload_bytes)
+    read_frame_inner(
+        stream,
+        Some(stop),
+        max_payload_bytes,
+        Some(Instant::now() + timeout),
+    )
 }
 
 fn read_frame_inner(
     stream: &mut (impl Read + Write),
     stop: Option<&Arc<AtomicBool>>,
     max_payload_bytes: usize,
+    deadline: Option<Instant>,
 ) -> Result<Option<Vec<u8>>> {
     let mut header = [0_u8; FRAME_HEADER_LEN];
-    match read_fully(stream, &mut header, stop)? {
+    match read_fully(stream, &mut header, stop, deadline)? {
         ReadResult::Done => {}
         ReadResult::Stopped => return Ok(None),
         ReadResult::Eof => {
@@ -824,6 +833,15 @@ fn read_frame_inner(
             )));
         }
     }
+    let kind = FrameKind::from_u8(header[5])?;
+    let max_payload_bytes = match kind {
+        FrameKind::Hello
+        | FrameKind::SnapshotBegin
+        | FrameKind::SnapshotEnd
+        | FrameKind::Ack
+        | FrameKind::Error => max_payload_bytes.min(MAX_HELLO_FRAME_BYTES),
+        FrameKind::SnapshotChunk | FrameKind::MutationBatch => max_payload_bytes,
+    };
     let payload_len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
     let uncompressed_len = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
     if payload_len > max_payload_bytes || uncompressed_len > max_payload_bytes {
@@ -840,7 +858,7 @@ fn read_frame_inner(
     })?;
     frame.extend_from_slice(&header);
     frame.resize(frame_len, 0);
-    match read_fully(stream, &mut frame[FRAME_HEADER_LEN..], stop)? {
+    match read_fully(stream, &mut frame[FRAME_HEADER_LEN..], stop, deadline)? {
         ReadResult::Done => Ok(Some(frame)),
         ReadResult::Stopped => Ok(None),
         ReadResult::Eof => Err(ShardCacheError::Io(io::Error::new(
@@ -860,9 +878,16 @@ fn read_fully(
     stream: &mut (impl Read + Write),
     buffer: &mut [u8],
     stop: Option<&Arc<AtomicBool>>,
+    deadline: Option<Instant>,
 ) -> Result<ReadResult> {
     let mut filled = 0;
     while filled < buffer.len() {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(ShardCacheError::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "replication frame read deadline exceeded",
+            )));
+        }
         match stream.read(&mut buffer[filled..]) {
             Ok(0) => return Ok(ReadResult::Eof),
             Ok(n) => filled += n,
@@ -871,8 +896,15 @@ fn read_fully(
                     if stop.load(Ordering::SeqCst) {
                         return Ok(ReadResult::Stopped);
                     }
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        return Err(ShardCacheError::Io(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "replication frame read deadline exceeded",
+                        )));
+                    }
                     continue;
                 }
+                None if deadline.is_some_and(|deadline| Instant::now() < deadline) => continue,
                 None => return Err(ShardCacheError::Io(error)),
             },
             Err(error) => return Err(ShardCacheError::Io(error)),
@@ -923,7 +955,7 @@ impl ReplicationReplicaClient {
         }
 
         let stop = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(Mutex::new(ReplicationReplica::new(1)));
+        let state = Arc::new(Mutex::new(ReplicationReplica::uninitialized()));
         let cfg = config;
         let stop_clone = Arc::clone(&stop);
         let state_clone = Arc::clone(&state);
@@ -1037,12 +1069,17 @@ fn connect_and_stream(
         .ok();
 
     let mut stream = wrap_client_stream(stream, config)?;
-    let since = state.lock().watermarks().clone();
+    let since = {
+        let replica = state.lock();
+        replica
+            .topology_initialized()
+            .then(|| replica.watermarks().clone())
+    };
     let hello = ReplicationHello {
         version: FCRP_VERSION,
         role: HelloRole::Replica,
         auth_token: current_replication_token(config)?,
-        since: Some(since),
+        since,
     };
     write_full_frame(
         &mut stream,
@@ -1053,11 +1090,28 @@ fn connect_and_stream(
     )?;
 
     // Read Hello-ack.
-    let ack_bytes = read_frame_bytes(&mut stream)?;
+    let ack_bytes = read_frame_inner(
+        &mut stream,
+        None,
+        MAX_HELLO_FRAME_BYTES,
+        Some(Instant::now() + Duration::from_millis(config.connect_timeout_ms.max(1))),
+    )?
+    .ok_or_else(|| {
+        ShardCacheError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "FCRP stream closed before Hello acknowledgement",
+        ))
+    })?;
     let ack = decode_frame(&ack_bytes)?;
     match ack.kind {
         FrameKind::Hello => {
-            let _ = validate_primary_hello(&ack.payload)?;
+            let hello = validate_primary_hello(&ack.payload)?;
+            let shard_count = hello
+                .since
+                .as_ref()
+                .map(|watermarks| watermarks.as_slice().len())
+                .unwrap_or(0);
+            state.lock().ensure_topology(shard_count)?;
         }
         FrameKind::Error => {
             let message = decode_error(&ack.payload).unwrap_or_else(|_| "unknown".to_string());
@@ -1074,7 +1128,12 @@ fn connect_and_stream(
 
     let mut pending_snapshot: Option<PendingSnapshot> = None;
     while !stop.load(Ordering::SeqCst) {
-        let bytes = match read_frame_bytes_interruptible(&mut stream, stop) {
+        let bytes = match read_frame_bytes_interruptible_limited(
+            &mut stream,
+            stop,
+            config.receive_max_frame_bytes.min(MAX_FRAME_BYTES),
+            Duration::from_millis(config.read_timeout_ms.max(1)),
+        ) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(()),
             Err(ShardCacheError::Io(error))
@@ -1110,12 +1169,17 @@ fn connect_and_stream(
                 ));
             }
             FrameKind::SnapshotChunk => {
-                let chunk = decode_snapshot_chunk(frame.payload.as_ref())?;
                 let Some(slot) = pending_snapshot.as_mut() else {
                     return Err(ShardCacheError::Protocol(
                         "SnapshotChunk arrived without SnapshotBegin".into(),
                     ));
                 };
+                let chunk = decode_snapshot_chunk_limited(
+                    frame.payload.as_ref(),
+                    slot.remaining_entries(),
+                    slot.remaining_bytes(),
+                    Some(slot.watermarks.as_slice().len()),
+                )?;
                 slot.push(chunk)?;
             }
             FrameKind::SnapshotEnd => {
@@ -1230,6 +1294,14 @@ impl PendingSnapshot {
         Ok(())
     }
 
+    pub(super) fn remaining_entries(&self) -> usize {
+        self.max_entries.saturating_sub(self.entries.len())
+    }
+
+    pub(super) fn remaining_bytes(&self) -> usize {
+        self.max_bytes.saturating_sub(self.retained_bytes)
+    }
+
     pub(super) fn finish(
         self,
         end_watermarks: ShardWatermarks,
@@ -1253,8 +1325,9 @@ impl PendingSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use crate::config::{
         ReplicationCompression, ReplicationConfig, ReplicationRole, ReplicationSendPolicy,
@@ -1433,6 +1506,7 @@ mod tests {
             await_value(&client, b"beta", Duration::from_secs(3)),
             Some(b"two".to_vec())
         );
+        assert_eq!(client.replica().lock().inner().shard_count(), 2);
         client.shutdown().ok();
         server.shutdown().ok();
     }
@@ -1510,8 +1584,13 @@ mod tests {
         let mut stream = std::io::Cursor::new(header);
         let stop = Arc::new(AtomicBool::new(false));
         assert!(
-            read_frame_bytes_interruptible_limited(&mut stream, &stop, MAX_HELLO_FRAME_BYTES,)
-                .is_err()
+            read_frame_bytes_interruptible_limited(
+                &mut stream,
+                &stop,
+                MAX_HELLO_FRAME_BYTES,
+                Duration::from_secs(1),
+            )
+            .is_err()
         );
         assert_eq!(stream.position(), FRAME_HEADER_LEN as u64);
 
@@ -1523,10 +1602,69 @@ mod tests {
         compressed_header.extend_from_slice(&((MAX_HELLO_FRAME_BYTES as u32) + 1).to_le_bytes());
         let mut stream = std::io::Cursor::new(compressed_header);
         assert!(
-            read_frame_bytes_interruptible_limited(&mut stream, &stop, MAX_HELLO_FRAME_BYTES,)
-                .is_err()
+            read_frame_bytes_interruptible_limited(
+                &mut stream,
+                &stop,
+                MAX_HELLO_FRAME_BYTES,
+                Duration::from_secs(1),
+            )
+            .is_err()
         );
         assert_eq!(stream.position(), FRAME_HEADER_LEN as u64);
+    }
+
+    struct PartialThenTimeout {
+        bytes: std::io::Cursor<Vec<u8>>,
+        readable_bytes: u64,
+    }
+
+    impl Read for PartialThenTimeout {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            let remaining = self.readable_bytes.saturating_sub(self.bytes.position()) as usize;
+            if remaining == 0 {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "injected timeout"));
+            }
+            let limit = remaining.min(buffer.len());
+            self.bytes.read(&mut buffer[..limit])
+        }
+    }
+
+    impl Write for PartialThenTimeout {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn frame_deadline_rejects_a_partially_consumed_frame() {
+        let mut bytes = encode_frame(
+            FrameKind::MutationBatch,
+            ReplicationCompressionMode::None,
+            0,
+            b"payload",
+        )
+        .unwrap();
+        bytes.extend_from_slice(b"next-frame-must-not-be-read");
+        let mut stream = PartialThenTimeout {
+            bytes: std::io::Cursor::new(bytes),
+            readable_bytes: (FRAME_HEADER_LEN + 2) as u64,
+        };
+
+        let error = read_frame_inner(
+            &mut stream,
+            None,
+            MAX_FRAME_BYTES,
+            Some(Instant::now() + Duration::from_millis(5)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ShardCacheError::Io(ref io) if io.kind() == io::ErrorKind::TimedOut)
+        );
+        assert_eq!(stream.bytes.position(), (FRAME_HEADER_LEN + 2) as u64);
     }
 
     #[test]

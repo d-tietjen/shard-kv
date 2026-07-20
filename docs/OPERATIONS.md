@@ -41,6 +41,18 @@ Size `replication.snapshot_receive_max_bytes` and
 `snapshot_receive_max_entries` above the largest expected bootstrap while
 leaving headroom for the resident replica. Exceeding either limit or receiving
 reordered/mismatched chunks disconnects the peer without replacing local data.
+`replication.receive_max_frame_bytes` limits mutation and snapshot-chunk frame
+allocation (64 MiB by default); control frames remain capped at 128 KiB.
+`replication.read_timeout_ms` is a whole-frame deadline, not an idle timeout.
+When it expires, the replica closes and reconnects rather than continuing from
+a potentially partial frame. The primary shard count is negotiated before any
+mutation allocation and must remain unchanged for the connection lifetime.
+
+FCRP mutations are exact per-source-shard sequence streams. A gap, invalid
+source shard, inconsistent key hash/tag, duplicate snapshot key, or topology
+change is a protocol error and leaves the prior replica state intact. Operators
+must restart bootstrap from a compatible primary after changing shard count;
+0.7.2 does not perform online FCRP shard-topology migration.
 
 `redis-server` implies `server`, `redis`, `redis-functions`, and
 `redis-modules`. Embedded-only builds stay separate from the Redis-compatible

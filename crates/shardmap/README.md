@@ -501,13 +501,20 @@ let replica = ReplicationReplicaClient::start(ReplicationConfig {
 # Ok::<(), shardmap::ShardCacheError>(())
 ```
 
-Native replication v1 streams byte-string cache mutations and consistent
+Native replication v2 streams byte-string cache mutations and consistent
 snapshots. It is intended for read replicas, sidecar cache mirrors, and service
 subscribers that consume shardcache's FCRP frames. Canonically serialized vector
 sets are included: `VADD`, `VREM`, `VSETATTR`, vector-key deletion, and TTL
 changes use the pinned shard-0 mutation stream, and snapshot restore preserves
 that route. Other Redis object families remain outside this embedded
 replication surface.
+
+Replica topology is negotiated from the primary before mutation processing.
+FCRP rejects source-shard IDs outside that topology, sequence gaps, mismatched
+key hashes/tags, duplicate snapshot keys, and topology changes. Configure
+`receive_max_frame_bytes` and `read_timeout_ms` to bound each data frame and its
+complete transfer time; a timed-out partial frame closes the connection before
+retry. Changing the primary shard count requires a new compatible bootstrap.
 
 `ReplicationConfig::vector_state_flush_ms` defaults to 10 ms. Within that
 window, repeated writes to one vector set replace its pending canonical state

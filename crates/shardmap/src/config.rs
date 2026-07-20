@@ -641,6 +641,8 @@ pub struct ReplicationConfig {
     pub snapshot_receive_max_bytes: usize,
     /// Maximum entries accepted in one replication snapshot.
     pub snapshot_receive_max_entries: usize,
+    /// Maximum compressed or uncompressed payload accepted in one data frame.
+    pub receive_max_frame_bytes: usize,
     /// Per-shard bounded queue capacity for ready replication batches.
     ///
     /// The shard worker builds ordered mutation batches locally. When this
@@ -652,6 +654,8 @@ pub struct ReplicationConfig {
     pub max_replicas: usize,
     /// Maximum time spent opening one TCP connect attempt from a replica.
     pub connect_timeout_ms: u64,
+    /// Maximum time allowed to receive one complete replication frame.
+    pub read_timeout_ms: u64,
     /// Per-write timeout for replication TCP I/O.
     pub write_timeout_ms: u64,
     /// Delay between reconnect attempts after a replica disconnect.
@@ -694,9 +698,11 @@ impl std::fmt::Debug for ReplicationConfig {
                 "snapshot_receive_max_entries",
                 &self.snapshot_receive_max_entries,
             )
+            .field("receive_max_frame_bytes", &self.receive_max_frame_bytes)
             .field("queue_capacity", &self.queue_capacity)
             .field("max_replicas", &self.max_replicas)
             .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("read_timeout_ms", &self.read_timeout_ms)
             .field("write_timeout_ms", &self.write_timeout_ms)
             .field("reconnect_backoff_ms", &self.reconnect_backoff_ms)
             .field(
@@ -979,9 +985,11 @@ impl Default for ReplicationConfig {
             snapshot_chunk_bytes: 1024 * 1024,
             snapshot_receive_max_bytes: 1024 * 1024 * 1024,
             snapshot_receive_max_entries: 10_000_000,
+            receive_max_frame_bytes: 64 * 1024 * 1024,
             queue_capacity: 16_384,
             max_replicas: 16,
             connect_timeout_ms: 500,
+            read_timeout_ms: 30_000,
             write_timeout_ms: 500,
             reconnect_backoff_ms: 200,
             subscriber_channel_capacity: 1_024,

@@ -64,9 +64,14 @@ snapshot_chunk_bytes = 1048576
 # snapshots; a peer exceeding either limit is disconnected before replacement.
 snapshot_receive_max_bytes = 1073741824
 snapshot_receive_max_entries = 10000000
+# Per-frame allocation ceiling. Control frames remain capped at 128 KiB.
+receive_max_frame_bytes = 67108864
 queue_capacity = 16384
 max_replicas = 16
 connect_timeout_ms = 500
+# A partially received frame is abandoned by closing and reconnecting after
+# this deadline; the stream is never resumed at an unknown frame boundary.
+read_timeout_ms = 30000
 write_timeout_ms = 500
 reconnect_backoff_ms = 200
 subscriber_channel_capacity = 1024

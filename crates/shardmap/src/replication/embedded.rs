@@ -46,6 +46,7 @@ pub struct ReplicatedEmbeddedStore {
 pub struct ReplicationReplica {
     store: EmbeddedStore,
     watermarks: ShardWatermarks,
+    topology_initialized: bool,
     metrics: ReplicationMetrics,
 }
 
@@ -960,8 +961,46 @@ impl ReplicationReplica {
         Self {
             store: EmbeddedStore::with_route_mode(shard_count, route_mode),
             watermarks: ShardWatermarks::new(shard_count),
+            topology_initialized: true,
             metrics: ReplicationMetrics::default(),
         }
+    }
+
+    pub(crate) fn uninitialized() -> Self {
+        Self {
+            store: EmbeddedStore::with_route_mode(1, EmbeddedRouteMode::FullKey),
+            watermarks: ShardWatermarks::new(0),
+            topology_initialized: false,
+            metrics: ReplicationMetrics::default(),
+        }
+    }
+
+    pub(crate) fn ensure_topology(&mut self, shard_count: usize) -> Result<()> {
+        if shard_count == 0 || !shard_count.is_power_of_two() {
+            return Err(ShardCacheError::Protocol(format!(
+                "replication primary advertised invalid shard count {shard_count}"
+            )));
+        }
+        if self.topology_initialized {
+            if self.store.shard_count() != shard_count
+                || self.watermarks.as_slice().len() != shard_count
+            {
+                return Err(ShardCacheError::Protocol(format!(
+                    "replication topology changed from {} to {shard_count} shards",
+                    self.store.shard_count()
+                )));
+            }
+            return Ok(());
+        }
+        let route_mode = self.store.route_mode();
+        self.store = EmbeddedStore::with_route_mode(shard_count, route_mode);
+        self.watermarks = ShardWatermarks::new(shard_count);
+        self.topology_initialized = true;
+        Ok(())
+    }
+
+    pub(crate) fn topology_initialized(&self) -> bool {
+        self.topology_initialized
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
@@ -1088,7 +1127,13 @@ impl ReplicationReplica {
         mutation: ReplicationMutation,
         now_ms: &mut Option<u64>,
     ) -> Result<bool> {
-        if mutation.sequence <= self.watermarks.get(mutation.shard_id) {
+        if !self.validate_mutation(
+            mutation.shard_id,
+            mutation.sequence,
+            mutation.key_hash,
+            Some(mutation.key_tag),
+            mutation.key.as_ref(),
+        )? {
             return Ok(false);
         }
 
@@ -1125,7 +1170,13 @@ impl ReplicationReplica {
         mutation: FrameBackedReplicationMutation<'_>,
         now_ms: &mut Option<u64>,
     ) -> Result<bool> {
-        if mutation.sequence <= self.watermarks.get(mutation.shard_id) {
+        if !self.validate_mutation(
+            mutation.shard_id,
+            mutation.sequence,
+            mutation.key_hash,
+            Some(mutation.key_tag),
+            mutation.key,
+        )? {
             return Ok(false);
         }
 
@@ -1162,7 +1213,13 @@ impl ReplicationReplica {
         mutation: BorrowedReplicationMutation<'_>,
         now_ms: &mut Option<u64>,
     ) -> Result<bool> {
-        if mutation.sequence <= self.watermarks.get(mutation.shard_id) {
+        if !self.validate_mutation(
+            mutation.shard_id,
+            mutation.sequence,
+            mutation.key_hash,
+            Some(mutation.key_tag),
+            mutation.key,
+        )? {
             return Ok(false);
         }
 
@@ -1204,7 +1261,9 @@ impl ReplicationReplica {
         now_ms: &mut Option<u64>,
     ) -> Result<()> {
         #[cfg(feature = "redis")]
-        let route = if value.starts_with(crate::storage::VECTOR_SET_PREFIX) {
+        let is_vector = value.starts_with(crate::storage::VECTOR_SET_PREFIX);
+        #[cfg(feature = "redis")]
+        let route = if is_vector {
             crate::commands::vector_set::validate_vector_set_bytes(&value).map_err(|_| {
                 ShardCacheError::Protocol("replica rejected malformed vector-set state".into())
             })?;
@@ -1216,6 +1275,11 @@ impl ReplicationReplica {
             }
             vector_route
         } else {
+            let vector_route = self.store.route_vector_key(key);
+            if self.store.clone_vector_value(key).is_some() {
+                self.store
+                    .delete_routed_then(vector_route, key, now_millis(), || {});
+            }
             self.store.route_key_prehashed(key_hash, key)
         };
         #[cfg(not(feature = "redis"))]
@@ -1248,12 +1312,76 @@ impl ReplicationReplica {
         Ok(())
     }
 
-    pub fn replace_with_snapshot(&mut self, snapshot: ReplicationSnapshot) {
-        self.try_replace_with_snapshot(snapshot)
-            .expect("trusted local replication snapshot must contain valid vector state");
+    fn validate_mutation(
+        &self,
+        shard_id: usize,
+        sequence: u64,
+        key_hash: u64,
+        key_tag: Option<u64>,
+        key: &[u8],
+    ) -> Result<bool> {
+        if !self.topology_initialized {
+            return Err(ShardCacheError::Protocol(
+                "replication mutation arrived before topology negotiation".into(),
+            ));
+        }
+        let shard_count = self.watermarks.as_slice().len();
+        if shard_id >= shard_count {
+            return Err(ShardCacheError::Protocol(format!(
+                "replication mutation shard {shard_id} exceeds topology size {shard_count}"
+            )));
+        }
+        let actual_hash = crate::storage::hash_key(key);
+        if key_hash != actual_hash {
+            return Err(ShardCacheError::Protocol(
+                "replication mutation key hash does not match key bytes".into(),
+            ));
+        }
+        if key_tag.is_some_and(|tag| tag != hash_key_tag_from_hash(actual_hash)) {
+            return Err(ShardCacheError::Protocol(
+                "replication mutation key tag does not match key hash".into(),
+            ));
+        }
+
+        let current = self.watermarks.get(shard_id);
+        if sequence <= current {
+            return Ok(false);
+        }
+        let expected = current.checked_add(1).ok_or_else(|| {
+            ShardCacheError::Protocol("replication sequence exhausted u64 range".into())
+        })?;
+        if sequence != expected {
+            return Err(ShardCacheError::Protocol(format!(
+                "replication sequence gap on shard {shard_id}: expected {expected}, received {sequence}"
+            )));
+        }
+        Ok(true)
     }
 
-    pub fn try_replace_with_snapshot(&mut self, snapshot: ReplicationSnapshot) -> Result<()> {
+    pub fn replace_with_snapshot(&mut self, snapshot: ReplicationSnapshot) {
+        let _ = self.try_replace_with_snapshot(snapshot);
+    }
+
+    pub fn try_replace_with_snapshot(&mut self, mut snapshot: ReplicationSnapshot) -> Result<()> {
+        let shard_count = self.store.shard_count();
+        if !self.topology_initialized || snapshot.watermarks.as_slice().len() != shard_count {
+            return Err(ShardCacheError::Protocol(format!(
+                "replication snapshot watermark count {} does not match replica shard count {shard_count}",
+                snapshot.watermarks.as_slice().len()
+            )));
+        }
+        snapshot
+            .entries
+            .sort_unstable_by(|left, right| left.key.cmp(&right.key));
+        if snapshot
+            .entries
+            .windows(2)
+            .any(|entries| entries[0].key == entries[1].key)
+        {
+            return Err(ShardCacheError::Protocol(
+                "replication snapshot contains duplicate logical keys".into(),
+            ));
+        }
         #[cfg(feature = "redis")]
         for entry in &snapshot.entries {
             if entry.value.starts_with(crate::storage::VECTOR_SET_PREFIX) {
@@ -1304,7 +1432,6 @@ mod tests {
     use crate::config::{ReplicationCompression, ReplicationConfig, ReplicationSendPolicy};
     #[cfg(feature = "redis")]
     use crate::protocol::Frame;
-    #[cfg(feature = "redis")]
     use crate::storage::StoredEntry;
 
     use super::*;
@@ -1510,6 +1637,118 @@ mod tests {
             ReplicationReplica::apply_mutation;
     }
 
+    #[test]
+    fn replace_with_snapshot_preserves_state_on_invalid_input() {
+        let mut replica = ReplicationReplica::new(1);
+        replica
+            .inner()
+            .set_value_bytes(b"sentinel", bytes::Bytes::from_static(b"preserved"), None);
+        let duplicate = StoredEntry {
+            key: b"duplicate".to_vec(),
+            value: b"one".to_vec(),
+            expire_at_ms: None,
+            governance: None,
+        };
+        replica.replace_with_snapshot(ReplicationSnapshot {
+            entries: vec![duplicate.clone(), duplicate],
+            watermarks: ShardWatermarks::from_vec(vec![0]),
+        });
+
+        assert_eq!(replica.get(b"sentinel"), Some(b"preserved".to_vec()));
+    }
+
+    #[test]
+    fn replica_rejects_malformed_mutation_identity_and_sequence_without_state_change() {
+        let mut replica = ReplicationReplica::new(4);
+        let key = bytes::Bytes::from_static(b"identity-key");
+        let key_hash = crate::storage::hash_key(&key);
+        let mutation = ReplicationMutation {
+            shard_id: 4,
+            sequence: 1,
+            timestamp_ms: 1,
+            op: ReplicationMutationOp::Set,
+            key_hash,
+            key_tag: hash_key_tag_from_hash(key_hash),
+            key: key.clone(),
+            value: bytes::Bytes::from_static(b"value"),
+            expire_at_ms: None,
+            governance: None,
+        };
+        assert!(replica.try_apply_mutation(mutation.clone()).is_err());
+        assert_eq!(replica.watermarks().as_slice().len(), 4);
+
+        let mut bad_hash = mutation.clone();
+        bad_hash.shard_id = 0;
+        bad_hash.key_hash ^= 1;
+        assert!(replica.try_apply_mutation(bad_hash).is_err());
+
+        let mut bad_tag = mutation.clone();
+        bad_tag.shard_id = 0;
+        bad_tag.key_tag ^= 1;
+        assert!(replica.try_apply_mutation(bad_tag).is_err());
+
+        let mut gap = mutation;
+        gap.shard_id = 0;
+        gap.sequence = 2;
+        assert!(replica.try_apply_mutation(gap).is_err());
+        assert_eq!(replica.watermarks().get(0), 0);
+        assert_eq!(replica.get(&key), None);
+    }
+
+    #[test]
+    fn snapshot_rejects_duplicate_keys_and_wrong_topology_atomically() {
+        let mut replica = ReplicationReplica::new(2);
+        let existing = ReplicationMutation {
+            shard_id: 0,
+            sequence: 1,
+            timestamp_ms: 1,
+            op: ReplicationMutationOp::Set,
+            key_hash: crate::storage::hash_key(b"existing"),
+            key_tag: crate::storage::hash_key_tag(b"existing"),
+            key: bytes::Bytes::from_static(b"existing"),
+            value: bytes::Bytes::from_static(b"safe"),
+            expire_at_ms: None,
+            governance: None,
+        };
+        replica.try_apply_mutation(existing).unwrap();
+
+        let duplicate = StoredEntry {
+            key: b"duplicate".to_vec(),
+            value: b"one".to_vec(),
+            expire_at_ms: None,
+            governance: None,
+        };
+        let snapshot = ReplicationSnapshot {
+            entries: vec![
+                duplicate.clone(),
+                StoredEntry {
+                    value: b"two".to_vec(),
+                    ..duplicate
+                },
+            ],
+            watermarks: ShardWatermarks::from_vec(vec![1, 0]),
+        };
+        assert!(replica.try_replace_with_snapshot(snapshot).is_err());
+        assert_eq!(replica.get(b"existing"), Some(b"safe".to_vec()));
+
+        let wrong_topology = ReplicationSnapshot {
+            entries: Vec::new(),
+            watermarks: ShardWatermarks::from_vec(vec![1]),
+        };
+        assert!(replica.try_replace_with_snapshot(wrong_topology).is_err());
+        assert_eq!(replica.get(b"existing"), Some(b"safe".to_vec()));
+    }
+
+    #[test]
+    fn network_replica_topology_is_initialized_once() {
+        let mut replica = ReplicationReplica::uninitialized();
+        assert!(!replica.topology_initialized());
+        replica.ensure_topology(8).unwrap();
+        assert_eq!(replica.inner().shard_count(), 8);
+        assert_eq!(replica.watermarks().as_slice().len(), 8);
+        assert!(replica.ensure_topology(4).is_err());
+    }
+
     #[cfg(feature = "redis")]
     #[test]
     fn vector_updates_coalesce_to_the_latest_snapshot_state() {
@@ -1680,11 +1919,13 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("string replacement frame");
 
-        // Out-of-order delivery still converges because both mutations use the
-        // pinned vector shard's sequence stream during the type transition.
+        // FCRP is ordered: a future sequence is rejected instead of silently
+        // advancing the watermark past a missing mutation.
+        assert!(replica.apply_frame(replacement.clone()).is_err());
+        replica.apply_frame(delete).expect("apply vector delete");
         replica.apply_frame(replacement).expect("apply replacement");
-        replica.apply_frame(delete).expect("apply stale delete");
         assert_eq!(replica.get(&key), Some(b"plain-string".to_vec()));
+        assert!(replica.inner().clone_vector_value(&key).is_none());
     }
 
     #[test]

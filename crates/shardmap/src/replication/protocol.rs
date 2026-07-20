@@ -37,7 +37,7 @@ pub enum FrameKind {
 }
 
 impl FrameKind {
-    fn from_u8(value: u8) -> Result<Self> {
+    pub(crate) fn from_u8(value: u8) -> Result<Self> {
         match value {
             1 => Ok(Self::Hello),
             2 => Ok(Self::SnapshotBegin),
@@ -197,6 +197,7 @@ pub struct FrameBackedReplicationMutation<'a> {
     pub sequence: u64,
     pub op: ReplicationMutationOp,
     pub key_hash: u64,
+    pub key_tag: u64,
     pub key: &'a [u8],
     pub value: SharedBytes,
     pub expire_at_ms: Option<u64>,
@@ -725,7 +726,7 @@ where
             ReplicationMutationOp::from_byte(raw_op)?
         };
         let key_hash = cursor.u64()?;
-        let _key_tag = cursor.u64()?;
+        let key_tag = cursor.u64()?;
         let expire_raw = cursor.u64()?;
         let key_len = cursor.u32()? as usize;
         let value_len = cursor.u32()? as usize;
@@ -746,6 +747,7 @@ where
             sequence,
             op,
             key_hash,
+            key_tag,
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
@@ -924,10 +926,26 @@ pub fn encode_snapshot_chunk(chunk: &ReplicationSnapshotChunk) -> Vec<u8> {
 }
 
 pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
+    decode_snapshot_chunk_limited(bytes, usize::MAX, usize::MAX, None)
+}
+
+pub(crate) fn decode_snapshot_chunk_limited(
+    bytes: &[u8],
+    max_entries: usize,
+    max_retained_bytes: usize,
+    expected_watermarks: Option<usize>,
+) -> Result<ReplicationSnapshotChunk> {
     let mut cursor = Cursor::new(bytes);
     let chunk_index = cursor.u64()?;
     let is_last = cursor.u8()? != 0;
     let watermark_count = cursor.u32()? as usize;
+    if let Some(expected) = expected_watermarks
+        && watermark_count != expected
+    {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP snapshot watermark count {watermark_count} does not match replica shard count {expected}"
+        )));
+    }
     cursor.validate_count(watermark_count, 8, "snapshot watermarks")?;
     let mut watermarks = Vec::new();
     watermarks.try_reserve_exact(watermark_count).map_err(|_| {
@@ -942,10 +960,24 @@ pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
         let _ = cursor.u32()?;
     }
     cursor.validate_count(entry_count, SNAPSHOT_ENTRY_MIN_BYTES, "snapshot entries")?;
+    if entry_count > max_entries {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP snapshot chunk entry count {entry_count} exceeds remaining limit {max_entries}"
+        )));
+    }
+    let entry_slots_bytes = entry_count
+        .checked_mul(std::mem::size_of::<StoredEntry>())
+        .ok_or_else(|| ShardCacheError::Protocol("snapshot entry size overflow".into()))?;
+    if entry_slots_bytes > max_retained_bytes {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP snapshot chunk entry storage exceeds remaining byte limit {max_retained_bytes}"
+        )));
+    }
     let mut entries = Vec::new();
     entries
         .try_reserve_exact(entry_count)
         .map_err(|_| ShardCacheError::Protocol("FCRP snapshot entry allocation failed".into()))?;
+    let mut retained_bytes = 0usize;
     for _ in 0..entry_count {
         let key_len = cursor.u32()? as usize;
         let value_len = cursor.u32()? as usize;
@@ -955,6 +987,23 @@ pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
             None
         };
         let expire_raw = cursor.u64()?;
+        let governance_bytes = match governance_len {
+            Some(GOVERNANCE_NONE) | None => 0,
+            Some(len) => len as usize,
+        };
+        let entry_bytes = std::mem::size_of::<StoredEntry>()
+            .checked_add(key_len)
+            .and_then(|bytes| bytes.checked_add(value_len))
+            .and_then(|bytes| bytes.checked_add(governance_bytes))
+            .ok_or_else(|| ShardCacheError::Protocol("snapshot byte count overflow".into()))?;
+        retained_bytes = retained_bytes
+            .checked_add(entry_bytes)
+            .ok_or_else(|| ShardCacheError::Protocol("snapshot byte count overflow".into()))?;
+        if retained_bytes > max_retained_bytes {
+            return Err(ShardCacheError::Protocol(format!(
+                "FCRP snapshot chunk exceeds remaining byte limit {max_retained_bytes}"
+            )));
+        }
         let key = cursor.bytes(key_len)?.to_vec();
         let value = cursor.bytes(value_len)?.to_vec();
         let governance = match governance_len {
@@ -1187,6 +1236,41 @@ mod tests {
         let encoded = encode_snapshot_chunk(&chunk);
         let decoded = decode_snapshot_chunk(&encoded).expect("decode");
         assert_eq!(decoded, chunk);
+    }
+
+    #[test]
+    fn snapshot_chunk_limits_apply_before_owned_entry_construction() {
+        let chunk = ReplicationSnapshotChunk {
+            watermarks: ShardWatermarks::from_vec(vec![1, 2]),
+            chunk_index: 0,
+            is_last: true,
+            entries: vec![
+                StoredEntry {
+                    key: b"a".to_vec(),
+                    value: vec![1; 128],
+                    expire_at_ms: None,
+                    governance: None,
+                },
+                StoredEntry {
+                    key: b"b".to_vec(),
+                    value: vec![2; 128],
+                    expire_at_ms: None,
+                    governance: None,
+                },
+            ],
+        };
+        let encoded = encode_snapshot_chunk(&chunk);
+        assert!(decode_snapshot_chunk_limited(&encoded, 1, usize::MAX, Some(2)).is_err());
+        assert!(
+            decode_snapshot_chunk_limited(
+                &encoded,
+                2,
+                std::mem::size_of::<StoredEntry>(),
+                Some(2),
+            )
+            .is_err()
+        );
+        assert!(decode_snapshot_chunk_limited(&encoded, 2, usize::MAX, Some(3)).is_err());
     }
 
     #[test]

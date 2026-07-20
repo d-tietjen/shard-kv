@@ -37,6 +37,8 @@
   collections, and reject raw `DUMP` export of governed vector sets.
 - Replaced the native replication flusher's idle sub-millisecond polling with
   event-driven wakeups and exact pending-batch deadlines.
+- Added whole-frame FCRP read deadlines and mutation-frame allocation limits;
+  control frames remain independently capped at 128 KiB.
 
 ### Fixed
 
@@ -56,6 +58,15 @@
 - Bumped native read-replica FCRP to v2. Version 0.7.2 peers fail closed when
   connected to pre-governance FCRP peers; mixed 0.7.1/0.7.2 replication is not
   supported.
+- Reject out-of-range mutation shards, sequence gaps, inconsistent key hashes
+  and tags, duplicate snapshot keys, and changing replica topology without
+  modifying the last valid replica state. Network replicas now initialize from
+  the primary's advertised physical shard count instead of assuming one shard.
+- Close and reconnect Monoio replication streams after a read or write
+  deadline, and reject non-loopback Monoio use because that transport does not
+  terminate TLS.
+- Keep governed HNSW queries on the bounded graph path instead of scanning the
+  full collection or returning an arbitrary authorized fallback result.
 
 ## 0.7.1 - 2026-07-17
 

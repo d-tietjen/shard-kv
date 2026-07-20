@@ -71,7 +71,21 @@ supports current/previous token files for rolling rotation. FCRP v2 rejects
 0.7.1 peers, so upgrade a replica pair together rather than mixing versions.
 Replica bootstrap validates ordered snapshot chunks and matching watermarks and
 is bounded by `snapshot_receive_max_bytes` and
-`snapshot_receive_max_entries` (1 GiB and 10 million by default).
+`snapshot_receive_max_entries` (1 GiB and 10 million by default). Mutation and
+snapshot-chunk frames are additionally bounded by `receive_max_frame_bytes`
+(64 MiB by default), control frames remain capped at 128 KiB, and
+`read_timeout_ms` applies to the complete frame. A partial timed-out frame is
+discarded with its connection. Mutation shard IDs, exact sequence continuity,
+key hash/tag identity, snapshot key uniqueness, and negotiated shard topology
+are validated before replacing replica state. Changing the primary shard count
+requires a fresh compatible replica bootstrap; online FCRP topology migration
+is outside 0.7.2.
+
+Governed HNSW search applies authorization only to graph candidates reached by
+the configured search effort; it never falls back to an unbounded full scan.
+Increase `EF` when approximate authorized recall is too low, or use `TRUTH` for
+an exact bounded collection scan. A result is never substituted merely because
+it is authorized.
 
 ## Intended Workload And Performance
 

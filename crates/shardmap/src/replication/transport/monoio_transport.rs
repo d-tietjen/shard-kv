@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 
 use crate::config::ReplicationConfig;
 use crate::monoio_runtime::MonoioRuntime;
+use crate::storage::StoredEntry;
 use crate::{Result, ShardCacheError};
 
 use super::super::ReplicationFrameBytes;
@@ -21,8 +22,8 @@ use super::super::embedded::ReplicationReplica;
 use super::super::protocol::{
     FCRP_VERSION, FrameKind, HelloRole, ReplicationCompressionMode, ReplicationHello,
     ReplicationSnapshotChunk, ShardWatermarks, decode_ack, decode_error, decode_frame,
-    decode_frame_payload_bytes, decode_hello, decode_snapshot_chunk, encode_ack, encode_error,
-    encode_frame, encode_hello, encode_snapshot_chunk,
+    decode_frame_payload_bytes, decode_hello, decode_snapshot_chunk_limited, encode_ack,
+    encode_error, encode_frame, encode_hello, encode_snapshot_chunk,
 };
 use super::{
     FRAME_HEADER_LEN, MAX_FRAME_BYTES, MAX_HELLO_FRAME_BYTES, PendingSnapshot,
@@ -33,10 +34,18 @@ use super::{
 const USE_MONOIO_ENV: &str = "SHARDCACHE_REPLICATION_USE_MONOIO";
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const LIVE_POLL_INTERVAL: Duration = Duration::from_micros(100);
-const REPLICA_READ_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 pub(super) fn should_use() -> bool {
     MonoioRuntime::enabled_by_env(USE_MONOIO_ENV)
+}
+
+fn require_loopback(address: SocketAddr, endpoint: &str) -> Result<()> {
+    if address.ip().is_loopback() {
+        return Ok(());
+    }
+    Err(ShardCacheError::Config(format!(
+        "non-loopback replication {endpoint} requires TLS"
+    )))
 }
 
 pub(super) fn start_primary(
@@ -50,6 +59,7 @@ pub(super) fn start_primary(
             config.bind_addr
         ))
     })?;
+    require_loopback(listener.local_addr()?, "primary listener")?;
     listener.set_nonblocking(true).map_err(|error| {
         ShardCacheError::Config(format!(
             "replication primary set_nonblocking failed: {error}"
@@ -81,8 +91,14 @@ pub(super) fn start_replica(
     upstream: String,
     config: ReplicationConfig,
 ) -> Result<ReplicationReplicaClient> {
+    let addresses = upstream.to_socket_addrs().map_err(|error| {
+        ShardCacheError::Config(format!("replica address {upstream} unresolvable: {error}"))
+    })?;
+    for address in addresses {
+        require_loopback(address, "replica connection")?;
+    }
     let stop = Arc::new(AtomicBool::new(false));
-    let state = Arc::new(Mutex::new(ReplicationReplica::new(1)));
+    let state = Arc::new(Mutex::new(ReplicationReplica::uninitialized()));
     let stop_clone = Arc::clone(&stop);
     let state_clone = Arc::clone(&state);
     let join = thread::Builder::new()
@@ -169,6 +185,7 @@ async fn serve_replica(
 ) -> Result<()> {
     stream.set_nodelay(true).ok();
     let timeout = Duration::from_millis(config.connect_timeout_ms.max(1));
+    let write_timeout = Duration::from_millis(config.write_timeout_ms.max(1));
     let hello_frame = match monoio::time::timeout(
         timeout,
         read_frame_bytes_limited(&mut stream, MAX_HELLO_FRAME_BYTES),
@@ -183,7 +200,7 @@ async fn serve_replica(
     match frame.kind {
         FrameKind::Hello => {}
         _ => {
-            send_error(&mut stream, "expected Hello frame").await?;
+            send_error(&mut stream, "expected Hello frame", write_timeout).await?;
             return Err(ShardCacheError::Protocol(format!(
                 "replica {peer} sent {:?} before Hello",
                 frame.kind
@@ -194,7 +211,7 @@ async fn serve_replica(
     match hello.version == FCRP_VERSION {
         true => {}
         false => {
-            send_error(&mut stream, "unsupported FCRP version").await?;
+            send_error(&mut stream, "unsupported FCRP version", write_timeout).await?;
             return Err(ShardCacheError::Protocol(format!(
                 "replica {peer} requested FCRP version {}",
                 hello.version
@@ -202,15 +219,35 @@ async fn serve_replica(
         }
     }
     if hello.role != HelloRole::Replica {
-        send_error(&mut stream, "invalid replication Hello role").await?;
+        send_error(&mut stream, "invalid replication Hello role", write_timeout).await?;
         return Err(ShardCacheError::Protocol(format!(
             "replica {peer} sent an invalid Hello role"
+        )));
+    }
+    if hello
+        .since
+        .as_ref()
+        .is_some_and(|watermarks| watermarks.as_slice().len() != primary.shard_count())
+    {
+        send_error(
+            &mut stream,
+            "replica shard topology does not match primary",
+            write_timeout,
+        )
+        .await?;
+        return Err(ShardCacheError::Protocol(format!(
+            "replica {peer} sent {} watermarks for a {}-shard primary",
+            hello
+                .since
+                .as_ref()
+                .map_or(0, |value| value.as_slice().len()),
+            primary.shard_count()
         )));
     }
     match auth_ok(config.auth_token.as_deref(), hello.auth_token.as_deref()) {
         true => {}
         false => {
-            send_error(&mut stream, "invalid auth token").await?;
+            send_error(&mut stream, "invalid auth token", write_timeout).await?;
             return Err(ShardCacheError::Protocol(format!(
                 "replica {peer} sent invalid auth token"
             )));
@@ -223,12 +260,13 @@ async fn serve_replica(
         auth_token: None,
         since: Some(primary.current_watermarks()),
     };
-    write_full_frame(
+    write_full_frame_with_timeout(
         &mut stream,
         FrameKind::Hello,
         ReplicationCompressionMode::None,
         0,
         &encode_hello(&ack),
+        write_timeout,
     )
     .await?;
 
@@ -240,7 +278,12 @@ async fn serve_replica(
     let live_start = match primary.catch_up_since(&since)? {
         BacklogCatchUp::Available(frames) => {
             for frame in frames {
-                write_raw_frame(&mut stream, frame).await?;
+                write_raw_frame_with_timeout(
+                    &mut stream,
+                    frame,
+                    Duration::from_millis(config.write_timeout_ms.max(1)),
+                )
+                .await?;
             }
             primary.current_watermarks()
         }
@@ -251,8 +294,8 @@ async fn serve_replica(
         }
     };
 
-    drain_buffered(&mut stream, &subscription, &live_start, &primary).await?;
-    forward_live_frames(&mut stream, &subscription, &stop).await
+    drain_buffered(&mut stream, &subscription, &live_start, &primary, &config).await?;
+    forward_live_frames(&mut stream, &subscription, &stop, &config).await
 }
 
 async fn drain_buffered(
@@ -260,13 +303,24 @@ async fn drain_buffered(
     subscription: &Receiver<ReplicationFrameBytes>,
     bootstrap_high: &ShardWatermarks,
     primary: &Arc<ReplicationPrimary>,
+    config: &ReplicationConfig,
 ) -> Result<()> {
     while let Ok(frame) = subscription.try_recv() {
-        write_raw_frame(stream, frame).await?;
+        write_raw_frame_with_timeout(
+            stream,
+            frame,
+            Duration::from_millis(config.write_timeout_ms.max(1)),
+        )
+        .await?;
     }
     if let BacklogCatchUp::Available(frames) = primary.catch_up_since(bootstrap_high)? {
         for frame in frames {
-            write_raw_frame(stream, frame).await?;
+            write_raw_frame_with_timeout(
+                stream,
+                frame,
+                Duration::from_millis(config.write_timeout_ms.max(1)),
+            )
+            .await?;
         }
     }
     Ok(())
@@ -276,10 +330,18 @@ async fn forward_live_frames(
     stream: &mut monoio::net::TcpStream,
     subscription: &Receiver<ReplicationFrameBytes>,
     stop: &Arc<AtomicBool>,
+    config: &ReplicationConfig,
 ) -> Result<()> {
     while !stop.load(Ordering::SeqCst) {
         match subscription.try_recv() {
-            Ok(frame) => write_raw_frame(stream, frame).await?,
+            Ok(frame) => {
+                write_raw_frame_with_timeout(
+                    stream,
+                    frame,
+                    Duration::from_millis(config.write_timeout_ms.max(1)),
+                )
+                .await?
+            }
             Err(TryRecvError::Empty) => monoio::time::sleep(LIVE_POLL_INTERVAL).await,
             Err(TryRecvError::Disconnected) => break,
         }
@@ -292,12 +354,13 @@ async fn stream_snapshot(
     snapshot: &super::super::protocol::ReplicationSnapshot,
     config: &ReplicationConfig,
 ) -> Result<()> {
-    write_full_frame(
+    write_full_frame_with_timeout(
         stream,
         FrameKind::SnapshotBegin,
         ReplicationCompressionMode::None,
         0,
         &encode_ack(&snapshot.watermarks),
+        Duration::from_millis(config.write_timeout_ms.max(1)),
     )
     .await?;
 
@@ -323,12 +386,13 @@ async fn stream_snapshot(
             buffer_bytes = 0;
             chunk_index += 1;
             let payload = encode_snapshot_chunk(&chunk);
-            write_full_frame(
+            write_full_frame_with_timeout(
                 stream,
                 FrameKind::SnapshotChunk,
                 compression,
                 config.zstd_level,
                 &payload,
+                Duration::from_millis(config.write_timeout_ms.max(1)),
             )
             .await?;
         }
@@ -341,32 +405,39 @@ async fn stream_snapshot(
             entries: Vec::new(),
         };
         let payload = encode_snapshot_chunk(&chunk);
-        write_full_frame(
+        write_full_frame_with_timeout(
             stream,
             FrameKind::SnapshotChunk,
             ReplicationCompressionMode::None,
             0,
             &payload,
+            Duration::from_millis(config.write_timeout_ms.max(1)),
         )
         .await?;
     }
-    write_full_frame(
+    write_full_frame_with_timeout(
         stream,
         FrameKind::SnapshotEnd,
         ReplicationCompressionMode::None,
         0,
         &encode_ack(&snapshot.watermarks),
+        Duration::from_millis(config.write_timeout_ms.max(1)),
     )
     .await
 }
 
-async fn send_error(stream: &mut monoio::net::TcpStream, message: &str) -> Result<()> {
-    write_full_frame(
+async fn send_error(
+    stream: &mut monoio::net::TcpStream,
+    message: &str,
+    timeout: Duration,
+) -> Result<()> {
+    write_full_frame_with_timeout(
         stream,
         FrameKind::Error,
         ReplicationCompressionMode::None,
         0,
         &encode_error(message),
+        timeout,
     )
     .await
 }
@@ -382,6 +453,28 @@ async fn write_full_frame(
     write_raw_vec(stream, frame).await
 }
 
+async fn write_full_frame_with_timeout(
+    stream: &mut monoio::net::TcpStream,
+    kind: FrameKind,
+    compression: ReplicationCompressionMode,
+    zstd_level: i32,
+    payload: &[u8],
+    timeout: Duration,
+) -> Result<()> {
+    match monoio::time::timeout(
+        timeout,
+        write_full_frame(stream, kind, compression, zstd_level, payload),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(ShardCacheError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "replication frame write deadline exceeded",
+        ))),
+    }
+}
+
 async fn write_raw_vec(stream: &mut monoio::net::TcpStream, bytes: Vec<u8>) -> Result<()> {
     write_all_owned(stream, Bytes::from(bytes)).await
 }
@@ -393,6 +486,20 @@ async fn write_raw_frame(
     write_all_owned(stream, bytes).await
 }
 
+async fn write_raw_frame_with_timeout(
+    stream: &mut monoio::net::TcpStream,
+    bytes: ReplicationFrameBytes,
+    timeout: Duration,
+) -> Result<()> {
+    match monoio::time::timeout(timeout, write_raw_frame(stream, bytes)).await {
+        Ok(result) => result,
+        Err(_) => Err(ShardCacheError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "replication frame write deadline exceeded",
+        ))),
+    }
+}
+
 async fn write_all_owned<T>(stream: &mut monoio::net::TcpStream, buffer: T) -> Result<()>
 where
     T: monoio::buf::IoBuf + 'static,
@@ -401,15 +508,20 @@ where
     result.map(|_| ()).map_err(ShardCacheError::Io)
 }
 
-async fn read_frame_bytes(stream: &mut monoio::net::TcpStream) -> Result<Vec<u8>> {
-    read_frame_bytes_limited(stream, MAX_FRAME_BYTES).await
-}
-
 async fn read_frame_bytes_limited(
     stream: &mut monoio::net::TcpStream,
     max_payload_bytes: usize,
 ) -> Result<Vec<u8>> {
     let header = read_exact_vec(stream, FRAME_HEADER_LEN).await?;
+    let kind = FrameKind::from_u8(header[5])?;
+    let max_payload_bytes = match kind {
+        FrameKind::Hello
+        | FrameKind::SnapshotBegin
+        | FrameKind::SnapshotEnd
+        | FrameKind::Ack
+        | FrameKind::Error => max_payload_bytes.min(MAX_HELLO_FRAME_BYTES),
+        FrameKind::SnapshotChunk | FrameKind::MutationBatch => max_payload_bytes,
+    };
     let payload_len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
     let uncompressed_len = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
     if payload_len > max_payload_bytes || uncompressed_len > max_payload_bytes {
@@ -417,7 +529,13 @@ async fn read_frame_bytes_limited(
             "FCRP frame payload exceeds limit ({payload_len}/{uncompressed_len} bytes)"
         )));
     }
-    let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload_len);
+    let frame_len = FRAME_HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or_else(|| ShardCacheError::Protocol("FCRP frame length overflow".into()))?;
+    let mut frame = Vec::new();
+    frame.try_reserve_exact(frame_len).map_err(|_| {
+        ShardCacheError::Protocol(format!("FCRP frame allocation failed ({frame_len} bytes)"))
+    })?;
     frame.extend_from_slice(&header);
     match payload_len {
         0 => {}
@@ -464,6 +582,7 @@ async fn connect_and_stream(
         .ok_or_else(|| {
             ShardCacheError::Config(format!("replica address {upstream} had no entries"))
         })?;
+    require_loopback(addr, "replica connection")?;
     let timeout = Duration::from_millis(config.connect_timeout_ms.max(1));
     let mut stream = monoio::time::timeout(timeout, monoio::net::TcpStream::connect_addr(addr))
         .await
@@ -475,27 +594,49 @@ async fn connect_and_stream(
         })??;
     stream.set_nodelay(true).ok();
 
-    let since = state.lock().watermarks().clone();
+    let since = {
+        let replica = state.lock();
+        replica
+            .topology_initialized()
+            .then(|| replica.watermarks().clone())
+    };
     let hello = ReplicationHello {
         version: FCRP_VERSION,
         role: HelloRole::Replica,
         auth_token: config.auth_token.clone(),
-        since: Some(since),
+        since,
     };
-    write_full_frame(
+    write_full_frame_with_timeout(
         &mut stream,
         FrameKind::Hello,
         ReplicationCompressionMode::None,
         0,
         &encode_hello(&hello),
+        Duration::from_millis(config.write_timeout_ms.max(1)),
     )
     .await?;
 
-    let ack_bytes = read_frame_bytes(&mut stream).await?;
+    let ack_bytes = monoio::time::timeout(
+        timeout,
+        read_frame_bytes_limited(&mut stream, MAX_HELLO_FRAME_BYTES),
+    )
+    .await
+    .map_err(|_| {
+        ShardCacheError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "replication Hello acknowledgement timed out",
+        ))
+    })??;
     let ack = decode_frame(&ack_bytes)?;
     match ack.kind {
         FrameKind::Hello => {
-            let _ = validate_primary_hello(&ack.payload)?;
+            let hello = validate_primary_hello(&ack.payload)?;
+            let shard_count = hello
+                .since
+                .as_ref()
+                .map(|watermarks| watermarks.as_slice().len())
+                .unwrap_or(0);
+            state.lock().ensure_topology(shard_count)?;
         }
         FrameKind::Error => {
             let message = decode_error(&ack.payload).unwrap_or_else(|_| "unknown".to_string());
@@ -521,19 +662,27 @@ async fn stream_replica_frames(
 ) -> Result<()> {
     let mut pending_snapshot: Option<PendingSnapshot> = None;
     while !stop.load(Ordering::SeqCst) {
-        let bytes =
-            match monoio::time::timeout(REPLICA_READ_POLL_INTERVAL, read_frame_bytes(stream)).await
+        let bytes = match monoio::time::timeout(
+            Duration::from_millis(config.read_timeout_ms.max(1)),
+            read_frame_bytes_limited(stream, config.receive_max_frame_bytes.min(MAX_FRAME_BYTES)),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(ShardCacheError::Io(error)))
+                if error.kind() == io::ErrorKind::UnexpectedEof
+                    || error.kind() == io::ErrorKind::ConnectionReset =>
             {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(ShardCacheError::Io(error)))
-                    if error.kind() == io::ErrorKind::UnexpectedEof
-                        || error.kind() == io::ErrorKind::ConnectionReset =>
-                {
-                    return Ok(());
-                }
-                Ok(Err(error)) => return Err(error),
-                Err(_) => continue,
-            };
+                return Ok(());
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                return Err(ShardCacheError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "replication frame read deadline exceeded",
+                )));
+            }
+        };
         let frame = decode_frame_payload_bytes(Bytes::from(bytes))?;
         match frame.kind {
             FrameKind::MutationBatch => {
@@ -559,12 +708,17 @@ async fn stream_replica_frames(
                 ));
             }
             FrameKind::SnapshotChunk => {
-                let chunk = decode_snapshot_chunk(frame.payload.as_ref())?;
                 let Some(slot) = pending_snapshot.as_mut() else {
                     return Err(ShardCacheError::Protocol(
                         "SnapshotChunk arrived without SnapshotBegin".into(),
                     ));
                 };
+                let chunk = decode_snapshot_chunk_limited(
+                    frame.payload.as_ref(),
+                    slot.remaining_entries(),
+                    slot.remaining_bytes(),
+                    Some(slot.watermarks.as_slice().len()),
+                )?;
                 slot.push(chunk)?;
             }
             FrameKind::SnapshotEnd => {
@@ -603,5 +757,18 @@ async fn sleep_backoff(backoff_ms: u64, stop: &Arc<AtomicBool>) {
         let sleep_for = step.min(backoff.saturating_sub(slept));
         monoio::time::sleep(sleep_for).await;
         slept = slept.saturating_add(sleep_for);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monoio_transport_rejects_every_non_loopback_address() {
+        assert!(require_loopback("127.0.0.1:7631".parse().unwrap(), "replica connection").is_ok());
+        assert!(require_loopback("[::1]:7631".parse().unwrap(), "replica connection").is_ok());
+        assert!(require_loopback("0.0.0.0:7631".parse().unwrap(), "primary listener").is_err());
+        assert!(require_loopback("192.0.2.1:7631".parse().unwrap(), "replica connection").is_err());
     }
 }
