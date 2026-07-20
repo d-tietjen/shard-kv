@@ -830,6 +830,8 @@ impl ReplicatedEmbeddedShardEmitter {
     }
 
     fn flush_due(&mut self) {
+        self.batch.arm_clockless_delay();
+        self.encoded_batch.arm_clockless_delay();
         if let Some(batch) = self.batch.flush_due() {
             self.send_owned_batch(batch);
         }
@@ -1518,12 +1520,15 @@ mod tests {
 
     #[test]
     fn embedded_replica_applies_batched_mutations() {
-        let primary =
-            ReplicatedEmbeddedStore::new(4, config(ReplicationSendPolicy::Batch)).expect("primary");
+        let mut replication = config(ReplicationSendPolicy::Batch);
+        replication.batch_max_delay_us = 100_000;
+        let primary = ReplicatedEmbeddedStore::new(4, replication).expect("primary");
         let mut replica = ReplicationReplica::new(4);
         let subscriber = primary.primary().subscribe(8);
         let (first_key, second_key) = same_source_shard_keys(&primary);
         primary.set(first_key.clone(), b"one".to_vec(), None);
+        thread::sleep(Duration::from_millis(10));
+        assert!(subscriber.try_recv().is_err());
         primary.set(second_key.clone(), b"two".to_vec(), None);
         let frame = subscriber
             .recv_timeout(Duration::from_secs(2))

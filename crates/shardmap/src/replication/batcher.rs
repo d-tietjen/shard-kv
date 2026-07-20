@@ -142,6 +142,12 @@ impl ReplicationBatchBuilder {
         self.should_flush_due().then(|| self.flush()).flatten()
     }
 
+    pub(crate) fn arm_clockless_delay(&mut self) {
+        if !self.track_delay && !self.pending.is_empty() && self.first_pending_at.is_none() {
+            self.first_pending_at = Some(Instant::now());
+        }
+    }
+
     pub(crate) fn flush(&mut self) -> Option<ReplicationBatch> {
         if self.pending.is_empty() {
             return None;
@@ -185,9 +191,6 @@ impl ReplicationBatchBuilder {
             return false;
         }
         if self.config.send_policy == ReplicationSendPolicy::Immediate {
-            return true;
-        }
-        if !self.track_delay {
             return true;
         }
         self.first_pending_at
@@ -283,6 +286,12 @@ impl EncodedReplicationBatchBuilder {
         self.should_flush_due().then(|| self.flush()).flatten()
     }
 
+    pub(crate) fn arm_clockless_delay(&mut self) {
+        if !self.track_delay && self.record_count != 0 && self.first_pending_at.is_none() {
+            self.first_pending_at = Some(Instant::now());
+        }
+    }
+
     pub(crate) fn next_timeout(&self) -> Option<Duration> {
         match (self.record_count, self.first_pending_at) {
             (0, _) => None,
@@ -341,9 +350,6 @@ impl EncodedReplicationBatchBuilder {
             return false;
         }
         if self.config.send_policy == ReplicationSendPolicy::Immediate {
-            return true;
-        }
-        if !self.track_delay {
             return true;
         }
         self.first_pending_at
