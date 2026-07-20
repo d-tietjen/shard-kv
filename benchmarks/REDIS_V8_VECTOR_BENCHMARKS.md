@@ -33,6 +33,13 @@ The sum ops/sec values are summed across registered vector command cases, not a
 single-operation saturation result. Use the per-command CSV rows for individual
 command claims.
 
+The 0.7.2 typed Object RAG release run is preserved in
+[`evidence/adam-scnp-vector-0.7.2-20260719`](evidence/adam-scnp-vector-0.7.2-20260719/README.md).
+For the exact `VSIM COUNT 10 WITHSCORES WITHATTRIBS EF 64` case, its three-run
+medians were 4,636 ops/sec for Redis 8.0, 14,707 for typed SCNP fanout, 18,761
+for typed direct-shard SCNP, and 83,607 for embedded ShardMap. All measured
+runs completed without unexpected command errors.
+
 ## Reproduce
 
 Run the server comparison with the shared Redis 8 vector suite:
