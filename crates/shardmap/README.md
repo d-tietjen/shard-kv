@@ -505,8 +505,10 @@ Native replication v2 streams byte-string cache mutations and consistent
 snapshots. It is intended for read replicas, sidecar cache mirrors, and service
 subscribers that consume shardcache's FCRP frames. Canonically serialized vector
 sets are included: `VADD`, `VREM`, `VSETATTR`, vector-key deletion, and TTL
-changes use the pinned shard-0 mutation stream, and snapshot restore preserves
-that route. Other Redis object families remain outside this embedded
+changes use the key's canonical source-shard sequence stream while live apply
+and snapshot restore preserve pinned shard-0 storage. Keeping the sequence
+stream tied to the key prevents ordering changes during vector-to-string
+transitions. Other Redis object families remain outside this embedded
 replication surface.
 
 Replica topology is negotiated from the primary before mutation processing.
@@ -523,7 +525,7 @@ bounded by the existing per-shard replication queue capacity and retained state
 is independently bounded by `vector_state_pending_max_bytes` (16 MiB by
 default). A state larger than that byte limit bypasses coalescing. Deletes,
 vector-to-string transitions, explicit snapshot capture, and shutdown flush
-the required state in shard-0 sequence order.
+the required state in canonical key-shard sequence order.
 
 Use `ReplicatedEmbeddedStore::shared_inner()` when an SCNP/RESP endpoint must
 serve the same writable primary memory. Keep the `ReplicatedEmbeddedStore`

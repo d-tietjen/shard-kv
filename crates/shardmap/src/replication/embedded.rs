@@ -13,7 +13,7 @@ use crate::config::ReplicationConfig;
 use crate::storage::VectorMutationKind;
 use crate::storage::{
     Bytes, EmbeddedRouteMode, EmbeddedStore, MutationOp, hash_key_tag_from_hash, now_millis,
-    ttl_now_millis,
+    shift_for, stripe_index, ttl_now_millis,
 };
 use crate::{Result, ShardCacheError};
 
@@ -46,7 +46,8 @@ pub struct ReplicatedEmbeddedStore {
 pub struct ReplicationReplica {
     store: EmbeddedStore,
     watermarks: ShardWatermarks,
-    topology_initialized: bool,
+    physical_topology_initialized: bool,
+    source_shard_count: Option<usize>,
     metrics: ReplicationMetrics,
 }
 
@@ -144,9 +145,10 @@ impl ReplicatedEmbeddedStore {
                         (_, _) => bytes::Bytes::new(),
                     };
                     let key_hash = crate::storage::hash_key(key);
+                    let shard_id = vector_emitters.shard_id_for_hash(key_hash);
                     let timestamp_ms = ttl_now_millis();
                     vector_emitters.queue_vector_mutation(ReplicationMutation {
-                        shard_id: 0,
+                        shard_id,
                         sequence: 0,
                         timestamp_ms,
                         op,
@@ -189,14 +191,7 @@ impl ReplicatedEmbeddedStore {
             self.store.delete(&key);
         }
         #[cfg(feature = "redis")]
-        let had_pending_vector = self.emitters.flush_vector_key(&key);
-        #[cfg(feature = "redis")]
-        let replication_shard_id = if was_vector || had_pending_vector {
-            self.store.vector_shard_id()
-        } else {
-            route.shard_id
-        };
-        #[cfg(not(feature = "redis"))]
+        self.emitters.flush_vector_key(&key);
         let replication_shard_id = route.shard_id;
         let key = bytes::Bytes::from(key);
         let value = bytes::Bytes::from(value);
@@ -293,14 +288,7 @@ impl ReplicatedEmbeddedStore {
             self.store.delete(&key);
         }
         #[cfg(feature = "redis")]
-        let had_pending_vector = self.emitters.flush_vector_key(&key);
-        #[cfg(feature = "redis")]
-        let replication_shard_id = if was_vector || had_pending_vector {
-            self.store.vector_shard_id()
-        } else {
-            route.shard_id
-        };
-        #[cfg(not(feature = "redis"))]
+        self.emitters.flush_vector_key(&key);
         let replication_shard_id = route.shard_id;
         let key = bytes::Bytes::from(key);
         let value = bytes::Bytes::from(value);
@@ -415,6 +403,7 @@ impl ReplicatedEmbeddedStore {
 
     pub fn catch_up_replica(&self, replica: &mut ReplicationReplica) -> Result<()> {
         self.emitters.flush_all_and_wait();
+        replica.ensure_source_topology(self.primary.shard_count())?;
         // Attempt backlog-only catch-up first.
         match self.primary.catch_up_since(&replica.watermarks)? {
             BacklogCatchUp::Available(frames) => {
@@ -430,7 +419,7 @@ impl ReplicatedEmbeddedStore {
         let mut attempts = 0;
         loop {
             attempts += 1;
-            replica.replace_with_snapshot(self.snapshot());
+            replica.try_replace_with_snapshot(self.snapshot())?;
             let watermarks = replica.watermarks.clone();
             match self.primary.catch_up_since(&watermarks)? {
                 BacklogCatchUp::Available(frames) => {
@@ -646,7 +635,7 @@ impl ReplicatedEmbeddedEmitters {
             mutation
         };
         if let Some(mutation) = mutation {
-            self.emit(0, mutation);
+            self.emit(mutation.shard_id, mutation);
             true
         } else {
             false
@@ -690,8 +679,13 @@ impl ReplicatedEmbeddedEmitters {
     fn emit_vector_mutations(&self, mut mutations: Vec<ReplicationMutation>) {
         mutations.sort_unstable_by(|left, right| left.key.cmp(&right.key));
         for mutation in mutations {
-            self.emit(0, mutation);
+            self.emit(mutation.shard_id, mutation);
         }
+    }
+
+    #[cfg(feature = "redis")]
+    fn shard_id_for_hash(&self, key_hash: u64) -> usize {
+        stripe_index(key_hash, shift_for(self.shards.len()))
     }
 
     fn emit_borrowed_set(&self, set: BorrowedSetReplication<'_>) {
@@ -961,7 +955,8 @@ impl ReplicationReplica {
         Self {
             store: EmbeddedStore::with_route_mode(shard_count, route_mode),
             watermarks: ShardWatermarks::new(shard_count),
-            topology_initialized: true,
+            physical_topology_initialized: true,
+            source_shard_count: None,
             metrics: ReplicationMetrics::default(),
         }
     }
@@ -970,7 +965,8 @@ impl ReplicationReplica {
         Self {
             store: EmbeddedStore::with_route_mode(1, EmbeddedRouteMode::FullKey),
             watermarks: ShardWatermarks::new(0),
-            topology_initialized: false,
+            physical_topology_initialized: false,
+            source_shard_count: None,
             metrics: ReplicationMetrics::default(),
         }
     }
@@ -981,26 +977,53 @@ impl ReplicationReplica {
                 "replication primary advertised invalid shard count {shard_count}"
             )));
         }
-        if self.topology_initialized {
-            if self.store.shard_count() != shard_count
-                || self.watermarks.as_slice().len() != shard_count
-            {
+        if !self.physical_topology_initialized {
+            let route_mode = self.store.route_mode();
+            self.store = EmbeddedStore::with_route_mode(shard_count, route_mode);
+            self.physical_topology_initialized = true;
+        }
+        self.ensure_source_topology(shard_count)
+    }
+
+    fn ensure_source_topology(&mut self, shard_count: usize) -> Result<()> {
+        self.validate_source_topology(shard_count)?;
+        if self.watermarks.as_slice().len() != shard_count {
+            self.watermarks = ShardWatermarks::new(shard_count);
+        }
+        self.source_shard_count = Some(shard_count);
+        Ok(())
+    }
+
+    fn validate_source_topology(&self, shard_count: usize) -> Result<()> {
+        if shard_count == 0 || !shard_count.is_power_of_two() {
+            return Err(ShardCacheError::Protocol(format!(
+                "replication primary advertised invalid shard count {shard_count}"
+            )));
+        }
+        if let Some(current) = self.source_shard_count {
+            if current != shard_count || self.watermarks.as_slice().len() != shard_count {
                 return Err(ShardCacheError::Protocol(format!(
-                    "replication topology changed from {} to {shard_count} shards",
-                    self.store.shard_count()
+                    "replication source topology changed from {current} to {shard_count} shards"
                 )));
             }
             return Ok(());
         }
-        let route_mode = self.store.route_mode();
-        self.store = EmbeddedStore::with_route_mode(shard_count, route_mode);
-        self.watermarks = ShardWatermarks::new(shard_count);
-        self.topology_initialized = true;
+        if self.watermarks.as_slice().len() != shard_count
+            && self
+                .watermarks
+                .as_slice()
+                .iter()
+                .any(|watermark| *watermark != 0)
+        {
+            return Err(ShardCacheError::Protocol(
+                "cannot change replication source topology after applying mutations".into(),
+            ));
+        }
         Ok(())
     }
 
     pub(crate) fn topology_initialized(&self) -> bool {
-        self.topology_initialized
+        self.source_shard_count.is_some()
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Bytes> {
@@ -1320,7 +1343,7 @@ impl ReplicationReplica {
         key_tag: Option<u64>,
         key: &[u8],
     ) -> Result<bool> {
-        if !self.topology_initialized {
+        if !self.physical_topology_initialized {
             return Err(ShardCacheError::Protocol(
                 "replication mutation arrived before topology negotiation".into(),
             ));
@@ -1342,6 +1365,14 @@ impl ReplicationReplica {
                 "replication mutation key tag does not match key hash".into(),
             ));
         }
+        if self.source_shard_count.is_some() {
+            let expected_shard = stripe_index(actual_hash, shift_for(shard_count));
+            if shard_id != expected_shard {
+                return Err(ShardCacheError::Protocol(format!(
+                    "replication mutation shard {shard_id} does not own key; expected shard {expected_shard}"
+                )));
+            }
+        }
 
         let current = self.watermarks.get(shard_id);
         if sequence <= current {
@@ -1359,17 +1390,19 @@ impl ReplicationReplica {
     }
 
     pub fn replace_with_snapshot(&mut self, snapshot: ReplicationSnapshot) {
-        let _ = self.try_replace_with_snapshot(snapshot);
+        if let Err(error) = self.try_replace_with_snapshot(snapshot) {
+            tracing::warn!(%error, "replication snapshot replacement rejected");
+        }
     }
 
     pub fn try_replace_with_snapshot(&mut self, mut snapshot: ReplicationSnapshot) -> Result<()> {
-        let shard_count = self.store.shard_count();
-        if !self.topology_initialized || snapshot.watermarks.as_slice().len() != shard_count {
-            return Err(ShardCacheError::Protocol(format!(
-                "replication snapshot watermark count {} does not match replica shard count {shard_count}",
-                snapshot.watermarks.as_slice().len()
-            )));
+        let source_shard_count = snapshot.watermarks.as_slice().len();
+        if !self.physical_topology_initialized {
+            return Err(ShardCacheError::Protocol(
+                "replication snapshot arrived before topology negotiation".into(),
+            ));
         }
+        self.validate_source_topology(source_shard_count)?;
         snapshot
             .entries
             .sort_unstable_by(|left, right| left.key.cmp(&right.key));
@@ -1400,6 +1433,7 @@ impl ReplicationReplica {
         store.restore_entries(snapshot.entries);
         self.store = store;
         self.watermarks = snapshot.watermarks;
+        self.source_shard_count = Some(source_shard_count);
         Ok(())
     }
 
@@ -1519,7 +1553,7 @@ mod tests {
 
     #[cfg(feature = "redis")]
     #[test]
-    fn vector_mutations_replicate_on_the_pinned_shard() {
+    fn vector_mutations_use_the_key_shard_sequence_and_pinned_storage() {
         let primary = ReplicatedEmbeddedStore::new(4, config(ReplicationSendPolicy::Immediate))
             .expect("primary");
         let mut replica = ReplicationReplica::new(4);
@@ -1545,6 +1579,10 @@ mod tests {
         let frame = subscriber
             .recv_timeout(Duration::from_secs(2))
             .expect("vector replication frame");
+        let source_shard = primary.inner().route_key(&key).shard_id;
+        assert_ne!(source_shard, primary.inner().vector_shard_id());
+        assert_eq!(primary.primary().current_watermarks().get(source_shard), 1);
+        assert_eq!(primary.primary().current_watermarks().get(0), 0);
         replica.apply_frame(frame).expect("apply vector mutation");
 
         assert_eq!(vector_count(replica.inner(), &key), 1);
@@ -1655,6 +1693,7 @@ mod tests {
         });
 
         assert_eq!(replica.get(b"sentinel"), Some(b"preserved".to_vec()));
+        assert!(!replica.topology_initialized());
     }
 
     #[test]
@@ -1747,6 +1786,31 @@ mod tests {
         assert_eq!(replica.inner().shard_count(), 8);
         assert_eq!(replica.watermarks().as_slice().len(), 8);
         assert!(replica.ensure_topology(4).is_err());
+    }
+
+    #[test]
+    fn negotiated_replica_rejects_an_in_range_non_owner_shard() {
+        let mut replica = ReplicationReplica::new(4);
+        replica.ensure_source_topology(4).unwrap();
+        let key = bytes::Bytes::from_static(b"owner-check");
+        let key_hash = crate::storage::hash_key(&key);
+        let owner = stripe_index(key_hash, shift_for(4));
+        let mutation = ReplicationMutation {
+            shard_id: (owner + 1) % 4,
+            sequence: 1,
+            timestamp_ms: 1,
+            op: ReplicationMutationOp::Set,
+            key_hash,
+            key_tag: hash_key_tag_from_hash(key_hash),
+            key: key.clone(),
+            value: bytes::Bytes::from_static(b"value"),
+            expire_at_ms: None,
+            governance: None,
+        };
+
+        assert!(replica.try_apply_mutation(mutation).is_err());
+        assert_eq!(replica.get(&key), None);
+        assert_eq!(replica.watermarks().get(owner), 0);
     }
 
     #[cfg(feature = "redis")]
@@ -2100,6 +2164,34 @@ mod tests {
         replica.apply_frame_bytes(&frame).expect("apply");
 
         assert_eq!(replica.get(&key), Some(b"one".to_vec()));
+    }
+
+    #[test]
+    fn snapshot_catch_up_keeps_replica_physical_topology() {
+        let mut cfg = config(ReplicationSendPolicy::Immediate);
+        cfg.backlog_bytes = 1;
+        let primary = ReplicatedEmbeddedStore::new(2, cfg).expect("primary");
+        for index in 0..32 {
+            primary.set(
+                format!("snapshot-key-{index}").into_bytes(),
+                b"value".to_vec(),
+                None,
+            );
+        }
+        let mut replica = ReplicationReplica::new(4);
+
+        primary
+            .catch_up_replica(&mut replica)
+            .expect("snapshot catch-up");
+
+        assert_eq!(replica.inner().shard_count(), 4);
+        assert_eq!(replica.watermarks().as_slice().len(), 2);
+        for index in 0..32 {
+            assert_eq!(
+                replica.get(format!("snapshot-key-{index}").as_bytes()),
+                Some(b"value".to_vec())
+            );
+        }
     }
 
     #[test]

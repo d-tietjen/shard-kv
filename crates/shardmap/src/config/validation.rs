@@ -1019,6 +1019,14 @@ impl<'a> ReplicationValidation<'a> {
         ConfigCheck::require(
             self.config.receive_max_frame_bytes <= 256 * 1024 * 1024,
             "replication.receive_max_frame_bytes cannot exceed the FCRP protocol limit",
+        )?;
+        ConfigCheck::require(
+            self.config.receive_max_frame_bytes >= self.config.batch_max_bytes.saturating_add(4),
+            "replication.receive_max_frame_bytes must accommodate batch_max_bytes plus its record-count header",
+        )?;
+        ConfigCheck::require(
+            self.config.receive_max_frame_bytes >= self.config.snapshot_chunk_bytes.max(4 * 1024),
+            "replication.receive_max_frame_bytes must accommodate snapshot_chunk_bytes",
         )
     }
 

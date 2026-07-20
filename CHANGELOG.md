@@ -67,6 +67,15 @@
   terminate TLS.
 - Keep governed HNSW queries on the bounded graph path instead of scanning the
   full collection or returning an arbitrary authorized fallback result.
+- Reject non-finite vectors, duplicate vector identities, invalid HNSW links,
+  and exhausted UID allocation. Sparse high UIDs no longer trigger a dense
+  allocation during similarity search.
+- Keep vector mutations on the key's canonical source-shard sequence while
+  retaining pinned shard-0 storage, and separate a replica's source sequence
+  topology from its physical storage topology during catch-up and snapshots.
+- Enforce blocking FCRP deadlines with bounded socket polling, size snapshot
+  chunks from their exact encoded payloads, and reject frame-limit settings
+  that cannot accommodate configured batches or snapshot chunks.
 
 ## 0.7.1 - 2026-07-17
 

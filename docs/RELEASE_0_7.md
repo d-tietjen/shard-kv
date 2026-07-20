@@ -22,7 +22,7 @@ select an active-sync feature.
 | Persistence and repair | Preserves causal state in checksummed snapshots and repairs compacted block history through bounded state transfer. | Included in active sync |
 | Conflict batching | Finalizes independent ambiguous conflicts in bounded batches while preserving repeated-key mutation order. | Included in consensus mode |
 | Typed vector client | Sends bounded native `PING`, `VADD`, `VSIM`, and `VREM` requests over fanout or direct shard-0 SCNP connections, including opaque per-embedding governance metadata. | `shardcache-client-rs` `vector` feature |
-| Vector read-replica state | Replicates canonical vector-set payloads, deletes, and TTL changes through FCRP and preserves shard-0 placement during live apply and snapshot bootstrap. | `shardmap` `redis` plus `ReplicatedEmbeddedStore` |
+| Vector read-replica state | Replicates canonical vector-set payloads, deletes, and TTL changes through the key's stable source-shard sequence while preserving shard-0 storage during live apply and snapshot bootstrap. | `shardmap` `redis` plus `ReplicatedEmbeddedStore` |
 
 Vector read replicas use the single-primary FCRP stream. The active-sync modes
 in this release synchronize exact `ActiveShardMap` point values only; they do

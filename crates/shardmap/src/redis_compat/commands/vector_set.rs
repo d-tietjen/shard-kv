@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
@@ -660,7 +661,17 @@ impl crate::commands::redis::RedisCommand for VAdd {
                         ));
                     }
                     let uid = set.next_uid;
-                    set.next_uid = set.next_uid.saturating_add(1).max(1);
+                    let Some(next_uid) = uid.checked_add(1) else {
+                        return VectorWriteResult::Unchanged(error(
+                            "ERR vector UID space exhausted",
+                        ));
+                    };
+                    if uid == 0 {
+                        return VectorWriteResult::Unchanged(error(
+                            "ERR vector UID space exhausted",
+                        ));
+                    }
+                    set.next_uid = next_uid;
                     set.insert_hnsw_entry(VectorEntry {
                         uid,
                         level: hnsw_level(&parsed.element),
@@ -2401,24 +2412,21 @@ fn vsim_response_bytes(scored: &[(&VectorEntry, f64)], parsed: &VSimArgs) -> Opt
     })
 }
 
-fn build_uid_index(set: &VectorSetState) -> Vec<Option<usize>> {
-    let max_uid = set.entries.iter().map(|entry| entry.uid).max().unwrap_or(0) as usize;
-    let mut uid_to_index = vec![None; max_uid.saturating_add(1)];
+fn build_uid_index(set: &VectorSetState) -> HashMap<u64, usize> {
+    let mut uid_to_index = HashMap::with_capacity(set.entries.len());
     for (index, entry) in set.entries.iter().enumerate() {
-        if let Some(slot) = uid_to_index.get_mut(entry.uid as usize) {
-            *slot = Some(index);
-        }
+        uid_to_index.insert(entry.uid, index);
     }
     uid_to_index
 }
 
-fn lookup_uid_index(uid_to_index: &[Option<usize>], uid: u64) -> Option<usize> {
-    uid_to_index.get(uid as usize).and_then(|index| *index)
+fn lookup_uid_index(uid_to_index: &HashMap<u64, usize>, uid: u64) -> Option<usize> {
+    uid_to_index.get(&uid).copied()
 }
 
 fn greedy_hnsw_layer_index(
     set: &VectorSetState,
-    uid_to_index: &[Option<usize>],
+    uid_to_index: &HashMap<u64, usize>,
     start_index: usize,
     query: &[f64],
     level: usize,
@@ -3053,7 +3061,11 @@ fn decode_vector_set_payload(
         let mut vector = Vec::new();
         vector.try_reserve_exact(vector_len).map_err(|_| ())?;
         for _ in 0..vector_len {
-            vector.push(read_f64(&mut raw)?);
+            let value = read_f64(&mut raw)?;
+            if !value.is_finite() {
+                return Err(());
+            }
+            vector.push(value);
         }
         let has_attributes = read_u32(&mut raw)? != 0;
         let attributes = if has_attributes {
@@ -3142,7 +3154,56 @@ fn decode_vector_set_payload(
     } else if decode_links && !read_hnsw_links {
         set.rebuild_hnsw();
     }
+    let validate_links = !matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) || decode_links;
+    validate_decoded_vector_set(&set, validate_links)?;
     Ok(set)
+}
+
+fn validate_decoded_vector_set(set: &VectorSetState, validate_links: bool) -> Result<(), ()> {
+    if set.next_uid == 0 {
+        return Err(());
+    }
+
+    let mut uid_levels = HashMap::with_capacity(set.entries.len());
+    let mut elements: HashSet<&[u8]> = HashSet::with_capacity(set.entries.len());
+    let mut max_uid = 0;
+    for entry in &set.entries {
+        if entry.uid == 0
+            || uid_levels.insert(entry.uid, entry.level).is_some()
+            || !elements.insert(entry.element.as_ref())
+            || entry.vector.iter().any(|value| !value.is_finite())
+        {
+            return Err(());
+        }
+        max_uid = max_uid.max(entry.uid);
+    }
+    if !set.entries.is_empty() && set.next_uid <= max_uid {
+        return Err(());
+    }
+    if !validate_links {
+        return Ok(());
+    }
+
+    for entry in &set.entries {
+        if entry.links.len() != entry.level.saturating_add(1) {
+            return Err(());
+        }
+        for (level, links) in entry.links.iter().enumerate() {
+            let mut seen = HashSet::with_capacity(links.len());
+            for uid in links {
+                let Some(target_level) = uid_levels.get(uid) else {
+                    return Err(());
+                };
+                if *uid == entry.uid || *target_level < level || !seen.insert(*uid) {
+                    return Err(());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn encode_vector_set(set: &VectorSetState) -> Bytes {
@@ -3198,10 +3259,14 @@ fn fp32_values(blob: &[u8]) -> Result<Vec<f64>, Frame> {
     if !blob.len().is_multiple_of(4) {
         return Err(error("ERR invalid FP32 vector length"));
     }
-    Ok(blob
+    let values: Vec<f64> = blob
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()) as f64)
-        .collect())
+        .collect();
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(error("ERR value is not a float"));
+    }
+    Ok(values)
 }
 
 fn fp32_blob(values: &[f64]) -> Bytes {
@@ -3964,9 +4029,17 @@ fn read_f64_slice(raw: &[u8]) -> Result<Vec<f64>, ()> {
     if !raw.len().is_multiple_of(8) {
         return Err(());
     }
-    raw.chunks_exact(8)
-        .map(|chunk| Ok(f64::from_le_bytes(chunk.try_into().map_err(|_| ())?)))
-        .collect()
+    let values: Vec<f64> = raw
+        .chunks_exact(8)
+        .map(|chunk| {
+            let bytes: [u8; 8] = chunk.try_into().map_err(|_| ())?;
+            Ok::<f64, ()>(f64::from_le_bytes(bytes))
+        })
+        .collect::<Result<_, ()>>()?;
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(());
+    }
+    Ok(values)
 }
 
 fn read_bytes_slice<'a>(raw: &mut &'a [u8]) -> Result<&'a [u8], ()> {
@@ -4021,6 +4094,71 @@ mod tests {
                 links: vec![Vec::new()],
             }],
         }
+    }
+
+    #[test]
+    fn sparse_large_hnsw_uids_do_not_drive_dense_allocations() {
+        let mut set = one_entry_set(None);
+        set.entries[0].uid = u64::MAX - 1;
+        set.next_uid = u64::MAX;
+        let encoded = encode_vector_set(&set);
+        let decoded = decode_vector_set(Some(&encoded)).expect("valid sparse UID state");
+
+        assert_eq!(build_uid_index(&decoded).len(), 1);
+        assert_eq!(hnsw_search(&decoded, &[1.0, 0.0], 1, 1, &[]).len(), 1);
+    }
+
+    #[test]
+    fn canonical_vector_state_rejects_invalid_identity_graph_and_numbers() {
+        let mut duplicate_uid = one_entry_set(None);
+        let mut second = duplicate_uid.entries[0].clone();
+        second.element = b"doc-b".to_vec();
+        duplicate_uid.entries.push(second);
+        duplicate_uid.next_uid = 3;
+        assert!(validate_vector_set_bytes(&encode_vector_set(&duplicate_uid)).is_err());
+
+        let mut duplicate_element = one_entry_set(None);
+        let mut second = duplicate_element.entries[0].clone();
+        second.uid = 2;
+        duplicate_element.entries.push(second);
+        duplicate_element.next_uid = 3;
+        assert!(validate_vector_set_bytes(&encode_vector_set(&duplicate_element)).is_err());
+
+        let mut dangling_link = one_entry_set(None);
+        dangling_link.entries[0].links[0].push(99);
+        assert!(validate_vector_set_bytes(&encode_vector_set(&dangling_link)).is_err());
+
+        let mut non_finite = one_entry_set(None);
+        non_finite.entries[0].vector[0] = f64::NAN;
+        assert!(validate_vector_set_bytes(&encode_vector_set(&non_finite)).is_err());
+    }
+
+    #[test]
+    fn fp32_input_rejects_non_finite_values() {
+        assert!(fp32_values(&f32::NAN.to_le_bytes()).is_err());
+        assert!(fp32_values(&f32::INFINITY.to_le_bytes()).is_err());
+    }
+
+    #[test]
+    fn vector_add_rejects_exhausted_uid_space() {
+        let store = EmbeddedStore::new(1);
+        let mut set = one_entry_set(None);
+        set.entries[0].uid = u64::MAX - 1;
+        set.next_uid = u64::MAX;
+        store.set_value_bytes(
+            b"objects",
+            bytes::Bytes::from(encode_vector_set(&set)),
+            None,
+        );
+
+        assert!(matches!(
+            VAdd::execute(
+                &store,
+                &[b"objects", b"VALUES", b"2", b"0", b"1", b"doc-b"],
+            ),
+            Frame::Error(message) if message.contains("UID space exhausted")
+        ));
+        assert_eq!(VCard::execute(&store, &[b"objects"]), Frame::Integer(1));
     }
 
     #[test]

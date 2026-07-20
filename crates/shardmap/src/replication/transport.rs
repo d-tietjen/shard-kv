@@ -36,6 +36,7 @@ mod monoio_transport;
 
 const FRAME_HEADER_LEN: usize = 16;
 const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+const MAX_SOCKET_READ_POLL_MS: u64 = 200;
 const MAX_HELLO_FRAME_BYTES: usize = 128 * 1024;
 #[cfg(feature = "scnp-tls")]
 const FCRP_ALPN: &[u8] = b"fcrp/2";
@@ -142,7 +143,7 @@ fn wrap_server_stream(
         }
         authorize_replication_client_certificate(&connection, &config.tls_server)?;
         socket
-            .set_read_timeout(Some(Duration::from_millis(200)))
+            .set_read_timeout(Some(frame_read_poll_timeout(config)))
             .ok();
         Ok(Box::new(rustls::StreamOwned::new(connection, socket)))
     }
@@ -365,7 +366,7 @@ fn wrap_client_stream(
             ));
         }
         socket
-            .set_read_timeout(Some(Duration::from_millis(200)))
+            .set_read_timeout(Some(frame_read_poll_timeout(config)))
             .ok();
         Ok(Box::new(rustls::StreamOwned::new(connection, socket)))
     }
@@ -546,9 +547,7 @@ fn serve_replica(
 ) -> Result<()> {
     stream.set_nodelay(true).ok();
     stream
-        .set_read_timeout(Some(Duration::from_millis(
-            config.connect_timeout_ms.max(1),
-        )))
+        .set_read_timeout(Some(frame_read_poll_timeout(&config)))
         .ok();
     stream
         .set_write_timeout(Some(Duration::from_millis(config.write_timeout_ms.max(1))))
@@ -702,51 +701,80 @@ fn stream_snapshot(
         &encode_ack(&snapshot.watermarks),
     )?;
 
-    let target = config.snapshot_chunk_bytes.max(4 * 1024);
+    let max_payload_bytes = config.receive_max_frame_bytes.min(MAX_FRAME_BYTES);
+    let base_payload_bytes = 8usize
+        .checked_add(1)
+        .and_then(|value| value.checked_add(4))
+        .and_then(|value| value.checked_add(snapshot.watermarks.as_slice().len().checked_mul(8)?))
+        .and_then(|value| value.checked_add(8))
+        .ok_or_else(|| ShardCacheError::Protocol("snapshot chunk size overflow".into()))?;
+    if base_payload_bytes > max_payload_bytes {
+        return Err(ShardCacheError::Config(
+            "replication receive frame limit cannot fit snapshot metadata".into(),
+        ));
+    }
+    let target = config
+        .snapshot_chunk_bytes
+        .max(4 * 1024)
+        .min(max_payload_bytes);
     let mut chunk_index = 0u64;
     let mut buffer: Vec<crate::storage::StoredEntry> = Vec::new();
-    let mut buffer_bytes = 0usize;
+    let mut buffer_bytes = base_payload_bytes;
     let total = snapshot.entries.len();
     let compression = ReplicationCompressionMode::from(config.compression);
 
     for (idx, entry) in snapshot.entries.iter().enumerate() {
-        let entry_bytes = entry.key.len() + entry.value.len() + 32;
+        let entry_bytes = 20usize
+            .checked_add(entry.key.len())
+            .and_then(|value| value.checked_add(entry.value.len()))
+            .and_then(|value| {
+                value.checked_add(entry.governance.as_ref().map_or(0, |value| value.len()))
+            })
+            .ok_or_else(|| ShardCacheError::Protocol("snapshot entry size overflow".into()))?;
+        if entry_bytes > max_payload_bytes.saturating_sub(base_payload_bytes) {
+            return Err(ShardCacheError::Protocol(format!(
+                "replication snapshot entry exceeds receive frame limit {max_payload_bytes}"
+            )));
+        }
+        if !buffer.is_empty() && buffer_bytes.saturating_add(entry_bytes) > target {
+            write_snapshot_chunk(
+                stream,
+                &snapshot.watermarks,
+                chunk_index,
+                false,
+                std::mem::take(&mut buffer),
+                compression,
+                config.zstd_level,
+            )?;
+            chunk_index += 1;
+            buffer_bytes = base_payload_bytes;
+        }
         buffer.push(entry.clone());
         buffer_bytes = buffer_bytes.saturating_add(entry_bytes);
         let is_last_entry = idx + 1 == total;
         if buffer_bytes >= target || is_last_entry {
-            let chunk = ReplicationSnapshotChunk {
-                watermarks: snapshot.watermarks.clone(),
-                chunk_index,
-                is_last: is_last_entry,
-                entries: std::mem::take(&mut buffer),
-            };
-            buffer_bytes = 0;
-            chunk_index += 1;
-            let payload = encode_snapshot_chunk(&chunk);
-            write_full_frame(
+            write_snapshot_chunk(
                 stream,
-                FrameKind::SnapshotChunk,
+                &snapshot.watermarks,
+                chunk_index,
+                is_last_entry,
+                std::mem::take(&mut buffer),
                 compression,
                 config.zstd_level,
-                &payload,
             )?;
+            chunk_index += 1;
+            buffer_bytes = base_payload_bytes;
         }
     }
     if total == 0 {
-        let chunk = ReplicationSnapshotChunk {
-            watermarks: snapshot.watermarks.clone(),
-            chunk_index: 0,
-            is_last: true,
-            entries: Vec::new(),
-        };
-        let payload = encode_snapshot_chunk(&chunk);
-        write_full_frame(
+        write_snapshot_chunk(
             stream,
-            FrameKind::SnapshotChunk,
+            &snapshot.watermarks,
+            0,
+            true,
+            Vec::new(),
             ReplicationCompressionMode::None,
             0,
-            &payload,
         )?;
     }
     write_full_frame(
@@ -757,6 +785,30 @@ fn stream_snapshot(
         &encode_ack(&snapshot.watermarks),
     )?;
     Ok(())
+}
+
+fn write_snapshot_chunk(
+    stream: &mut (impl Read + Write),
+    watermarks: &ShardWatermarks,
+    chunk_index: u64,
+    is_last: bool,
+    entries: Vec<crate::storage::StoredEntry>,
+    compression: ReplicationCompressionMode,
+    zstd_level: i32,
+) -> Result<()> {
+    let payload = encode_snapshot_chunk(&ReplicationSnapshotChunk {
+        watermarks: watermarks.clone(),
+        chunk_index,
+        is_last,
+        entries,
+    });
+    write_full_frame(
+        stream,
+        FrameKind::SnapshotChunk,
+        compression,
+        zstd_level,
+        &payload,
+    )
 }
 
 fn send_error(stream: &mut (impl Read + Write), message: &str) -> Result<()> {
@@ -1060,9 +1112,7 @@ fn connect_and_stream(
     )?;
     stream.set_nodelay(true).ok();
     stream
-        .set_read_timeout(Some(Duration::from_millis(
-            config.connect_timeout_ms.max(1),
-        )))
+        .set_read_timeout(Some(frame_read_poll_timeout(config)))
         .ok();
     stream
         .set_write_timeout(Some(Duration::from_millis(config.write_timeout_ms.max(1))))
@@ -1282,7 +1332,7 @@ impl PendingSnapshot {
             )));
         }
         self.entries
-            .try_reserve(chunk.entries.len())
+            .try_reserve_exact(chunk.entries.len())
             .map_err(|_| ShardCacheError::Protocol("snapshot entry allocation failed".into()))?;
         self.entries.extend(chunk.entries);
         self.retained_bytes = next_bytes;
@@ -1321,6 +1371,16 @@ impl PendingSnapshot {
             watermarks: self.watermarks,
         })
     }
+}
+
+fn frame_read_poll_timeout(config: &ReplicationConfig) -> Duration {
+    Duration::from_millis(
+        config
+            .connect_timeout_ms
+            .max(1)
+            .min(config.read_timeout_ms.max(1))
+            .min(MAX_SOCKET_READ_POLL_MS),
+    )
 }
 
 #[cfg(test)]
@@ -1665,6 +1725,26 @@ mod tests {
             matches!(error, ShardCacheError::Io(ref io) if io.kind() == io::ErrorKind::TimedOut)
         );
         assert_eq!(stream.bytes.position(), (FRAME_HEADER_LEN + 2) as u64);
+    }
+
+    #[test]
+    fn socket_poll_timeout_never_exceeds_the_shortest_frame_deadline() {
+        let config = ReplicationConfig {
+            connect_timeout_ms: 500,
+            read_timeout_ms: 10,
+            ..ReplicationConfig::default()
+        };
+        assert_eq!(frame_read_poll_timeout(&config), Duration::from_millis(10));
+
+        let config = ReplicationConfig {
+            connect_timeout_ms: 500,
+            read_timeout_ms: 5_000,
+            ..ReplicationConfig::default()
+        };
+        assert_eq!(
+            frame_read_poll_timeout(&config),
+            Duration::from_millis(MAX_SOCKET_READ_POLL_MS)
+        );
     }
 
     #[test]

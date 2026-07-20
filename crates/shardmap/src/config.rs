@@ -1195,6 +1195,24 @@ mod tests {
         assert!(config.validate().is_err());
     }
 
+    #[test]
+    fn replication_receive_limit_must_fit_configured_outbound_frames() {
+        let mut config = ShardCacheConfig::default();
+        config.replication.enabled = true;
+        config.replication.batch_max_bytes = 1_024;
+        config.replication.snapshot_chunk_bytes = 512;
+        config.replication.receive_max_frame_bytes = 1_024;
+        assert!(config.validate().is_err());
+
+        config.replication.batch_max_bytes = 512;
+        config.replication.snapshot_chunk_bytes = 4_097;
+        config.replication.receive_max_frame_bytes = 4_096;
+        assert!(config.validate().is_err());
+
+        config.replication.snapshot_chunk_bytes = 4_096;
+        assert!(config.validate().is_ok());
+    }
+
     #[cfg(feature = "scnp-tls")]
     #[test]
     fn non_loopback_replication_requires_mtls_and_token_authentication() {
