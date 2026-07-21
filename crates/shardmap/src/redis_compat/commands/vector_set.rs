@@ -1551,7 +1551,13 @@ fn vector_write_maybe(
                 Err(()) => return Err(wrongtype()),
             };
             match op(&mut set) {
-                VectorWriteResult::Changed(frame) => Ok(((frame, true), encode_vector_set(&set))),
+                VectorWriteResult::Changed(frame) => {
+                    let value = encode_vector_set(&set);
+                    if !store.vector_mutation_is_replicable(key, &value) {
+                        return Err(error("ERR vector state exceeds replication frame limit"));
+                    }
+                    Ok(((frame, true), value))
+                }
                 VectorWriteResult::Unchanged(frame) => {
                     let value = existing
                         .map(<[u8]>::to_vec)
@@ -1696,6 +1702,9 @@ fn vector_read_cached(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -1716,6 +1725,9 @@ fn vector_read_metadata(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -1736,6 +1748,9 @@ fn vector_lookup_entry(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(VectorEntryLookup::MissingKey),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -1840,6 +1855,9 @@ fn vector_read_prefix_elements(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -1876,6 +1894,9 @@ fn vector_read_lex_range(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 

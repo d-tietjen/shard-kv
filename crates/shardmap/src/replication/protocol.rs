@@ -8,12 +8,12 @@ use crate::storage::{MutationOp, MutationRecord, StoredEntry, hash_key, hash_key
 use crate::{Result, ShardCacheError};
 
 pub const FCRP_MAGIC: &[u8; 4] = b"FCRP";
-pub const FCRP_VERSION: u8 = 2;
+pub const FCRP_VERSION: u8 = 3;
 
 const HEADER_LEN: usize = 16;
 pub(crate) const FRAME_HEADER_LEN: usize = HEADER_LEN;
 const FLAG_COMPRESSED: u8 = 0x01;
-const MAX_FCRP_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_FCRP_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 // u64::MAX is reserved as the wire sentinel for "no expiry". A legitimate
 // `expire_at_ms` of u64::MAX would map to year ~584,942,417, so it is safe to
 // reserve.
@@ -310,6 +310,28 @@ pub fn encode_frame(
     }
 }
 
+pub(crate) fn encode_frame_with_payload_limit(
+    kind: FrameKind,
+    compression: ReplicationCompressionMode,
+    zstd_level: i32,
+    payload: &[u8],
+    max_payload_bytes: usize,
+) -> Result<Vec<u8>> {
+    if payload.len() > max_payload_bytes {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP payload exceeds negotiated maximum {max_payload_bytes}"
+        )));
+    }
+
+    let compressed = encode_frame(kind, compression, zstd_level, payload)?;
+    if compression == ReplicationCompressionMode::Zstd
+        && compressed.len().saturating_sub(HEADER_LEN) > max_payload_bytes
+    {
+        return encode_frame(kind, ReplicationCompressionMode::None, 0, payload);
+    }
+    Ok(compressed)
+}
+
 fn write_header(
     out: &mut Vec<u8>,
     kind: FrameKind,
@@ -473,6 +495,11 @@ pub(crate) fn encode_mutation_batch_frame_with_payload_len(
     compression: ReplicationCompressionMode,
     zstd_level: i32,
 ) -> Result<(Vec<u8>, usize)> {
+    if payload_len > MAX_FCRP_PAYLOAD_BYTES {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP mutation batch exceeds maximum {MAX_FCRP_PAYLOAD_BYTES}"
+        )));
+    }
     match compression {
         ReplicationCompressionMode::None => {
             let mut out = Vec::with_capacity(HEADER_LEN + payload_len);
@@ -787,6 +814,7 @@ pub struct ReplicationHello {
     pub role: HelloRole,
     pub auth_token: Option<String>,
     pub since: Option<ShardWatermarks>,
+    pub receive_max_frame_bytes: u32,
 }
 
 pub fn encode_hello(hello: &ReplicationHello) -> Vec<u8> {
@@ -806,6 +834,7 @@ pub fn encode_hello(hello: &ReplicationHello) -> Vec<u8> {
         }
         None => out.push(0),
     }
+    out.extend_from_slice(&hello.receive_max_frame_bytes.to_le_bytes());
     out
 }
 
@@ -843,12 +872,19 @@ pub fn decode_hello(bytes: &[u8]) -> Result<ReplicationHello> {
     } else {
         None
     };
+    let receive_max_frame_bytes = cursor.u32()?;
+    if receive_max_frame_bytes == 0 || receive_max_frame_bytes as usize > MAX_FCRP_PAYLOAD_BYTES {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP hello frame limit {receive_max_frame_bytes} is out of range"
+        )));
+    }
     cursor.finish()?;
     Ok(ReplicationHello {
         version,
         role,
         auth_token,
         since,
+        receive_max_frame_bytes,
     })
 }
 
@@ -1127,6 +1163,23 @@ mod tests {
         let encoded = encode_mutation_batch(&mutations);
         let decoded = decode_mutation_batch(&encoded).expect("decode");
         assert_eq!(decoded, mutations);
+    }
+
+    #[test]
+    fn compression_expansion_falls_back_to_an_uncompressed_frame() {
+        let payload = b"x";
+        let encoded = encode_frame_with_payload_limit(
+            FrameKind::SnapshotChunk,
+            ReplicationCompressionMode::Zstd,
+            3,
+            payload,
+            payload.len(),
+        )
+        .expect("encode bounded frame");
+        let decoded = decode_frame(&encoded).expect("decode bounded frame");
+
+        assert!(!decoded.compressed);
+        assert_eq!(decoded.payload, payload);
     }
 
     #[test]

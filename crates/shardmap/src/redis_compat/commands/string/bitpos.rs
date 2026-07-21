@@ -88,6 +88,6 @@ fn bitpos_value(
     }) {
         RedisStringLookup::Hit => Ok(position),
         RedisStringLookup::Miss => Ok(position),
-        RedisStringLookup::WrongType => Err(()),
+        RedisStringLookup::WrongType | RedisStringLookup::BackendError => Err(()),
     }
 }

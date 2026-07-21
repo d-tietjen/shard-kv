@@ -30,6 +30,9 @@ impl crate::commands::redis::RedisCommand for Restore {
             Err(RestoreError::InvalidIdleOrFreq) => {
                 error("ERR value is not an integer or out of range")
             }
+            Err(RestoreError::ReplicationLimit) => {
+                error("ERR vector state exceeds replication frame limit")
+            }
         }
     }
 
@@ -70,6 +73,7 @@ enum RestoreError {
     BusyKey,
     BadPayload,
     InvalidIdleOrFreq,
+    ReplicationLimit,
 }
 
 #[derive(Debug, Default)]
@@ -166,7 +170,9 @@ fn restore_key(store: &EmbeddedStore, args: &[&[u8]]) -> Result<(), RestoreError
         DumpRestoreValue::String(value) if value.starts_with(VECTOR_SET_PREFIX) => {
             crate::commands::vector_set::validate_vector_set_bytes(&value)
                 .map_err(|_| RestoreError::BadPayload)?;
-            store.set_pinned_vector_value(key, value.into(), ttl_ms);
+            store
+                .set_pinned_vector_value(key, value.into(), ttl_ms)
+                .map_err(|_| RestoreError::ReplicationLimit)?;
         }
         DumpRestoreValue::String(value) => store.set_value_bytes(key, value.into(), ttl_ms),
         DumpRestoreValue::Object(value) => store.set_object_value(key, value, ttl_ms),
@@ -256,6 +262,9 @@ fn write_restore_error(out: &mut BytesMut, error: RestoreError) {
         }
         RestoreError::InvalidIdleOrFreq => {
             ServerWire::write_resp_error(out, "ERR value is not an integer or out of range")
+        }
+        RestoreError::ReplicationLimit => {
+            ServerWire::write_resp_error(out, "ERR vector state exceeds replication frame limit")
         }
     }
 }

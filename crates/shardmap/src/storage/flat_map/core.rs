@@ -5,6 +5,9 @@ impl FlatMap {
         Self {
             entries: HashTable::new(),
             remote_entries: FastHashMap::default(),
+            pending_object_offloads: FastHashMap::default(),
+            pending_object_faults: 0,
+            pending_object_fault_bytes: 0,
             semantic_index: SemanticIndex::default(),
             #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             fast_points: FastPointMap::default(),
@@ -81,24 +84,40 @@ impl FlatMap {
 
     #[inline(always)]
     pub fn object_overflow_stats(&self) -> ObjectOverflowStats {
+        self.object_overflow_stats_with_worker_stats(true)
+    }
+
+    pub(crate) fn object_overflow_stats_with_worker_stats(
+        &self,
+        include_worker_stats: bool,
+    ) -> ObjectOverflowStats {
         let mut stats = self.object_overflow_stats.clone();
         stats.remote_entries = self.remote_entries.len();
+        stats.pending_offloads = self.pending_object_offloads.len();
+        stats.pending_faults = self.pending_object_faults;
+        stats.pending_fault_bytes = self.pending_object_fault_bytes;
         stats.remote_value_bytes = self.remote_value_bytes;
         stats.remote_stored_bytes = self
             .remote_entries
             .values()
             .map(|entry| entry.object.stored_len)
-            .sum();
+            .fold(0usize, usize::saturating_add);
         if let Some(object_overflow) = &self.object_overflow {
             let health = object_overflow.health_snapshot();
             stats.enabled = health.enabled;
             stats.backend = health.backend;
             stats.degraded = health.degraded;
+            if !include_worker_stats {
+                return stats;
+            }
             stats.queue_capacity = health.queue_capacity;
             stats.queue_depth = health.queue_depth;
             stats.pending_jobs = health.pending_jobs;
             stats.active_workers = health.active_workers;
+            stats.live_workers = health.live_workers;
             stats.worker_threads = health.worker_threads;
+            stats.max_worker_threads = health.max_worker_threads;
+            stats.worker_capacity_exhausted = health.worker_capacity_exhausted;
             stats.encode_ops = health.stats.encode_ops;
             stats.compress_ops = health.stats.compress_ops;
             stats.upload_ops = health.stats.upload_ops;
@@ -154,10 +173,34 @@ impl FlatMap {
         object_overflow: Option<ObjectOverflowRuntime>,
         shard_id: usize,
         now_ms: u64,
-    ) {
+    ) -> crate::Result<()> {
+        self.validate_object_overflow_reconfiguration(object_overflow.as_ref())?;
         self.object_overflow = object_overflow;
         self.object_overflow_shard_id = shard_id;
         self.enforce_memory_limit(now_ms);
+        Ok(())
+    }
+
+    pub(crate) fn validate_object_overflow_reconfiguration(
+        &self,
+        object_overflow: Option<&ObjectOverflowRuntime>,
+    ) -> crate::Result<()> {
+        let unchanged = match (&self.object_overflow, object_overflow) {
+            (None, None) => true,
+            (Some(current), Some(next)) => current.same_instance(next),
+            _ => false,
+        };
+        if unchanged
+            || (self.remote_entries.is_empty()
+                && self.pending_object_offloads.is_empty()
+                && self.pending_object_faults == 0)
+        {
+            return Ok(());
+        }
+        Err(ShardCacheError::Config(
+            "object overflow cannot be replaced or disabled while remote or pending values still depend on the current runtime"
+                .into(),
+        ))
     }
 
     #[cfg(feature = "telemetry")]
@@ -373,6 +416,7 @@ impl FlatMap {
     }
 
     pub(super) fn enforce_memory_limit(&mut self, now_ms: u64) {
+        self.process_object_overflow_completions(now_ms);
         let Some(limit) = self.memory_limit_bytes else {
             return;
         };

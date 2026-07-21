@@ -98,7 +98,7 @@ fn main() -> Result<(), BoxError> {
         write_csv(path, &rows)?;
     }
     if !args.keep_dir {
-        fs::remove_dir_all(&root)?;
+        remove_bench_dir(&root)?;
     }
     Ok(())
 }
@@ -170,6 +170,7 @@ fn bench_overflow_offload(
     let mut last_remote_stored_bytes = 0usize;
     for store in &stores {
         store.configure_memory_policy(Some(1), EvictionPolicy::Lru);
+        wait_for_remote_entries(store, args.keys)?;
         let stats = object_overflow_stats(store);
         last_remote_entries = stats.0;
         last_remote_stored_bytes = stats.1;
@@ -214,6 +215,7 @@ fn bench_overflow_fault_in(
         }
         age_overflow_candidates(&store, args, "fault-age", repetition);
         store.configure_memory_policy(Some(1), EvictionPolicy::Lru);
+        wait_for_remote_entries(&store, args.keys)?;
         let stats = object_overflow_stats(&store);
         last_remote_entries = stats.0;
         last_remote_stored_bytes = stats.1;
@@ -270,7 +272,9 @@ fn overflow_store(
     let runtime = ObjectOverflowRuntime::from_config(&config)?.expect("enabled runtime");
     let store = EmbeddedStore::new(1);
     store.configure_memory_policy(Some(memory_limit), EvictionPolicy::Lru);
-    store.configure_object_overflow(Some(runtime));
+    store
+        .configure_object_overflow(Some(runtime))
+        .expect("configure object overflow");
     Ok(store)
 }
 
@@ -300,6 +304,38 @@ fn object_overflow_stats(store: &EmbeddedStore) -> (usize, usize) {
         .map(|shard| shard.object_overflow.remote_stored_bytes)
         .sum();
     (remote_entries, remote_stored_bytes)
+}
+
+fn wait_for_remote_entries(store: &EmbeddedStore, expected: usize) -> Result<(), BoxError> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        store.process_maintenance();
+        let (remote_entries, _) = object_overflow_stats(store);
+        if remote_entries >= expected {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for object overflow: expected {expected}, observed {remote_entries}"
+            )
+            .into());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn remove_bench_dir(root: &Path) -> Result<(), BoxError> {
+    for attempt in 0..50 {
+        match fs::remove_dir_all(root) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < 49 => {
+                let _ = error;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("cleanup retry loop always returns")
 }
 
 fn parse_compression(value: &str) -> Result<ObjectOverflowCompression, BoxError> {

@@ -8,7 +8,7 @@ server ports. This crate is intentionally small and synchronous: one client owns
 one or more TCP connections and is meant to be used directly from worker
 threads.
 
-This is one of the three publishable crates in the 0.7.x release line alongside
+This is one of the three publishable crates in the 0.8.x release line alongside
 `shardmap` and `shardcache`.
 
 ## Install
@@ -17,7 +17,7 @@ Use the published crate from crates.io:
 
 ```toml
 [dependencies]
-shardcache-client-rs = "0.7.2"
+shardcache-client-rs = "0.8.0"
 ```
 
 From a workspace checkout, use a path dependency:
@@ -200,11 +200,11 @@ without enabling the complete optional Redis command API:
 
 ```toml
 [dependencies]
-shardcache-client-rs = { version = "0.7.2", features = ["vector"] }
+shardcache-client-rs = { version = "0.8.0", features = ["vector"] }
 ```
 
 `VSIM` always requests `WITHSCORES WITHATTRIBS`, giving every successful query
-one stable typed result shape. Add `.with_governance(true)` on 0.7.2 servers to
+one stable typed result shape. Add `.with_governance(true)` on 0.8.0 servers to
 include opaque governance metadata as a fourth field. FP32 vectors are encoded
 directly as little-endian binary values. Response bodies and result counts are
 checked before allocation.
@@ -264,12 +264,12 @@ releasing the corresponding document or generated context.
 
 Leave `with_governance` disabled while a client can reach a 0.7.1 server; the
 0.7.1 vector parser does not recognize the new option. Governed `VADD` requests
-likewise require a 0.7.2 server.
+likewise require a 0.8.0 server.
 
 Add the `tls` feature and use `connect_with_timeouts_auth_and_tls` on a fanout
 client or router when the connection crosses a trust boundary. Token auth and
-operation deadlines apply before any typed vector request is sent. The 0.7.2
-client accepts native 0.7.2 responses and the RESP-enveloped vector responses
+operation deadlines apply before any typed vector request is sent. The 0.8.0
+client accepts native 0.8.0 responses and the RESP-enveloped vector responses
 returned by 0.7.1 servers for rolling upgrades.
 
 ## Native Redis Commands
@@ -282,7 +282,7 @@ building RESP request frames in user code.
 
 ```toml
 [dependencies]
-shardcache-client-rs = { version = "0.7.2", features = ["redis"] }
+shardcache-client-rs = { version = "0.8.0", features = ["redis"] }
 ```
 
 The primary API is the first-party Redis namespace on the client. Common

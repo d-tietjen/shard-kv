@@ -1,6 +1,6 @@
 # Operations
 
-This page is the short operational contract for running `shardcache` 0.7.
+This page is the short operational contract for running `shardcache` 0.8.
 
 For the container-specific runbook, see
 [`SHARDCACHE_DOCKER.md`](SHARDCACHE_DOCKER.md).
@@ -9,28 +9,28 @@ For the container-specific runbook, see
 
 | Build | Command | Use When |
 | --- | --- | --- |
-| Embedded crate | `shardmap = "0.7.2"` | In-process Rust cache use. |
-| Server crate | `shardcache = "0.7.2"` | Install or depend on the RESP/SCNP server package. |
-| Native client crate | `shardcache-client-rs = "0.7.2"` | SCNP client access from Rust applications. |
+| Embedded crate | `shardmap = "0.8.0"` | In-process Rust cache use. |
+| Server crate | `shardcache = "0.8.0"` | Install or depend on the RESP/SCNP server package. |
+| Native client crate | `shardcache-client-rs = "0.8.0"` | SCNP client access from Rust applications. |
 | Active-active embedded map | `shardmap` with `active-sync-causal-eventual` or `active-sync-consensus-ordered-eventual` | Opt-in exact point-value synchronization; add `active-sync-tls` for network peers. |
 | Vector read replica | `shardmap` with `redis` and `ReplicatedEmbeddedStore` | Single-writer FCRP replication of canonical vector-set state; fence promotion after catch-up. |
 | Server | `cargo run -p shardcache --features server --bin shardcache -- ...` | RESP/SCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo run -p shardcache --features redis-server --bin shardcache -- ...` | Redis/Valkey-compatible command and object behavior. |
 
 `shardmap`, `shardcache`, and `shardcache-client-rs` are the crates.io crates
-for 0.7. Publish `shardcache-client-rs` first, then `shardmap`, then
+for 0.8. Publish `shardcache-client-rs` first, then `shardmap`, then
 `shardcache`; the optional `kv-overflow` adapter makes that order necessary.
 Python, C ABI, runtime, benchmark, and
 integration packages remain source-workspace packages.
 
 Active sync is absent from the default feature set. It is intended for
 read-heavy exact-value deployments that need eventually consistent writable
-replicas. Review [`RELEASE_0_7.md`](RELEASE_0_7.md) for measured overhead and
+replicas. Review [`RELEASE_0_8.md`](RELEASE_0_8.md) for measured overhead and
 [`ACTIVE_ACTIVE_REPLICATION.md`](ACTIVE_ACTIVE_REPLICATION.md) for consistency,
 membership, security, and recovery requirements before enabling it.
 
 Native vector read-replica FCRP is a separate single-primary transport. FCRP
-v2 requires both peers to run 0.7.2. On non-loopback addresses configure TLS
+v3 requires both peers to run 0.8.0. On non-loopback addresses configure TLS
 1.3 mTLS on both sides and a replication token. Prefer
 `replication.auth_token_path`; during rotation, place the new token in that
 file and the retiring token in `previous_auth_token_path`, reconnect replicas,
@@ -41,18 +41,67 @@ Size `replication.snapshot_receive_max_bytes` and
 `snapshot_receive_max_entries` above the largest expected bootstrap while
 leaving headroom for the resident replica. Exceeding either limit or receiving
 reordered/mismatched chunks disconnects the peer without replacing local data.
+The byte limit also caps the primary's per-shard retained key index during
+streaming, so a bootstrap cannot create an unbounded key-only allocation.
 `replication.receive_max_frame_bytes` limits mutation and snapshot-chunk frame
-allocation (64 MiB by default); control frames remain capped at 128 KiB.
-`replication.read_timeout_ms` is a whole-frame deadline, not an idle timeout.
-When it expires, the replica closes and reconnects rather than continuing from
-a potentially partial frame. The primary shard count is negotiated before any
-mutation allocation and must remain unchanged for the connection lifetime.
+allocation (64 MiB by default); control frames remain capped at 128 KiB. The
+replica advertises this value and the primary rejects it if it is smaller than
+the primary's configured outbound ceiling. Keep the replica limit equal to or
+greater than the primary limit, and ensure every individual mutation fits it.
+`replication.read_timeout_ms` and `write_timeout_ms` are whole-frame deadlines,
+not idle timeouts. When either expires, the connection closes rather than
+continuing from a partial frame. The primary shard count is negotiated before
+any mutation allocation and must remain unchanged for the connection lifetime.
+
+Only one snapshot bootstrap is streamed by a primary at a time, and it
+materializes one source shard at a time rather than cloning the complete cache.
+The primary retains that shard's key index, one bounded materialization page,
+and one wire chunk; remote overflow reads do not hold the shard lock. Other
+stale replicas wait while backlog-only replicas remain independent.
+`snapshot_bootstrap_timeout_ms` bounds gate wait, capture, cold-tier reads,
+delivery, and buffered catch-up as one operation. Snapshot provider or
+cold-tier failures close the connection without replacing the replica's last
+valid state.
+
+## Object Overflow Safety
+
+Object overflow uses bounded background workers. Uploads retain the resident
+value until the acknowledgement is observed, and upload, fault-in, and delete
+requests never wait while a shard lock is held. A GET that reaches a remote
+value materializes it before returning; server protocols report a backend
+error rather than an ordinary cache miss when that read fails. Persistence
+snapshots and entry visitors use fallible materialization and fail if a remote
+value cannot be verified.
+
+Each `SCOVF2` payload is compressed within an exact decoded-size bound and is
+authenticated with a process-generation HMAC-SHA256 key bound to its object
+key. Remote references are intentionally not durable recovery state, so a new
+process receives a new authentication key and recovers authoritative values
+from local WAL and snapshots. S3 bodies, generation markers, and cleanup key
+listings are bounded before retention. Filesystem operations use
+descriptor-relative, no-follow traversal on Unix, and each cleanup prefix is
+traversed once with a total limit of 100,000 keys or 16 MiB of key names.
+Generation markers are replaced with a synced same-directory rename, and
+generation cleanup uses a heartbeat independent of the cleanup scan interval.
+S3 credentials must be named explicitly as an access-key/secret-key environment
+pair; the adapter never falls back to instance metadata. Private HTTPS
+endpoints can add a bounded PEM trust bundle with `tls_ca_path` while retaining
+certificate verification.
+
+Configuration validation caps worker, queue, retry, timeout, cooldown, and
+cleanup settings. Entropy acquisition and required worker/cleanup thread
+creation are fallible startup operations and never intentionally panic.
+Replacing or disabling a runtime is rejected while remote or pending entries
+still depend on it. Cleanup scans fail closed above their total key or retained
+name limits. `EmbeddedStore::try_batch_set`
+preflights the complete batch; `batch_set` also rejects the whole batch rather
+than partially applying invalid point mutations.
 
 FCRP mutations are exact per-source-shard sequence streams. A gap, invalid
 source shard, inconsistent key hash/tag, duplicate snapshot key, or topology
 change is a protocol error and leaves the prior replica state intact. Operators
 must restart bootstrap from a compatible primary after changing shard count;
-0.7.2 does not perform online FCRP shard-topology migration.
+0.8.0 does not perform online FCRP shard-topology migration.
 
 `redis-server` implies `server`, `redis`, `redis-functions`, and
 `redis-modules`. Embedded-only builds stay separate from the Redis-compatible

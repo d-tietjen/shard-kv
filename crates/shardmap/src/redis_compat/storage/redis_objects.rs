@@ -43,10 +43,18 @@ pub enum RedisObjectError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedisKeyError {
+    WrongType,
+    MissingKey,
+    ReplicationLimit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedisStringLookup {
     Hit,
     Miss,
     WrongType,
+    BackendError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

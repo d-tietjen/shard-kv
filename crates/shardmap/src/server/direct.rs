@@ -27,7 +27,7 @@ impl DirectServer {
             );
             store.configure_object_overflow(ObjectOverflowRuntime::from_config(
                 &config.object_overflow,
-            )?);
+            )?)?;
             #[cfg(feature = "redis")]
             store.configure_vector_memory_policy(
                 config.total_memory_limit_bytes(),
@@ -103,14 +103,18 @@ impl DirectServerState {
     }
 
     pub(super) fn get(&mut self, key: &[u8], now_ms: u64) -> Option<Bytes> {
+        self.try_get(key, now_ms).ok().flatten()
+    }
+
+    pub(super) fn try_get(&mut self, key: &[u8], now_ms: u64) -> crate::Result<Option<Bytes>> {
         #[cfg(feature = "embedded")]
         {
             let _ = now_ms;
-            self.with_local_store(|store| store.get_if_local(key).ok().flatten())
+            self.with_local_store(|store| store.try_get_if_local(key))
         }
         #[cfg(not(feature = "embedded"))]
         {
-            self.map.get(key, now_ms)
+            Ok(self.map.get(key, now_ms))
         }
     }
 
@@ -238,9 +242,13 @@ impl DirectServerState {
 
 impl DirectCommandContext {
     pub(crate) fn get(&self, key: &[u8]) -> Option<Bytes> {
+        self.try_get(key).ok().flatten()
+    }
+
+    pub(crate) fn try_get(&self, key: &[u8]) -> crate::Result<Option<Bytes>> {
         DirectServer::with_state(|state| {
             state.reads = state.reads.saturating_add(1);
-            state.get(key, self.now_ms)
+            state.try_get(key, self.now_ms)
         })
     }
 

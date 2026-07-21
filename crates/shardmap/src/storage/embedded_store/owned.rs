@@ -594,6 +594,11 @@ impl OwnedEmbeddedWorkerShards {
 
     #[cfg(feature = "embedded")]
     pub(crate) fn local_get(&mut self, key: &[u8]) -> Option<Bytes> {
+        self.local_try_get(key).ok().flatten()
+    }
+
+    #[cfg(feature = "embedded")]
+    pub(crate) fn local_try_get(&mut self, key: &[u8]) -> crate::Result<Option<Bytes>> {
         let route = self.route_key(key);
         let now_ms = now_millis();
         let shard = self.shard_for_route_mut(route.shard_id);
@@ -603,12 +608,22 @@ impl OwnedEmbeddedWorkerShards {
                     .session_slots
                     .get_ref_hashed_local(&session_prefix, route.key_hash, key)
         {
-            return Some(value.to_vec());
+            return Ok(Some(value.to_vec()));
         }
+        if let Some(value) = shard.map.get_ref_hashed_local(route.key_hash, key, now_ms) {
+            return Ok(Some(value.to_vec()));
+        }
+        let Some(plan) = shard
+            .map
+            .prepare_object_fault_hashed(route.key_hash, key, now_ms, false)
+        else {
+            return Ok(None);
+        };
+        let result = plan.fetch();
         shard
             .map
-            .get_ref_hashed_local(route.key_hash, key, now_ms)
-            .map(<[u8]>::to_vec)
+            .finish_object_fault(plan, result, now_millis())
+            .map(|value| value.map(|bytes| bytes.to_vec()))
     }
 
     pub(crate) fn local_get_with_governance_filter<F>(

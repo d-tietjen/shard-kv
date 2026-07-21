@@ -59,6 +59,7 @@ region = "us-east-1"
 force_path_style = true
 allow_http = false
 tls_verify = true
+# tls_ca_path = "/etc/shardcache/rustfs-ca.pem"
 # server_side_encryption = "AES256"
 # access_key_env = "RUSTFS_ACCESS_KEY"
 # secret_key_env = "RUSTFS_SECRET_KEY"

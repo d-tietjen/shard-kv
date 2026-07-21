@@ -3,7 +3,7 @@ use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use crossbeam_channel::{Receiver, TryRecvError};
@@ -27,8 +27,9 @@ use super::super::protocol::{
 };
 use super::{
     FRAME_HEADER_LEN, MAX_FRAME_BYTES, MAX_HELLO_FRAME_BYTES, PendingSnapshot,
-    ReplicationPrimaryServer, ReplicationReplicaClient, SnapshotProvider, auth_ok,
-    validate_primary_hello,
+    ReplicationPrimaryServer, ReplicationReplicaClient, SnapshotGate, SnapshotPermit,
+    SnapshotProvider, auth_ok, bootstrap_write_timeout, ensure_bootstrap_deadline,
+    snapshot_bootstrap_timeout, validate_primary_hello,
 };
 
 const USE_MONOIO_ENV: &str = "SHARDCACHE_REPLICATION_USE_MONOIO";
@@ -52,6 +53,7 @@ pub(super) fn start_primary(
     config: ReplicationConfig,
     primary: Arc<ReplicationPrimary>,
     snapshots: Arc<dyn SnapshotProvider>,
+    snapshot_gate: Arc<SnapshotGate>,
 ) -> Result<ReplicationPrimaryServer> {
     let listener = TcpListener::bind(&config.bind_addr).map_err(|error| {
         ShardCacheError::Config(format!(
@@ -71,7 +73,15 @@ pub(super) fn start_primary(
         .name("shardcache-replication-listener-monoio".into())
         .spawn(move || {
             let result = MonoioRuntime::block_on("replication primary", || async move {
-                run_primary_listener(listener, config, primary, snapshots, stop_clone).await
+                run_primary_listener(
+                    listener,
+                    config,
+                    primary,
+                    snapshots,
+                    snapshot_gate,
+                    stop_clone,
+                )
+                .await
             });
             match result {
                 Ok(Ok(())) => {}
@@ -122,6 +132,7 @@ async fn run_primary_listener(
     config: ReplicationConfig,
     primary: Arc<ReplicationPrimary>,
     snapshots: Arc<dyn SnapshotProvider>,
+    snapshot_gate: Arc<SnapshotGate>,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
     let listener = monoio::net::TcpListener::from_std(listener).map_err(ShardCacheError::Io)?;
@@ -134,6 +145,7 @@ async fn run_primary_listener(
                     &config,
                     Arc::clone(&primary),
                     Arc::clone(&snapshots),
+                    Arc::clone(&snapshot_gate),
                     Arc::clone(&stop),
                     Arc::clone(&active),
                 );
@@ -149,6 +161,7 @@ fn accept_replica(
     config: &ReplicationConfig,
     primary: Arc<ReplicationPrimary>,
     snapshots: Arc<dyn SnapshotProvider>,
+    snapshot_gate: Arc<SnapshotGate>,
     stop: Arc<AtomicBool>,
     active: Arc<AtomicUsize>,
 ) {
@@ -164,7 +177,8 @@ fn accept_replica(
             let cfg = config.clone();
             active.fetch_add(1, Ordering::SeqCst);
             monoio::spawn(async move {
-                if let Err(error) = serve_replica(stream, peer, cfg, primary, snapshots, stop).await
+                if let Err(error) =
+                    serve_replica(stream, peer, cfg, primary, snapshots, snapshot_gate, stop).await
                 {
                     tracing::warn!("monoio replication worker for {peer} terminated: {error}");
                 }
@@ -181,6 +195,7 @@ async fn serve_replica(
     config: ReplicationConfig,
     primary: Arc<ReplicationPrimary>,
     snapshots: Arc<dyn SnapshotProvider>,
+    snapshot_gate: Arc<SnapshotGate>,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
     stream.set_nodelay(true).ok();
@@ -224,6 +239,19 @@ async fn serve_replica(
             "replica {peer} sent an invalid Hello role"
         )));
     }
+    let peer_receive_max = hello.receive_max_frame_bytes as usize;
+    if peer_receive_max < config.receive_max_frame_bytes {
+        send_error(
+            &mut stream,
+            "replica receive frame limit is smaller than the primary outbound limit",
+            write_timeout,
+        )
+        .await?;
+        return Err(ShardCacheError::Protocol(format!(
+            "replica {peer} receive frame limit {peer_receive_max} is smaller than primary outbound limit {}",
+            config.receive_max_frame_bytes
+        )));
+    }
     if hello
         .since
         .as_ref()
@@ -259,6 +287,7 @@ async fn serve_replica(
         role: HelloRole::Primary,
         auth_token: None,
         since: Some(primary.current_watermarks()),
+        receive_max_frame_bytes: config.receive_max_frame_bytes as u32,
     };
     write_full_frame_with_timeout(
         &mut stream,
@@ -275,7 +304,7 @@ async fn serve_replica(
         .since
         .clone()
         .unwrap_or_else(|| ShardWatermarks::new(primary.shard_count()));
-    let live_start = match primary.catch_up_since(&since)? {
+    let (live_start, bootstrap_deadline) = match primary.catch_up_since(&since)? {
         BacklogCatchUp::Available(frames) => {
             for frame in frames {
                 write_raw_frame_with_timeout(
@@ -285,16 +314,34 @@ async fn serve_replica(
                 )
                 .await?;
             }
-            primary.current_watermarks()
+            (primary.current_watermarks(), None)
         }
         BacklogCatchUp::NeedsSnapshot => {
-            let snapshot = snapshots.snapshot();
-            stream_snapshot(&mut stream, &snapshot, &config).await?;
-            snapshot.watermarks
+            let bootstrap_deadline =
+                Instant::now() + Duration::from_millis(config.snapshot_bootstrap_timeout_ms.max(1));
+            let _permit =
+                acquire_snapshot_permit(&snapshot_gate, &stop, bootstrap_deadline).await?;
+            let watermarks = stream_snapshot(
+                &mut stream,
+                snapshots.as_ref(),
+                &config,
+                peer_receive_max,
+                bootstrap_deadline,
+            )
+            .await?;
+            (watermarks, Some(bootstrap_deadline))
         }
     };
 
-    drain_buffered(&mut stream, &subscription, &live_start, &primary, &config).await?;
+    drain_buffered(
+        &mut stream,
+        &subscription,
+        &live_start,
+        &primary,
+        &config,
+        bootstrap_deadline,
+    )
+    .await?;
     forward_live_frames(&mut stream, &subscription, &stop, &config).await
 }
 
@@ -304,21 +351,40 @@ async fn drain_buffered(
     bootstrap_high: &ShardWatermarks,
     primary: &Arc<ReplicationPrimary>,
     config: &ReplicationConfig,
+    bootstrap_deadline: Option<Instant>,
 ) -> Result<()> {
     while let Ok(frame) = subscription.try_recv() {
+        if let Some(deadline) = bootstrap_deadline {
+            ensure_bootstrap_deadline(deadline)?;
+        }
         write_raw_frame_with_timeout(
             stream,
             frame,
-            Duration::from_millis(config.write_timeout_ms.max(1)),
+            match bootstrap_deadline {
+                Some(deadline) => bootstrap_write_timeout(
+                    deadline,
+                    Duration::from_millis(config.write_timeout_ms.max(1)),
+                )?,
+                None => Duration::from_millis(config.write_timeout_ms.max(1)),
+            },
         )
         .await?;
     }
     if let BacklogCatchUp::Available(frames) = primary.catch_up_since(bootstrap_high)? {
         for frame in frames {
+            if let Some(deadline) = bootstrap_deadline {
+                ensure_bootstrap_deadline(deadline)?;
+            }
             write_raw_frame_with_timeout(
                 stream,
                 frame,
-                Duration::from_millis(config.write_timeout_ms.max(1)),
+                match bootstrap_deadline {
+                    Some(deadline) => bootstrap_write_timeout(
+                        deadline,
+                        Duration::from_millis(config.write_timeout_ms.max(1)),
+                    )?,
+                    None => Duration::from_millis(config.write_timeout_ms.max(1)),
+                },
             )
             .await?;
         }
@@ -351,79 +417,182 @@ async fn forward_live_frames(
 
 async fn stream_snapshot(
     stream: &mut monoio::net::TcpStream,
-    snapshot: &super::super::protocol::ReplicationSnapshot,
+    snapshots: &dyn SnapshotProvider,
     config: &ReplicationConfig,
-) -> Result<()> {
+    peer_receive_max: usize,
+    bootstrap_deadline: Instant,
+) -> Result<ShardWatermarks> {
+    let watermarks = snapshots.snapshot_watermarks()?;
+    ensure_bootstrap_deadline(bootstrap_deadline)?;
+    let per_frame_timeout = Duration::from_millis(config.write_timeout_ms.max(1));
     write_full_frame_with_timeout(
         stream,
         FrameKind::SnapshotBegin,
         ReplicationCompressionMode::None,
         0,
-        &encode_ack(&snapshot.watermarks),
-        Duration::from_millis(config.write_timeout_ms.max(1)),
+        &encode_ack(&watermarks),
+        bootstrap_write_timeout(bootstrap_deadline, per_frame_timeout)?,
     )
     .await?;
 
-    let target = config.snapshot_chunk_bytes.max(4 * 1024);
+    let max_payload_bytes = peer_receive_max
+        .min(config.receive_max_frame_bytes)
+        .min(MAX_FRAME_BYTES);
+    let base_payload_bytes = 8usize
+        .checked_add(1)
+        .and_then(|value| value.checked_add(4))
+        .and_then(|value| value.checked_add(watermarks.as_slice().len().checked_mul(8)?))
+        .and_then(|value| value.checked_add(8))
+        .ok_or_else(|| ShardCacheError::Protocol("snapshot chunk size overflow".into()))?;
+    if base_payload_bytes > max_payload_bytes {
+        return Err(ShardCacheError::Config(
+            "replication receive frame limit cannot fit snapshot metadata".into(),
+        ));
+    }
+    let target = config
+        .snapshot_chunk_bytes
+        .max(4 * 1024)
+        .min(max_payload_bytes);
     let mut chunk_index = 0u64;
     let mut buffer: Vec<StoredEntry> = Vec::new();
-    let mut buffer_bytes = 0usize;
-    let total = snapshot.entries.len();
+    let mut buffer_bytes = base_payload_bytes;
     let compression = ReplicationCompressionMode::from(config.compression);
+    let mut saw_entry = false;
 
-    for (idx, entry) in snapshot.entries.iter().enumerate() {
-        let entry_bytes = entry.key.len() + entry.value.len() + 32;
-        buffer.push(entry.clone());
-        buffer_bytes = buffer_bytes.saturating_add(entry_bytes);
-        let is_last_entry = idx + 1 == total;
-        if buffer_bytes >= target || is_last_entry {
-            let chunk = ReplicationSnapshotChunk {
-                watermarks: snapshot.watermarks.clone(),
-                chunk_index,
-                is_last: is_last_entry,
-                entries: std::mem::take(&mut buffer),
-            };
-            buffer_bytes = 0;
-            chunk_index += 1;
-            let payload = encode_snapshot_chunk(&chunk);
-            write_full_frame_with_timeout(
-                stream,
-                FrameKind::SnapshotChunk,
-                compression,
-                config.zstd_level,
-                &payload,
-                Duration::from_millis(config.write_timeout_ms.max(1)),
-            )
-            .await?;
+    for shard_id in 0..watermarks.as_slice().len() {
+        let entries = snapshots.snapshot_shard(
+            shard_id,
+            target,
+            config.snapshot_receive_max_bytes,
+            bootstrap_deadline,
+        )?;
+        ensure_bootstrap_deadline(bootstrap_deadline)?;
+        for entry in entries {
+            let entry = entry?;
+            ensure_bootstrap_deadline(bootstrap_deadline)?;
+            saw_entry = true;
+            let entry_bytes = 20usize
+                .checked_add(entry.key.len())
+                .and_then(|value| value.checked_add(entry.value.len()))
+                .and_then(|value| {
+                    value.checked_add(entry.governance.as_ref().map_or(0, |value| value.len()))
+                })
+                .ok_or_else(|| ShardCacheError::Protocol("snapshot entry size overflow".into()))?;
+            if entry_bytes > max_payload_bytes.saturating_sub(base_payload_bytes) {
+                return Err(ShardCacheError::Protocol(format!(
+                    "replication snapshot entry exceeds receive frame limit {max_payload_bytes}"
+                )));
+            }
+            if !buffer.is_empty() && buffer_bytes.saturating_add(entry_bytes) > target {
+                write_monoio_snapshot_chunk(
+                    stream,
+                    &watermarks,
+                    chunk_index,
+                    false,
+                    std::mem::take(&mut buffer),
+                    compression,
+                    config.zstd_level,
+                    bootstrap_write_timeout(bootstrap_deadline, per_frame_timeout)?,
+                )
+                .await?;
+                chunk_index += 1;
+                buffer_bytes = base_payload_bytes;
+            }
+            buffer.push(entry);
+            buffer_bytes = buffer_bytes.saturating_add(entry_bytes);
+            if buffer_bytes >= target {
+                write_monoio_snapshot_chunk(
+                    stream,
+                    &watermarks,
+                    chunk_index,
+                    false,
+                    std::mem::take(&mut buffer),
+                    compression,
+                    config.zstd_level,
+                    bootstrap_write_timeout(bootstrap_deadline, per_frame_timeout)?,
+                )
+                .await?;
+                chunk_index += 1;
+                buffer_bytes = base_payload_bytes;
+            }
         }
     }
-    if total == 0 {
-        let chunk = ReplicationSnapshotChunk {
-            watermarks: snapshot.watermarks.clone(),
-            chunk_index: 0,
-            is_last: true,
-            entries: Vec::new(),
-        };
-        let payload = encode_snapshot_chunk(&chunk);
-        write_full_frame_with_timeout(
-            stream,
-            FrameKind::SnapshotChunk,
-            ReplicationCompressionMode::None,
-            0,
-            &payload,
-            Duration::from_millis(config.write_timeout_ms.max(1)),
-        )
-        .await?;
-    }
+    write_monoio_snapshot_chunk(
+        stream,
+        &watermarks,
+        chunk_index,
+        true,
+        std::mem::take(&mut buffer),
+        if saw_entry {
+            compression
+        } else {
+            ReplicationCompressionMode::None
+        },
+        config.zstd_level,
+        bootstrap_write_timeout(bootstrap_deadline, per_frame_timeout)?,
+    )
+    .await?;
     write_full_frame_with_timeout(
         stream,
         FrameKind::SnapshotEnd,
         ReplicationCompressionMode::None,
         0,
-        &encode_ack(&snapshot.watermarks),
-        Duration::from_millis(config.write_timeout_ms.max(1)),
+        &encode_ack(&watermarks),
+        bootstrap_write_timeout(bootstrap_deadline, per_frame_timeout)?,
     )
-    .await
+    .await?;
+    Ok(watermarks)
+}
+
+async fn write_monoio_snapshot_chunk(
+    stream: &mut monoio::net::TcpStream,
+    watermarks: &ShardWatermarks,
+    chunk_index: u64,
+    is_last: bool,
+    entries: Vec<StoredEntry>,
+    compression: ReplicationCompressionMode,
+    zstd_level: i32,
+    timeout: Duration,
+) -> Result<()> {
+    let payload = encode_snapshot_chunk(&ReplicationSnapshotChunk {
+        watermarks: watermarks.clone(),
+        chunk_index,
+        is_last,
+        entries,
+    });
+    let frame = crate::replication::protocol::encode_frame_with_payload_limit(
+        FrameKind::SnapshotChunk,
+        compression,
+        zstd_level,
+        &payload,
+        payload.len(),
+    )?;
+    match monoio::time::timeout(timeout, write_raw_vec(stream, frame)).await {
+        Ok(result) => result,
+        Err(_) => Err(ShardCacheError::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "replication frame write deadline exceeded",
+        ))),
+    }
+}
+
+async fn acquire_snapshot_permit(
+    gate: &Arc<SnapshotGate>,
+    stop: &Arc<AtomicBool>,
+    deadline: Instant,
+) -> Result<SnapshotPermit> {
+    while !stop.load(Ordering::SeqCst) {
+        if let Some(permit) = gate.try_acquire() {
+            return Ok(permit);
+        }
+        if Instant::now() >= deadline {
+            return Err(snapshot_bootstrap_timeout());
+        }
+        monoio::time::sleep(ACCEPT_POLL_INTERVAL).await;
+    }
+    Err(ShardCacheError::TaskJoin(
+        "replication stopped while waiting for snapshot bootstrap".into(),
+    ))
 }
 
 async fn send_error(
@@ -605,6 +774,7 @@ async fn connect_and_stream(
         role: HelloRole::Replica,
         auth_token: config.auth_token.clone(),
         since,
+        receive_max_frame_bytes: config.receive_max_frame_bytes as u32,
     };
     write_full_frame_with_timeout(
         &mut stream,

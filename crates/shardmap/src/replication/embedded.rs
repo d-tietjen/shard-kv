@@ -12,8 +12,8 @@ use crate::config::ReplicationConfig;
 #[cfg(feature = "redis")]
 use crate::storage::VectorMutationKind;
 use crate::storage::{
-    Bytes, EmbeddedRouteMode, EmbeddedStore, MutationOp, hash_key_tag_from_hash, now_millis,
-    shift_for, stripe_index, ttl_now_millis,
+    Bytes, EmbeddedRouteMode, EmbeddedStore, MutationOp, PointMutationKind, hash_key_tag_from_hash,
+    now_millis, shift_for, stripe_index, ttl_now_millis,
 };
 use crate::{Result, ShardCacheError};
 
@@ -124,8 +124,68 @@ impl ReplicatedEmbeddedStore {
         let primary = Arc::new(ReplicationPrimary::start(shard_count, config.clone())?);
         let emitters =
             ReplicatedEmbeddedEmitters::start(Arc::clone(&primary), shard_count, config)?;
+        let point_validator_primary = Arc::clone(&primary);
+        store.configure_point_mutation_validator(Some(Arc::new(
+            move |key, value_len, governance_len| {
+                point_validator_primary
+                    .validate_mutation_lengths(key.len(), value_len, governance_len)
+                    .is_ok()
+            },
+        )));
+        let point_primary = Arc::clone(&primary);
+        let point_emitters = Arc::clone(&emitters);
+        store.configure_point_mutation_observer(Some(Arc::new(
+            move |kind, key, value, expire_at_ms, governance| {
+                let value = match (kind, value) {
+                    (PointMutationKind::Set, Some(value)) => value,
+                    (PointMutationKind::Set, None) => {
+                        tracing::error!("rejecting point replication event without a value");
+                        return;
+                    }
+                    (_, _) => bytes::Bytes::new(),
+                };
+                if let Err(error) = point_primary.validate_mutation_lengths(
+                    key.len(),
+                    value.len(),
+                    governance.as_ref().map(bytes::Bytes::len),
+                ) {
+                    tracing::error!("shared embedded mutation cannot be replicated: {error}");
+                    return;
+                }
+                #[cfg(feature = "redis")]
+                point_emitters.flush_vector_key(key);
+                let key_hash = crate::storage::hash_key(key);
+                let shard_id = point_emitters.shard_id_for_hash(key_hash);
+                let op = match kind {
+                    PointMutationKind::Set => ReplicationMutationOp::Set,
+                    PointMutationKind::Delete => ReplicationMutationOp::Del,
+                    PointMutationKind::Expire => ReplicationMutationOp::Expire,
+                };
+                point_emitters.emit(
+                    shard_id,
+                    ReplicationMutation {
+                        shard_id,
+                        sequence: 0,
+                        timestamp_ms: ttl_now_millis(),
+                        op,
+                        key_hash,
+                        key_tag: hash_key_tag_from_hash(key_hash),
+                        key: bytes::Bytes::copy_from_slice(key),
+                        value,
+                        expire_at_ms,
+                        governance,
+                    },
+                );
+            },
+        )));
         #[cfg(feature = "redis")]
         {
+            let vector_primary = Arc::clone(&primary);
+            store.configure_vector_mutation_validator(Some(Arc::new(move |key, value| {
+                vector_primary
+                    .validate_mutation_lengths(key.len(), value.len(), None)
+                    .is_ok()
+            })));
             let vector_emitters = Arc::clone(&emitters);
             store.configure_vector_mutation_observer(Some(Arc::new(
                 move |kind, key, value, expire_at_ms| {
@@ -182,7 +242,9 @@ impl ReplicatedEmbeddedStore {
             .map(|value| value.to_vec())
     }
 
-    pub fn set(&self, key: Bytes, value: Bytes, ttl_ms: Option<u64>) {
+    pub fn set(&self, key: Bytes, value: Bytes, ttl_ms: Option<u64>) -> Result<()> {
+        self.primary
+            .validate_mutation_lengths(key.len(), value.len(), None)?;
         let route = self.store.route_key(&key);
         #[cfg(feature = "redis")]
         let was_vector = self.store.clone_vector_value(&key).is_some();
@@ -271,6 +333,7 @@ impl ReplicatedEmbeddedStore {
                 );
             }
         }
+        Ok(())
     }
 
     pub fn set_with_governance(
@@ -279,7 +342,9 @@ impl ReplicatedEmbeddedStore {
         value: Bytes,
         ttl_ms: Option<u64>,
         governance: Bytes,
-    ) {
+    ) -> Result<()> {
+        self.primary
+            .validate_mutation_lengths(key.len(), value.len(), Some(governance.len()))?;
         let route = self.store.route_key(&key);
         #[cfg(feature = "redis")]
         let was_vector = self.store.clone_vector_value(&key).is_some();
@@ -331,16 +396,18 @@ impl ReplicatedEmbeddedStore {
                 ),
             },
         );
+        Ok(())
     }
 
-    pub fn delete(&self, key: &[u8]) -> bool {
+    pub fn delete(&self, key: &[u8]) -> Result<bool> {
+        self.primary.validate_mutation_lengths(key.len(), 0, None)?;
         #[cfg(feature = "redis")]
         if self.store.clone_vector_value(key).is_some() {
-            return self.store.delete(key);
+            return Ok(self.store.delete(key));
         }
         let route = self.store.route_key(key);
         let now_ms = now_millis();
-        self.store.delete_routed_then(route, key, now_ms, || {
+        Ok(self.store.delete_routed_then(route, key, now_ms, || {
             self.emitters.emit(
                 route.shard_id,
                 ReplicationMutation {
@@ -356,17 +423,19 @@ impl ReplicatedEmbeddedStore {
                     governance: None,
                 },
             );
-        })
+        }))
     }
 
-    pub fn expire(&self, key: &[u8], expire_at_ms: u64) -> bool {
+    pub fn expire(&self, key: &[u8], expire_at_ms: u64) -> Result<bool> {
+        self.primary.validate_mutation_lengths(key.len(), 0, None)?;
         #[cfg(feature = "redis")]
         if self.store.clone_vector_value(key).is_some() {
-            return self.store.expire(key, expire_at_ms);
+            return Ok(self.store.expire(key, expire_at_ms));
         }
         let route = self.store.route_key(key);
         let now_ms = now_millis();
-        self.store
+        Ok(self
+            .store
             .expire_routed_then(route, key, expire_at_ms, now_ms, || {
                 self.emitters.emit(
                     route.shard_id,
@@ -383,7 +452,7 @@ impl ReplicatedEmbeddedStore {
                         governance: None,
                     },
                 );
-            })
+            }))
     }
 
     /// Captures a consistent snapshot for replica bootstrap.
@@ -392,13 +461,45 @@ impl ReplicatedEmbeddedStore {
     /// watermark read and the entry read is reflected in the entries. Catch-up
     /// from this watermark may re-deliver those mutations, but `apply_mutation`
     /// deduplicates by sequence so re-delivery is a no-op.
-    pub fn snapshot(&self) -> ReplicationSnapshot {
-        self.emitters.flush_all_and_wait();
-        let watermarks = self.primary.current_watermarks();
-        ReplicationSnapshot {
-            entries: self.store.entry_snapshot(),
-            watermarks,
+    pub fn snapshot(&self) -> Result<ReplicationSnapshot> {
+        let watermarks = self.snapshot_watermarks();
+        let mut entries = Vec::new();
+        for shard_id in 0..watermarks.as_slice().len() {
+            entries.extend(self.snapshot_shard(shard_id)?);
         }
+        entries.sort_by_key(|entry| crate::storage::hash_key(&entry.key));
+        Ok(ReplicationSnapshot {
+            entries,
+            watermarks,
+        })
+    }
+
+    pub(crate) fn snapshot_watermarks(&self) -> ShardWatermarks {
+        self.emitters.flush_all_and_wait();
+        self.primary.current_watermarks()
+    }
+
+    pub(crate) fn snapshot_shard(
+        &self,
+        shard_id: usize,
+    ) -> Result<Vec<crate::storage::StoredEntry>> {
+        self.store.try_shard_entry_snapshot(shard_id, now_millis())
+    }
+
+    pub(crate) fn snapshot_shard_iter(
+        &self,
+        shard_id: usize,
+        page_bytes: usize,
+        key_index_max_bytes: usize,
+        deadline: Instant,
+    ) -> Result<impl Iterator<Item = Result<crate::storage::StoredEntry>> + '_> {
+        self.store.try_shard_entry_snapshot_iter(
+            shard_id,
+            now_millis(),
+            page_bytes,
+            key_index_max_bytes,
+            Some(deadline),
+        )
     }
 
     pub fn catch_up_replica(&self, replica: &mut ReplicationReplica) -> Result<()> {
@@ -419,7 +520,7 @@ impl ReplicatedEmbeddedStore {
         let mut attempts = 0;
         loop {
             attempts += 1;
-            replica.try_replace_with_snapshot(self.snapshot())?;
+            replica.try_replace_with_snapshot(self.snapshot()?)?;
             let watermarks = replica.watermarks.clone();
             match self.primary.catch_up_since(&watermarks)? {
                 BacklogCatchUp::Available(frames) => {
@@ -478,6 +579,10 @@ fn direct_encoded_set_enabled(value_len: usize) -> bool {
 
 impl Drop for ReplicatedEmbeddedStore {
     fn drop(&mut self) {
+        self.store.configure_point_mutation_validator(None);
+        self.store.configure_point_mutation_observer(None);
+        #[cfg(feature = "redis")]
+        self.store.configure_vector_mutation_validator(None);
         #[cfg(feature = "redis")]
         self.store.configure_vector_mutation_observer(None);
         self.emitters.shutdown();
@@ -683,7 +788,6 @@ impl ReplicatedEmbeddedEmitters {
         }
     }
 
-    #[cfg(feature = "redis")]
     fn shard_id_for_hash(&self, key_hash: u64) -> usize {
         stripe_index(key_hash, shift_for(self.shards.len()))
     }
@@ -799,7 +903,7 @@ impl ReplicatedEmbeddedShardEmitter {
         self.flush_encoded();
         self.sequence = self.sequence.saturating_add(1);
         mutation.sequence = self.sequence;
-        if let Some(batch) = self.batch.push(mutation) {
+        for batch in self.batch.push(mutation) {
             self.send_owned_batch(batch);
         }
     }
@@ -819,7 +923,7 @@ impl ReplicatedEmbeddedShardEmitter {
             expire_at_ms: set.expire_at_ms,
             governance: set.governance,
         };
-        if let Some(batch) = self.encoded_batch.push(mutation) {
+        for batch in self.encoded_batch.push(mutation) {
             self.send_encoded_batch(batch);
         }
     }
@@ -1458,6 +1562,10 @@ mod tests {
     use std::time::Duration;
 
     #[cfg(feature = "redis")]
+    use crate::commands::incr::Incr;
+    #[cfg(feature = "redis")]
+    use crate::commands::mset::MSet;
+    #[cfg(feature = "redis")]
     use crate::commands::redis::RedisCommand;
     #[cfg(feature = "redis")]
     use crate::commands::vector_set::{VAdd, VCard, VSim};
@@ -1538,7 +1646,9 @@ mod tests {
             .expect("primary");
         let mut replica = ReplicationReplica::new(4);
         let subscriber = primary.primary().subscribe(8);
-        primary.set(b"alpha".to_vec(), b"one".to_vec(), None);
+        primary
+            .set(b"alpha".to_vec(), b"one".to_vec(), None)
+            .unwrap();
         let frame = subscriber
             .recv_timeout(Duration::from_secs(2))
             .expect("replication frame");
@@ -1549,6 +1659,233 @@ mod tests {
             .get_value_bytes(b"alpha")
             .expect("stored value");
         assert!(bytes_points_inside(&stored, &frame));
+    }
+
+    #[test]
+    fn shared_embedded_store_point_mutations_are_replicated_in_order() {
+        let primary = ReplicatedEmbeddedStore::new(4, config(ReplicationSendPolicy::Immediate))
+            .expect("primary");
+        let shared = primary.shared_inner();
+        let subscriber = primary.primary().subscribe(8);
+        let mut replica = ReplicationReplica::new(4);
+
+        shared.set(b"shared".to_vec(), b"one".to_vec(), None);
+        let set = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shared SET replication frame");
+        replica.apply_frame(set).expect("apply shared SET");
+        assert_eq!(replica.get(b"shared"), Some(b"one".to_vec()));
+
+        let expire_at_ms = now_millis().saturating_add(60_000);
+        assert!(shared.expire(b"shared", expire_at_ms));
+        let expire = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shared EXPIRE replication frame");
+        replica.apply_frame(expire).expect("apply shared EXPIRE");
+        assert!(replica.inner().pttl_millis(b"shared") > 0);
+
+        shared.set_value_bytes(b"shared", bytes::Bytes::from_static(b"two"), None);
+        let overwrite = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shared overwrite replication frame");
+        replica
+            .apply_frame(overwrite)
+            .expect("apply shared overwrite");
+        assert_eq!(replica.get(b"shared"), Some(b"two".to_vec()));
+        assert_eq!(replica.inner().pttl_millis(b"shared"), -1);
+
+        assert!(shared.delete(b"shared"));
+        let delete = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("shared DELETE replication frame");
+        replica.apply_frame(delete).expect("apply shared DELETE");
+        assert_eq!(replica.get(b"shared"), None);
+    }
+
+    #[test]
+    fn shared_embedded_store_rejects_oversized_values_before_commit() {
+        let mut replication = config(ReplicationSendPolicy::Immediate);
+        replication.batch_max_bytes = 512;
+        replication.snapshot_chunk_bytes = 4 * 1024;
+        replication.receive_max_frame_bytes = 4 * 1024;
+        let primary = ReplicatedEmbeddedStore::new(2, replication).expect("primary");
+        let shared = primary.shared_inner();
+        let subscriber = primary.primary().subscribe(8);
+
+        shared.set(b"too-large".to_vec(), vec![b'x'; 4 * 1024], None);
+
+        assert!(shared.get(b"too-large").is_none());
+        assert!(subscriber.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(primary.primary().current_watermarks().as_slice(), &[0, 0]);
+    }
+
+    #[test]
+    fn shared_batch_set_rejects_every_item_before_commit() {
+        let mut replication = config(ReplicationSendPolicy::Immediate);
+        replication.batch_max_bytes = 512;
+        replication.snapshot_chunk_bytes = 4 * 1024;
+        replication.receive_max_frame_bytes = 4 * 1024;
+        let primary = ReplicatedEmbeddedStore::new(2, replication).expect("primary");
+        let shared = primary.shared_inner();
+        let subscriber = primary.primary().subscribe(8);
+
+        assert!(!shared.try_batch_set(
+            vec![
+                (b"valid".to_vec(), b"value".to_vec()),
+                (b"too-large".to_vec(), vec![b'x'; 4 * 1024]),
+            ],
+            None,
+        ));
+        assert!(shared.get(b"valid").is_none());
+        assert!(shared.get(b"too-large").is_none());
+        assert!(subscriber.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(primary.primary().current_watermarks().as_slice(), &[0, 0]);
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn redis_mset_rejects_oversized_batch_before_any_commit() {
+        let mut replication = config(ReplicationSendPolicy::Immediate);
+        replication.batch_max_bytes = 512;
+        replication.snapshot_chunk_bytes = 4 * 1024;
+        replication.receive_max_frame_bytes = 4 * 1024;
+        let primary = ReplicatedEmbeddedStore::new(2, replication).expect("primary");
+        let shared = primary.shared_inner();
+        let oversized = vec![b'x'; 4 * 1024];
+
+        let response = MSet::execute(
+            &shared,
+            &[b"would-be-valid", b"value", b"too-large", &oversized],
+        );
+
+        assert!(matches!(response, Frame::Error(_)));
+        assert!(shared.get(b"would-be-valid").is_none());
+        assert!(shared.get(b"too-large").is_none());
+        assert_eq!(primary.primary().current_watermarks().as_slice(), &[0, 0]);
+    }
+
+    #[test]
+    fn shared_mutable_guard_replicates_replace_and_remove() {
+        let primary = ReplicatedEmbeddedStore::new(1, config(ReplicationSendPolicy::Immediate))
+            .expect("primary");
+        let shared = primary.shared_inner();
+        let subscriber = primary.primary().subscribe(8);
+        let mut replica = ReplicationReplica::new(1);
+
+        shared.set(b"mutable".to_vec(), b"one".to_vec(), None);
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("initial SET frame"),
+            )
+            .expect("apply initial SET");
+
+        shared
+            .get_mut(b"mutable")
+            .expect("mutable guard")
+            .set_slice(b"two");
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("mutable replacement frame"),
+            )
+            .expect("apply mutable replacement");
+        assert_eq!(replica.get(b"mutable"), Some(b"two".to_vec()));
+
+        let removed = shared.get_mut(b"mutable").expect("mutable guard").remove();
+        assert_eq!(removed.as_deref(), Some(b"two".as_slice()));
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("mutable remove frame"),
+            )
+            .expect("apply mutable remove");
+        assert_eq!(replica.get(b"mutable"), None);
+    }
+
+    #[cfg(feature = "mutable-value-slices")]
+    #[test]
+    fn shared_in_place_mutable_guard_replicates_on_drop() {
+        let primary = ReplicatedEmbeddedStore::new(1, config(ReplicationSendPolicy::Immediate))
+            .expect("primary");
+        let shared = primary.shared_inner();
+        let subscriber = primary.primary().subscribe(8);
+        let mut replica = ReplicationReplica::new(1);
+
+        shared.set(b"in-place".to_vec(), b"one".to_vec(), None);
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("initial SET frame"),
+            )
+            .expect("apply initial SET");
+        {
+            let mut guard = shared.get_mut(b"in-place").expect("mutable guard");
+            let value = guard.value_mut_no_ttl().expect("unique value buffer");
+            value.copy_from_slice(b"two");
+        }
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("in-place mutation frame"),
+            )
+            .expect("apply in-place mutation");
+        assert_eq!(replica.get(b"in-place"), Some(b"two".to_vec()));
+    }
+
+    #[cfg(feature = "unsafe")]
+    #[test]
+    fn shared_single_threaded_set_fast_path_is_replicated() {
+        let primary = ReplicatedEmbeddedStore::new(1, config(ReplicationSendPolicy::Immediate))
+            .expect("primary");
+        let shared = primary.shared_inner();
+        let subscriber = primary.primary().subscribe(8);
+        let key = b"scnp-fast-path";
+        let key_hash = crate::storage::hash_key(key);
+
+        // SAFETY: this test is the only thread accessing the single-shard store.
+        unsafe { shared.set_single_threaded_hashed(key_hash, key, b"value", None) };
+
+        let frame = subscriber
+            .recv_timeout(Duration::from_secs(2))
+            .expect("fast-path replication frame");
+        let mut replica = ReplicationReplica::new(1);
+        replica.apply_frame(frame).expect("apply fast-path SET");
+        assert_eq!(replica.get(key), Some(b"value".to_vec()));
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn shared_redis_string_transform_is_replicated() {
+        let primary = ReplicatedEmbeddedStore::new(1, config(ReplicationSendPolicy::Immediate))
+            .expect("primary");
+        let shared = primary.shared_inner();
+        let subscriber = primary.primary().subscribe(8);
+        let mut replica = ReplicationReplica::new(1);
+
+        shared.set(b"counter".to_vec(), b"1".to_vec(), None);
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("initial SET frame"),
+            )
+            .expect("apply initial SET");
+        assert_eq!(Incr::execute(&shared, &[b"counter"]), Frame::Integer(2));
+        replica
+            .apply_frame(
+                subscriber
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("INCR replication frame"),
+            )
+            .expect("apply INCR");
+
+        assert_eq!(replica.get(b"counter"), Some(b"2".to_vec()));
     }
 
     #[cfg(feature = "redis")]
@@ -1617,7 +1954,7 @@ mod tests {
         add_vector(primary.inner(), &key, b"document-1");
 
         let mut replica = ReplicationReplica::new(4);
-        replica.replace_with_snapshot(primary.snapshot());
+        replica.replace_with_snapshot(primary.snapshot().expect("snapshot"));
 
         assert_eq!(vector_count(replica.inner(), &key), 1);
         assert!(replica.inner().clone_vector_value(&key).is_some());
@@ -1827,7 +2164,7 @@ mod tests {
         add_vector(primary.inner(), &key, b"document-3");
         assert!(subscriber.try_recv().is_err());
 
-        let snapshot = primary.snapshot();
+        let snapshot = primary.snapshot().expect("snapshot");
         let mut replica = ReplicationReplica::new(4);
         replica
             .apply_frame(
@@ -1867,6 +2204,35 @@ mod tests {
 
     #[cfg(feature = "redis")]
     #[test]
+    fn oversized_vector_state_is_rejected_before_index_commit() {
+        let mut replication = config(ReplicationSendPolicy::Immediate);
+        replication.batch_max_bytes = 512;
+        replication.snapshot_chunk_bytes = 4 * 1024;
+        replication.receive_max_frame_bytes = 4 * 1024;
+        let primary = ReplicatedEmbeddedStore::new(4, replication).expect("primary");
+        let key = vector_key_outside_shard_zero(primary.inner());
+        let governance = vec![b'g'; 4 * 1024];
+
+        let response = VAdd::execute(
+            primary.inner(),
+            &[
+                &key,
+                b"VALUES",
+                b"2",
+                b"1",
+                b"0",
+                b"document-1",
+                b"GOVERNANCE",
+                &governance,
+            ],
+        );
+        assert!(matches!(response, Frame::Error(_)));
+        assert_eq!(vector_count(primary.inner(), &key), 0);
+        assert_eq!(primary.primary().current_watermarks().as_slice(), &[0; 4]);
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
     fn vector_update_after_expire_preserves_the_absolute_deadline() {
         let mut replication = config(ReplicationSendPolicy::Immediate);
         replication.vector_state_flush_ms = 60_000;
@@ -1880,7 +2246,7 @@ mod tests {
         add_vector(primary.inner(), &key, b"document-2");
 
         let mut replica = ReplicationReplica::new(4);
-        let _snapshot = primary.snapshot();
+        let _snapshot = primary.snapshot().expect("snapshot");
         replica
             .apply_frame(
                 subscriber
@@ -1933,7 +2299,7 @@ mod tests {
             Rename::execute(primary.inner(), &[&copied, &moved]),
             Frame::SimpleString("OK".to_string())
         );
-        let _snapshot = primary.snapshot();
+        let _snapshot = primary.snapshot().expect("snapshot");
 
         let mut replica = ReplicationReplica::new(4);
         replica
@@ -1978,7 +2344,9 @@ mod tests {
             )
             .expect("apply vector set");
 
-        primary.set(key.clone(), b"plain-string".to_vec(), None);
+        primary
+            .set(key.clone(), b"plain-string".to_vec(), None)
+            .unwrap();
         let delete = subscriber
             .recv_timeout(Duration::from_secs(2))
             .expect("vector delete frame");
@@ -2001,12 +2369,14 @@ mod tests {
             .expect("primary");
         let mut replica = ReplicationReplica::new(4);
         let subscriber = primary.primary().subscribe(8);
-        primary.set_with_governance(
-            b"private".to_vec(),
-            b"model-state".to_vec(),
-            None,
-            b"tenant-a/repo-private".to_vec(),
-        );
+        primary
+            .set_with_governance(
+                b"private".to_vec(),
+                b"model-state".to_vec(),
+                None,
+                b"tenant-a/repo-private".to_vec(),
+            )
+            .unwrap();
         let frame = subscriber
             .recv_timeout(Duration::from_secs(2))
             .expect("replication frame");
@@ -2033,10 +2403,14 @@ mod tests {
         let mut replica = ReplicationReplica::new(4);
         let subscriber = primary.primary().subscribe(8);
         let (first_key, second_key) = same_source_shard_keys(&primary);
-        primary.set(first_key.clone(), b"one".to_vec(), None);
+        primary
+            .set(first_key.clone(), b"one".to_vec(), None)
+            .unwrap();
         thread::sleep(Duration::from_millis(10));
         assert!(subscriber.try_recv().is_err());
-        primary.set(second_key.clone(), b"two".to_vec(), None);
+        primary
+            .set(second_key.clone(), b"two".to_vec(), None)
+            .unwrap();
         let frame = subscriber
             .recv_timeout(Duration::from_secs(2))
             .expect("replication frame");
@@ -2058,7 +2432,9 @@ mod tests {
         let primary = ReplicatedEmbeddedStore::new(4, replication).expect("primary");
         let subscriber = primary.primary().subscribe(8);
 
-        primary.set(b"single".to_vec(), b"value".to_vec(), None);
+        primary
+            .set(b"single".to_vec(), b"value".to_vec(), None)
+            .unwrap();
         let frame = subscriber
             .recv_timeout(Duration::from_secs(2))
             .expect("single delayed batch");
@@ -2071,7 +2447,9 @@ mod tests {
     fn backlog_catch_up_replays_missing_mutations() {
         let primary = ReplicatedEmbeddedStore::new(4, config(ReplicationSendPolicy::Immediate))
             .expect("primary");
-        primary.set(b"alpha".to_vec(), b"one".to_vec(), None);
+        primary
+            .set(b"alpha".to_vec(), b"one".to_vec(), None)
+            .unwrap();
         thread::sleep(Duration::from_millis(20));
         let mut replica = ReplicationReplica::new(4);
         primary.catch_up_replica(&mut replica).expect("catch up");
@@ -2083,7 +2461,9 @@ mod tests {
         let mut cfg = config(ReplicationSendPolicy::Immediate);
         cfg.backlog_bytes = 1;
         let primary = ReplicatedEmbeddedStore::new(4, cfg).expect("primary");
-        primary.set(b"alpha".to_vec(), b"one".to_vec(), None);
+        primary
+            .set(b"alpha".to_vec(), b"one".to_vec(), None)
+            .unwrap();
         thread::sleep(Duration::from_millis(20));
         let mut replica = ReplicationReplica::new(4);
         primary.catch_up_replica(&mut replica).expect("catch up");
@@ -2103,12 +2483,14 @@ mod tests {
             let mut i = 0u64;
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 let key = format!("key-{i}");
-                writer_clone.set(key.into_bytes(), b"v".to_vec(), None);
+                writer_clone
+                    .set(key.into_bytes(), b"v".to_vec(), None)
+                    .unwrap();
                 i += 1;
             }
         });
         thread::sleep(Duration::from_millis(20));
-        let snapshot = writer.snapshot();
+        let snapshot = writer.snapshot().expect("snapshot");
         let entry_count = snapshot.entries.len();
         let max_watermark = snapshot
             .watermarks
@@ -2132,7 +2514,9 @@ mod tests {
         let primary = ReplicatedEmbeddedStore::new(4, config(ReplicationSendPolicy::Immediate))
             .expect("primary");
         for i in 0..16 {
-            primary.set(format!("key-{i}").into_bytes(), b"v".to_vec(), None);
+            primary
+                .set(format!("key-{i}").into_bytes(), b"v".to_vec(), None)
+                .unwrap();
         }
         thread::sleep(Duration::from_millis(20));
         let mut replica = ReplicationReplica::new(4);
@@ -2160,7 +2544,7 @@ mod tests {
             .expect("key with different source and target shard routes");
 
         let subscriber = primary.primary().subscribe(8);
-        primary.set(key.clone(), b"one".to_vec(), None);
+        primary.set(key.clone(), b"one".to_vec(), None).unwrap();
         let frame = subscriber
             .recv_timeout(Duration::from_secs(2))
             .expect("replication frame");
@@ -2175,11 +2559,13 @@ mod tests {
         cfg.backlog_bytes = 1;
         let primary = ReplicatedEmbeddedStore::new(2, cfg).expect("primary");
         for index in 0..32 {
-            primary.set(
-                format!("snapshot-key-{index}").into_bytes(),
-                b"value".to_vec(),
-                None,
-            );
+            primary
+                .set(
+                    format!("snapshot-key-{index}").into_bytes(),
+                    b"value".to_vec(),
+                    None,
+                )
+                .unwrap();
         }
         let mut replica = ReplicationReplica::new(4);
 
@@ -2195,6 +2581,22 @@ mod tests {
                 Some(b"value".to_vec())
             );
         }
+    }
+
+    #[test]
+    fn oversized_write_is_rejected_without_advancing_state() {
+        let mut cfg = config(ReplicationSendPolicy::Immediate);
+        cfg.batch_max_bytes = 512;
+        cfg.snapshot_chunk_bytes = 4 * 1024;
+        cfg.receive_max_frame_bytes = 4 * 1024;
+        let primary = ReplicatedEmbeddedStore::new(2, cfg).expect("primary");
+
+        let error = primary
+            .set(b"too-large".to_vec(), vec![b'x'; 4 * 1024], None)
+            .expect_err("oversized write");
+        assert!(matches!(error, ShardCacheError::Config(_)));
+        assert!(primary.get(b"too-large").is_none());
+        assert_eq!(primary.primary().current_watermarks().as_slice(), &[0, 0]);
     }
 
     #[test]

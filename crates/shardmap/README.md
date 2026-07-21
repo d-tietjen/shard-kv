@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.7.2"
+shardmap = "0.8.0"
 ```
 
 ## Quick Start
@@ -85,7 +85,7 @@ Active sync is disabled by default and is intended for read-heavy durable-cache
 deployments. On Adam, three-run 99% GET / 1% SET medians retained 77.5% of
 baseline throughput in synchronized causal mode and 75.1% in synchronized
 consensus mode, while both measured 2.3us p99 versus 2.1us at baseline. See the
-[`0.7 feature guide`](../../docs/RELEASE_0_7.md) before enabling it.
+[`0.8 feature guide`](../../docs/RELEASE_0_8.md) before enabling it.
 
 ## Typed Map Operations
 
@@ -501,7 +501,7 @@ let replica = ReplicationReplicaClient::start(ReplicationConfig {
 # Ok::<(), shardmap::ShardCacheError>(())
 ```
 
-Native replication v2 streams byte-string cache mutations and consistent
+Native replication v3 streams byte-string cache mutations and consistent
 snapshots. It is intended for read replicas, sidecar cache mirrors, and service
 subscribers that consume shardcache's FCRP frames. Canonically serialized vector
 sets are included: `VADD`, `VREM`, `VSETATTR`, vector-key deletion, and TTL
@@ -513,10 +513,24 @@ replication surface.
 
 Replica topology is negotiated from the primary before mutation processing.
 FCRP rejects source-shard IDs outside that topology, sequence gaps, mismatched
-key hashes/tags, duplicate snapshot keys, and topology changes. Configure
-`receive_max_frame_bytes` and `read_timeout_ms` to bound each data frame and its
-complete transfer time; a timed-out partial frame closes the connection before
-retry. Changing the primary shard count requires a new compatible bootstrap.
+key hashes/tags, duplicate snapshot keys, and topology changes. Peers advertise
+`receive_max_frame_bytes` during the handshake; a replica whose limit is below
+the primary's configured outbound ceiling is rejected before bootstrap.
+Configure `read_timeout_ms` and `write_timeout_ms` to bound each complete frame
+transfer; a timed-out partial frame closes the connection before retry. Each
+individual key/value/governance mutation must fit `receive_max_frame_bytes`.
+Changing the primary shard count requires a new compatible bootstrap.
+
+`ReplicatedEmbeddedStore` write methods return `Result` and reject mutations
+that cannot fit one configured FCRP frame before changing local state.
+`SnapshotProvider::snapshot_watermarks` and `snapshot_shard` are fallible. A
+cold-value materialization failure aborts bootstrap and preserves the replica's
+last valid state. The primary streams one source shard at a time and permits one
+bootstrap at a time. Each shard retains a key index plus one bounded
+materialization page and one wire chunk; object-store reads run after releasing
+the shard lock. `snapshot_bootstrap_timeout_ms` covers gate wait, key capture,
+materialization, delivery, and buffered catch-up; backlog-only catch-up remains
+concurrent.
 
 `ReplicationConfig::vector_state_flush_ms` defaults to 10 ms. Within that
 window, repeated writes to one vector set replace its pending canonical state
@@ -530,7 +544,7 @@ the required state in canonical key-shard sequence order.
 Use `ReplicatedEmbeddedStore::shared_inner()` when an SCNP/RESP endpoint must
 serve the same writable primary memory. Keep the `ReplicatedEmbeddedStore`
 alive for the lifetime of the server so its bounded replication exporters and
-vector observer remain active. Replica promotion and client endpoint selection
+point/vector observers remain active. Replica promotion and client endpoint selection
 remain orchestration responsibilities; wait for replica catch-up before
 redirecting vector reads or promoting a node.
 

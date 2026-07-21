@@ -138,6 +138,13 @@ impl ShardValue {
             Self::Shared(value) => value,
         }
     }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Inline(value) => value.len(),
+            Self::Shared(value) => value.len(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -616,7 +623,8 @@ impl ShardWorker {
             config.eviction_policy,
             now_millis(),
         );
-        map.configure_object_overflow(object_overflow, shard_id, now_millis());
+        map.configure_object_overflow(object_overflow, shard_id, now_millis())
+            .expect("new shard has no object-overflow state");
         #[cfg(feature = "telemetry")]
         if let Some(metrics) = &metrics {
             map.attach_metrics(CacheTelemetryHandle::from_arc(metrics), shard_id);
@@ -744,6 +752,9 @@ impl ShardState {
         expire_at_ms: Option<u64>,
         timestamp_ms: u64,
     ) -> Result<()> {
+        if let Some(replication) = &self.replication {
+            replication.validate_mutation_lengths(key.as_ref().len(), value.len(), None)?;
+        }
         if self.wal.is_some() || self.replication.is_some() {
             self.sequence = self.sequence.saturating_add(1);
             let key = key.into_shared();
@@ -802,6 +813,9 @@ impl ShardState {
         key: ShardKey,
         timestamp_ms: u64,
     ) -> Result<bool> {
+        if let Some(replication) = &self.replication {
+            replication.validate_mutation_lengths(key.as_ref().len(), 0, None)?;
+        }
         if self.wal.is_some() || self.replication.is_some() {
             self.sequence = self.sequence.saturating_add(1);
             let key = key.into_shared();
@@ -835,6 +849,9 @@ impl ShardState {
         expiration: ExpirationChange,
         timestamp_ms: u64,
     ) -> Result<bool> {
+        if let Some(replication) = &self.replication {
+            replication.validate_mutation_lengths(key.as_ref().len(), 0, None)?;
+        }
         let changed = match expiration {
             ExpirationChange::Keep => false,
             ExpirationChange::ExpireAt(expire_at_ms) => {
@@ -876,7 +893,7 @@ impl ShardState {
             replication.emit(mutation);
             return;
         };
-        if let Some(batch) = batch_builder.push(mutation) {
+        for batch in batch_builder.push(mutation) {
             replication.export_batch_direct(batch);
         }
     }
@@ -1013,6 +1030,37 @@ mod tests {
         let response = engine.execute_borrowed(get).await.expect("GET response");
         assert_eq!(response, Frame::BlobString(value));
 
+        engine.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replication_rejects_oversized_set_before_local_commit() {
+        let mut config = ShardCacheConfig {
+            shard_count: 2,
+            ..ShardCacheConfig::default()
+        };
+        config.persistence.enabled = false;
+        config.replication.enabled = true;
+        config.replication.batch_max_bytes = 512;
+        config.replication.snapshot_chunk_bytes = 4 * 1024;
+        config.replication.receive_max_frame_bytes = 4 * 1024;
+
+        let engine = EngineHandle::open(config).expect("engine");
+        let set = Command::from_frame(Frame::Array(vec![
+            Frame::BlobString(b"SET".to_vec()),
+            Frame::BlobString(b"oversized".to_vec()),
+            Frame::BlobString(vec![b'x'; 4 * 1024]),
+        ]))
+        .expect("SET command");
+        let response = engine.execute(set).await;
+        assert!(matches!(response, Err(ShardCacheError::Config(_))));
+
+        let get = BorrowedCommand::from_parts(&[b"GET".as_slice(), b"oversized".as_slice()])
+            .expect("GET command");
+        assert_eq!(
+            engine.execute_borrowed(get).await.expect("GET"),
+            Frame::Null
+        );
         engine.shutdown().await.expect("shutdown");
     }
 

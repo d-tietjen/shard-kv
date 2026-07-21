@@ -269,6 +269,9 @@ pub struct ObjectOverflowConfig {
     pub allow_http: bool,
     /// Verify TLS certificates for HTTPS S3-compatible stores.
     pub tls_verify: bool,
+    /// Optional PEM bundle containing additional trusted roots for an HTTPS
+    /// S3-compatible endpoint.
+    pub tls_ca_path: Option<PathBuf>,
     /// Optional server-side encryption algorithm or key reference.
     pub server_side_encryption: Option<String>,
     /// Environment variable that contains the access key for rust-fs/S3 stores.
@@ -312,6 +315,15 @@ pub struct ObjectOverflowConfig {
     /// Delete remote payloads when a key is overwritten or removed.
     pub delete_on_overwrite: bool,
 }
+
+pub const MAX_OBJECT_OVERFLOW_WORKERS: usize = 256;
+pub const MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY: usize = 1_048_576;
+pub const MAX_OBJECT_OVERFLOW_RETRIES: usize = 32;
+pub const MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS: u64 = 600_000;
+pub const MAX_OBJECT_OVERFLOW_RETRY_BACKOFF_MS: u64 = 60_000;
+pub const MAX_OBJECT_OVERFLOW_DEGRADED_THRESHOLD: usize = 1_000_000;
+pub const MAX_OBJECT_OVERFLOW_COOLDOWN_MS: u64 = 86_400_000;
+pub const MAX_OBJECT_OVERFLOW_CLEANUP_SECONDS: u64 = 31_536_000;
 
 /// Object-overflow backend.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -658,6 +670,8 @@ pub struct ReplicationConfig {
     pub read_timeout_ms: u64,
     /// Per-write timeout for replication TCP I/O.
     pub write_timeout_ms: u64,
+    /// Maximum wall-clock time for snapshot capture and delivery to one replica.
+    pub snapshot_bootstrap_timeout_ms: u64,
     /// Delay between reconnect attempts after a replica disconnect.
     pub reconnect_backoff_ms: u64,
     /// Per-subscriber outbound channel capacity.
@@ -704,6 +718,10 @@ impl std::fmt::Debug for ReplicationConfig {
             .field("connect_timeout_ms", &self.connect_timeout_ms)
             .field("read_timeout_ms", &self.read_timeout_ms)
             .field("write_timeout_ms", &self.write_timeout_ms)
+            .field(
+                "snapshot_bootstrap_timeout_ms",
+                &self.snapshot_bootstrap_timeout_ms,
+            )
             .field("reconnect_backoff_ms", &self.reconnect_backoff_ms)
             .field(
                 "subscriber_channel_capacity",
@@ -861,6 +879,7 @@ impl Default for ObjectOverflowConfig {
             force_path_style: true,
             allow_http: false,
             tls_verify: true,
+            tls_ca_path: None,
             server_side_encryption: None,
             access_key_env: None,
             secret_key_env: None,
@@ -991,6 +1010,7 @@ impl Default for ReplicationConfig {
             connect_timeout_ms: 500,
             read_timeout_ms: 30_000,
             write_timeout_ms: 500,
+            snapshot_bootstrap_timeout_ms: 300_000,
             reconnect_backoff_ms: 200,
             subscriber_channel_capacity: 1_024,
         }
@@ -1120,10 +1140,17 @@ impl PersistenceConfig {
 mod tests {
     #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
     use super::KvOverflowBackend;
+    #[cfg(feature = "object-overflow-s3")]
+    use super::ObjectOverflowBackend;
     #[cfg(feature = "kv-overflow")]
     use super::{
         EvictionPolicy, KvOverflowConfig, KvOverflowReplica, KvOverflowReplicaServerConfig,
         MAX_KV_OVERFLOW_SLOT_COUNT, ScnpTlsClientConfig,
+    };
+    #[cfg(feature = "object-overflow")]
+    use super::{
+        MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS, MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY,
+        MAX_OBJECT_OVERFLOW_WORKERS, ObjectOverflowConfig,
     };
     use super::{
         ReplicationConfig, ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser,
@@ -1154,6 +1181,61 @@ mod tests {
             };
             assert!(config.validate().is_ok(), "{shard_count} should pass");
         }
+    }
+
+    #[cfg(feature = "object-overflow")]
+    #[test]
+    fn object_overflow_rejects_resource_amplifying_configuration() {
+        let mut config = ShardCacheConfig {
+            max_memory_bytes: 1024,
+            eviction_policy: super::EvictionPolicy::Lru,
+            object_overflow: ObjectOverflowConfig {
+                enabled: true,
+                endpoint: "/tmp/shardcache-object-overflow-config-test".into(),
+                bucket: "bucket".into(),
+                ..ObjectOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        config.object_overflow.worker_threads = MAX_OBJECT_OVERFLOW_WORKERS + 1;
+        assert!(config.validate().is_err());
+        config.object_overflow.worker_threads = 1;
+        config.object_overflow.queue_capacity = MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY + 1;
+        assert!(config.validate().is_err());
+        config.object_overflow.queue_capacity = 1;
+        config.object_overflow.operation_timeout_ms = MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS + 1;
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(feature = "object-overflow-s3")]
+    #[test]
+    fn s3_object_overflow_requires_a_complete_credential_env_pair() {
+        let mut config = ShardCacheConfig {
+            max_memory_bytes: 1024,
+            eviction_policy: super::EvictionPolicy::Lru,
+            object_overflow: ObjectOverflowConfig {
+                enabled: true,
+                backend: ObjectOverflowBackend::S3,
+                endpoint: "https://object-store.example".into(),
+                bucket: "bucket".into(),
+                ..ObjectOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_err());
+        config.object_overflow.access_key_env = Some("OBJECT_ACCESS_KEY".into());
+        assert!(config.validate().is_err());
+        config.object_overflow.secret_key_env = Some("OBJECT_SECRET_KEY".into());
+        assert!(config.validate().is_ok());
+        config.object_overflow.tls_ca_path = Some(PathBuf::new());
+        assert!(config.validate().is_err());
+        config.object_overflow.tls_ca_path = Some("/etc/shardcache/object-ca.pem".into());
+        config.object_overflow.tls_verify = false;
+        assert!(config.validate().is_err());
+        config.object_overflow.tls_verify = true;
+        assert!(config.validate().is_ok());
     }
 
     #[test]

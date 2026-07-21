@@ -64,7 +64,7 @@ impl EmbeddedShard {
         &self,
         now_ms: u64,
         visitor: &mut impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
-    ) -> bool {
+    ) -> crate::Result<bool> {
         self.map.visit_entries(now_ms, visitor)
     }
 

@@ -31,6 +31,8 @@ impl EmbeddedStore {
             let string_key_counts = Self::empty_string_key_counts(shard_count);
             Self {
                 shards,
+                point_mutation_observer: RwLock::new(None),
+                point_mutation_validator: RwLock::new(None),
                 #[cfg(feature = "redis")]
                 string_key_counts,
                 shift,
@@ -38,6 +40,8 @@ impl EmbeddedStore {
                 objects: RedisObjectStore::new(shard_count),
                 #[cfg(feature = "redis")]
                 vector_mutation_observer: RwLock::new(None),
+                #[cfg(feature = "redis")]
+                vector_mutation_validator: RwLock::new(None),
                 #[cfg(feature = "redis-modules")]
                 module_state: modules::RedisModuleState::new(shard_count),
                 #[cfg(feature = "redis-module-topk")]
@@ -111,6 +115,8 @@ impl EmbeddedStore {
         let string_key_counts = Self::empty_string_key_counts(shard_count);
         Self {
             shards,
+            point_mutation_observer: RwLock::new(None),
+            point_mutation_validator: RwLock::new(None),
             #[cfg(feature = "redis")]
             string_key_counts,
             shift,
@@ -118,6 +124,8 @@ impl EmbeddedStore {
             objects: RedisObjectStore::new(shard_count),
             #[cfg(feature = "redis")]
             vector_mutation_observer: RwLock::new(None),
+            #[cfg(feature = "redis")]
+            vector_mutation_validator: RwLock::new(None),
             #[cfg(feature = "redis-modules")]
             module_state: modules::RedisModuleState::new(shard_count),
             #[cfg(feature = "redis-module-topk")]
@@ -245,20 +253,34 @@ impl EmbeddedStore {
         }
     }
 
-    /// Visits currently live string entries without cloning keys or values.
+    /// Visits currently live string entries without performing remote I/O
+    /// while a shard lock is held.
     ///
-    /// The visitor receives `(key, value, expire_at_ms)` while each shard read
-    /// lock is held. Keep callbacks lightweight, and return `false` to stop
-    /// early. Redis object values are intentionally excluded; this mirrors
-    /// [`Self::entry_snapshot`].
-    pub fn visit_string_entries(&self, mut visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool) {
+    /// Remote values are materialized through the fallible snapshot iterator.
+    /// Redis object values and governance-protected point values are excluded.
+    pub fn visit_string_entries(
+        &self,
+        mut visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
+    ) -> crate::Result<()> {
         let now_ms = now_millis();
-        for shard in &self.shards {
-            let shard = shard.read();
-            if !shard.map.visit_entries(now_ms, &mut visitor) {
-                return;
+        for shard_id in 0..self.shards.len() {
+            let entries = self.try_shard_entry_snapshot_iter(
+                shard_id,
+                now_ms,
+                1024 * 1024,
+                usize::MAX,
+                None,
+            )?;
+            for entry in entries {
+                let entry = entry?;
+                if entry.governance.is_none()
+                    && !visitor(&entry.key, &entry.value, entry.expire_at_ms)
+                {
+                    return Ok(());
+                }
             }
         }
+        Ok(())
     }
 
     /// Returns an unsorted snapshot of currently live Redis-visible keys.
@@ -307,12 +329,52 @@ impl EmbeddedStore {
     pub fn try_entry_snapshot(&self) -> crate::Result<Vec<StoredEntry>> {
         let now_ms = now_millis();
         let mut entries = Vec::new();
-        for shard in &self.shards {
-            let shard = shard.read();
-            entries.extend(shard.map.try_snapshot_entries(now_ms)?);
+        for shard_id in 0..self.shards.len() {
+            entries.extend(self.try_shard_entry_snapshot(shard_id, now_ms)?);
         }
         entries.sort_by_key(|entry| hash_key(entry.key.as_ref()));
         Ok(entries)
+    }
+
+    pub(crate) fn try_shard_entry_snapshot(
+        &self,
+        shard_id: usize,
+        now_ms: u64,
+    ) -> crate::Result<Vec<StoredEntry>> {
+        self.try_shard_entry_snapshot_iter(shard_id, now_ms, 1024 * 1024, usize::MAX, None)?
+            .collect()
+    }
+
+    pub(crate) fn try_shard_entry_snapshot_iter(
+        &self,
+        shard_id: usize,
+        now_ms: u64,
+        page_bytes: usize,
+        key_index_max_bytes: usize,
+        deadline: Option<Instant>,
+    ) -> crate::Result<EmbeddedSnapshotIterator<'_>> {
+        let shard = self.shards.get(shard_id).ok_or_else(|| {
+            crate::ShardCacheError::Protocol(format!(
+                "snapshot shard {shard_id} is outside topology {}",
+                self.shards.len()
+            ))
+        })?;
+        let keys =
+            shard
+                .read()
+                .map
+                .snapshot_entry_keys(now_ms, deadline, key_index_max_bytes.max(1))?;
+        Ok(EmbeddedSnapshotIterator {
+            store: self,
+            shard_id,
+            keys,
+            next_key: 0,
+            pending: VecDeque::new(),
+            page_bytes: page_bytes.max(1),
+            now_ms,
+            deadline,
+            failed: false,
+        })
     }
 
     /// Returns the approximate number of bytes stored in string values.
@@ -346,14 +408,25 @@ impl EmbeddedStore {
     }
 
     /// Configures object-storage overflow for string values.
-    pub fn configure_object_overflow(&self, object_overflow: Option<ObjectOverflowRuntime>) {
+    pub fn configure_object_overflow(
+        &self,
+        object_overflow: Option<ObjectOverflowRuntime>,
+    ) -> crate::Result<()> {
         let now_ms = now_millis();
-        for (shard_id, shard) in self.shards.iter().enumerate() {
+        for shard in &self.shards {
             shard
-                .write()
+                .read()
                 .map
-                .configure_object_overflow(object_overflow.clone(), shard_id, now_ms);
+                .validate_object_overflow_reconfiguration(object_overflow.as_ref())?;
         }
+        for (shard_id, shard) in self.shards.iter().enumerate() {
+            shard.write().map.configure_object_overflow(
+                object_overflow.clone(),
+                shard_id,
+                now_ms,
+            )?;
+        }
+        Ok(())
     }
 
     /// Gives the pinned vector shard the full configured memory budget.
@@ -436,6 +509,62 @@ impl EmbeddedStore {
         compute_key_route(self.route_mode, self.shift, key)
     }
 
+    pub(crate) fn configure_point_mutation_observer(&self, observer: Option<Arc<PointMutationFn>>) {
+        *self.point_mutation_observer.write() = observer.map(PointMutationObserver);
+    }
+
+    pub(crate) fn configure_point_mutation_validator(
+        &self,
+        validator: Option<Arc<PointMutationValidatorFn>>,
+    ) {
+        *self.point_mutation_validator.write() = validator.map(PointMutationValidator);
+    }
+
+    pub(crate) fn point_mutation_is_replicable(
+        &self,
+        key: &[u8],
+        value_len: usize,
+        governance_len: Option<usize>,
+    ) -> bool {
+        self.point_mutation_validator
+            .read()
+            .as_ref()
+            .is_none_or(|validator| validator.allows(key, value_len, governance_len))
+    }
+
+    pub(crate) fn notify_point_mutation(
+        &self,
+        kind: PointMutationKind,
+        key: &[u8],
+        value: Option<bytes::Bytes>,
+        expire_at_ms: Option<u64>,
+        governance: Option<bytes::Bytes>,
+    ) {
+        let observer = self.point_mutation_observer.read().clone();
+        if let Some(observer) = observer {
+            observer.notify(kind, key, value, expire_at_ms, governance);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn notify_point_set_slice(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        expire_at_ms: Option<u64>,
+    ) {
+        let observer = self.point_mutation_observer.read().clone();
+        if let Some(observer) = observer {
+            observer.notify(
+                PointMutationKind::Set,
+                key,
+                Some(bytes::Bytes::copy_from_slice(value)),
+                expire_at_ms,
+                None,
+            );
+        }
+    }
+
     /// Returns the shard that owns pinned vector-set data.
     #[cfg(feature = "redis")]
     #[inline(always)]
@@ -449,6 +578,22 @@ impl EmbeddedStore {
         observer: Option<Arc<VectorMutationFn>>,
     ) {
         *self.vector_mutation_observer.write() = observer.map(VectorMutationObserver);
+    }
+
+    #[cfg(feature = "redis")]
+    pub(crate) fn configure_vector_mutation_validator(
+        &self,
+        validator: Option<Arc<VectorMutationValidatorFn>>,
+    ) {
+        *self.vector_mutation_validator.write() = validator.map(VectorMutationValidator);
+    }
+
+    #[cfg(feature = "redis")]
+    pub(crate) fn vector_mutation_is_replicable(&self, key: &[u8], value: &[u8]) -> bool {
+        self.vector_mutation_validator
+            .read()
+            .as_ref()
+            .is_none_or(|validator| (validator.0)(key, value))
     }
 
     #[cfg(feature = "redis")]

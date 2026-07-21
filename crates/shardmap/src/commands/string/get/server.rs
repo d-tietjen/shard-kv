@@ -61,7 +61,7 @@ impl RawDirectCommand for Get {
                         // SAFETY: forwarded from the connection worker's single-threaded contract.
                         unsafe {
                             ctx.store
-                                .with_shared_value_bytes_route_hashed_single_threaded(
+                                .try_with_shared_value_bytes_route_hashed_single_threaded(
                                     key_hash,
                                     key,
                                     |value| {
@@ -82,7 +82,7 @@ impl RawDirectCommand for Get {
                     }
                     false => {
                         ctx.store
-                            .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+                            .try_with_shared_value_bytes_route_hashed(key_hash, key, |value| {
                                 #[cfg(feature = "redis")]
                                 if Self::write_fast_wrongtype_for_typed_point_value(value, out) {
                                     return;
@@ -99,7 +99,7 @@ impl RawDirectCommand for Get {
                 let found = {
                     let _ = ctx.single_threaded;
                     ctx.store
-                        .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+                        .try_with_shared_value_bytes_route_hashed(key_hash, key, |value| {
                             #[cfg(feature = "redis")]
                             if Self::write_fast_wrongtype_for_typed_point_value(value, out) {
                                 return;
@@ -111,8 +111,12 @@ impl RawDirectCommand for Get {
                             }
                         })
                 };
-                if !found {
-                    ServerWire::write_fast_null(ctx.out);
+                match found {
+                    Ok(true) => {}
+                    Ok(false) => ServerWire::write_fast_null(ctx.out),
+                    Err(_) => {
+                        ServerWire::write_fast_error(ctx.out, "ERR object overflow read failed")
+                    }
                 }
             }
             GetRawArgs::WrongArity => ServerWire::write_fast_error(
@@ -155,27 +159,27 @@ impl Get {
             Self::write_resp_string_lookup(ctx, key);
             return;
         }
-        let hit = if let Some(queue) = ctx.fast_write_queue.as_mut() {
-            let key_hash = hash_key(key);
-            let out = &mut *ctx.out;
-            // SAFETY: forwarded from caller's single-worker contract.
-            unsafe {
-                ctx.store
-                    .with_shared_value_bytes_route_hashed_single_threaded(key_hash, key, |value| {
-                        #[cfg(feature = "redis")]
-                        if Self::write_resp_wrongtype_for_typed_point_value(value, out) {
-                            return;
-                        }
-                        queue.push_resp_value(out, value)
-                    })
-            }
-        } else {
-            // SAFETY: forwarded from caller's single-worker contract.
-            unsafe { ctx.store.get_blob_string_into_single_threaded(key, ctx.out) }
+        let key_hash = hash_key(key);
+        let out = &mut *ctx.out;
+        // SAFETY: forwarded from caller's single-worker contract.
+        let result = unsafe {
+            ctx.store
+                .try_with_shared_value_bytes_route_hashed_single_threaded(key_hash, key, |value| {
+                    #[cfg(feature = "redis")]
+                    if Self::write_resp_wrongtype_for_typed_point_value(value, out) {
+                        return;
+                    }
+                    if let Some(queue) = ctx.fast_write_queue.as_mut() {
+                        queue.push_resp_value(out, value);
+                    } else {
+                        ServerWire::write_resp_blob_string(out, value.as_ref());
+                    }
+                })
         };
-        match hit {
-            true => {}
-            false => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
+        match result {
+            Ok(true) => {}
+            Ok(false) => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
+            Err(_) => ServerWire::write_resp_error(ctx.out, "ERR object overflow read failed"),
         }
     }
 
@@ -189,23 +193,25 @@ impl Get {
             Self::write_resp_string_lookup(ctx, key);
             return;
         }
-        let hit = if let Some(queue) = ctx.fast_write_queue.as_mut() {
-            let key_hash = hash_key(key);
-            let out = &mut *ctx.out;
-            ctx.store
-                .with_shared_value_bytes_route_hashed(key_hash, key, |value| {
-                    #[cfg(feature = "redis")]
-                    if Self::write_resp_wrongtype_for_typed_point_value(value, out) {
-                        return;
-                    }
-                    queue.push_resp_value(out, value)
-                })
-        } else {
-            ctx.store.get_blob_string_into(key, ctx.out)
-        };
-        match hit {
-            true => {}
-            false => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
+        let key_hash = hash_key(key);
+        let out = &mut *ctx.out;
+        let result = ctx
+            .store
+            .try_with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+                #[cfg(feature = "redis")]
+                if Self::write_resp_wrongtype_for_typed_point_value(value, out) {
+                    return;
+                }
+                if let Some(queue) = ctx.fast_write_queue.as_mut() {
+                    queue.push_resp_value(out, value);
+                } else {
+                    ServerWire::write_resp_blob_string(out, value.as_ref());
+                }
+            });
+        match result {
+            Ok(true) => {}
+            Ok(false) => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
+            Err(_) => ServerWire::write_resp_error(ctx.out, "ERR object overflow read failed"),
         }
     }
 
@@ -227,6 +233,9 @@ impl Get {
             RedisStringLookup::Miss => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
             RedisStringLookup::WrongType => {
                 ServerWire::write_resp_error(ctx.out, WRONGTYPE_MESSAGE)
+            }
+            RedisStringLookup::BackendError => {
+                ServerWire::write_resp_error(ctx.out, "ERR object overflow read failed")
             }
         }
     }
@@ -262,13 +271,14 @@ impl DirectFastCommand for Get {
         request: FastRequest<'_>,
     ) -> FastResponse {
         match request.command {
-            FastCommand::Get { key } => match ctx.get(key) {
+            FastCommand::Get { key } => match ctx.try_get(key) {
                 #[cfg(feature = "redis")]
-                Some(value) if value.starts_with(VECTOR_SET_PREFIX) => {
+                Ok(Some(value)) if value.starts_with(VECTOR_SET_PREFIX) => {
                     FastResponse::Error(WRONGTYPE_MESSAGE.as_bytes().to_vec())
                 }
-                Some(value) => FastResponse::Value(value),
-                None => FastResponse::Null,
+                Ok(Some(value)) => FastResponse::Value(value),
+                Ok(None) => FastResponse::Null,
+                Err(_) => FastResponse::Error(b"ERR object overflow read failed".to_vec()),
             },
             _ => FastResponse::Error(b"ERR unsupported command".to_vec()),
         }
@@ -290,12 +300,18 @@ impl FastDirectCommand for Get {
                         RedisStringLookup::WrongType => {
                             ServerWire::write_fast_error(ctx.out, WRONGTYPE_MESSAGE)
                         }
+                        RedisStringLookup::BackendError => {
+                            ServerWire::write_fast_error(ctx.out, "ERR object overflow read failed")
+                        }
                     }
                     return;
                 }
                 match Self::fast_get_decoded_value_into(&mut ctx, key) {
-                    true => {}
-                    false => ServerWire::write_fast_null(ctx.out),
+                    Ok(true) => {}
+                    Ok(false) => ServerWire::write_fast_null(ctx.out),
+                    Err(_) => {
+                        ServerWire::write_fast_error(ctx.out, "ERR object overflow read failed")
+                    }
                 }
             }
             _ => ServerWire::write_fast_error(ctx.out, "ERR unsupported command"),
@@ -306,7 +322,10 @@ impl FastDirectCommand for Get {
 #[cfg(feature = "server")]
 impl Get {
     #[inline(always)]
-    fn fast_get_decoded_value_into(ctx: &mut FastCommandContext<'_, '_>, key: &[u8]) -> bool {
+    fn fast_get_decoded_value_into(
+        ctx: &mut FastCommandContext<'_, '_>,
+        key: &[u8],
+    ) -> crate::Result<bool> {
         let store = ctx.store;
         let out = &mut *ctx.out;
         match (ctx.key_hash, ctx.single_threaded) {
@@ -316,7 +335,7 @@ impl Get {
                     // SAFETY: caller only enables this when exactly one worker can
                     // access the store.
                     unsafe {
-                        store.with_value_bytes_route_hashed_single_threaded(
+                        store.try_with_value_bytes_route_hashed_single_threaded(
                             key_hash,
                             key,
                             |value| {
@@ -331,7 +350,7 @@ impl Get {
                 }
                 #[cfg(not(feature = "unsafe"))]
                 {
-                    store.with_value_bytes_route_hashed(key_hash, key, |value| {
+                    store.try_with_value_bytes_route_hashed(key_hash, key, |value| {
                         #[cfg(feature = "redis")]
                         if Self::write_fast_wrongtype_for_typed_point_value(value, out) {
                             return;
@@ -341,7 +360,7 @@ impl Get {
                 }
             }
             (Some(key_hash), false) => {
-                store.with_value_bytes_route_hashed(key_hash, key, |value| {
+                store.try_with_value_bytes_route_hashed(key_hash, key, |value| {
                     #[cfg(feature = "redis")]
                     if Self::write_fast_wrongtype_for_typed_point_value(value, out) {
                         return;
@@ -349,16 +368,16 @@ impl Get {
                     ServerWire::write_fast_value(out, value);
                 })
             }
-            (None, _) => match store.get_value_bytes(key) {
+            (None, _) => match store.try_get_value_bytes(key)? {
                 Some(value) => {
                     #[cfg(feature = "redis")]
                     if Self::write_fast_wrongtype_for_typed_point_value(value.as_ref(), out) {
-                        return true;
+                        return Ok(true);
                     }
                     ServerWire::write_fast_value(out, value.as_ref());
-                    true
+                    Ok(true)
                 }
-                None => false,
+                None => Ok(false),
             },
         }
     }

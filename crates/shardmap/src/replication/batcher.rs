@@ -83,6 +83,21 @@ pub(crate) struct EncodedReplicationBatchBuilder {
     track_delay: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct BatchPush<T> {
+    before: Option<T>,
+    after: Option<T>,
+}
+
+impl<T> IntoIterator for BatchPush<T> {
+    type Item = T;
+    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<T>, 2>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        [self.before, self.after].into_iter().flatten()
+    }
+}
+
 impl ReplicationBatch {
     fn single(mutation: ReplicationMutation) -> Self {
         let pending_bytes = mutation.estimated_uncompressed_len();
@@ -125,17 +140,22 @@ impl ReplicationBatchBuilder {
         }
     }
 
-    pub(crate) fn push(&mut self, mutation: ReplicationMutation) -> Option<ReplicationBatch> {
+    pub(crate) fn push(&mut self, mutation: ReplicationMutation) -> BatchPush<ReplicationBatch> {
+        let mutation_bytes = mutation.estimated_uncompressed_len();
+        let before = self
+            .would_exceed_limits(mutation_bytes)
+            .then(|| self.flush())
+            .flatten();
         if self.track_delay && self.pending.is_empty() {
             self.first_pending_at = Some(Instant::now());
         }
-        self.pending_bytes = self
-            .pending_bytes
-            .saturating_add(mutation.estimated_uncompressed_len());
+        self.pending_bytes = self.pending_bytes.saturating_add(mutation_bytes);
         self.pending.push(mutation);
-        self.should_flush_after_push()
+        let after = self
+            .should_flush_after_push()
             .then(|| self.flush())
-            .flatten()
+            .flatten();
+        BatchPush { before, after }
     }
 
     pub(crate) fn flush_due(&mut self) -> Option<ReplicationBatch> {
@@ -186,6 +206,12 @@ impl ReplicationBatchBuilder {
             || self.pending_bytes >= self.config.batch_max_bytes
     }
 
+    fn would_exceed_limits(&self, mutation_bytes: usize) -> bool {
+        !self.pending.is_empty()
+            && (self.pending.len().saturating_add(1) > self.config.batch_max_records
+                || self.pending_bytes.saturating_add(mutation_bytes) > self.config.batch_max_bytes)
+    }
+
     fn should_flush_due(&self) -> bool {
         if self.pending.is_empty() {
             return false;
@@ -227,15 +253,23 @@ impl EncodedReplicationBatch {
         self,
         compression: ReplicationCompressionMode,
         zstd_level: i32,
+        max_payload_bytes: usize,
     ) -> Result<Vec<u8>> {
         match compression {
             ReplicationCompressionMode::None => Ok(self.frame),
-            ReplicationCompressionMode::Zstd => encode_frame(
-                FrameKind::MutationBatch,
-                compression,
-                zstd_level,
-                &self.frame[FRAME_HEADER_LEN..],
-            ),
+            ReplicationCompressionMode::Zstd => {
+                let compressed = encode_frame(
+                    FrameKind::MutationBatch,
+                    compression,
+                    zstd_level,
+                    &self.frame[FRAME_HEADER_LEN..],
+                )?;
+                if compressed.len().saturating_sub(FRAME_HEADER_LEN) > max_payload_bytes {
+                    Ok(self.frame)
+                } else {
+                    Ok(compressed)
+                }
+            }
         }
     }
 }
@@ -266,20 +300,25 @@ impl EncodedReplicationBatchBuilder {
     pub(crate) fn push(
         &mut self,
         mutation: BorrowedReplicationMutation<'_>,
-    ) -> Option<EncodedReplicationBatch> {
+    ) -> BatchPush<EncodedReplicationBatch> {
+        let mutation_bytes = borrowed_mutation_record_payload_len(mutation);
+        let before = self
+            .would_exceed_limits(mutation_bytes)
+            .then(|| self.flush())
+            .flatten();
         if self.track_delay && self.record_count == 0 {
             self.first_pending_at = Some(Instant::now());
         }
-        self.pending_bytes = self
-            .pending_bytes
-            .saturating_add(borrowed_mutation_record_payload_len(mutation));
+        self.pending_bytes = self.pending_bytes.saturating_add(mutation_bytes);
         self.record_count += 1;
         self.min_sequence = self.min_sequence.min(mutation.sequence);
         self.max_sequence = self.max_sequence.max(mutation.sequence);
         write_borrowed_mutation_payload_record(&mut self.frame, mutation);
-        self.should_flush_after_push()
+        let after = self
+            .should_flush_after_push()
             .then(|| self.flush())
-            .flatten()
+            .flatten();
+        BatchPush { before, after }
     }
 
     pub(crate) fn flush_due(&mut self) -> Option<EncodedReplicationBatch> {
@@ -343,6 +382,12 @@ impl EncodedReplicationBatchBuilder {
         }
         self.record_count >= self.config.batch_max_records
             || self.pending_bytes >= self.config.batch_max_bytes
+    }
+
+    fn would_exceed_limits(&self, mutation_bytes: usize) -> bool {
+        self.record_count != 0
+            && (self.record_count.saturating_add(1) > self.config.batch_max_records
+                || self.pending_bytes.saturating_add(mutation_bytes) > self.config.batch_max_bytes)
     }
 
     fn should_flush_due(&self) -> bool {
@@ -430,6 +475,7 @@ impl ReplicationPrimary {
                 "replication primary requires replication.enabled = true".into(),
             ));
         }
+        super::validate_frame_limits(&config)?;
         let shard_count = shard_count.max(1);
         let metrics = ReplicationMetrics::default();
         let shards = (0..shard_count)
@@ -450,6 +496,39 @@ impl ReplicationPrimary {
 
     pub fn shard_count(&self) -> usize {
         self.shard_count
+    }
+
+    pub(crate) fn receive_max_frame_bytes(&self) -> usize {
+        self.config.receive_max_frame_bytes
+    }
+
+    pub(crate) fn validate_mutation_lengths(
+        &self,
+        key_len: usize,
+        value_len: usize,
+        governance_len: Option<usize>,
+    ) -> Result<()> {
+        if key_len > u32::MAX as usize
+            || value_len > u32::MAX as usize
+            || governance_len.is_some_and(|len| len > u32::MAX as usize)
+        {
+            return Err(ShardCacheError::Protocol(
+                "replication mutation field exceeds the FCRP u32 length limit".into(),
+            ));
+        }
+        let governance_record_len = governance_len
+            .and_then(|len| len.checked_add(4))
+            .unwrap_or(0);
+        let record_len =
+            super::protocol::mutation_record_payload_len(key_len, value_len, governance_record_len);
+        if record_len.saturating_add(4) > self.config.receive_max_frame_bytes {
+            return Err(ShardCacheError::Config(format!(
+                "replication mutation requires {} bytes but receive_max_frame_bytes is {}",
+                record_len.saturating_add(4),
+                self.config.receive_max_frame_bytes
+            )));
+        }
+        Ok(())
     }
 
     /// Allocates the next sequence for `shard_id` from the primary-owned
@@ -514,7 +593,7 @@ impl ReplicationPrimary {
         let record_count = batch.pending.len();
         let compression = ReplicationCompressionMode::from(self.config.compression);
         let compression_started = Instant::now();
-        let (frame, uncompressed_len) = match encode_mutation_batch_frame_with_payload_len(
+        let (mut frame, uncompressed_len) = match encode_mutation_batch_frame_with_payload_len(
             &batch.pending,
             payload_len,
             compression,
@@ -526,7 +605,35 @@ impl ReplicationPrimary {
                 return;
             }
         };
+        if compression == ReplicationCompressionMode::Zstd
+            && frame.len().saturating_sub(FRAME_HEADER_LEN) > self.config.receive_max_frame_bytes
+            && uncompressed_len <= self.config.receive_max_frame_bytes
+        {
+            frame = match encode_mutation_batch_frame_with_payload_len(
+                &batch.pending,
+                payload_len,
+                ReplicationCompressionMode::None,
+                0,
+            ) {
+                Ok((frame, _)) => frame,
+                Err(error) => {
+                    tracing::error!("failed to encode uncompressed replication batch: {error}");
+                    return;
+                }
+            };
+        }
         let compression_ns = compression_started.elapsed().as_nanos() as u64;
+        if !self.frame_fits_receive_limit(uncompressed_len, frame.len()) {
+            self.metrics.record_drop();
+            tracing::error!(
+                shard_id,
+                uncompressed_len,
+                encoded_len = frame.len(),
+                receive_max_frame_bytes = self.config.receive_max_frame_bytes,
+                "replication batch exceeds configured frame limit"
+            );
+            return;
+        }
         self.metrics.record_emit_count(record_count, 0);
         self.metrics
             .record_batch(record_count, uncompressed_len, frame.len(), compression_ns);
@@ -557,7 +664,11 @@ impl ReplicationPrimary {
         let uncompressed_len = batch.uncompressed_len();
         let compression = ReplicationCompressionMode::from(self.config.compression);
         let compression_started = Instant::now();
-        let frame = match batch.into_frame(compression, self.config.zstd_level) {
+        let frame = match batch.into_frame(
+            compression,
+            self.config.zstd_level,
+            self.config.receive_max_frame_bytes,
+        ) {
             Ok(frame) => frame,
             Err(error) => {
                 tracing::error!("failed to encode direct replication batch: {error}");
@@ -565,6 +676,17 @@ impl ReplicationPrimary {
             }
         };
         let compression_ns = compression_started.elapsed().as_nanos() as u64;
+        if !self.frame_fits_receive_limit(uncompressed_len, frame.len()) {
+            self.metrics.record_drop();
+            tracing::error!(
+                shard_id,
+                uncompressed_len,
+                encoded_len = frame.len(),
+                receive_max_frame_bytes = self.config.receive_max_frame_bytes,
+                "direct replication batch exceeds configured frame limit"
+            );
+            return;
+        }
         self.metrics.record_emit_count(record_count, 0);
         self.metrics
             .record_batch(record_count, uncompressed_len, frame.len(), compression_ns);
@@ -583,6 +705,12 @@ impl ReplicationPrimary {
 
     pub fn queue_depths(&self) -> Vec<usize> {
         vec![0; self.shard_count]
+    }
+
+    fn frame_fits_receive_limit(&self, uncompressed_len: usize, encoded_len: usize) -> bool {
+        let encoded_payload_len = encoded_len.saturating_sub(FRAME_HEADER_LEN);
+        uncompressed_len <= self.config.receive_max_frame_bytes
+            && encoded_payload_len <= self.config.receive_max_frame_bytes
     }
 
     pub fn max_queue_depth(&self) -> usize {
@@ -698,5 +826,114 @@ impl ReplicationPrimary {
 impl Drop for ReplicationPrimary {
     fn drop(&mut self) {
         let _ = self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use crate::config::{ReplicationConfig, ReplicationSendPolicy};
+    use crate::storage::{hash_key, hash_key_tag_from_hash};
+
+    use super::super::protocol::ReplicationMutationOp;
+    use super::*;
+
+    fn mutation(sequence: u64, value_len: usize) -> ReplicationMutation {
+        let key = Bytes::from_static(b"batch-key");
+        let key_hash = hash_key(key.as_ref());
+        ReplicationMutation {
+            shard_id: 0,
+            sequence,
+            timestamp_ms: 1,
+            op: ReplicationMutationOp::Set,
+            key_hash,
+            key_tag: hash_key_tag_from_hash(key_hash),
+            key,
+            value: Bytes::from(vec![b'x'; value_len]),
+            expire_at_ms: None,
+            governance: None,
+        }
+    }
+
+    fn tight_batch_config(record_len: usize) -> ReplicationConfig {
+        ReplicationConfig {
+            send_policy: ReplicationSendPolicy::Batch,
+            batch_max_records: 8,
+            batch_max_bytes: record_len + 1,
+            ..ReplicationConfig::default()
+        }
+    }
+
+    #[test]
+    fn owned_builder_preflushes_before_crossing_byte_limit() {
+        let first = mutation(1, 32);
+        let config = tight_batch_config(first.estimated_uncompressed_len());
+        let mut builder = ReplicationBatchBuilder::new_clockless(config.clone());
+        assert_eq!(builder.push(first).into_iter().count(), 0);
+
+        let flushed = builder
+            .push(mutation(2, 32))
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(flushed.len(), 1);
+        assert!(flushed[0].pending_bytes <= config.batch_max_bytes);
+        let remaining = builder.flush().expect("second mutation remains pending");
+        assert!(remaining.pending_bytes <= config.batch_max_bytes);
+    }
+
+    #[test]
+    fn encoded_builder_preflushes_before_crossing_byte_limit() {
+        let first = mutation(1, 32);
+        let config = tight_batch_config(first.estimated_uncompressed_len());
+        let mut builder = EncodedReplicationBatchBuilder::new_clockless(config.clone(), 0);
+        assert_eq!(builder.push(first.as_borrowed()).into_iter().count(), 0);
+
+        let second = mutation(2, 32);
+        let flushed = builder
+            .push(second.as_borrowed())
+            .into_iter()
+            .collect::<Vec<_>>();
+        assert_eq!(flushed.len(), 1);
+        assert!(flushed[0].uncompressed_len() <= config.batch_max_bytes + 4);
+        let remaining = builder.flush().expect("second mutation remains pending");
+        assert!(remaining.uncompressed_len() <= config.batch_max_bytes + 4);
+    }
+
+    #[test]
+    fn encoded_batch_falls_back_when_compression_exceeds_the_frame_limit() {
+        let payload = [0x5a];
+        let frame = encode_frame(
+            FrameKind::MutationBatch,
+            ReplicationCompressionMode::None,
+            0,
+            &payload,
+        )
+        .unwrap();
+        let batch = EncodedReplicationBatch {
+            shard_id: 0,
+            min_sequence: 1,
+            max_sequence: 1,
+            record_count: 1,
+            uncompressed_len: payload.len(),
+            frame,
+        };
+
+        let encoded = batch
+            .into_frame(ReplicationCompressionMode::Zstd, 3, payload.len())
+            .unwrap();
+        let decoded = crate::replication::protocol::decode_frame(&encoded).unwrap();
+        assert!(!decoded.compressed);
+        assert_eq!(decoded.payload.as_ref(), payload);
+    }
+
+    #[test]
+    fn direct_primary_constructor_rejects_unrepresentable_frame_limit() {
+        let config = ReplicationConfig {
+            enabled: true,
+            receive_max_frame_bytes: usize::MAX,
+            ..ReplicationConfig::default()
+        };
+        assert!(ReplicationPrimary::start(1, config).is_err());
     }
 }

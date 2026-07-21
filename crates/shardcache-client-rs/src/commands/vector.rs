@@ -110,7 +110,7 @@ impl<'a> VAddOptions<'a> {
 /// Options for typed SCNP `VSIM` requests.
 ///
 /// Typed requests always ask the server for scores and attributes. Governance
-/// metadata can be included after all vector servers are on 0.7.2.
+/// metadata can be included after all vector servers are on 0.8.0.
 #[derive(Debug, Clone)]
 pub struct VSimOptions<'a> {
     count: usize,

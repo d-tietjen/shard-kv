@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.2 - 2026-07-19
+## 0.8.0 - 2026-07-20
 
 ### Added
 
@@ -29,7 +29,7 @@
   opaque label. `VADD IFGOVERNANCE` supports guarded label rotation and
   `CLEARGOVERNANCE`; typed clients expose matching options.
 - Added TLS 1.3 mTLS for native FCRP read-replica streams with dedicated
-  `fcrp/2` ALPN, non-loopback TLS enforcement, reloadable current/previous
+  `fcrp/3` ALPN, non-loopback TLS enforcement, reloadable current/previous
   token files, and redacted replication configuration output.
 - Bounded FCRP snapshot receive memory and reject reordered, interleaved, or
   watermark-inconsistent bootstrap frames in both blocking and Monoio paths.
@@ -42,6 +42,12 @@
 
 ### Fixed
 
+- Made object-overflow generation entropy and required background-thread
+  creation return startup errors instead of panicking. Filesystem generation
+  cleanup now performs one bounded traversal per prefix rather than rescanning
+  the complete tree for each page. S3 overflow accepts a bounded private-CA PEM
+  bundle, preserves certificate verification, classifies live authentication
+  failures, and emits configured SSE-S3 headers.
 - Return native SCNP value, integer, and array responses for typed `PING`,
   `VADD`, `VREM`, and `VSIM` requests instead of wrapping RESP bytes.
 - Route vector opcodes consistently to the dedicated vector shard on fanout and
@@ -55,8 +61,8 @@
 - Reject malformed or allocation-amplifying vector state at RESTORE and FCRP
   ingress, bound vector dimensions and HNSW parameters, account decoded heap
   state in the vector cache, and cap unauthenticated FCRP Hello allocation.
-- Bumped native read-replica FCRP to v2. Version 0.7.2 peers fail closed when
-  connected to pre-governance FCRP peers; mixed 0.7.1/0.7.2 replication is not
+- Bumped native read-replica FCRP to v3. Version 0.8.0 peers fail closed when
+  connected to earlier FCRP peers; mixed-version replication is not
   supported.
 - Reject out-of-range mutation shards, sequence gaps, inconsistent key hashes
   and tags, duplicate snapshot keys, and changing replica topology without
@@ -76,6 +82,36 @@
 - Enforce blocking FCRP deadlines with bounded socket polling, size snapshot
   chunks from their exact encoded payloads, and reject frame-limit settings
   that cannot accommodate configured batches or snapshot chunks.
+- Make FCRP snapshot providers fallible so an object-overflow fetch failure
+  disconnects bootstrap instead of installing an empty snapshot at current
+  watermarks. Primary bootstrap materialization is serialized to one replica
+  at a time to bound reconnect-storm memory amplification.
+- Advertise replica frame capacity during the FCRP v3 handshake and reject
+  peers whose limit cannot accept the primary's configured outbound frames.
+  Batch builders now preflush before crossing record or byte targets and all
+  encoded frames are checked before entering the backlog.
+- Enforce one deadline across each complete blocking FCRP write, even when a
+  slow peer continues making partial progress.
+- Reject point and vector mutations that cannot fit one configured FCRP frame
+  before modifying local state or allocating a sequence number.
+- Stream primary bootstrap one source shard at a time and enforce one total
+  capture-and-delivery deadline, preventing full-cache duplication and slow
+  replicas from monopolizing bootstrap indefinitely.
+- Require the replication listener and primary exporter to use the same frame
+  limit, eliminating successful handshakes that could later emit larger frames.
+- Fall back to an uncompressed FCRP frame when zstd expands an admitted
+  mutation batch or snapshot chunk beyond the negotiated receive limit.
+- Make object-overflow GET and governed GET materialize cold values on the
+  first request without holding a shard lock. Fallible embedded APIs and the
+  RESP/SCNP server paths now distinguish backend failures from cache misses.
+- Reject object-overflow runtime replacement while remote or pending entries
+  still depend on it, and make snapshots and entry visitors propagate cold
+  materialization failures instead of silently omitting values.
+- Harden filesystem overflow with descriptor-relative no-follow operations,
+  bounded reads, prefix-scoped paginated cleanup, validated generation
+  markers, and heartbeat scheduling independent of cleanup cadence.
+- Correct the filesystem overflow benchmark to wait for acknowledged remote
+  state before timing offload and fault-in operations.
 
 ## 0.7.1 - 2026-07-17
 

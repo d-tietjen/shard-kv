@@ -7,7 +7,7 @@ use crate::commands::redis::{
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
 use crate::server::wire::ServerWire;
-use crate::storage::{EmbeddedStore, RedisObjectError};
+use crate::storage::{EmbeddedStore, RedisKeyError};
 
 define_redis_command!(Rename, "RENAME", true);
 
@@ -28,8 +28,11 @@ pub(crate) fn execute_rename(store: &EmbeddedStore, args: &[&[u8]], nx: bool) ->
             Ok(true) if nx => int(1),
             Ok(false) if nx => int(0),
             Ok(_) => simple("OK"),
-            Err(RedisObjectError::MissingKey) => crate::commands::redis::error("ERR no such key"),
-            Err(RedisObjectError::WrongType) => wrongtype(),
+            Err(RedisKeyError::MissingKey) => crate::commands::redis::error("ERR no such key"),
+            Err(RedisKeyError::WrongType) => wrongtype(),
+            Err(RedisKeyError::ReplicationLimit) => {
+                crate::commands::redis::error("ERR vector state exceeds replication frame limit")
+            }
         },
         _ => wrong_arity(if nx { "RENAMENX" } else { "RENAME" }),
     }
@@ -47,10 +50,12 @@ pub(crate) fn write_rename_resp(
             Ok(true) if nx => ServerWire::write_resp_integer(out, 1),
             Ok(false) if nx => ServerWire::write_resp_integer(out, 0),
             Ok(_) => write_resp_simple_string(out, "OK"),
-            Err(RedisObjectError::MissingKey) => {
-                ServerWire::write_resp_error(out, "ERR no such key")
-            }
-            Err(RedisObjectError::WrongType) => write_frame(out, &wrongtype()),
+            Err(RedisKeyError::MissingKey) => ServerWire::write_resp_error(out, "ERR no such key"),
+            Err(RedisKeyError::WrongType) => write_frame(out, &wrongtype()),
+            Err(RedisKeyError::ReplicationLimit) => ServerWire::write_resp_error(
+                out,
+                "ERR vector state exceeds replication frame limit",
+            ),
         },
         _ => write_frame(out, &wrong_arity(if nx { "RENAMENX" } else { "RENAME" })),
     }

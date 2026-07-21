@@ -167,6 +167,12 @@ impl FlatMap {
     ) {
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
+        #[cfg(feature = "telemetry")]
+        let start = self.start_telemetry_latency_sample();
+        #[cfg(feature = "telemetry")]
+        let written_len = value.len();
+        #[cfg(feature = "telemetry")]
+        let (key_delta, memory_delta): (isize, isize);
         let mut governance = governance;
         let access_tick = if self.eviction_policy == EvictionPolicy::None {
             0
@@ -190,6 +196,11 @@ impl FlatMap {
                 entry.clear_semantic_embedding();
                 entry.governance = governance.take();
                 entry.access.record_access(access_tick);
+                #[cfg(feature = "telemetry")]
+                {
+                    key_delta = 0;
+                    memory_delta = entry.stored_bytes() as isize - previous_entry_bytes as isize;
+                }
                 self.stored_bytes = self
                     .stored_bytes
                     .saturating_sub(previous_entry_bytes)
@@ -223,12 +234,21 @@ impl FlatMap {
                     .saturating_add(key_len)
                     .saturating_add(value_len)
                     .saturating_add(governance_len);
+                #[cfg(feature = "telemetry")]
+                {
+                    key_delta = 1;
+                    memory_delta = key_len
+                        .saturating_add(value_len)
+                        .saturating_add(governance_len) as isize;
+                }
                 if expire_at_ms.is_some() {
                     self.ttl_entries = self.ttl_entries.saturating_add(1);
                 }
             }
         }
 
+        #[cfg(feature = "telemetry")]
+        self.record_set_metrics(written_len, key_delta, memory_delta, start);
         self.enforce_memory_limit(now_ms);
     }
 

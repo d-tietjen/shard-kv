@@ -39,6 +39,9 @@ impl crate::commands::redis::RedisCommand for GetDel {
                 }
                 RedisStringLookup::Miss => write_resp_null(out),
                 RedisStringLookup::WrongType => write_resp_wrongtype(out),
+                RedisStringLookup::BackendError => {
+                    ServerWire::write_resp_error(out, "ERR object overflow read failed")
+                }
             },
             _ => write_resp_wrong_arity(out, "GETDEL"),
         }

@@ -37,9 +37,10 @@ mod monoio_transport;
 const FRAME_HEADER_LEN: usize = 16;
 const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 const MAX_SOCKET_READ_POLL_MS: u64 = 200;
+const MAX_SOCKET_WRITE_POLL_MS: u64 = 50;
 const MAX_HELLO_FRAME_BYTES: usize = 128 * 1024;
 #[cfg(feature = "scnp-tls")]
-const FCRP_ALPN: &[u8] = b"fcrp/2";
+const FCRP_ALPN: &[u8] = b"fcrp/3";
 
 trait ReplicationIo: Read + Write {}
 impl<T: Read + Write> ReplicationIo for T {}
@@ -138,7 +139,7 @@ fn wrap_server_stream(
             || connection.alpn_protocol() != Some(FCRP_ALPN)
         {
             return Err(ShardCacheError::Protocol(
-                "replication TLS requires TLS 1.3 and fcrp/2 ALPN".into(),
+                "replication TLS requires TLS 1.3 and fcrp/3 ALPN".into(),
             ));
         }
         authorize_replication_client_certificate(&connection, &config.tls_server)?;
@@ -362,7 +363,7 @@ fn wrap_client_stream(
             || connection.alpn_protocol() != Some(FCRP_ALPN)
         {
             return Err(ShardCacheError::Protocol(
-                "replication TLS requires TLS 1.3 and fcrp/2 ALPN".into(),
+                "replication TLS requires TLS 1.3 and fcrp/3 ALPN".into(),
             ));
         }
         socket
@@ -374,14 +375,86 @@ fn wrap_client_stream(
 
 /// Provides consistent snapshots to the replication transport.
 pub trait SnapshotProvider: Send + Sync + 'static {
-    /// Returns a consistent snapshot together with the watermarks captured at
-    /// the same logical point.
-    fn snapshot(&self) -> super::protocol::ReplicationSnapshot;
+    /// Flushes replication and returns the source-shard watermarks anchoring
+    /// the snapshot stream.
+    fn snapshot_watermarks(&self) -> Result<ShardWatermarks>;
+
+    /// Lazily materializes one source shard after the watermarks were captured.
+    fn snapshot_shard<'a>(
+        &'a self,
+        shard_id: usize,
+        page_bytes: usize,
+        key_index_max_bytes: usize,
+        deadline: Instant,
+    ) -> Result<Box<dyn Iterator<Item = Result<StoredEntry>> + 'a>>;
 }
 
 impl SnapshotProvider for ReplicatedEmbeddedStore {
-    fn snapshot(&self) -> super::protocol::ReplicationSnapshot {
-        ReplicatedEmbeddedStore::snapshot(self)
+    fn snapshot_watermarks(&self) -> Result<ShardWatermarks> {
+        Ok(ReplicatedEmbeddedStore::snapshot_watermarks(self))
+    }
+
+    fn snapshot_shard<'a>(
+        &'a self,
+        shard_id: usize,
+        page_bytes: usize,
+        key_index_max_bytes: usize,
+        deadline: Instant,
+    ) -> Result<Box<dyn Iterator<Item = Result<StoredEntry>> + 'a>> {
+        ReplicatedEmbeddedStore::snapshot_shard_iter(
+            self,
+            shard_id,
+            page_bytes,
+            key_index_max_bytes,
+            deadline,
+        )
+        .map(|entries| Box::new(entries) as Box<dyn Iterator<Item = Result<StoredEntry>>>)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct SnapshotGate {
+    active: AtomicBool,
+}
+
+#[derive(Debug)]
+pub(super) struct SnapshotPermit {
+    gate: Arc<SnapshotGate>,
+}
+
+impl SnapshotGate {
+    pub(super) fn try_acquire(self: &Arc<Self>) -> Option<SnapshotPermit> {
+        self.active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| SnapshotPermit {
+                gate: Arc::clone(self),
+            })
+    }
+
+    fn acquire_blocking(
+        self: &Arc<Self>,
+        stop: &Arc<AtomicBool>,
+        deadline: Instant,
+    ) -> Result<SnapshotPermit> {
+        while !stop.load(Ordering::SeqCst) {
+            if let Some(permit) = self.try_acquire() {
+                return Ok(permit);
+            }
+            if Instant::now() >= deadline {
+                return Err(snapshot_bootstrap_timeout());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Err(ShardCacheError::TaskJoin(
+            "replication stopped while waiting for snapshot bootstrap".into(),
+        ))
+    }
+}
+
+impl Drop for SnapshotPermit {
+    fn drop(&mut self) {
+        self.gate.active.store(false, Ordering::Release);
     }
 }
 
@@ -404,18 +477,27 @@ impl ReplicationPrimaryServer {
                 "replication primary server requires replication.enabled = true".into(),
             ));
         }
+        super::validate_frame_limits(&config)?;
+        if config.receive_max_frame_bytes != primary.receive_max_frame_bytes() {
+            return Err(ShardCacheError::Config(format!(
+                "replication listener frame limit {} does not match primary exporter frame limit {}",
+                config.receive_max_frame_bytes,
+                primary.receive_max_frame_bytes()
+            )));
+        }
         validate_replication_credentials(&config)?;
         #[cfg(feature = "scnp-tls")]
         if config.tls_server.enabled {
             let _ = build_replication_server_tls_config(&config.tls_server)?;
         }
+        let snapshot_gate = Arc::new(SnapshotGate::default());
         #[cfg(all(target_os = "linux", feature = "monoio"))]
         if monoio_transport::should_use()
             && !config.tls_server.enabled
             && config.auth_token_path.is_none()
             && config.previous_auth_token_path.is_none()
         {
-            return monoio_transport::start_primary(config, primary, snapshots);
+            return monoio_transport::start_primary(config, primary, snapshots, snapshot_gate);
         }
 
         let listener = TcpListener::bind(&config.bind_addr).map_err(|error| {
@@ -439,7 +521,9 @@ impl ReplicationPrimaryServer {
         let cfg = config;
         let join = thread::Builder::new()
             .name("shardcache-replication-listener".into())
-            .spawn(move || run_listener(listener, cfg, primary, snapshots, stop_clone))
+            .spawn(move || {
+                run_listener(listener, cfg, primary, snapshots, snapshot_gate, stop_clone)
+            })
             .map_err(|error| {
                 ShardCacheError::Config(format!("failed to start replication listener: {error}"))
             })?;
@@ -478,6 +562,7 @@ fn run_listener(
     config: ReplicationConfig,
     primary: Arc<ReplicationPrimary>,
     snapshots: Arc<dyn SnapshotProvider>,
+    snapshot_gate: Arc<SnapshotGate>,
     stop: Arc<AtomicBool>,
 ) {
     let active = Arc::new(parking_lot::Mutex::new(Vec::<JoinHandle<()>>::new()));
@@ -506,13 +591,20 @@ fn run_listener(
                 let cfg = config.clone();
                 let primary = Arc::clone(&primary);
                 let snapshots = Arc::clone(&snapshots);
+                let snapshot_gate = Arc::clone(&snapshot_gate);
                 let stop = Arc::clone(&stop);
                 let handle = thread::Builder::new()
                     .name(format!("shardcache-replication-worker-{peer}"))
                     .spawn(move || {
-                        if let Err(error) =
-                            serve_replica(stream, peer, cfg, primary, snapshots, stop)
-                        {
+                        if let Err(error) = serve_replica(
+                            stream,
+                            peer,
+                            cfg,
+                            primary,
+                            snapshots,
+                            snapshot_gate,
+                            stop,
+                        ) {
                             tracing::warn!("replication worker for {peer} terminated: {error}");
                         }
                     });
@@ -543,14 +635,16 @@ fn serve_replica(
     config: ReplicationConfig,
     primary: Arc<ReplicationPrimary>,
     snapshots: Arc<dyn SnapshotProvider>,
+    snapshot_gate: Arc<SnapshotGate>,
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
+    let write_timeout = Duration::from_millis(config.write_timeout_ms.max(1));
     stream.set_nodelay(true).ok();
     stream
         .set_read_timeout(Some(frame_read_poll_timeout(&config)))
         .ok();
     stream
-        .set_write_timeout(Some(Duration::from_millis(config.write_timeout_ms.max(1))))
+        .set_write_timeout(Some(frame_write_poll_timeout(&config)))
         .ok();
 
     if config.tls_server.enabled {
@@ -572,7 +666,7 @@ fn serve_replica(
     };
     let frame = decode_frame(&hello_frame)?;
     if frame.kind != FrameKind::Hello {
-        send_error(&mut stream, "expected Hello frame")?;
+        send_error(&mut stream, "expected Hello frame", write_timeout)?;
         return Err(ShardCacheError::Protocol(format!(
             "replica {peer} sent {:?} before Hello",
             frame.kind
@@ -580,16 +674,28 @@ fn serve_replica(
     }
     let hello = decode_hello(&frame.payload)?;
     if hello.version != FCRP_VERSION {
-        send_error(&mut stream, "unsupported FCRP version")?;
+        send_error(&mut stream, "unsupported FCRP version", write_timeout)?;
         return Err(ShardCacheError::Protocol(format!(
             "replica {peer} requested FCRP version {}",
             hello.version
         )));
     }
     if hello.role != HelloRole::Replica {
-        send_error(&mut stream, "invalid replication Hello role")?;
+        send_error(&mut stream, "invalid replication Hello role", write_timeout)?;
         return Err(ShardCacheError::Protocol(format!(
             "replica {peer} sent an invalid Hello role"
+        )));
+    }
+    let peer_receive_max = hello.receive_max_frame_bytes as usize;
+    if peer_receive_max < config.receive_max_frame_bytes {
+        send_error(
+            &mut stream,
+            "replica receive frame limit is smaller than the primary outbound limit",
+            write_timeout,
+        )?;
+        return Err(ShardCacheError::Protocol(format!(
+            "replica {peer} receive frame limit {peer_receive_max} is smaller than primary outbound limit {}",
+            config.receive_max_frame_bytes
         )));
     }
     if hello
@@ -597,7 +703,11 @@ fn serve_replica(
         .as_ref()
         .is_some_and(|watermarks| watermarks.as_slice().len() != primary.shard_count())
     {
-        send_error(&mut stream, "replica shard topology does not match primary")?;
+        send_error(
+            &mut stream,
+            "replica shard topology does not match primary",
+            write_timeout,
+        )?;
         return Err(ShardCacheError::Protocol(format!(
             "replica {peer} sent {} watermarks for a {}-shard primary",
             hello
@@ -608,7 +718,7 @@ fn serve_replica(
         )));
     }
     if !replication_auth_ok(&config, hello.auth_token.as_deref())? {
-        send_error(&mut stream, "invalid auth token")?;
+        send_error(&mut stream, "invalid auth token", write_timeout)?;
         return Err(ShardCacheError::Protocol(format!(
             "replica {peer} sent invalid auth token"
         )));
@@ -618,6 +728,7 @@ fn serve_replica(
         role: HelloRole::Primary,
         auth_token: None,
         since: Some(primary.current_watermarks()),
+        receive_max_frame_bytes: config.receive_max_frame_bytes as u32,
     };
     write_full_frame(
         &mut stream,
@@ -625,6 +736,7 @@ fn serve_replica(
         ReplicationCompressionMode::None,
         0,
         &encode_hello(&ack),
+        write_timeout,
     )?;
 
     // Subscribe BEFORE deciding whether to snapshot, so we don't drop frames
@@ -635,27 +747,43 @@ fn serve_replica(
         .since
         .clone()
         .unwrap_or_else(|| ShardWatermarks::new(primary.shard_count()));
-    let live_start = match primary.catch_up_since(&since)? {
+    let (live_start, bootstrap_deadline) = match primary.catch_up_since(&since)? {
         BacklogCatchUp::Available(frames) => {
             for frame in &frames {
-                write_raw(&mut stream, frame.as_ref())?;
+                write_raw(&mut stream, frame.as_ref(), write_timeout)?;
             }
-            primary.current_watermarks()
+            (primary.current_watermarks(), None)
         }
         BacklogCatchUp::NeedsSnapshot => {
-            let snapshot = snapshots.snapshot();
-            stream_snapshot(&mut stream, &snapshot, &config)?;
-            snapshot.watermarks
+            let bootstrap_deadline =
+                Instant::now() + Duration::from_millis(config.snapshot_bootstrap_timeout_ms.max(1));
+            let _permit = snapshot_gate.acquire_blocking(&stop, bootstrap_deadline)?;
+            let watermarks = stream_snapshot(
+                &mut stream,
+                snapshots.as_ref(),
+                &config,
+                peer_receive_max,
+                write_timeout,
+                bootstrap_deadline,
+            )?;
+            (watermarks, Some(bootstrap_deadline))
         }
     };
 
     // Drain any frames that were broadcast while we were sending the
     // snapshot, then enter the steady-state forwarding loop.
-    drain_buffered(&mut stream, &subscription, &live_start, &primary)?;
+    drain_buffered(
+        &mut stream,
+        &subscription,
+        &live_start,
+        &primary,
+        write_timeout,
+        bootstrap_deadline,
+    )?;
 
     while !stop.load(Ordering::SeqCst) {
         match subscription.recv_timeout(Duration::from_millis(100)) {
-            Ok(frame) => write_raw(&mut stream, frame.as_ref())?,
+            Ok(frame) => write_raw(&mut stream, frame.as_ref(), write_timeout)?,
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
@@ -668,10 +796,22 @@ fn drain_buffered(
     subscription: &crossbeam_channel::Receiver<ReplicationFrameBytes>,
     bootstrap_high: &ShardWatermarks,
     primary: &Arc<ReplicationPrimary>,
+    write_timeout: Duration,
+    bootstrap_deadline: Option<Instant>,
 ) -> Result<()> {
     loop {
+        if let Some(deadline) = bootstrap_deadline {
+            ensure_bootstrap_deadline(deadline)?;
+        }
         match subscription.try_recv() {
-            Ok(frame) => write_raw(stream, frame.as_ref())?,
+            Ok(frame) => write_raw(
+                stream,
+                frame.as_ref(),
+                match bootstrap_deadline {
+                    Some(deadline) => bootstrap_write_timeout(deadline, write_timeout)?,
+                    None => write_timeout,
+                },
+            )?,
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => break,
         }
@@ -680,9 +820,19 @@ fn drain_buffered(
     // bootstrap watermarks; the inflight backlog covers that gap.
     if let BacklogCatchUp::Available(frames) = primary.catch_up_since(bootstrap_high)? {
         for frame in frames {
+            if let Some(deadline) = bootstrap_deadline {
+                ensure_bootstrap_deadline(deadline)?;
+            }
             // De-duplication happens on the replica side via per-shard
             // watermark comparison, so re-sending these frames is safe.
-            write_raw(stream, frame.as_ref())?;
+            write_raw(
+                stream,
+                frame.as_ref(),
+                match bootstrap_deadline {
+                    Some(deadline) => bootstrap_write_timeout(deadline, write_timeout)?,
+                    None => write_timeout,
+                },
+            )?;
         }
     }
     Ok(())
@@ -690,22 +840,30 @@ fn drain_buffered(
 
 fn stream_snapshot(
     stream: &mut (impl Read + Write),
-    snapshot: &super::protocol::ReplicationSnapshot,
+    snapshots: &dyn SnapshotProvider,
     config: &ReplicationConfig,
-) -> Result<()> {
+    peer_receive_max: usize,
+    write_timeout: Duration,
+    bootstrap_deadline: Instant,
+) -> Result<ShardWatermarks> {
+    let watermarks = snapshots.snapshot_watermarks()?;
+    ensure_bootstrap_deadline(bootstrap_deadline)?;
     write_full_frame(
         stream,
         FrameKind::SnapshotBegin,
         ReplicationCompressionMode::None,
         0,
-        &encode_ack(&snapshot.watermarks),
+        &encode_ack(&watermarks),
+        bootstrap_write_timeout(bootstrap_deadline, write_timeout)?,
     )?;
 
-    let max_payload_bytes = config.receive_max_frame_bytes.min(MAX_FRAME_BYTES);
+    let max_payload_bytes = peer_receive_max
+        .min(config.receive_max_frame_bytes)
+        .min(MAX_FRAME_BYTES);
     let base_payload_bytes = 8usize
         .checked_add(1)
         .and_then(|value| value.checked_add(4))
-        .and_then(|value| value.checked_add(snapshot.watermarks.as_slice().len().checked_mul(8)?))
+        .and_then(|value| value.checked_add(watermarks.as_slice().len().checked_mul(8)?))
         .and_then(|value| value.checked_add(8))
         .ok_or_else(|| ShardCacheError::Protocol("snapshot chunk size overflow".into()))?;
     if base_payload_bytes > max_payload_bytes {
@@ -720,71 +878,121 @@ fn stream_snapshot(
     let mut chunk_index = 0u64;
     let mut buffer: Vec<crate::storage::StoredEntry> = Vec::new();
     let mut buffer_bytes = base_payload_bytes;
-    let total = snapshot.entries.len();
     let compression = ReplicationCompressionMode::from(config.compression);
+    let mut saw_entry = false;
 
-    for (idx, entry) in snapshot.entries.iter().enumerate() {
-        let entry_bytes = 20usize
-            .checked_add(entry.key.len())
-            .and_then(|value| value.checked_add(entry.value.len()))
-            .and_then(|value| {
-                value.checked_add(entry.governance.as_ref().map_or(0, |value| value.len()))
-            })
-            .ok_or_else(|| ShardCacheError::Protocol("snapshot entry size overflow".into()))?;
-        if entry_bytes > max_payload_bytes.saturating_sub(base_payload_bytes) {
-            return Err(ShardCacheError::Protocol(format!(
-                "replication snapshot entry exceeds receive frame limit {max_payload_bytes}"
-            )));
-        }
-        if !buffer.is_empty() && buffer_bytes.saturating_add(entry_bytes) > target {
-            write_snapshot_chunk(
-                stream,
-                &snapshot.watermarks,
-                chunk_index,
-                false,
-                std::mem::take(&mut buffer),
-                compression,
-                config.zstd_level,
-            )?;
-            chunk_index += 1;
-            buffer_bytes = base_payload_bytes;
-        }
-        buffer.push(entry.clone());
-        buffer_bytes = buffer_bytes.saturating_add(entry_bytes);
-        let is_last_entry = idx + 1 == total;
-        if buffer_bytes >= target || is_last_entry {
-            write_snapshot_chunk(
-                stream,
-                &snapshot.watermarks,
-                chunk_index,
-                is_last_entry,
-                std::mem::take(&mut buffer),
-                compression,
-                config.zstd_level,
-            )?;
-            chunk_index += 1;
-            buffer_bytes = base_payload_bytes;
-        }
-    }
-    if total == 0 {
-        write_snapshot_chunk(
-            stream,
-            &snapshot.watermarks,
-            0,
-            true,
-            Vec::new(),
-            ReplicationCompressionMode::None,
-            0,
+    for shard_id in 0..watermarks.as_slice().len() {
+        let entries = snapshots.snapshot_shard(
+            shard_id,
+            target,
+            config.snapshot_receive_max_bytes,
+            bootstrap_deadline,
         )?;
+        ensure_bootstrap_deadline(bootstrap_deadline)?;
+        for entry in entries {
+            let entry = entry?;
+            ensure_bootstrap_deadline(bootstrap_deadline)?;
+            saw_entry = true;
+            let entry_bytes = 20usize
+                .checked_add(entry.key.len())
+                .and_then(|value| value.checked_add(entry.value.len()))
+                .and_then(|value| {
+                    value.checked_add(entry.governance.as_ref().map_or(0, |value| value.len()))
+                })
+                .ok_or_else(|| ShardCacheError::Protocol("snapshot entry size overflow".into()))?;
+            if entry_bytes > max_payload_bytes.saturating_sub(base_payload_bytes) {
+                return Err(ShardCacheError::Protocol(format!(
+                    "replication snapshot entry exceeds receive frame limit {max_payload_bytes}"
+                )));
+            }
+            if !buffer.is_empty() && buffer_bytes.saturating_add(entry_bytes) > target {
+                write_snapshot_chunk(
+                    stream,
+                    &watermarks,
+                    chunk_index,
+                    false,
+                    std::mem::take(&mut buffer),
+                    SnapshotChunkWrite {
+                        compression,
+                        zstd_level: config.zstd_level,
+                        timeout: bootstrap_write_timeout(bootstrap_deadline, write_timeout)?,
+                    },
+                )?;
+                chunk_index += 1;
+                buffer_bytes = base_payload_bytes;
+            }
+            buffer.push(entry);
+            buffer_bytes = buffer_bytes.saturating_add(entry_bytes);
+            if buffer_bytes >= target {
+                write_snapshot_chunk(
+                    stream,
+                    &watermarks,
+                    chunk_index,
+                    false,
+                    std::mem::take(&mut buffer),
+                    SnapshotChunkWrite {
+                        compression,
+                        zstd_level: config.zstd_level,
+                        timeout: bootstrap_write_timeout(bootstrap_deadline, write_timeout)?,
+                    },
+                )?;
+                chunk_index += 1;
+                buffer_bytes = base_payload_bytes;
+            }
+        }
     }
+    write_snapshot_chunk(
+        stream,
+        &watermarks,
+        chunk_index,
+        true,
+        std::mem::take(&mut buffer),
+        SnapshotChunkWrite {
+            compression: if saw_entry {
+                compression
+            } else {
+                ReplicationCompressionMode::None
+            },
+            zstd_level: config.zstd_level,
+            timeout: bootstrap_write_timeout(bootstrap_deadline, write_timeout)?,
+        },
+    )?;
     write_full_frame(
         stream,
         FrameKind::SnapshotEnd,
         ReplicationCompressionMode::None,
         0,
-        &encode_ack(&snapshot.watermarks),
+        &encode_ack(&watermarks),
+        bootstrap_write_timeout(bootstrap_deadline, write_timeout)?,
     )?;
-    Ok(())
+    Ok(watermarks)
+}
+
+fn snapshot_bootstrap_timeout() -> ShardCacheError {
+    ShardCacheError::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "replication snapshot bootstrap deadline exceeded",
+    ))
+}
+
+fn ensure_bootstrap_deadline(deadline: Instant) -> Result<()> {
+    (Instant::now() < deadline)
+        .then_some(())
+        .ok_or_else(snapshot_bootstrap_timeout)
+}
+
+fn bootstrap_write_timeout(deadline: Instant, per_frame: Duration) -> Result<Duration> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(snapshot_bootstrap_timeout)?;
+    Ok(remaining.min(per_frame).max(Duration::from_millis(1)))
+}
+
+#[derive(Clone, Copy)]
+struct SnapshotChunkWrite {
+    compression: ReplicationCompressionMode,
+    zstd_level: i32,
+    timeout: Duration,
 }
 
 fn write_snapshot_chunk(
@@ -793,8 +1001,7 @@ fn write_snapshot_chunk(
     chunk_index: u64,
     is_last: bool,
     entries: Vec<crate::storage::StoredEntry>,
-    compression: ReplicationCompressionMode,
-    zstd_level: i32,
+    write: SnapshotChunkWrite,
 ) -> Result<()> {
     let payload = encode_snapshot_chunk(&ReplicationSnapshotChunk {
         watermarks: watermarks.clone(),
@@ -802,22 +1009,28 @@ fn write_snapshot_chunk(
         is_last,
         entries,
     });
-    write_full_frame(
-        stream,
+    let frame = crate::replication::protocol::encode_frame_with_payload_limit(
         FrameKind::SnapshotChunk,
-        compression,
-        zstd_level,
+        write.compression,
+        write.zstd_level,
         &payload,
-    )
+        payload.len(),
+    )?;
+    write_raw(stream, &frame, write.timeout)
 }
 
-fn send_error(stream: &mut (impl Read + Write), message: &str) -> Result<()> {
+fn send_error(
+    stream: &mut (impl Read + Write),
+    message: &str,
+    write_timeout: Duration,
+) -> Result<()> {
     write_full_frame(
         stream,
         FrameKind::Error,
         ReplicationCompressionMode::None,
         0,
         &encode_error(message),
+        write_timeout,
     )
 }
 
@@ -845,13 +1058,44 @@ fn write_full_frame(
     compression: ReplicationCompressionMode,
     zstd_level: i32,
     payload: &[u8],
+    write_timeout: Duration,
 ) -> Result<()> {
     let frame = encode_frame(kind, compression, zstd_level, payload)?;
-    write_raw(stream, &frame)
+    write_raw(stream, &frame, write_timeout)
 }
 
-fn write_raw(stream: &mut (impl Read + Write), bytes: &[u8]) -> Result<()> {
-    stream.write_all(bytes).map_err(ShardCacheError::Io)
+fn write_raw(stream: &mut (impl Read + Write), mut bytes: &[u8], timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !bytes.is_empty() {
+        if Instant::now() >= deadline {
+            return Err(frame_write_timeout_error());
+        }
+        match stream.write(bytes) {
+            Ok(0) => {
+                return Err(ShardCacheError::Io(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write complete replication frame",
+                )));
+            }
+            Ok(written) => bytes = &bytes[written..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if is_timeout(&error) && Instant::now() < deadline => {}
+            Err(error) if is_timeout(&error) => return Err(frame_write_timeout_error()),
+            Err(error) => return Err(ShardCacheError::Io(error)),
+        }
+    }
+    Ok(())
+}
+
+fn frame_write_timeout_error() -> ShardCacheError {
+    ShardCacheError::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "replication frame write deadline exceeded",
+    ))
+}
+
+fn frame_write_poll_timeout(config: &ReplicationConfig) -> Duration {
+    Duration::from_millis(config.write_timeout_ms.clamp(1, MAX_SOCKET_WRITE_POLL_MS))
 }
 
 fn read_frame_bytes_interruptible_limited(
@@ -984,6 +1228,7 @@ impl ReplicationReplicaClient {
     /// Starts a replica that connects to `config.replica_of`, bootstraps via
     /// snapshot or backlog, and streams live mutations.
     pub fn start(config: ReplicationConfig) -> Result<Self> {
+        super::validate_frame_limits(&config)?;
         if !config.enabled {
             return Err(ShardCacheError::Config(
                 "replication replica requires replication.enabled = true".into(),
@@ -1115,7 +1360,7 @@ fn connect_and_stream(
         .set_read_timeout(Some(frame_read_poll_timeout(config)))
         .ok();
     stream
-        .set_write_timeout(Some(Duration::from_millis(config.write_timeout_ms.max(1))))
+        .set_write_timeout(Some(frame_write_poll_timeout(config)))
         .ok();
 
     let mut stream = wrap_client_stream(stream, config)?;
@@ -1130,6 +1375,7 @@ fn connect_and_stream(
         role: HelloRole::Replica,
         auth_token: current_replication_token(config)?,
         since,
+        receive_max_frame_bytes: config.receive_max_frame_bytes as u32,
     };
     write_full_frame(
         &mut stream,
@@ -1137,6 +1383,7 @@ fn connect_and_stream(
         ReplicationCompressionMode::None,
         0,
         &encode_hello(&hello),
+        Duration::from_millis(config.write_timeout_ms.max(1)),
     )?;
 
     // Read Hello-ack.
@@ -1387,6 +1634,7 @@ fn frame_read_poll_timeout(config: &ReplicationConfig) -> Duration {
 mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
 
     use crate::config::{
@@ -1484,12 +1732,261 @@ mod tests {
             role: HelloRole::Primary,
             auth_token: None,
             since: Some(ShardWatermarks::from_vec(vec![0, 0])),
+            receive_max_frame_bytes: MAX_FRAME_BYTES as u32,
         };
         assert!(validate_primary_hello(&encode_hello(&valid)).is_ok());
 
         let mut invalid = valid;
         invalid.role = HelloRole::Replica;
         assert!(validate_primary_hello(&encode_hello(&invalid)).is_err());
+    }
+
+    #[test]
+    fn hello_rejects_invalid_receive_frame_limits() {
+        let hello = ReplicationHello {
+            version: FCRP_VERSION,
+            role: HelloRole::Replica,
+            auth_token: None,
+            since: None,
+            receive_max_frame_bytes: 1,
+        };
+        assert_eq!(decode_hello(&encode_hello(&hello)).unwrap(), hello);
+
+        let mut encoded = encode_hello(&hello);
+        let frame_limit_offset = encoded.len() - 4;
+        encoded[frame_limit_offset..].copy_from_slice(&0_u32.to_le_bytes());
+        assert!(decode_hello(&encoded).is_err());
+    }
+
+    #[test]
+    fn snapshot_gate_allows_only_one_materialized_bootstrap() {
+        let gate = Arc::new(SnapshotGate::default());
+        let first = gate.try_acquire().expect("first snapshot permit");
+        assert!(gate.try_acquire().is_none());
+        drop(first);
+        assert!(gate.try_acquire().is_some());
+    }
+
+    struct SlowProgressWriter {
+        writes: usize,
+        delay: Duration,
+    }
+
+    impl Read for SlowProgressWriter {
+        fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Write for SlowProgressWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            thread::sleep(self.delay);
+            Ok(1)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn frame_write_deadline_covers_partial_progress() {
+        let mut writer = SlowProgressWriter {
+            writes: 0,
+            delay: Duration::from_millis(8),
+        };
+        let started = Instant::now();
+        let error = write_raw(&mut writer, &[0_u8; 64], Duration::from_millis(20)).unwrap_err();
+        assert!(
+            matches!(error, ShardCacheError::Io(ref io) if io.kind() == io::ErrorKind::TimedOut)
+        );
+        assert!(writer.writes < 64);
+        assert!(started.elapsed() < Duration::from_millis(80));
+    }
+
+    #[derive(Debug)]
+    struct FailingSnapshotProvider {
+        calls: AtomicUsize,
+    }
+
+    impl SnapshotProvider for FailingSnapshotProvider {
+        fn snapshot_watermarks(&self) -> Result<ShardWatermarks> {
+            Ok(ShardWatermarks::new(1))
+        }
+
+        fn snapshot_shard<'a>(
+            &'a self,
+            _shard_id: usize,
+            _page_bytes: usize,
+            _key_index_max_bytes: usize,
+            _deadline: Instant,
+        ) -> Result<Box<dyn Iterator<Item = Result<StoredEntry>> + 'a>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(ShardCacheError::Persistence(
+                "injected overflow materialization failure".into(),
+            ))
+        }
+    }
+
+    #[test]
+    fn snapshot_provider_failure_never_replaces_replica_with_empty_state() {
+        let addr = ephemeral_addr();
+        let mut config = primary_config(&addr, None);
+        config.backlog_bytes = 1;
+        let primary_store =
+            Arc::new(ReplicatedEmbeddedStore::new(1, config.clone()).expect("replicated primary"));
+        primary_store
+            .set(b"cold".to_vec(), b"value".to_vec(), None)
+            .unwrap();
+        let _ = primary_store.metrics_snapshot();
+        let provider = Arc::new(FailingSnapshotProvider {
+            calls: AtomicUsize::new(0),
+        });
+        let server = ReplicationPrimaryServer::start(
+            config,
+            primary_store.primary(),
+            Arc::clone(&provider) as Arc<dyn SnapshotProvider>,
+        )
+        .expect("server");
+        let client = ReplicationReplicaClient::start(replica_config(&addr, None)).expect("replica");
+
+        thread::sleep(Duration::from_millis(250));
+        assert!(provider.calls.load(Ordering::Relaxed) > 0);
+        assert_eq!(
+            client
+                .replica()
+                .lock()
+                .metrics_snapshot()
+                .catch_up_snapshot_count,
+            0
+        );
+        assert!(client.replica().lock().get(b"cold").is_none());
+        client.shutdown().unwrap();
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn primary_rejects_replica_with_smaller_frame_limit() {
+        let addr = ephemeral_addr();
+        let mut server_config = primary_config(&addr, None);
+        server_config.batch_max_bytes = 512;
+        server_config.snapshot_chunk_bytes = 4 * 1024;
+        server_config.receive_max_frame_bytes = 8 * 1024;
+        let primary =
+            Arc::new(ReplicatedEmbeddedStore::new(1, server_config.clone()).expect("primary"));
+        let server = ReplicationPrimaryServer::start(
+            server_config,
+            primary.primary(),
+            Arc::clone(&primary) as Arc<dyn SnapshotProvider>,
+        )
+        .expect("server");
+
+        let mut client_config = replica_config(&addr, None);
+        client_config.batch_max_bytes = 512;
+        client_config.snapshot_chunk_bytes = 4 * 1024;
+        client_config.receive_max_frame_bytes = 4 * 1024;
+        let client = ReplicationReplicaClient::start(client_config).expect("replica loop");
+        primary
+            .set(b"must-not-stream".to_vec(), b"value".to_vec(), None)
+            .unwrap();
+        thread::sleep(Duration::from_millis(250));
+
+        assert!(!client.replica().lock().topology_initialized());
+        assert!(client.replica().lock().get(b"must-not-stream").is_none());
+        client.shutdown().unwrap();
+        server.shutdown().unwrap();
+    }
+
+    #[test]
+    fn listener_rejects_exporter_frame_limit_mismatch() {
+        let addr = ephemeral_addr();
+        let mut exporter_config = primary_config(&addr, None);
+        exporter_config.batch_max_bytes = 512;
+        exporter_config.snapshot_chunk_bytes = 4 * 1024;
+        exporter_config.receive_max_frame_bytes = 8 * 1024;
+        let primary =
+            Arc::new(ReplicatedEmbeddedStore::new(1, exporter_config.clone()).expect("primary"));
+        let mut listener_config = exporter_config;
+        listener_config.receive_max_frame_bytes = 16 * 1024;
+
+        let error = ReplicationPrimaryServer::start(
+            listener_config,
+            primary.primary(),
+            Arc::clone(&primary) as Arc<dyn SnapshotProvider>,
+        )
+        .expect_err("mismatched listener");
+        assert!(matches!(error, ShardCacheError::Config(_)));
+    }
+
+    #[derive(Debug)]
+    struct SlowSnapshotProvider;
+
+    impl SnapshotProvider for SlowSnapshotProvider {
+        fn snapshot_watermarks(&self) -> Result<ShardWatermarks> {
+            Ok(ShardWatermarks::new(1))
+        }
+
+        fn snapshot_shard<'a>(
+            &'a self,
+            _shard_id: usize,
+            _page_bytes: usize,
+            _key_index_max_bytes: usize,
+            _deadline: Instant,
+        ) -> Result<Box<dyn Iterator<Item = Result<StoredEntry>> + 'a>> {
+            thread::sleep(Duration::from_millis(20));
+            Ok(Box::new(std::iter::empty()))
+        }
+    }
+
+    #[test]
+    fn snapshot_bootstrap_has_a_total_deadline() {
+        let mut output = io::Cursor::new(Vec::new());
+        let config = ReplicationConfig {
+            snapshot_chunk_bytes: 4 * 1024,
+            receive_max_frame_bytes: 8 * 1024,
+            ..ReplicationConfig::default()
+        };
+        let error = stream_snapshot(
+            &mut output,
+            &SlowSnapshotProvider,
+            &config,
+            config.receive_max_frame_bytes,
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_millis(5),
+        )
+        .expect_err("bootstrap timeout");
+        assert!(
+            matches!(error, ShardCacheError::Io(ref io) if io.kind() == io::ErrorKind::TimedOut)
+        );
+    }
+
+    #[test]
+    fn snapshot_deadline_also_covers_buffered_catch_up() {
+        let config = primary_config("127.0.0.1:0", None);
+        let primary = Arc::new(ReplicationPrimary::start(1, config).expect("primary"));
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        sender
+            .send(ReplicationFrameBytes::from(bytes::Bytes::from_static(
+                b"frame",
+            )))
+            .expect("queue frame");
+        let mut output = io::Cursor::new(Vec::new());
+
+        let error = drain_buffered(
+            &mut output,
+            &receiver,
+            &ShardWatermarks::new(1),
+            &primary,
+            Duration::from_secs(1),
+            Some(Instant::now()),
+        )
+        .expect_err("expired bootstrap deadline");
+
+        assert!(
+            matches!(error, ShardCacheError::Io(ref io) if io.kind() == io::ErrorKind::TimedOut)
+        );
+        assert!(output.into_inner().is_empty());
     }
 
     fn ephemeral_addr() -> String {
@@ -1556,8 +2053,12 @@ mod tests {
         .expect("server");
         let client = ReplicationReplicaClient::start(replica_config(&addr, None)).expect("replica");
 
-        primary.set(b"alpha".to_vec(), b"one".to_vec(), None);
-        primary.set(b"beta".to_vec(), b"two".to_vec(), None);
+        primary
+            .set(b"alpha".to_vec(), b"one".to_vec(), None)
+            .unwrap();
+        primary
+            .set(b"beta".to_vec(), b"two".to_vec(), None)
+            .unwrap();
         assert_eq!(
             await_value(&client, b"alpha", Duration::from_secs(3)),
             Some(b"one".to_vec())
@@ -1579,7 +2080,9 @@ mod tests {
         );
         // Populate before the replica connects.
         for i in 0..32 {
-            primary.set(format!("key-{i}").into_bytes(), b"v".to_vec(), None);
+            primary
+                .set(format!("key-{i}").into_bytes(), b"v".to_vec(), None)
+                .unwrap();
         }
         thread::sleep(Duration::from_millis(20));
         let mut tight_cfg = primary_config(&addr, None);
@@ -1587,7 +2090,9 @@ mod tests {
         let primary =
             Arc::new(ReplicatedEmbeddedStore::new(2, tight_cfg.clone()).expect("primary2"));
         for i in 0..32 {
-            primary.set(format!("key-{i}").into_bytes(), b"v".to_vec(), None);
+            primary
+                .set(format!("key-{i}").into_bytes(), b"v".to_vec(), None)
+                .unwrap();
         }
         let server = ReplicationPrimaryServer::start(
             tight_cfg,
@@ -1626,7 +2131,9 @@ mod tests {
         // client retries; we just confirm no data leaks.
         let client = ReplicationReplicaClient::start(replica_config(&addr, Some("wrong")))
             .expect("client-start");
-        primary.set(b"alpha".to_vec(), b"one".to_vec(), None);
+        primary
+            .set(b"alpha".to_vec(), b"one".to_vec(), None)
+            .unwrap();
         thread::sleep(Duration::from_millis(200));
         assert!(client.replica().lock().get(b"alpha").is_none());
         client.shutdown().ok();
@@ -1779,7 +2286,9 @@ mod tests {
         let mut old_config = replica_config(&addr, None);
         old_config.auth_token_path = Some(old_client_token.clone());
         let old_client = ReplicationReplicaClient::start(old_config.clone()).expect("old client");
-        primary.set(b"during-overlap".to_vec(), b"accepted".to_vec(), None);
+        primary
+            .set(b"during-overlap".to_vec(), b"accepted".to_vec(), None)
+            .unwrap();
         assert_eq!(
             await_value(&old_client, b"during-overlap", Duration::from_secs(3)),
             Some(b"accepted".to_vec())
@@ -1788,7 +2297,9 @@ mod tests {
 
         std::fs::write(&previous, "retired-secret\n").unwrap();
         let rejected = ReplicationReplicaClient::start(old_config).expect("rejected client loop");
-        primary.set(b"after-retirement".to_vec(), b"hidden".to_vec(), None);
+        primary
+            .set(b"after-retirement".to_vec(), b"hidden".to_vec(), None)
+            .unwrap();
         thread::sleep(Duration::from_millis(300));
         assert!(rejected.replica().lock().get(b"after-retirement").is_none());
         rejected.shutdown().unwrap();
@@ -1882,7 +2393,9 @@ mod tests {
             server_name: Some("localhost".into()),
         };
         let client = ReplicationReplicaClient::start(client_config.clone()).expect("TLS client");
-        primary.set(b"encrypted".to_vec(), b"replicated".to_vec(), None);
+        primary
+            .set(b"encrypted".to_vec(), b"replicated".to_vec(), None)
+            .unwrap();
         assert_eq!(
             await_value(&client, b"encrypted", Duration::from_secs(3)),
             Some(b"replicated".to_vec())
@@ -1892,7 +2405,9 @@ mod tests {
         std::fs::write(&client_cert_path, unauthorized_cert.pem()).unwrap();
         std::fs::write(&client_key_path, unauthorized_key.serialize_pem()).unwrap();
         let rejected = ReplicationReplicaClient::start(client_config).expect("rejected TLS loop");
-        primary.set(b"pinned".to_vec(), b"must-not-replicate".to_vec(), None);
+        primary
+            .set(b"pinned".to_vec(), b"must-not-replicate".to_vec(), None)
+            .unwrap();
         thread::sleep(Duration::from_millis(300));
         assert!(rejected.replica().lock().get(b"pinned").is_none());
         rejected.shutdown().unwrap();

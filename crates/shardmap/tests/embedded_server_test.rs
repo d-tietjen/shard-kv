@@ -603,7 +603,9 @@ async fn replicated_embedded_store_can_serve_read_replica() {
     let primary = Arc::new(
         ReplicatedEmbeddedStore::new(4, primary_config.clone()).expect("replicated primary"),
     );
-    primary.set(b"before-connect".to_vec(), b"snapshot-value".to_vec(), None);
+    primary
+        .set(b"before-connect".to_vec(), b"snapshot-value".to_vec(), None)
+        .unwrap();
 
     let server = primary
         .serve_replicas(primary_config)
@@ -622,7 +624,9 @@ async fn replicated_embedded_store_can_serve_read_replica() {
         Some(b"snapshot-value".to_vec())
     );
 
-    primary.set(b"after-connect".to_vec(), b"streamed-value".to_vec(), None);
+    primary
+        .set(b"after-connect".to_vec(), b"streamed-value".to_vec(), None)
+        .unwrap();
     assert_eq!(
         await_replica_value(&replica, b"after-connect", Duration::from_secs(3)),
         Some(b"streamed-value".to_vec())

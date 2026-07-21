@@ -265,14 +265,14 @@ impl<const SHARDS: usize> SharedCache<SHARDS> {
         self.inner.visit_string_keys(visitor);
     }
 
-    /// Visits currently live point entries without cloning keys or values.
-    ///
-    /// The visitor receives `(key, value, expire_at_ms)` while each shard read
-    /// lock is held. Keep callbacks lightweight, and return `false` to stop
-    /// early.
+    /// Visits currently live point entries, materializing cold values outside
+    /// shard locks and returning an error if materialization fails.
     #[inline(always)]
-    pub fn visit_entries(&self, visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool) {
-        self.inner.visit_string_entries(visitor);
+    pub fn visit_entries(
+        &self,
+        visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
+    ) -> crate::Result<()> {
+        self.inner.visit_string_entries(visitor)
     }
 
     /// Inserts or replaces a point-key value without a TTL.

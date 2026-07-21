@@ -462,7 +462,9 @@ fn run_replicated(
         .enumerate()
         .take(args.key_count.min(10_000))
     {
-        store.set(key.clone(), values.value_for(key_index).to_vec(), None);
+        store
+            .set(key.clone(), values.value_for(key_index).to_vec(), None)
+            .expect("replicated prepopulation");
     }
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -497,7 +499,9 @@ fn run_replicated(
         {
             let store = Arc::clone(&store);
             move |key, value| {
-                store.set(key.to_vec(), value.to_vec(), None);
+                store
+                    .set(key.to_vec(), value.to_vec(), None)
+                    .expect("replicated benchmark write");
             }
         },
     )?;

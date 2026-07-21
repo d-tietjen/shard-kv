@@ -1,11 +1,16 @@
-#[cfg(feature = "object-overflow")]
-use super::ObjectOverflowBackend;
 use super::{
     EvictionPolicy, KvOverflowConfig, ObjectOverflowConfig, PersistenceConfig, ReplicationConfig,
     ReplicationRole, ServerEndpointMode, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
 };
 #[cfg(feature = "kv-overflow")]
 use super::{KvOverflowBackend, KvOverflowCompression, MAX_KV_OVERFLOW_SLOT_COUNT};
+#[cfg(feature = "object-overflow")]
+use super::{
+    MAX_OBJECT_OVERFLOW_CLEANUP_SECONDS, MAX_OBJECT_OVERFLOW_COOLDOWN_MS,
+    MAX_OBJECT_OVERFLOW_DEGRADED_THRESHOLD, MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS,
+    MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY, MAX_OBJECT_OVERFLOW_RETRIES,
+    MAX_OBJECT_OVERFLOW_RETRY_BACKOFF_MS, MAX_OBJECT_OVERFLOW_WORKERS, ObjectOverflowBackend,
+};
 use crate::{Result, ShardCacheError};
 
 #[cfg(feature = "kv-overflow")]
@@ -716,32 +721,50 @@ impl<'a> ObjectOverflowValidation<'a> {
                         "object_overflow.zstd_level must be between -7 and 22",
                     )?;
                     ConfigCheck::require(
-                        self.config.retry_backoff_ms > 0,
-                        "object_overflow.retry_backoff_ms must be > 0",
+                        self.config.retry_backoff_ms > 0
+                            && self.config.retry_backoff_ms <= MAX_OBJECT_OVERFLOW_RETRY_BACKOFF_MS,
+                        "object_overflow.retry_backoff_ms is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.operation_timeout_ms > 0,
-                        "object_overflow.operation_timeout_ms must be > 0",
+                        self.config.operation_timeout_ms > 0
+                            && self.config.operation_timeout_ms
+                                <= MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS,
+                        "object_overflow.operation_timeout_ms is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.worker_threads > 0,
-                        "object_overflow.worker_threads must be > 0",
+                        self.config.worker_threads > 0
+                            && self.config.worker_threads <= MAX_OBJECT_OVERFLOW_WORKERS,
+                        "object_overflow.worker_threads is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.queue_capacity > 0,
-                        "object_overflow.queue_capacity must be > 0",
+                        self.config.queue_capacity > 0
+                            && self.config.queue_capacity <= MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY,
+                        "object_overflow.queue_capacity is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.degraded_failure_threshold > 0,
-                        "object_overflow.degraded_failure_threshold must be > 0",
+                        self.config.max_retries <= MAX_OBJECT_OVERFLOW_RETRIES,
+                        "object_overflow.max_retries exceeds the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.degraded_cooldown_ms > 0,
-                        "object_overflow.degraded_cooldown_ms must be > 0",
+                        self.config.degraded_failure_threshold > 0
+                            && self.config.degraded_failure_threshold
+                                <= MAX_OBJECT_OVERFLOW_DEGRADED_THRESHOLD,
+                        "object_overflow.degraded_failure_threshold is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.cleanup_grace_seconds > 0,
-                        "object_overflow.cleanup_grace_seconds must be > 0",
+                        self.config.degraded_cooldown_ms > 0
+                            && self.config.degraded_cooldown_ms <= MAX_OBJECT_OVERFLOW_COOLDOWN_MS,
+                        "object_overflow.degraded_cooldown_ms is outside the production bound",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.cleanup_grace_seconds > 0
+                            && self.config.cleanup_grace_seconds
+                                <= MAX_OBJECT_OVERFLOW_CLEANUP_SECONDS,
+                        "object_overflow.cleanup_grace_seconds is outside the production bound",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.cleanup_interval_seconds <= MAX_OBJECT_OVERFLOW_CLEANUP_SECONDS,
+                        "object_overflow.cleanup_interval_seconds exceeds the production bound",
                     )?;
                     if self.config.cleanup_on_start || self.config.cleanup_interval_seconds > 0 {
                         ConfigCheck::optional_token(
@@ -757,6 +780,17 @@ impl<'a> ObjectOverflowValidation<'a> {
                         Some(self.config.region.as_str()),
                         "object_overflow.region must not be empty",
                     )?;
+                    ConfigCheck::require(
+                        self.config
+                            .tls_ca_path
+                            .as_ref()
+                            .is_none_or(|path| !path.as_os_str().is_empty()),
+                        "object_overflow.tls_ca_path must not be empty",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.tls_ca_path.is_none() || self.config.tls_verify,
+                        "object_overflow.tls_ca_path requires tls_verify = true",
+                    )?;
                     ConfigCheck::optional_token(
                         self.config.server_side_encryption.as_deref(),
                         "object_overflow.server_side_encryption must not be empty",
@@ -768,6 +802,12 @@ impl<'a> ObjectOverflowValidation<'a> {
                             return Err(ShardCacheError::Config(
                                 "object_overflow.backend = \"s3\" requires the object-overflow-s3 feature".into(),
                             ));
+                            #[cfg(feature = "object-overflow-s3")]
+                            ConfigCheck::require(
+                                self.config.access_key_env.is_some()
+                                    && self.config.secret_key_env.is_some(),
+                                "S3 object overflow requires access_key_env and secret_key_env",
+                            )?;
                         }
                     }
                     ConfigCheck::optional_token(
@@ -1048,6 +1088,7 @@ impl<'a> ReplicationValidation<'a> {
             [
                 self.config.connect_timeout_ms,
                 self.config.write_timeout_ms,
+                self.config.snapshot_bootstrap_timeout_ms,
                 self.config.reconnect_backoff_ms,
             ]
             .into_iter()

@@ -105,7 +105,7 @@ object-overflow = []
 object-overflow-s3 = ["object-overflow", "dep:futures-util", "dep:object_store"]
 kv-overflow = ["embedded", "dep:shardcache-client-rs"]
 kv-overflow-redis = ["kv-overflow", "dep:redis-client"]
-active-sync-causal-eventual = ["embedded", "dep:sha2"]
+active-sync-causal-eventual = ["embedded"]
 active-sync-consensus-ordered-eventual = ["active-sync-causal-eventual"]
 active-sync-tls = ["active-sync-causal-eventual", "dep:rustls"]
 scnp-tls = [
@@ -113,7 +113,6 @@ scnp-tls = [
     "kv-overflow",
     "dep:rustls",
     "dep:rustls-pemfile",
-    "dep:sha2",
     "dep:tokio-rustls",
     "shardcache-client-rs/tls",
 ]
@@ -135,6 +134,7 @@ core_affinity = { workspace = true }
 crc32fast = { workspace = true }
 crossbeam-channel = { workspace = true }
 crossbeam-utils = { workspace = true }
+getrandom = { workspace = true }
 fast-telemetry = { workspace = true, features = ["runtime"], optional = true }
 futures-util = { version = "0.3", optional = true }
 hashbrown = { workspace = true }
@@ -152,7 +152,7 @@ rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true, optional = true }
+sha2 = { workspace = true }
 shardcache-client-rs = { workspace = true, optional = true }
 smallvec = "1"
 socket2 = { version = "0.5", features = ["all"], optional = true }

@@ -76,6 +76,6 @@ fn bitcount_value(
     }) {
         RedisStringLookup::Hit => Ok(count),
         RedisStringLookup::Miss => Ok(0),
-        RedisStringLookup::WrongType => Err(()),
+        RedisStringLookup::WrongType | RedisStringLookup::BackendError => Err(()),
     }
 }

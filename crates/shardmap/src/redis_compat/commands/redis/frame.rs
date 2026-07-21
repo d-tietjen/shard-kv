@@ -72,6 +72,9 @@ pub(crate) fn optional_string_value(
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType if wrongtype_errors => Err(wrongtype()),
         crate::storage::RedisStringLookup::WrongType => Ok(None),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 

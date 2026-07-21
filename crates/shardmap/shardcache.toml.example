@@ -41,8 +41,8 @@ wal_channel_capacity = 16384
 wal_block_max_records = 64
 wal_block_max_bytes = 262144
 
-# Single-primary native FCRP v2 replication. Version 0.7.2 peers cannot mix
-# with 0.7.1 peers. Non-loopback deployments require TLS 1.3 mTLS plus token
+# Single-primary native FCRP v3 replication. Version 0.8.0 peers cannot mix
+# with earlier peers. Non-loopback deployments require TLS 1.3 mTLS plus token
 # authentication. Current/previous files permit bounded rolling rotation.
 [replication]
 enabled = false
@@ -73,6 +73,9 @@ connect_timeout_ms = 500
 # this deadline; the stream is never resumed at an unknown frame boundary.
 read_timeout_ms = 30000
 write_timeout_ms = 500
+# Whole snapshot capture-and-stream deadline. This prevents a slow replica from
+# monopolizing the primary's single snapshot producer indefinitely.
+snapshot_bootstrap_timeout_ms = 300000
 reconnect_backoff_ms = 200
 subscriber_channel_capacity = 1024
 
