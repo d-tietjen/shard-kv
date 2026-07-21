@@ -505,10 +505,12 @@ async fn stream_snapshot(
             if buffer_bytes >= target {
                 write_monoio_snapshot_chunk(
                     stream,
-                    &watermarks,
-                    chunk_index,
-                    false,
-                    std::mem::take(&mut buffer),
+                    ReplicationSnapshotChunk {
+                        watermarks: watermarks.clone(),
+                        chunk_index,
+                        is_last: false,
+                        entries: std::mem::take(&mut buffer),
+                    },
                     compression,
                     config.zstd_level,
                     bootstrap_write_timeout(bootstrap_deadline, per_frame_timeout)?,
