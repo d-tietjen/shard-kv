@@ -24,6 +24,29 @@ impl FlatMap {
         now_ms: u64,
         transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
     ) -> std::result::Result<R, E> {
+        self.transform_value_hashed(hash, key, now_ms, true, transform)
+    }
+
+    #[cfg(feature = "redis")]
+    pub(crate) fn transform_value_hashed_preserve_ttl<R, E>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
+    ) -> std::result::Result<R, E> {
+        self.transform_value_hashed(hash, key, now_ms, false, transform)
+    }
+
+    #[cfg(feature = "redis")]
+    fn transform_value_hashed<R, E>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        clear_ttl: bool,
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
+    ) -> std::result::Result<R, E> {
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         if self.ttl_entries != 0 && self.entry_is_expired_hashed(hash, key, now_ms) {
@@ -57,8 +80,10 @@ impl FlatMap {
                     .stored_bytes
                     .saturating_sub(previous_entry_bytes)
                     .saturating_add(entry.stored_bytes());
-                entry.expire_at_ms = None;
-                self.adjust_ttl_count(had_ttl, false);
+                if clear_ttl {
+                    entry.expire_at_ms = None;
+                    self.adjust_ttl_count(had_ttl, false);
+                }
                 self.retire_value(retired_value);
                 self.enforce_memory_limit(now_ms);
                 Ok(result)
@@ -142,6 +167,12 @@ impl FlatMap {
     ) {
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
+        #[cfg(feature = "telemetry")]
+        let start = self.start_telemetry_latency_sample();
+        #[cfg(feature = "telemetry")]
+        let written_len = value.len();
+        #[cfg(feature = "telemetry")]
+        let (key_delta, memory_delta): (isize, isize);
         let mut governance = governance;
         let access_tick = if self.eviction_policy == EvictionPolicy::None {
             0
@@ -165,6 +196,11 @@ impl FlatMap {
                 entry.clear_semantic_embedding();
                 entry.governance = governance.take();
                 entry.access.record_access(access_tick);
+                #[cfg(feature = "telemetry")]
+                {
+                    key_delta = 0;
+                    memory_delta = entry.stored_bytes() as isize - previous_entry_bytes as isize;
+                }
                 self.stored_bytes = self
                     .stored_bytes
                     .saturating_sub(previous_entry_bytes)
@@ -198,12 +234,21 @@ impl FlatMap {
                     .saturating_add(key_len)
                     .saturating_add(value_len)
                     .saturating_add(governance_len);
+                #[cfg(feature = "telemetry")]
+                {
+                    key_delta = 1;
+                    memory_delta = key_len
+                        .saturating_add(value_len)
+                        .saturating_add(governance_len) as isize;
+                }
                 if expire_at_ms.is_some() {
                     self.ttl_entries = self.ttl_entries.saturating_add(1);
                 }
             }
         }
 
+        #[cfg(feature = "telemetry")]
+        self.record_set_metrics(written_len, key_delta, memory_delta, start);
         self.enforce_memory_limit(now_ms);
     }
 

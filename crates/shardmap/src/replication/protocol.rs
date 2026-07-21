@@ -8,12 +8,12 @@ use crate::storage::{MutationOp, MutationRecord, StoredEntry, hash_key, hash_key
 use crate::{Result, ShardCacheError};
 
 pub const FCRP_MAGIC: &[u8; 4] = b"FCRP";
-pub const FCRP_VERSION: u8 = 1;
+pub const FCRP_VERSION: u8 = 3;
 
 const HEADER_LEN: usize = 16;
 pub(crate) const FRAME_HEADER_LEN: usize = HEADER_LEN;
 const FLAG_COMPRESSED: u8 = 0x01;
-const MAX_FCRP_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_FCRP_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 // u64::MAX is reserved as the wire sentinel for "no expiry". A legitimate
 // `expire_at_ms` of u64::MAX would map to year ~584,942,417, so it is safe to
 // reserve.
@@ -37,7 +37,7 @@ pub enum FrameKind {
 }
 
 impl FrameKind {
-    fn from_u8(value: u8) -> Result<Self> {
+    pub(crate) fn from_u8(value: u8) -> Result<Self> {
         match value {
             1 => Ok(Self::Hello),
             2 => Ok(Self::SnapshotBegin),
@@ -197,6 +197,7 @@ pub struct FrameBackedReplicationMutation<'a> {
     pub sequence: u64,
     pub op: ReplicationMutationOp,
     pub key_hash: u64,
+    pub key_tag: u64,
     pub key: &'a [u8],
     pub value: SharedBytes,
     pub expire_at_ms: Option<u64>,
@@ -307,6 +308,28 @@ pub fn encode_frame(
             Ok(out)
         }
     }
+}
+
+pub(crate) fn encode_frame_with_payload_limit(
+    kind: FrameKind,
+    compression: ReplicationCompressionMode,
+    zstd_level: i32,
+    payload: &[u8],
+    max_payload_bytes: usize,
+) -> Result<Vec<u8>> {
+    if payload.len() > max_payload_bytes {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP payload exceeds negotiated maximum {max_payload_bytes}"
+        )));
+    }
+
+    let compressed = encode_frame(kind, compression, zstd_level, payload)?;
+    if compression == ReplicationCompressionMode::Zstd
+        && compressed.len().saturating_sub(HEADER_LEN) > max_payload_bytes
+    {
+        return encode_frame(kind, ReplicationCompressionMode::None, 0, payload);
+    }
+    Ok(compressed)
 }
 
 fn write_header(
@@ -472,6 +495,11 @@ pub(crate) fn encode_mutation_batch_frame_with_payload_len(
     compression: ReplicationCompressionMode,
     zstd_level: i32,
 ) -> Result<(Vec<u8>, usize)> {
+    if payload_len > MAX_FCRP_PAYLOAD_BYTES {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP mutation batch exceeds maximum {MAX_FCRP_PAYLOAD_BYTES}"
+        )));
+    }
     match compression {
         ReplicationCompressionMode::None => {
             let mut out = Vec::with_capacity(HEADER_LEN + payload_len);
@@ -725,7 +753,7 @@ where
             ReplicationMutationOp::from_byte(raw_op)?
         };
         let key_hash = cursor.u64()?;
-        let _key_tag = cursor.u64()?;
+        let key_tag = cursor.u64()?;
         let expire_raw = cursor.u64()?;
         let key_len = cursor.u32()? as usize;
         let value_len = cursor.u32()? as usize;
@@ -746,6 +774,7 @@ where
             sequence,
             op,
             key_hash,
+            key_tag,
             key,
             value,
             expire_at_ms: (expire_raw != EXPIRE_NONE).then_some(expire_raw),
@@ -759,6 +788,7 @@ where
 pub enum HelloRole {
     Replica = 1,
     ServiceSubscriber = 2,
+    Primary = 3,
 }
 
 impl HelloRole {
@@ -770,6 +800,7 @@ impl HelloRole {
         match value {
             1 => Ok(Self::Replica),
             2 => Ok(Self::ServiceSubscriber),
+            3 => Ok(Self::Primary),
             other => Err(ShardCacheError::Protocol(format!(
                 "unsupported FCRP hello role: {other}"
             ))),
@@ -783,6 +814,7 @@ pub struct ReplicationHello {
     pub role: HelloRole,
     pub auth_token: Option<String>,
     pub since: Option<ShardWatermarks>,
+    pub receive_max_frame_bytes: u32,
 }
 
 pub fn encode_hello(hello: &ReplicationHello) -> Vec<u8> {
@@ -802,6 +834,7 @@ pub fn encode_hello(hello: &ReplicationHello) -> Vec<u8> {
         }
         None => out.push(0),
     }
+    out.extend_from_slice(&hello.receive_max_frame_bytes.to_le_bytes());
     out
 }
 
@@ -839,12 +872,19 @@ pub fn decode_hello(bytes: &[u8]) -> Result<ReplicationHello> {
     } else {
         None
     };
+    let receive_max_frame_bytes = cursor.u32()?;
+    if receive_max_frame_bytes == 0 || receive_max_frame_bytes as usize > MAX_FCRP_PAYLOAD_BYTES {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP hello frame limit {receive_max_frame_bytes} is out of range"
+        )));
+    }
     cursor.finish()?;
     Ok(ReplicationHello {
         version,
         role,
         auth_token,
         since,
+        receive_max_frame_bytes,
     })
 }
 
@@ -922,10 +962,26 @@ pub fn encode_snapshot_chunk(chunk: &ReplicationSnapshotChunk) -> Vec<u8> {
 }
 
 pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
+    decode_snapshot_chunk_limited(bytes, usize::MAX, usize::MAX, None)
+}
+
+pub(crate) fn decode_snapshot_chunk_limited(
+    bytes: &[u8],
+    max_entries: usize,
+    max_retained_bytes: usize,
+    expected_watermarks: Option<usize>,
+) -> Result<ReplicationSnapshotChunk> {
     let mut cursor = Cursor::new(bytes);
     let chunk_index = cursor.u64()?;
     let is_last = cursor.u8()? != 0;
     let watermark_count = cursor.u32()? as usize;
+    if let Some(expected) = expected_watermarks
+        && watermark_count != expected
+    {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP snapshot watermark count {watermark_count} does not match replica shard count {expected}"
+        )));
+    }
     cursor.validate_count(watermark_count, 8, "snapshot watermarks")?;
     let mut watermarks = Vec::new();
     watermarks.try_reserve_exact(watermark_count).map_err(|_| {
@@ -940,10 +996,24 @@ pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
         let _ = cursor.u32()?;
     }
     cursor.validate_count(entry_count, SNAPSHOT_ENTRY_MIN_BYTES, "snapshot entries")?;
+    if entry_count > max_entries {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP snapshot chunk entry count {entry_count} exceeds remaining limit {max_entries}"
+        )));
+    }
+    let entry_slots_bytes = entry_count
+        .checked_mul(std::mem::size_of::<StoredEntry>())
+        .ok_or_else(|| ShardCacheError::Protocol("snapshot entry size overflow".into()))?;
+    if entry_slots_bytes > max_retained_bytes {
+        return Err(ShardCacheError::Protocol(format!(
+            "FCRP snapshot chunk entry storage exceeds remaining byte limit {max_retained_bytes}"
+        )));
+    }
     let mut entries = Vec::new();
     entries
         .try_reserve_exact(entry_count)
         .map_err(|_| ShardCacheError::Protocol("FCRP snapshot entry allocation failed".into()))?;
+    let mut retained_bytes = 0usize;
     for _ in 0..entry_count {
         let key_len = cursor.u32()? as usize;
         let value_len = cursor.u32()? as usize;
@@ -953,6 +1023,23 @@ pub fn decode_snapshot_chunk(bytes: &[u8]) -> Result<ReplicationSnapshotChunk> {
             None
         };
         let expire_raw = cursor.u64()?;
+        let governance_bytes = match governance_len {
+            Some(GOVERNANCE_NONE) | None => 0,
+            Some(len) => len as usize,
+        };
+        let entry_bytes = std::mem::size_of::<StoredEntry>()
+            .checked_add(key_len)
+            .and_then(|bytes| bytes.checked_add(value_len))
+            .and_then(|bytes| bytes.checked_add(governance_bytes))
+            .ok_or_else(|| ShardCacheError::Protocol("snapshot byte count overflow".into()))?;
+        retained_bytes = retained_bytes
+            .checked_add(entry_bytes)
+            .ok_or_else(|| ShardCacheError::Protocol("snapshot byte count overflow".into()))?;
+        if retained_bytes > max_retained_bytes {
+            return Err(ShardCacheError::Protocol(format!(
+                "FCRP snapshot chunk exceeds remaining byte limit {max_retained_bytes}"
+            )));
+        }
         let key = cursor.bytes(key_len)?.to_vec();
         let value = cursor.bytes(value_len)?.to_vec();
         let governance = match governance_len {
@@ -1079,6 +1166,23 @@ mod tests {
     }
 
     #[test]
+    fn compression_expansion_falls_back_to_an_uncompressed_frame() {
+        let payload = b"x";
+        let encoded = encode_frame_with_payload_limit(
+            FrameKind::SnapshotChunk,
+            ReplicationCompressionMode::Zstd,
+            3,
+            payload,
+            payload.len(),
+        )
+        .expect("encode bounded frame");
+        let decoded = decode_frame(&encoded).expect("decode bounded frame");
+
+        assert!(!decoded.compressed);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
     fn governed_mutation_round_trips_through_owned_and_frame_backed_decoders() {
         let mut mutation = sample_mutation(7);
         mutation.governance = Some(SharedBytes::from_static(b"tenant-a/repo-private"));
@@ -1188,6 +1292,41 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_chunk_limits_apply_before_owned_entry_construction() {
+        let chunk = ReplicationSnapshotChunk {
+            watermarks: ShardWatermarks::from_vec(vec![1, 2]),
+            chunk_index: 0,
+            is_last: true,
+            entries: vec![
+                StoredEntry {
+                    key: b"a".to_vec(),
+                    value: vec![1; 128],
+                    expire_at_ms: None,
+                    governance: None,
+                },
+                StoredEntry {
+                    key: b"b".to_vec(),
+                    value: vec![2; 128],
+                    expire_at_ms: None,
+                    governance: None,
+                },
+            ],
+        };
+        let encoded = encode_snapshot_chunk(&chunk);
+        assert!(decode_snapshot_chunk_limited(&encoded, 1, usize::MAX, Some(2)).is_err());
+        assert!(
+            decode_snapshot_chunk_limited(
+                &encoded,
+                2,
+                std::mem::size_of::<StoredEntry>(),
+                Some(2),
+            )
+            .is_err()
+        );
+        assert!(decode_snapshot_chunk_limited(&encoded, 2, usize::MAX, Some(3)).is_err());
+    }
+
+    #[test]
     fn rejects_count_allocation_amplification() {
         let count_only = u32::MAX.to_le_bytes();
         assert!(decode_mutation_batch(&count_only).is_err());
@@ -1215,5 +1354,22 @@ mod tests {
         frame[6] = 0x80;
         frame[12..16].copy_from_slice(&0u32.to_le_bytes());
         assert!(decode_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn rejects_pre_governance_fcrp_peers_instead_of_silently_dropping_metadata() {
+        let frame = encode_frame(
+            FrameKind::Ack,
+            ReplicationCompressionMode::None,
+            0,
+            &encode_ack(&ShardWatermarks::from_vec(vec![1])),
+        )
+        .unwrap();
+        let mut old_version = frame;
+        old_version[4] = FCRP_VERSION - 1;
+        assert!(matches!(
+            decode_frame(&old_version),
+            Err(ShardCacheError::Protocol(message)) if message.contains("unsupported FCRP version")
+        ));
     }
 }

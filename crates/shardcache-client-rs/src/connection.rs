@@ -6,12 +6,14 @@ use crate::commands::ScnpCommand;
 #[cfg(feature = "redis")]
 use crate::commands::redis::RedisResponse;
 use crate::error::{Result, ShardCacheClientError};
+#[cfg(any(feature = "redis", feature = "vector"))]
+use crate::protocol::STATUS_ARRAY;
+#[cfg(feature = "redis")]
+use crate::protocol::STATUS_FLOAT;
 use crate::protocol::{
     FAST_PROTOCOL_VERSION, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC, STATUS_ERROR, STATUS_INTEGER,
     STATUS_NULL, STATUS_OK, STATUS_VALUE,
 };
-#[cfg(feature = "redis")]
-use crate::protocol::{STATUS_ARRAY, STATUS_FLOAT};
 #[cfg(feature = "tls")]
 use crate::tls::ScnpTlsClientConfig;
 
@@ -19,7 +21,7 @@ const SCNP_READ_BUFFER_BYTES: usize = 8 * 1024;
 const SCNP_WRITE_BUFFER_BYTES: usize = 8 * 1024;
 const SCNP_MAX_RESPONSE_BODY_BYTES: usize = 256 * 1024 * 1024;
 const SCNP_MAX_ERROR_BODY_BYTES: usize = 64 * 1024;
-#[cfg(feature = "redis")]
+#[cfg(any(feature = "redis", feature = "vector"))]
 const SCNP_MAX_ARRAY_ITEMS: usize = 65_536;
 const SCNP_AUTH_MAGIC: &[u8; 8] = b"SCAUTH01";
 
@@ -72,6 +74,7 @@ pub(crate) struct ScnpConnection {
     r: BufReader<ScnpStream>,
     pub(crate) w: Vec<u8>,
     scratch: Vec<u8>,
+    response_aligned: bool,
 }
 
 impl ScnpConnection {
@@ -154,6 +157,7 @@ impl ScnpConnection {
             r: BufReader::with_capacity(SCNP_READ_BUFFER_BYTES, stream),
             w: Vec::with_capacity(SCNP_WRITE_BUFFER_BYTES),
             scratch: Vec::with_capacity(64),
+            response_aligned: true,
         })
     }
 
@@ -180,6 +184,11 @@ impl ScnpConnection {
     }
 
     pub(crate) fn execute<C: ScnpCommand>(&mut self, command: C) -> Result<C::Output> {
+        if !self.response_aligned {
+            return Err(ShardCacheClientError::Protocol(
+                "SCNP connection is unusable after an invalid response frame".into(),
+            ));
+        }
         let body_len = u32::try_from(command.body_len()).map_err(|_| {
             ShardCacheClientError::Protocol("SCNP request body exceeds the protocol limit".into())
         })?;
@@ -210,9 +219,7 @@ impl ScnpConnection {
                 Ok(())
             }
             STATUS_ERROR => Err(ShardCacheClientError::Protocol(self.read_error(body_len)?)),
-            other => Err(ShardCacheClientError::Protocol(format!(
-                "{op} unexpected response status: {other}"
-            ))),
+            other => self.unexpected_status(op, other, body_len),
         }
     }
 
@@ -231,6 +238,7 @@ impl ScnpConnection {
         match status {
             STATUS_VALUE => {
                 if body_len > max_body_len {
+                    self.response_aligned = false;
                     return Err(ShardCacheClientError::Protocol(format!(
                         "{op} response body length {body_len} exceeds configured maximum {max_body_len}"
                     )));
@@ -249,9 +257,7 @@ impl ScnpConnection {
                 Ok(false)
             }
             STATUS_ERROR => Err(ShardCacheClientError::Protocol(self.read_error(body_len)?)),
-            other => Err(ShardCacheClientError::Protocol(format!(
-                "{op} unexpected response status: {other}"
-            ))),
+            other => self.unexpected_status(op, other, body_len),
         }
     }
 
@@ -270,9 +276,53 @@ impl ScnpConnection {
                 Ok(i64::from_le_bytes(value))
             }
             STATUS_ERROR => Err(ShardCacheClientError::Protocol(self.read_error(body_len)?)),
-            other => Err(ShardCacheClientError::Protocol(format!(
-                "{op} unexpected response status: {other}"
-            ))),
+            other => self.unexpected_status(op, other, body_len),
+        }
+    }
+
+    #[cfg(feature = "vector")]
+    pub(crate) fn read_typed_integer(&mut self, op: &str) -> Result<i64> {
+        let (status, body_len) = self.read_response_header()?;
+        match status {
+            STATUS_INTEGER => self.read_integer_body(op, body_len),
+            STATUS_VALUE => {
+                let body = self.read_limited_body(op, body_len, 64)?;
+                parse_resp_integer(body, op)
+            }
+            STATUS_ERROR => Err(ShardCacheClientError::Protocol(self.read_error(body_len)?)),
+            other => self.unexpected_status(op, other, body_len),
+        }
+    }
+
+    #[cfg(feature = "vector")]
+    pub(crate) fn read_typed_value(&mut self, op: &str, max_body_len: usize) -> Result<Vec<u8>> {
+        let (status, body_len) = self.read_response_header()?;
+        match status {
+            STATUS_VALUE => {
+                let body = self.read_limited_body(op, body_len, max_body_len)?;
+                parse_native_or_resp_value(body, op)
+            }
+            STATUS_ERROR => Err(ShardCacheClientError::Protocol(self.read_error(body_len)?)),
+            other => self.unexpected_status(op, other, body_len),
+        }
+    }
+
+    #[cfg(feature = "vector")]
+    pub(crate) fn read_typed_array(
+        &mut self,
+        op: &str,
+        max_body_len: usize,
+        max_items: usize,
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let (status, body_len) = self.read_response_header()?;
+        match status {
+            STATUS_ARRAY => self.read_optional_array_body(op, body_len, max_body_len, max_items),
+            STATUS_VALUE => {
+                let body = self.read_limited_body(op, body_len, max_body_len)?;
+                parse_resp_flat_array(body, op, max_items)
+            }
+            STATUS_ERROR => Err(ShardCacheClientError::Protocol(self.read_error(body_len)?)),
+            other => self.unexpected_status(op, other, body_len),
         }
     }
 
@@ -417,9 +467,35 @@ impl ScnpConnection {
 
     #[cfg(feature = "redis")]
     fn read_array_response(&mut self, op: &str, body_len: usize) -> Result<RedisResponse> {
-        if body_len > SCNP_MAX_RESPONSE_BODY_BYTES {
+        self.read_optional_array_body(
+            op,
+            body_len,
+            SCNP_MAX_RESPONSE_BODY_BYTES,
+            SCNP_MAX_ARRAY_ITEMS,
+        )
+        .map(|values| {
+            RedisResponse::Array(
+                values
+                    .into_iter()
+                    .map(|value| value.map_or(RedisResponse::Null, RedisResponse::Value))
+                    .collect(),
+            )
+        })
+    }
+
+    #[cfg(any(feature = "redis", feature = "vector"))]
+    fn read_optional_array_body(
+        &mut self,
+        op: &str,
+        body_len: usize,
+        max_body_len: usize,
+        max_items: usize,
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let effective_max = max_body_len.min(SCNP_MAX_RESPONSE_BODY_BYTES);
+        if body_len > effective_max {
+            self.response_aligned = false;
             return Err(ShardCacheClientError::Protocol(format!(
-                "{op} array response body length {body_len} exceeds maximum {SCNP_MAX_RESPONSE_BODY_BYTES}"
+                "{op} array response body length {body_len} exceeds maximum {effective_max}"
             )));
         }
         self.scratch.try_reserve_exact(body_len).map_err(|_| {
@@ -437,9 +513,12 @@ impl ScnpConnection {
 
         let mut cursor = 0usize;
         let count = read_u32(&self.scratch, &mut cursor, op)? as usize;
-        if count > SCNP_MAX_ARRAY_ITEMS || count > self.scratch.len().saturating_sub(cursor) / 4 {
+        if count > max_items
+            || count > SCNP_MAX_ARRAY_ITEMS
+            || count > self.scratch.len().saturating_sub(cursor) / 4
+        {
             return Err(ShardCacheClientError::Protocol(format!(
-                "{op} array item count exceeds response body"
+                "{op} array item count exceeds the configured or response-body limit"
             )));
         }
         let mut values = Vec::new();
@@ -451,7 +530,7 @@ impl ScnpConnection {
         for _ in 0..count {
             let len = read_u32(&self.scratch, &mut cursor, op)?;
             if len == u32::MAX {
-                values.push(RedisResponse::Null);
+                values.push(None);
                 continue;
             }
             let len = len as usize;
@@ -463,7 +542,7 @@ impl ScnpConnection {
                     "{op} array item exceeds response body"
                 )));
             }
-            values.push(RedisResponse::Value(self.scratch[cursor..end].to_vec()));
+            values.push(Some(self.scratch[cursor..end].to_vec()));
             cursor = end;
         }
         if cursor != self.scratch.len() {
@@ -471,7 +550,53 @@ impl ScnpConnection {
                 "{op} array response has trailing bytes"
             )));
         }
-        Ok(RedisResponse::Array(values))
+        Ok(values)
+    }
+
+    #[cfg(feature = "vector")]
+    fn read_integer_body(&mut self, op: &str, body_len: usize) -> Result<i64> {
+        if body_len != 8 {
+            self.discard(body_len)?;
+            return Err(ShardCacheClientError::Protocol(format!(
+                "{op} integer response body length was {body_len}, expected 8"
+            )));
+        }
+        let mut value = [0u8; 8];
+        self.r.read_exact(&mut value)?;
+        Ok(i64::from_le_bytes(value))
+    }
+
+    #[cfg(feature = "vector")]
+    fn read_limited_body(
+        &mut self,
+        op: &str,
+        body_len: usize,
+        max_body_len: usize,
+    ) -> Result<&[u8]> {
+        let effective_max = max_body_len.min(SCNP_MAX_RESPONSE_BODY_BYTES);
+        if body_len > effective_max {
+            self.response_aligned = false;
+            return Err(ShardCacheClientError::Protocol(format!(
+                "{op} response body length {body_len} exceeds configured maximum {effective_max}"
+            )));
+        }
+        self.scratch.try_reserve_exact(body_len).map_err(|_| {
+            ShardCacheClientError::Protocol(format!(
+                "{op} response allocation of {body_len} bytes failed"
+            ))
+        })?;
+        self.scratch.resize(body_len, 0);
+        self.r.read_exact(&mut self.scratch[..body_len])?;
+        Ok(&self.scratch[..body_len])
+    }
+
+    fn unexpected_status<T>(&mut self, op: &str, status: u8, body_len: usize) -> Result<T> {
+        if body_len != 0 {
+            self.response_aligned = false;
+        }
+        Err(ShardCacheClientError::Protocol(format!(
+            "{op} unexpected response status: {status}"
+        )))
     }
 
     fn discard(&mut self, n: usize) -> Result<()> {
@@ -539,7 +664,7 @@ fn tune_tcp_stream_buffers(stream: &TcpStream) {
 #[cfg(not(unix))]
 fn tune_tcp_stream_buffers(_stream: &TcpStream) {}
 
-#[cfg(feature = "redis")]
+#[cfg(any(feature = "redis", feature = "vector"))]
 fn read_u32(buf: &[u8], cursor: &mut usize, op: &str) -> Result<u32> {
     let end = cursor
         .checked_add(4)
@@ -554,9 +679,186 @@ fn read_u32(buf: &[u8], cursor: &mut usize, op: &str) -> Result<u32> {
     Ok(value)
 }
 
+#[cfg(feature = "vector")]
+fn parse_resp_integer(body: &[u8], op: &str) -> Result<i64> {
+    if body.first() != Some(&b':') {
+        return Err(ShardCacheClientError::Protocol(format!(
+            "{op} legacy response was not a RESP integer"
+        )));
+    }
+    let mut cursor = 1;
+    let line = read_resp_line(body, &mut cursor, op)?;
+    if cursor != body.len() {
+        return Err(ShardCacheClientError::Protocol(format!(
+            "{op} RESP integer has trailing bytes"
+        )));
+    }
+    std::str::from_utf8(line)
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .ok_or_else(|| ShardCacheClientError::Protocol(format!("{op} RESP integer is invalid")))
+}
+
+#[cfg(feature = "vector")]
+fn parse_native_or_resp_value(body: &[u8], op: &str) -> Result<Vec<u8>> {
+    match body.first().copied() {
+        Some(b'+') => {
+            let mut cursor = 1;
+            let value = read_resp_line(body, &mut cursor, op)?.to_vec();
+            ensure_resp_consumed(body, cursor, op)?;
+            Ok(value)
+        }
+        Some(b'$') => {
+            let mut cursor = 1;
+            let value = read_resp_bulk(body, &mut cursor, op)?.ok_or_else(|| {
+                ShardCacheClientError::Protocol(format!("{op} returned a null RESP value"))
+            })?;
+            ensure_resp_consumed(body, cursor, op)?;
+            Ok(value)
+        }
+        Some(b'-') => {
+            let mut cursor = 1;
+            let message = read_resp_line(body, &mut cursor, op)?;
+            Err(ShardCacheClientError::Protocol(
+                String::from_utf8_lossy(message).into_owned(),
+            ))
+        }
+        _ => Ok(body.to_vec()),
+    }
+}
+
+#[cfg(feature = "vector")]
+fn parse_resp_flat_array(body: &[u8], op: &str, max_items: usize) -> Result<Vec<Option<Vec<u8>>>> {
+    if body.first() == Some(&b'-') {
+        let mut cursor = 1;
+        let message = read_resp_line(body, &mut cursor, op)?;
+        return Err(ShardCacheClientError::Protocol(
+            String::from_utf8_lossy(message).into_owned(),
+        ));
+    }
+    if body.first() != Some(&b'*') {
+        return Err(ShardCacheClientError::Protocol(format!(
+            "{op} legacy response was not a RESP array"
+        )));
+    }
+    let mut cursor = 1;
+    let count = parse_resp_len(read_resp_line(body, &mut cursor, op)?, op)?
+        .ok_or_else(|| ShardCacheClientError::Protocol(format!("{op} returned a null array")))?;
+    if count > max_items || count > SCNP_MAX_ARRAY_ITEMS {
+        return Err(ShardCacheClientError::Protocol(format!(
+            "{op} RESP array item count exceeds the configured limit"
+        )));
+    }
+    let mut values = Vec::new();
+    values.try_reserve_exact(count).map_err(|_| {
+        ShardCacheClientError::Protocol(format!(
+            "{op} RESP array allocation of {count} entries failed"
+        ))
+    })?;
+    for _ in 0..count {
+        let prefix = body.get(cursor).copied().ok_or_else(|| {
+            ShardCacheClientError::Protocol(format!("{op} RESP array is truncated"))
+        })?;
+        cursor += 1;
+        match prefix {
+            b'$' => values.push(read_resp_bulk(body, &mut cursor, op)?),
+            b'+' => values.push(Some(read_resp_line(body, &mut cursor, op)?.to_vec())),
+            b'_' => {
+                let end = cursor.checked_add(2).ok_or_else(|| {
+                    ShardCacheClientError::Protocol(format!("{op} RESP null length overflow"))
+                })?;
+                if body.get(cursor..end) != Some(b"\r\n") {
+                    return Err(ShardCacheClientError::Protocol(format!(
+                        "{op} RESP null is malformed"
+                    )));
+                }
+                cursor = end;
+                values.push(None);
+            }
+            b'-' => {
+                let message = read_resp_line(body, &mut cursor, op)?;
+                return Err(ShardCacheClientError::Protocol(
+                    String::from_utf8_lossy(message).into_owned(),
+                ));
+            }
+            other => {
+                return Err(ShardCacheClientError::Protocol(format!(
+                    "{op} RESP array contains unsupported prefix 0x{other:02X}"
+                )));
+            }
+        }
+    }
+    ensure_resp_consumed(body, cursor, op)?;
+    Ok(values)
+}
+
+#[cfg(feature = "vector")]
+fn read_resp_bulk(body: &[u8], cursor: &mut usize, op: &str) -> Result<Option<Vec<u8>>> {
+    let len = parse_resp_len(read_resp_line(body, cursor, op)?, op)?;
+    let Some(len) = len else {
+        return Ok(None);
+    };
+    let end = cursor.checked_add(len).ok_or_else(|| {
+        ShardCacheClientError::Protocol(format!("{op} RESP bulk length overflow"))
+    })?;
+    let frame_end = end.checked_add(2).ok_or_else(|| {
+        ShardCacheClientError::Protocol(format!("{op} RESP bulk frame length overflow"))
+    })?;
+    if body.get(end..frame_end) != Some(b"\r\n") {
+        return Err(ShardCacheClientError::Protocol(format!(
+            "{op} RESP bulk value is truncated"
+        )));
+    }
+    let value = body
+        .get(*cursor..end)
+        .ok_or_else(|| ShardCacheClientError::Protocol(format!("{op} RESP bulk is truncated")))?
+        .to_vec();
+    *cursor = frame_end;
+    Ok(Some(value))
+}
+
+#[cfg(feature = "vector")]
+fn parse_resp_len(line: &[u8], op: &str) -> Result<Option<usize>> {
+    let value = std::str::from_utf8(line)
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .ok_or_else(|| ShardCacheClientError::Protocol(format!("{op} RESP length is invalid")))?;
+    if value == -1 {
+        return Ok(None);
+    }
+    usize::try_from(value)
+        .map(Some)
+        .map_err(|_| ShardCacheClientError::Protocol(format!("{op} RESP length is negative")))
+}
+
+#[cfg(feature = "vector")]
+fn read_resp_line<'a>(body: &'a [u8], cursor: &mut usize, op: &str) -> Result<&'a [u8]> {
+    let relative_end = body
+        .get(*cursor..)
+        .and_then(|remaining| remaining.windows(2).position(|bytes| bytes == b"\r\n"))
+        .ok_or_else(|| ShardCacheClientError::Protocol(format!("{op} RESP line is truncated")))?;
+    let end = *cursor + relative_end;
+    let line = &body[*cursor..end];
+    *cursor = end + 2;
+    Ok(line)
+}
+
+#[cfg(feature = "vector")]
+fn ensure_resp_consumed(body: &[u8], cursor: usize, op: &str) -> Result<()> {
+    if cursor == body.len() {
+        Ok(())
+    } else {
+        Err(ShardCacheClientError::Protocol(format!(
+            "{op} RESP response has trailing bytes"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "vector")]
+    use crate::commands::vector::Ping;
     use std::net::TcpListener;
     use std::thread;
 
@@ -626,5 +928,107 @@ mod tests {
         assert_eq!(&output[..2], b"ab");
         assert!(output[2..].iter().all(|byte| *byte == 0));
         server.join().unwrap();
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn typed_ping_uses_auth_and_native_value_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut auth_header = [0u8; 10];
+            stream.read_exact(&mut auth_header).unwrap();
+            assert_eq!(&auth_header[..8], SCNP_AUTH_MAGIC);
+            let token_len = u16::from_le_bytes(auth_header[8..].try_into().unwrap()) as usize;
+            let mut token = vec![0u8; token_len];
+            stream.read_exact(&mut token).unwrap();
+            assert_eq!(token, b"rotating-secret");
+            stream.write_all(&[1]).unwrap();
+
+            let mut request = [0u8; 9];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(
+                request,
+                [
+                    FAST_REQUEST_MAGIC,
+                    FAST_PROTOCOL_VERSION,
+                    9,
+                    crate::protocol::FAST_FLAG_REDIS_COMMAND_ARGS,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]
+            );
+            stream
+                .write_all(&[
+                    FAST_RESPONSE_MAGIC,
+                    FAST_PROTOCOL_VERSION,
+                    STATUS_VALUE,
+                    0,
+                    4,
+                    0,
+                    0,
+                    0,
+                    b'P',
+                    b'O',
+                    b'N',
+                    b'G',
+                ])
+                .unwrap();
+        });
+
+        let timeout = Duration::from_secs(2);
+        let mut connection =
+            ScnpConnection::connect_with_timeouts(address, timeout, timeout).unwrap();
+        connection.authenticate(Some(b"rotating-secret")).unwrap();
+        assert_eq!(connection.execute(Ping).unwrap(), b"PONG");
+        server.join().unwrap();
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn oversized_typed_response_does_not_allocate_or_reuse_the_connection() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(&[
+                    FAST_RESPONSE_MAGIC,
+                    FAST_PROTOCOL_VERSION,
+                    STATUS_VALUE,
+                    0,
+                    65,
+                    0,
+                    0,
+                    0,
+                ])
+                .unwrap();
+        });
+
+        let mut connection = ScnpConnection::connect(address).unwrap();
+        let error = connection.read_typed_value("PING", 64).unwrap_err();
+        assert!(error.to_string().contains("exceeds configured maximum"));
+        assert!(connection.scratch.capacity() < 65);
+        assert!(
+            connection
+                .execute(Ping)
+                .unwrap_err()
+                .to_string()
+                .contains("unusable")
+        );
+        server.join().unwrap();
+    }
+
+    #[cfg(feature = "vector")]
+    #[test]
+    fn legacy_vector_response_parsers_reject_truncation_and_trailing_data() {
+        assert_eq!(parse_resp_integer(b":1\r\n", "VADD").unwrap(), 1);
+        assert!(parse_resp_integer(b":1\r\nextra", "VADD").is_err());
+        assert!(parse_resp_flat_array(b"*1\r\n_", "VSIM", 3).is_err());
+        assert!(parse_resp_flat_array(b"*1\r\n$8\r\nshort\r\n", "VSIM", 3).is_err());
     }
 }

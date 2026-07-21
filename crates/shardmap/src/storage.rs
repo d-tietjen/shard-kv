@@ -48,12 +48,15 @@ pub(crate) use embedded_store::OverflowReplicaAuthRuntime;
 pub(crate) use embedded_store::OverflowReplicaTlsRuntime;
 #[cfg(feature = "sharded")]
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
+pub(crate) use embedded_store::PointMutationKind;
 #[doc(hidden)]
 pub use embedded_store::ShardArcEmbeddedStore;
 #[cfg(feature = "redis-module-timeseries")]
 pub(crate) use embedded_store::TimeSeriesMultiRangeWriter;
 #[cfg(feature = "redis-module-topk")]
 pub(crate) use embedded_store::TopKError;
+#[cfg(feature = "redis")]
+pub(crate) use embedded_store::VectorMutationKind;
 pub(crate) use embedded_store::overflow_slot_shard;
 #[cfg(feature = "redis")]
 pub(crate) use embedded_store::{
@@ -105,7 +108,8 @@ pub(crate) use engine::{
     ExpirationChange, RESP_SPANNED_VALUE_MIN, ShardKey, ShardOperation, ShardReply, ShardValue,
 };
 pub use flat_map::FlatMap;
-pub(crate) use flat_map::GovernedRead;
+pub(crate) use flat_map::SnapshotEntrySource;
+pub(crate) use flat_map::{GovernedObjectFault, GovernedRead};
 #[cfg(feature = "kv-overflow-redis")]
 pub use kv_overflow::RedisKvOverflowNode;
 #[cfg(feature = "kv-overflow")]
@@ -114,6 +118,9 @@ pub use kv_overflow::{
     KvOverflowOptions, KvOverflowPrimaryOwnershipSnapshot, KvOverflowPutRequest, KvOverflowStore,
     KvOverflowValue, ScnpKvOverflowNode,
 };
+#[cfg(feature = "object-overflow")]
+pub use object_overflow::FileObjectOverflowStore;
+pub(crate) use object_overflow::ObjectOverflowTicket;
 pub use object_overflow::{
     ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore, ObjectValueRef,
 };
@@ -123,12 +130,12 @@ pub(crate) use redis_objects::{
     HashFieldExpireCond, HashFieldGetExpireAction, HashFieldSetCondition, HashFieldSetExpireAction,
 };
 #[cfg(feature = "redis")]
+pub use redis_objects::{RedisKeyError, RedisObjectError, RedisObjectResult, RedisStringLookup};
+#[cfg(feature = "redis")]
 pub(crate) use redis_objects::{
     RedisObjectBucket, RedisObjectReadOutcome, RedisObjectStore, RedisObjectValue,
     RedisObjectWriteAttempt, RedisObjectZSetRangeItem, WRONGTYPE_MESSAGE,
 };
-#[cfg(feature = "redis")]
-pub use redis_objects::{RedisObjectError, RedisObjectResult, RedisStringLookup};
 pub use semantic::{SemanticCacheError, SemanticMatch};
 pub(crate) use semantic::{
     SemanticEmbedding, SemanticIndex, SemanticIndexCandidate, SemanticIndexToken,

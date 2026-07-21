@@ -3,6 +3,7 @@ use super::{
     RedisHashStore, RedisKeyStore, RedisListStore, RedisObjectStoreAccess, RedisSetStore,
     RedisStringStore, RedisZSetStore,
 };
+use crate::storage::RedisKeyError;
 
 impl EmbeddedStore {
     /// Returns true when Redis object containers are present.
@@ -286,7 +287,7 @@ impl EmbeddedStore {
         source: &[u8],
         dest: &[u8],
         nx: bool,
-    ) -> std::result::Result<bool, RedisObjectError> {
+    ) -> std::result::Result<bool, RedisKeyError> {
         <Self as RedisKeyStore>::rename_key(self, source, dest, nx)
     }
 }

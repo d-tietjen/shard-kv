@@ -1,5 +1,4 @@
 use super::*;
-use crate::ShardCacheError;
 
 impl FlatMap {
     #[inline(always)]
@@ -355,12 +354,37 @@ impl FlatMap {
     where
         F: FnOnce(Option<&[u8]>) -> bool,
     {
+        match self.prepare_governed_object_fault_hashed(hash, key, now_ms, authorize) {
+            GovernedObjectFault::Missing => GovernedRead::Missing,
+            GovernedObjectFault::Denied => GovernedRead::Denied,
+            GovernedObjectFault::Resident(value) => GovernedRead::Authorized(value),
+            GovernedObjectFault::Remote(plan) => {
+                let result = plan.fetch();
+                match self.finish_object_fault(*plan, result, now_ms) {
+                    Ok(Some(value)) => GovernedRead::Authorized(value),
+                    Ok(None) | Err(_) => GovernedRead::Missing,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn prepare_governed_object_fault_hashed<F>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        authorize: F,
+    ) -> GovernedObjectFault
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
+        self.process_object_overflow_completions(now_ms);
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return if authorize(None) {
-                GovernedRead::Authorized(value.clone())
+                GovernedObjectFault::Resident(value.clone())
             } else {
-                GovernedRead::Denied
+                GovernedObjectFault::Denied
             };
         }
         if let Some(entry) = self
@@ -369,61 +393,28 @@ impl FlatMap {
             .filter(|entry| !entry.is_expired(now_ms))
         {
             if !authorize(entry.governance.as_deref()) {
-                return GovernedRead::Denied;
+                return GovernedObjectFault::Denied;
             }
-            return GovernedRead::Authorized(entry.value.clone());
+            return GovernedObjectFault::Resident(entry.value.clone());
         }
 
         let Some(remote) = self.remote_entries.get(key) else {
-            return GovernedRead::Missing;
+            return GovernedObjectFault::Missing;
         };
         if !remote.matches(hash, key) {
-            return GovernedRead::Missing;
+            return GovernedObjectFault::Missing;
         }
         if remote.is_expired(now_ms) {
             let _ = self.delete_remote_hashed(hash, key, DeleteReason::Expired);
-            return GovernedRead::Missing;
+            return GovernedObjectFault::Missing;
         }
         if !authorize(remote.governance.as_deref()) {
-            return GovernedRead::Denied;
+            return GovernedObjectFault::Denied;
         }
-        let governance = remote.governance.clone();
-        let Some(object_overflow) = self.object_overflow.clone() else {
-            return GovernedRead::Missing;
-        };
-        if !object_overflow.fetch_on_get() {
-            return GovernedRead::Missing;
-        }
-        self.object_overflow_stats.fault_attempts =
-            self.object_overflow_stats.fault_attempts.saturating_add(1);
-        let value = match object_overflow.get_value(&remote.object) {
-            Ok(value) => value,
-            Err(error) => {
-                self.object_overflow_stats.fault_failures =
-                    self.object_overflow_stats.fault_failures.saturating_add(1);
-                if matches!(error, ShardCacheError::ObjectIntegrity(_)) {
-                    self.object_overflow_stats.checksum_failures = self
-                        .object_overflow_stats
-                        .checksum_failures
-                        .saturating_add(1);
-                }
-                return GovernedRead::Missing;
-            }
-        };
-        let key_bytes = remote.key.as_ref().to_vec();
-        let expire_at_ms = remote.expire_at_ms;
-        let _ = self.delete_remote_hashed(hash, key, DeleteReason::Explicit);
-        self.set_bytes_hashed_with_governance_option(
-            hash,
-            &key_bytes,
-            value.clone(),
-            governance,
-            expire_at_ms,
-            now_ms,
-        );
-        self.object_overflow_stats.fault_successes =
-            self.object_overflow_stats.fault_successes.saturating_add(1);
-        GovernedRead::Authorized(value)
+        self.prepare_object_fault_hashed(hash, key, now_ms, true)
+            .map_or(GovernedObjectFault::Missing, |plan| {
+                GovernedObjectFault::Remote(Box::new(plan))
+            })
     }
 
     #[inline(always)]
@@ -608,7 +599,11 @@ impl FlatMap {
         if let Some(value) = self.get_ref_hashed(hash, key, now_ms) {
             return Some(value.to_vec());
         }
-        self.fault_remote_hashed(hash, key, now_ms)
+        let plan = self.prepare_object_fault_hashed(hash, key, now_ms, false)?;
+        let result = plan.fetch();
+        self.finish_object_fault(plan, result, now_ms)
+            .ok()
+            .flatten()
             .map(|value| value.as_ref().to_vec())
     }
 
@@ -628,12 +623,14 @@ impl FlatMap {
                 .is_some_and(|entry| entry.matches(hash, key) && !entry.is_protected())
     }
 
-    pub(crate) fn fault_remote_hashed(
+    pub(crate) fn prepare_object_fault_hashed(
         &mut self,
         hash: u64,
         key: &[u8],
         now_ms: u64,
-    ) -> Option<SharedBytes> {
+        allow_protected: bool,
+    ) -> Option<ObjectFaultPlan> {
+        self.process_object_overflow_completions(now_ms);
         let object_overflow = self.object_overflow.clone()?;
         if !object_overflow.fetch_on_get() {
             return None;
@@ -642,37 +639,43 @@ impl FlatMap {
         if !remote.matches(hash, key) {
             return None;
         }
-        if remote.is_protected() {
+        if remote.is_protected() && !allow_protected {
             return None;
         }
         if remote.is_expired(now_ms) {
             let _ = self.delete_remote_hashed(hash, key, DeleteReason::Expired);
             return None;
         }
+        if !self.can_start_object_fault(remote.object.len) {
+            return None;
+        }
 
         self.object_overflow_stats.fault_attempts =
             self.object_overflow_stats.fault_attempts.saturating_add(1);
-        let value = match object_overflow.get_value(&remote.object) {
-            Ok(value) => value,
-            Err(error) => {
-                self.object_overflow_stats.fault_failures =
-                    self.object_overflow_stats.fault_failures.saturating_add(1);
-                if matches!(error, ShardCacheError::ObjectIntegrity(_)) {
-                    self.object_overflow_stats.checksum_failures = self
-                        .object_overflow_stats
-                        .checksum_failures
-                        .saturating_add(1);
-                }
-                return None;
-            }
-        };
-        let key_bytes = remote.key.as_ref().to_vec();
-        let expire_at_ms = remote.expire_at_ms;
-        let _ = self.delete_remote_hashed(hash, key, DeleteReason::Explicit);
-        self.set_bytes_hashed(hash, &key_bytes, value.clone(), expire_at_ms, now_ms);
-        self.object_overflow_stats.fault_successes =
-            self.object_overflow_stats.fault_successes.saturating_add(1);
-        Some(value)
+        let object = remote.object.clone();
+        let remote_key = remote.key.clone();
+        self.pending_object_fault_bytes =
+            self.pending_object_fault_bytes.saturating_add(object.len);
+        self.pending_object_faults = self.pending_object_faults.saturating_add(1);
+        Some(ObjectFaultPlan {
+            hash,
+            key: remote_key,
+            reserved_bytes: object.len,
+            object,
+            runtime: object_overflow,
+        })
+    }
+
+    pub(super) fn can_start_object_fault(&self, value_len: usize) -> bool {
+        if self.pending_object_fault_bytes == 0 {
+            return true;
+        }
+        let limit = self
+            .memory_limit_bytes
+            .unwrap_or(MAX_UNBOUNDED_PENDING_FAULT_BYTES);
+        self.pending_object_fault_bytes
+            .checked_add(value_len)
+            .is_some_and(|total| total <= limit)
     }
 
     /// Starts a shard-local read epoch.

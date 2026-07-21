@@ -90,6 +90,16 @@ impl Set {
         let key_end = key_start + key_len;
         let key = &ctx.frame.buf[key_start..key_end];
         let value = &ctx.frame.buf[key_end..key_end + value_len];
+        if !ctx
+            .store
+            .point_mutation_is_replicable(key, value.len(), None)
+        {
+            ServerWire::write_fast_error(
+                ctx.out,
+                "ERR mutation exceeds the configured replication frame limit",
+            );
+            return ScnpDispatch::Complete(ctx.frame.frame_len);
+        }
         if ctx.store.has_redis_objects() {
             ctx.store.set(key.to_vec(), value.to_vec(), None);
         } else {
@@ -145,6 +155,16 @@ impl Set {
         let key_end = key_start + key_len;
         let key = &ctx.frame.buf[key_start..key_end];
         let value = &ctx.frame.buf[key_end..key_end + value_len];
+        if !ctx
+            .store
+            .point_mutation_is_replicable(key, value.len(), None)
+        {
+            ServerWire::write_fast_error(
+                ctx.out,
+                "ERR mutation exceeds the configured replication frame limit",
+            );
+            return ScnpDispatch::Complete(ctx.frame.frame_len);
+        }
 
         let written = match ctx.store.route_mode() {
             EmbeddedRouteMode::SessionPrefix if key.starts_with(b"s:") => {
@@ -258,6 +278,16 @@ impl Set {
         let key_end = key_start + key_len;
         let key = &ctx.frame.buf[key_start..key_end];
         let value = &ctx.frame.buf[key_end..key_end + value_len];
+        if !ctx
+            .store
+            .point_mutation_is_replicable(key, value.len(), None)
+        {
+            ServerWire::write_fast_error(
+                ctx.out,
+                "ERR mutation exceeds the configured replication frame limit",
+            );
+            return ScnpDispatch::Complete(ctx.frame.frame_len);
+        }
         if ctx.store.has_redis_objects() {
             ctx.store.set(key.to_vec(), value.to_vec(), None);
         } else {
@@ -296,15 +326,21 @@ impl Set {
             return ScnpDispatch::Unsupported;
         }
         let key_end = cursor + key_len;
-        <Self as EmbeddedStringWrite>::set_prehashed(
+        if !<Self as EmbeddedStringWrite>::set_prehashed(
             ctx.store,
             prefix.key_hash,
             &ctx.frame.buf[cursor..key_end],
             &ctx.frame.buf[key_end..body_end],
             None,
             ctx.single_threaded,
-        );
-        ServerWire::write_fast_ok(ctx.out);
+        ) {
+            ServerWire::write_fast_error(
+                ctx.out,
+                "ERR mutation exceeds the configured replication frame limit",
+            );
+        } else {
+            ServerWire::write_fast_ok(ctx.out);
+        }
         ScnpDispatch::Complete(ctx.frame.frame_len)
     }
 }

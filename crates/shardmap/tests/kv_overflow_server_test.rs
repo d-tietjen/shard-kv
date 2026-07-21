@@ -126,13 +126,30 @@ fn replica_lru_cascades_cold_values_to_filesystem_object_overflow() {
         .unwrap();
     primary.flush_remote().unwrap();
 
+    for _ in 0..500 {
+        replica.process_maintenance();
+        if replica.shard_stats_snapshot()[0]
+            .object_overflow
+            .remote_entries
+            >= 1
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
     let overflow = &replica.shard_stats_snapshot()[0].object_overflow;
     assert!(overflow.remote_entries >= 1);
     assert!(overflow.offload_successes >= 1);
-    assert_eq!(
-        primary.cluster().get(b"cold").unwrap().unwrap().value.len(),
-        4 * 1024
-    );
+    let mut cold = None;
+    for _ in 0..500 {
+        cold = primary.cluster().get(b"cold").unwrap();
+        if cold.is_some() {
+            break;
+        }
+        replica.process_maintenance();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(cold.expect("cold overflow value").value.len(), 4 * 1024);
     assert!(
         replica.shard_stats_snapshot()[0]
             .object_overflow

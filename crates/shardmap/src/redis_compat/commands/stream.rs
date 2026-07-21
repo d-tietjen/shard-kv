@@ -1148,6 +1148,9 @@ fn load_stream_len(store: &EmbeddedStore, key: &[u8]) -> Result<usize, Frame> {
         }
         crate::storage::RedisStringLookup::Miss => Ok(0),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => Err(crate::commands::redis::error(
+            "ERR object overflow read failed",
+        )),
     }
 }
 

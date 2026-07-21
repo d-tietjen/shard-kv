@@ -1,0 +1,3 @@
+typed-scnp-fanout: workers=1 entries=1024 dims=16 count=10 ops/sec=14903 p50=65.855us p95=73.535us p99=81.407us hits=149030/149030 client_vcpu=0.32
+typed-scnp-fanout: workers=1 entries=1024 dims=16 count=10 ops/sec=14583 p50=66.367us p95=78.015us p99=84.863us hits=145830/145830 client_vcpu=0.34
+typed-scnp-fanout: workers=1 entries=1024 dims=16 count=10 ops/sec=14791 p50=65.983us p95=74.559us p99=81.983us hits=147913/147913 client_vcpu=0.32

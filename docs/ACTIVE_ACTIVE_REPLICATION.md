@@ -1,11 +1,11 @@
-# Shardcache 0.7 Active-Active Replication
+# Shardcache 0.8 Active-Active Replication
 
 ## Release Target
 
 Active-active synchronization, causal conflict handling, independent residency
-eviction, and exact cluster-eviction primitives are feature-gated for
-Shardcache `0.7.0`. They are not part of the `0.6.x` API or compatibility
-contract and do not affect the default `ShardMap` layout or hot path.
+eviction, and exact cluster-eviction primitives were introduced behind feature
+gates in Shardcache `0.7.0` and remain opt-in in `0.8.0`. They do not affect the
+default `ShardMap` layout or hot path.
 
 ## Implementation Status
 
@@ -14,6 +14,15 @@ The `active-sync-causal-eventual` and
 exact byte keys and values. The consensus-ordered feature implies the causal
 replication core, so callers select one outcome flag rather than naming an
 ordering implementation. They include:
+
+Redis object commands, including vector-set mutations, are not part of the
+active-active merge surface in 0.8.0. Vector high availability uses the
+single-primary `ReplicatedEmbeddedStore` FCRP path, which transfers each
+canonical vector set atomically. It sequences mutations on the key's canonical
+source shard while preserving pinned shard-0 storage. Run one writable vector
+primary at a time and fence promotion after replica catch-up;
+concurrent vector writers require operation-level conflict semantics that this
+release does not claim.
 
 - per-shard mutation dots, hybrid logical clocks, compact causal contexts, and
   deterministic convergence for SET, DEL, expiry, and governed SET;
@@ -187,7 +196,7 @@ node still needs direct connectivity to every peer whose mutations it must
 receive. External service discovery, topology persistence, and multi-hop block
 signatures remain separate control-plane work.
 
-The following design items remain outside the 0.7 release rather than
+The following design items remain outside the 0.8 release rather than
 implemented claims: building sync blocks from durable WAL offsets instead of
 retaining mutation payloads in memory, external topology discovery and
 persistence, multi-hop origin signatures, quorum cold nominations, tombstone
@@ -199,7 +208,7 @@ see [Performance Impact](#performance-impact).
 
 ## Architecture Summary
 
-The 0.7 implementation provides active-active shardmap synchronization in which
+The 0.8 implementation provides active-active shardmap synchronization in which
 every member of a slot's replica group may accept local reads and writes while
 managing its resident cache independently. Local LRU/LFU eviction drops payload
 residency without deleting the logical version, and exact-version fault-in
@@ -340,7 +349,7 @@ anti-entropy correctness never depend on wall-clock ordering.
 
 ### Causal-First Resolution
 
-The 0.7 active-sync release uses a causal register. Each stored key version
+The 0.8 active-sync release uses a causal register. Each stored key version
 contains its mutation dot and a bounded dotted causal context for the slot's
 replica group. The typical three-to-five-member context is stored inline; origin
 and membership counts have hard limits.
@@ -1183,7 +1192,7 @@ Expose cluster and per-local-shard health without per-key metric cardinality:
 ## Original Design Work Breakdown
 
 The following phases preserve the original design work breakdown. They are not
-all 0.7 release claims; the implemented public surface is listed in
+all 0.8 release claims; the implemented public surface is listed in
 [Implementation Status](#implementation-status), and deferred items are listed
 in [Release Boundaries](#release-boundaries).
 
@@ -1261,7 +1270,7 @@ in [Release Boundaries](#release-boundaries).
 
 This matrix records both completed 0.7 release coverage and the broader
 default-enablement coverage. The executed release evidence is summarized in
-[`RELEASE_0_7.md`](RELEASE_0_7.md).
+[`RELEASE_0_8.md`](RELEASE_0_8.md).
 
 ### Unit And Model Tests
 
@@ -1403,7 +1412,7 @@ per-mutation replication path cannot stand in for this design.
 ## Default-Enablement Gates
 
 These gates define when active sync may become a default production path. The
-0.7 release intentionally ships the evaluated point-value implementation behind
+0.8 release intentionally ships the evaluated point-value implementation behind
 explicit Cargo features; an unmet default-enablement gate does not silently
 weaken the selected consistency mode.
 

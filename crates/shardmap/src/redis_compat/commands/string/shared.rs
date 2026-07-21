@@ -30,7 +30,7 @@ pub(crate) fn strlen_value(store: &EmbeddedStore, key: &[u8]) -> std::result::Re
     match store.get_string_value_into(key, |bytes| len = bytes.len() as i64) {
         RedisStringLookup::Hit => Ok(len),
         RedisStringLookup::Miss => Ok(0),
-        RedisStringLookup::WrongType => Err(()),
+        RedisStringLookup::WrongType | RedisStringLookup::BackendError => Err(()),
     }
 }
 

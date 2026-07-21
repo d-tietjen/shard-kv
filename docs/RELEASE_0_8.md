@@ -1,6 +1,7 @@
-# Shardcache 0.7 Feature Guide
+# Shardcache 0.8 Feature Guide
 
-Shardcache 0.7 adds opt-in active-active replication for read-heavy exact
+Shardcache 0.8 adds typed vector clients and governance, hardened native vector
+read replicas, and opt-in active-active replication for read-heavy exact
 point-value workloads. Multiple `ActiveShardMap` members may accept local reads
 and writes, exchange bounded shard-local mutation blocks, and converge after
 partitions without putting network round trips on local GET or SET calls.
@@ -21,6 +22,101 @@ select an active-sync feature.
 | Exact fault-in | Restores an evicted version from local overflow, durable state, or a peer and rejects stale promotion after a racing mutation. | Included in active sync |
 | Persistence and repair | Preserves causal state in checksummed snapshots and repairs compacted block history through bounded state transfer. | Included in active sync |
 | Conflict batching | Finalizes independent ambiguous conflicts in bounded batches while preserving repeated-key mutation order. | Included in consensus mode |
+| Typed vector client | Sends bounded native `PING`, `VADD`, `VSIM`, and `VREM` requests over fanout or direct shard-0 SCNP connections, including opaque per-embedding governance metadata. | `shardcache-client-rs` `vector` feature |
+| Vector read-replica state | Replicates canonical vector-set payloads, deletes, and TTL changes through the key's stable source-shard sequence while preserving shard-0 storage during live apply and snapshot bootstrap. | `shardmap` `redis` plus `ReplicatedEmbeddedStore` |
+| Hardened object overflow | Materializes cold values transparently, reports backend failures through fallible APIs and server errors, and provides bounded filesystem/S3 cleanup and health accounting. | `object-overflow` or `object-overflow-s3` |
+
+## Object Overflow Correctness
+
+Object overflow remains a capacity tier rather than authoritative recovery
+state. Local WAL and snapshots remain authoritative. A cold point GET now
+fetches and verifies the remote payload on the first request, releases the
+shard lock during I/O, and promotes only when the remote reference still names
+the current key generation. `try_get_value_bytes`, governed fallible GET,
+snapshots, and entry visitors return errors when the payload cannot be read;
+RESP and SCNP return an explicit backend error instead of `NULL`.
+
+Filesystem storage uses descriptor-relative no-follow traversal on Unix and
+bounded reads. Generation cleanup validates marker identity, performs one
+bounded traversal per prefix, and refreshes heartbeats independently of cleanup
+scans. S3/RustFS supports verified HTTPS with an optional private-CA PEM bundle
+and emits configured SSE-S3 headers. Runtime replacement or disablement is
+rejected while remote, pending, or faulting entries still depend on that
+runtime. Entropy or required background-thread creation failures reject startup
+without intentionally panicking.
+
+Vector read replicas use the single-primary FCRP stream. The active-sync modes
+in this release synchronize exact `ActiveShardMap` point values only; they do
+not merge concurrent `VADD`, `VREM`, or `VSETATTR` operations. Do not place the
+same vector set behind multiple writable vector primaries. Promote a caught-up
+replica under an external writer fence, then redirect clients.
+
+Canonical vector state is coalesced per key for at most
+`vector_state_flush_ms` (10 ms by default), so bulk VADD does not publish every
+increasingly large intermediate index. This interval is part of the maximum
+steady-state replication lag. Snapshot capture, delete, type transition, and
+shutdown force ordered flushes. Retained canonical state is capped by
+`vector_state_pending_max_bytes` (16 MiB by default); an individual larger
+state bypasses the coalescer and is emitted immediately.
+
+`VADD ... GOVERNANCE <bytes>` stores an opaque policy label on one embedding.
+Governed embeddings fail closed: ordinary point reads appear missing, list and
+similarity commands omit them, and `VADD`, `VREM`, and `VSETATTR` cannot mutate
+them. Supply the exact label with `GOVERNANCE` for reads/search/removal or
+`IFGOVERNANCE` for `VADD`; guarded `VADD` can rotate the label with
+`GOVERNANCE <new>` or remove it with `CLEARGOVERNANCE`. Typed SCNP clients use
+`VSimOptions::allow_governance`, `VAddOptions::if_governance`, and
+`vrem_governed`. `WITHGOVERNANCE` only controls whether an already-authorized
+result includes its label.
+
+Metadata is limited to 64 KiB, survives canonical vector serialization and the
+single-primary FCRP path, and remains separate from JSON attributes. Exact
+label matching is a storage-layer guard, not user authentication or a policy
+language. Authenticate the connection and derive allowed labels in the
+service authorization layer.
+
+`DUMP` is rejected for governed vector sets so a client cannot bypass element
+reads by exporting canonical state. Whole-key `DEL`, expiry, and eviction remain
+available because governed vectors are still cache entries. Restrict lifecycle
+and overwrite commands to trusted service identities; governance labels do not
+replace connection ACLs or command authorization.
+
+Vector state is supported by the single-primary FCRP read-replica path. Active
+sync treats values as point-key versions and does not merge concurrent `VADD`
+operations from multiple writers. Do not use active-active replication for
+multi-writer vector sets in 0.8.0.
+
+Native vector read replicas use FCRP v3 in 0.8.0. Non-loopback replication
+requires TLS 1.3 mTLS plus token authentication, advertises only `fcrp/3`, and
+supports current/previous token files for rolling rotation. FCRP v3 rejects
+earlier peers, so upgrade a replica pair together rather than mixing versions.
+Replica bootstrap validates ordered snapshot chunks and matching watermarks and
+is bounded by `snapshot_receive_max_bytes` and
+`snapshot_receive_max_entries` (1 GiB and 10 million by default). The byte
+limit also bounds the primary's per-shard retained key index while a snapshot
+is streamed. Mutation and
+snapshot-chunk frames are additionally bounded by `receive_max_frame_bytes`
+(64 MiB by default), control frames remain capped at 128 KiB, and
+peers advertise frame capacity during the handshake. A replica below the
+primary's outbound ceiling is rejected before bootstrap. `read_timeout_ms` and
+`write_timeout_ms` apply to complete frames, including a slow transfer that
+continues making partial progress. Mutation shard IDs, exact sequence
+continuity, key hash/tag identity, snapshot key uniqueness, and negotiated
+shard topology are validated before replacing replica state. Point and vector
+writes that cannot fit one frame fail before local commit. Snapshot capture is
+fallible, serialized per primary, and materialized one source shard at a time:
+overflow fetch errors leave the prior replica state intact. The primary retains
+the source shard's key index plus one bounded materialization page and one wire
+chunk, and performs object-store reads without holding the shard lock.
+`snapshot_bootstrap_timeout_ms` bounds gate wait, capture, materialization,
+delivery, and buffered catch-up as one operation. Changing the primary shard count requires a fresh
+compatible replica bootstrap; online FCRP topology migration is outside 0.8.0.
+
+Governed HNSW search applies authorization only to graph candidates reached by
+the configured search effort; it never falls back to an unbounded full scan.
+Increase `EF` when approximate authorized recall is too low, or use `TRUTH` for
+an exact bounded collection scan. A result is never substituted merely because
+it is authorized.
 
 ## Intended Workload And Performance
 
@@ -79,7 +175,7 @@ or value replication path.
 - Give every writer a stable unique `NodeId`, cluster identity, and persisted
   incarnation state.
 - Use direct connectivity between every peer that must receive an origin's
-  mutations. Unsigned multi-hop forwarding fails closed in 0.7.
+  mutations. Unsigned multi-hop forwarding fails closed in 0.8.
 - Use `active-sync-tls` for non-loopback peers. Configure TLS 1.3 mutual
   authentication, certificate-fingerprint authorization, bounded deadlines,
   and tested credential overlap before admitting traffic.
@@ -100,7 +196,7 @@ or value replication path.
 - External topology discovery and persistence are application responsibilities.
 - Automated writer fencing, multi-hop origin signatures, tombstone garbage
   collection, stronger acknowledgement modes, and quorum cold nomination are
-  not 0.7 claims.
+  not 0.8 claims.
 - Write-heavy active modes remain below the original 90% baseline-retention
   target. The feature therefore remains explicit and disabled by default.
 - The standalone Blossom bridge is source-only because it pins a pre-release
@@ -121,4 +217,4 @@ real six-validator Blossom finality/restart integration test.
 
 Feature-disabled raw-cache and native `ShardMap` GET, SET, and 80/20 rows stayed
 within 2.4% of their recorded Adam baselines with zero errors. This verifies
-that publishing 0.7 does not impose the active-sync path on default users.
+that publishing 0.8 does not impose the active-sync path on default users.

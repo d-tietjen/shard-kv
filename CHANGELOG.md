@@ -1,5 +1,118 @@
 # Changelog
 
+## 0.8.0 - 2026-07-20
+
+### Added
+
+- Added the independent `vector` feature to `shardcache-client-rs`, with typed
+  SCNP `PING`, `VADD`, `VSIM COUNT ... WITHSCORES WITHATTRIBS`, and `VREM`
+  methods for fanout, automatically routed direct, and shard-pinned clients.
+- Added FP32 request encoding, typed vector options and results, bounded native
+  array decoding, legacy 0.7.1 RESP-envelope compatibility, explicit connect
+  and operation deadlines, optional token authentication, and existing Rustls
+  client support for typed vector calls.
+- Added a reproducible typed Object RAG benchmark plus matching Redis-compatible
+  and embedded ShardMap vector cases.
+- Added native read-replica replication for canonical vector-set state,
+  including live updates, deletes, TTL changes, backlog replay, and snapshot
+  bootstrap while preserving the dedicated vector-shard route. Repeated
+  updates to one vector set coalesce to the latest bounded state before flush,
+  avoiding quadratic bootstrap traffic.
+- Added bounded opaque governance metadata per vector embedding. Typed SCNP
+  `VADD` stores it independently of JSON attributes and typed `VSIM` can return
+  it in an element/score/attributes/governance result tuple. Canonical
+  serialization preserves it through TTL changes, snapshots, key lifecycle
+  commands, and native read-replica replication.
+- Added fail-closed vector governance guards. Protected embeddings are omitted
+  from `VSIM`, `VRANGE`, `VRANDMEMBER`, and `VLINKS`, point reads appear
+  missing, and mutations are denied unless the caller supplies the exact
+  opaque label. `VADD IFGOVERNANCE` supports guarded label rotation and
+  `CLEARGOVERNANCE`; typed clients expose matching options.
+- Added TLS 1.3 mTLS for native FCRP read-replica streams with dedicated
+  `fcrp/3` ALPN, non-loopback TLS enforcement, reloadable current/previous
+  token files, and redacted replication configuration output.
+- Bounded FCRP snapshot receive memory and reject reordered, interleaved, or
+  watermark-inconsistent bootstrap frames in both blocking and Monoio paths.
+- Bound `VSIM` response items and bytes, preserve HNSW search for governed
+  collections, and reject raw `DUMP` export of governed vector sets.
+- Replaced the native replication flusher's idle sub-millisecond polling with
+  event-driven wakeups and exact pending-batch deadlines.
+- Added whole-frame FCRP read deadlines and mutation-frame allocation limits;
+  control frames remain independently capped at 128 KiB.
+
+### Fixed
+
+- Made object-overflow generation entropy and required background-thread
+  creation return startup errors instead of panicking. Filesystem generation
+  cleanup now performs one bounded traversal per prefix rather than rescanning
+  the complete tree for each page. S3 overflow accepts a bounded private-CA PEM
+  bundle, preserves certificate verification, classifies live authentication
+  failures, and emits configured SSE-S3 headers.
+- Return native SCNP value, integer, and array responses for typed `PING`,
+  `VADD`, `VREM`, and `VSIM` requests instead of wrapping RESP bytes.
+- Route vector opcodes consistently to the dedicated vector shard on fanout and
+  direct-shard listeners, including keys whose ordinary hash belongs elsewhere.
+- Added command-name/opcode uniqueness coverage to prevent duplicate optional
+  Redis command-table entries.
+- Fixed multi-shard snapshot restore and replica apply incorrectly routing
+  vector payloads by ordinary key hash; they now use dedicated pinned shard 0.
+- Fixed `VADD`, `VREM`, and `VSETATTR` clearing an existing vector-set TTL;
+  vector collection mutations now preserve the deadline like Redis 8.
+- Reject malformed or allocation-amplifying vector state at RESTORE and FCRP
+  ingress, bound vector dimensions and HNSW parameters, account decoded heap
+  state in the vector cache, and cap unauthenticated FCRP Hello allocation.
+- Bumped native read-replica FCRP to v3. Version 0.8.0 peers fail closed when
+  connected to earlier FCRP peers; mixed-version replication is not
+  supported.
+- Reject out-of-range mutation shards, sequence gaps, inconsistent key hashes
+  and tags, duplicate snapshot keys, and changing replica topology without
+  modifying the last valid replica state. Network replicas now initialize from
+  the primary's advertised physical shard count instead of assuming one shard.
+- Close and reconnect Monoio replication streams after a read or write
+  deadline, and reject non-loopback Monoio use because that transport does not
+  terminate TLS.
+- Keep governed HNSW queries on the bounded graph path instead of scanning the
+  full collection or returning an arbitrary authorized fallback result.
+- Reject non-finite vectors, duplicate vector identities, invalid HNSW links,
+  and exhausted UID allocation. Sparse high UIDs no longer trigger a dense
+  allocation during similarity search.
+- Keep vector mutations on the key's canonical source-shard sequence while
+  retaining pinned shard-0 storage, and separate a replica's source sequence
+  topology from its physical storage topology during catch-up and snapshots.
+- Enforce blocking FCRP deadlines with bounded socket polling, size snapshot
+  chunks from their exact encoded payloads, and reject frame-limit settings
+  that cannot accommodate configured batches or snapshot chunks.
+- Make FCRP snapshot providers fallible so an object-overflow fetch failure
+  disconnects bootstrap instead of installing an empty snapshot at current
+  watermarks. Primary bootstrap materialization is serialized to one replica
+  at a time to bound reconnect-storm memory amplification.
+- Advertise replica frame capacity during the FCRP v3 handshake and reject
+  peers whose limit cannot accept the primary's configured outbound frames.
+  Batch builders now preflush before crossing record or byte targets and all
+  encoded frames are checked before entering the backlog.
+- Enforce one deadline across each complete blocking FCRP write, even when a
+  slow peer continues making partial progress.
+- Reject point and vector mutations that cannot fit one configured FCRP frame
+  before modifying local state or allocating a sequence number.
+- Stream primary bootstrap one source shard at a time and enforce one total
+  capture-and-delivery deadline, preventing full-cache duplication and slow
+  replicas from monopolizing bootstrap indefinitely.
+- Require the replication listener and primary exporter to use the same frame
+  limit, eliminating successful handshakes that could later emit larger frames.
+- Fall back to an uncompressed FCRP frame when zstd expands an admitted
+  mutation batch or snapshot chunk beyond the negotiated receive limit.
+- Make object-overflow GET and governed GET materialize cold values on the
+  first request without holding a shard lock. Fallible embedded APIs and the
+  RESP/SCNP server paths now distinguish backend failures from cache misses.
+- Reject object-overflow runtime replacement while remote or pending entries
+  still depend on it, and make snapshots and entry visitors propagate cold
+  materialization failures instead of silently omitting values.
+- Harden filesystem overflow with descriptor-relative no-follow operations,
+  bounded reads, prefix-scoped paginated cleanup, validated generation
+  markers, and heartbeat scheduling independent of cleanup cadence.
+- Correct the filesystem overflow benchmark to wait for acknowledged remote
+  state before timing offload and fault-in operations.
+
 ## 0.7.1 - 2026-07-17
 
 ### Added

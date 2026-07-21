@@ -21,9 +21,6 @@ pub(crate) use crate::commands::zset_shared::{
 pub(crate) use adapter::RedisCommand;
 pub(crate) use define_redis_command;
 pub(crate) use dispatch::dispatch as dispatch_redis_command;
-#[cfg(feature = "server")]
-#[allow(unused_imports)]
-pub(crate) use frame::with_resp_protocol;
 pub(crate) use frame::{
     array_bulk, bulk, error, frame_from_result, int, object_result, optional_string_value,
     reserve_resp_bulk_array_hint, scan_array, scan_array_with_cursor, scan_from_result, simple,
@@ -31,6 +28,9 @@ pub(crate) use frame::{
     write_resp_wrong_arity, write_resp_wrongtype, write_result_resp, wrong_arity, wrongtype,
     zentries_flat, zentries_frame,
 };
+#[cfg(feature = "server")]
+#[allow(unused_imports)]
+pub(crate) use frame::{with_resp_protocol, write_fast_frame};
 #[cfg(feature = "server")]
 pub(crate) use key::FastObjectArrayWriter;
 pub(crate) use key::{

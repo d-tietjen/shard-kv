@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::protocol::Frame;
 use crate::storage::VECTOR_SET_PREFIX;
 
 #[allow(dead_code)]
@@ -19,26 +20,26 @@ pub(crate) trait RedisStringStore {
     where
         F: FnMut(&mut [u8]);
 
-    fn transform_string_value_no_ttl<R, E>(
+    fn transform_string_value_no_ttl<R>(
         &self,
         key: &[u8],
-        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
-        wrong_type: fn() -> E,
-    ) -> std::result::Result<R, E>;
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), Frame>,
+        wrong_type: fn() -> Frame,
+    ) -> std::result::Result<R, Frame>;
 
-    fn transform_raw_string_value_no_ttl<R, E>(
+    fn transform_raw_string_value_no_ttl<R>(
         &self,
         key: &[u8],
-        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
-        wrong_type: fn() -> E,
-    ) -> std::result::Result<R, E>;
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), Frame>,
+        wrong_type: fn() -> Frame,
+    ) -> std::result::Result<R, Frame>;
 
-    fn transform_raw_vector_value_no_ttl<R, E>(
+    fn transform_raw_vector_value_preserve_ttl<R>(
         &self,
         key: &[u8],
-        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
-        wrong_type: fn() -> E,
-    ) -> std::result::Result<R, E>;
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), Frame>,
+        wrong_type: fn() -> Frame,
+    ) -> std::result::Result<R, Frame>;
 }
 
 impl RedisStringStore for EmbeddedStore {
@@ -123,18 +124,30 @@ impl RedisStringStore for EmbeddedStore {
             }
         }) {
             Some(()) if vector_set => RedisStringLookup::WrongType,
-            Some(()) => RedisStringLookup::Hit,
+            Some(()) => {
+                if let Some(value) = shard.get_shared_value_bytes_hashed_no_ttl(route.key_hash, key)
+                {
+                    self.notify_point_mutation(
+                        PointMutationKind::Set,
+                        key,
+                        Some(value.clone()),
+                        None,
+                        None,
+                    );
+                }
+                RedisStringLookup::Hit
+            }
             None if pinned_vector_value_exists(self, key) => RedisStringLookup::WrongType,
             None => RedisStringLookup::Miss,
         }
     }
 
-    fn transform_string_value_no_ttl<R, E>(
+    fn transform_string_value_no_ttl<R>(
         &self,
         key: &[u8],
-        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
-        wrong_type: fn() -> E,
-    ) -> std::result::Result<R, E> {
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), Frame>,
+        wrong_type: fn() -> Frame,
+    ) -> std::result::Result<R, Frame> {
         self.transform_raw_string_value_no_ttl(
             key,
             |existing| {
@@ -148,12 +161,12 @@ impl RedisStringStore for EmbeddedStore {
         )
     }
 
-    fn transform_raw_string_value_no_ttl<R, E>(
+    fn transform_raw_string_value_no_ttl<R>(
         &self,
         key: &[u8],
-        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
-        wrong_type: fn() -> E,
-    ) -> std::result::Result<R, E> {
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), Frame>,
+        wrong_type: fn() -> Frame,
+    ) -> std::result::Result<R, Frame> {
         if pinned_vector_value_exists(self, key) {
             return Err(wrong_type());
         }
@@ -183,22 +196,36 @@ impl RedisStringStore for EmbeddedStore {
 
         let now_ms = now_millis();
         let mut shard = self.shards[route.shard_id].write();
-        let result = shard.transform_value_hashed_no_ttl(route.key_hash, key, now_ms, transform)?;
+        let mut observed = None;
+        let result =
+            shard.transform_value_hashed_no_ttl(route.key_hash, key, now_ms, |existing| {
+                let (result, value) = transform(existing)?;
+                if !self.point_mutation_is_replicable(key, value.len(), None) {
+                    return Err(crate::commands::redis::error(
+                        "ERR mutation exceeds the configured replication frame limit",
+                    ));
+                }
+                observed = Some(bytes::Bytes::copy_from_slice(&value));
+                Ok((result, value))
+            })?;
         self.refresh_string_key_count(route.shard_id, &shard);
+        if let Some(value) = observed {
+            self.notify_point_mutation(PointMutationKind::Set, key, Some(value), None, None);
+        }
         Ok(result)
     }
 
-    fn transform_raw_vector_value_no_ttl<R, E>(
+    fn transform_raw_vector_value_preserve_ttl<R>(
         &self,
         key: &[u8],
-        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
-        wrong_type: fn() -> E,
-    ) -> std::result::Result<R, E> {
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), Frame>,
+        wrong_type: fn() -> Frame,
+    ) -> std::result::Result<R, Frame> {
         let route = self.route_vector_key(key);
         if vector_key_conflicts_with_primary_route(self, route, key) {
             return Err(wrong_type());
         }
-        transform_raw_string_value_routed_no_ttl(self, route, key, transform, wrong_type)
+        transform_raw_vector_value_routed(self, route, key, transform, wrong_type)
     }
 }
 
@@ -211,20 +238,22 @@ fn get_raw_string_value_routed_into<F>(
 where
     F: FnMut(&bytes::Bytes),
 {
-    if store.with_shared_value_bytes_routed(route, key, write) {
-        return RedisStringLookup::Hit;
+    match store.try_with_shared_value_bytes_routed(route, key, write) {
+        Ok(true) => return RedisStringLookup::Hit,
+        Ok(false) => {}
+        Err(_) => return RedisStringLookup::BackendError,
     }
 
     object_lookup_for_string_route(store, route, key).unwrap_or(RedisStringLookup::Miss)
 }
 
-fn transform_raw_string_value_routed_no_ttl<R, E>(
+fn transform_raw_vector_value_routed<R>(
     store: &EmbeddedStore,
     route: EmbeddedKeyRoute,
     key: &[u8],
-    transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
-    wrong_type: fn() -> E,
-) -> std::result::Result<R, E> {
+    transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), Frame>,
+    wrong_type: fn() -> Frame,
+) -> std::result::Result<R, Frame> {
     if matches!(
         object_lookup_for_string_route(store, route, key),
         Some(RedisStringLookup::WrongType)
@@ -234,7 +263,8 @@ fn transform_raw_string_value_routed_no_ttl<R, E>(
 
     let now_ms = now_millis();
     let mut shard = store.shards[route.shard_id].write();
-    let result = shard.transform_value_hashed_no_ttl(route.key_hash, key, now_ms, transform)?;
+    let result =
+        shard.transform_value_hashed_preserve_ttl(route.key_hash, key, now_ms, transform)?;
     store.refresh_string_key_count(route.shard_id, &shard);
     Ok(result)
 }

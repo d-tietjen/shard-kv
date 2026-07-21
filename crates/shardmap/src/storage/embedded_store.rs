@@ -3,20 +3,70 @@ use crossbeam_utils::CachePadded;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 #[cfg(feature = "embedded-read-biased-lock")]
 use rblock::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::collections::VecDeque;
 use std::sync::Arc;
 #[cfg(feature = "scnp-tls")]
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 #[cfg(feature = "redis")]
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(feature = "telemetry")]
 use std::time::Instant;
 
 use crate::config::EvictionPolicy;
 use crate::storage::{
-    Bytes, GovernedRead, ObjectOverflowRuntime, PackedBatch, PreparedPointKey, SemanticCacheError,
-    SemanticEmbedding, SemanticMatch, StoredEntry, hash_key, hash_key_tag_from_hash, now_millis,
-    validate_similarity_threshold,
+    Bytes, GovernedObjectFault, GovernedRead, ObjectOverflowRuntime, PackedBatch, PreparedPointKey,
+    SemanticCacheError, SemanticEmbedding, SemanticMatch, SnapshotEntrySource, StoredEntry,
+    hash_key, hash_key_tag_from_hash, now_millis, validate_similarity_threshold,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PointMutationKind {
+    Set,
+    Delete,
+    Expire,
+}
+
+pub(crate) type PointMutationFn = dyn Fn(PointMutationKind, &[u8], Option<bytes::Bytes>, Option<u64>, Option<bytes::Bytes>)
+    + Send
+    + Sync;
+pub(crate) type PointMutationValidatorFn =
+    dyn Fn(&[u8], usize, Option<usize>) -> bool + Send + Sync;
+
+#[derive(Clone)]
+struct PointMutationObserver(Arc<PointMutationFn>);
+
+#[derive(Clone)]
+struct PointMutationValidator(Arc<PointMutationValidatorFn>);
+
+impl std::fmt::Debug for PointMutationObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PointMutationObserver(..)")
+    }
+}
+
+impl PointMutationObserver {
+    fn notify(
+        &self,
+        kind: PointMutationKind,
+        key: &[u8],
+        value: Option<bytes::Bytes>,
+        expire_at_ms: Option<u64>,
+        governance: Option<bytes::Bytes>,
+    ) {
+        (self.0)(kind, key, value, expire_at_ms, governance);
+    }
+}
+
+impl std::fmt::Debug for PointMutationValidator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PointMutationValidator(..)")
+    }
+}
+
+impl PointMutationValidator {
+    fn allows(&self, key: &[u8], value_len: usize, governance_len: Option<usize>) -> bool {
+        (self.0)(key, value_len, governance_len)
+    }
+}
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetry, CacheTelemetryHandle, TelemetryRuntime};
 #[cfg(feature = "redis")]
@@ -25,6 +75,40 @@ use crate::storage::{
     RedisObjectResult, RedisObjectStore, RedisObjectValue, RedisObjectWriteAttempt,
     RedisObjectZSetRangeItem, RedisStringLookup,
 };
+
+#[cfg(feature = "redis")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VectorMutationKind {
+    Set,
+    Delete,
+    Expire,
+}
+
+#[cfg(feature = "redis")]
+pub(crate) type VectorMutationFn =
+    dyn Fn(VectorMutationKind, &[u8], Option<bytes::Bytes>, Option<u64>) + Send + Sync;
+#[cfg(feature = "redis")]
+pub(crate) type VectorMutationValidatorFn = dyn Fn(&[u8], &[u8]) -> bool + Send + Sync;
+
+#[cfg(feature = "redis")]
+#[derive(Clone)]
+struct VectorMutationObserver(Arc<VectorMutationFn>);
+#[cfg(feature = "redis")]
+#[derive(Clone)]
+struct VectorMutationValidator(Arc<VectorMutationValidatorFn>);
+
+#[cfg(feature = "redis")]
+impl std::fmt::Debug for VectorMutationObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VectorMutationObserver(..)")
+    }
+}
+#[cfg(feature = "redis")]
+impl std::fmt::Debug for VectorMutationValidator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VectorMutationValidator(..)")
+    }
+}
 #[cfg(feature = "embedded")]
 use crate::storage::{ShardStatsSnapshot, TierStatsSnapshot};
 
@@ -364,11 +448,17 @@ pub use views::{
 #[derive(Debug)]
 pub struct EmbeddedStore {
     shards: Box<[CachePadded<RwLock<EmbeddedShard>>]>,
+    point_mutation_observer: RwLock<Option<PointMutationObserver>>,
+    point_mutation_validator: RwLock<Option<PointMutationValidator>>,
     #[cfg(feature = "redis")]
     string_key_counts: Box<[CachePadded<AtomicUsize>]>,
     shift: u32,
     #[cfg(feature = "redis")]
     objects: RedisObjectStore,
+    #[cfg(feature = "redis")]
+    vector_mutation_observer: RwLock<Option<VectorMutationObserver>>,
+    #[cfg(feature = "redis")]
+    vector_mutation_validator: RwLock<Option<VectorMutationValidator>>,
     #[cfg(feature = "redis-modules")]
     module_state: modules::RedisModuleState,
     #[cfg(feature = "redis-module-topk")]
@@ -380,6 +470,96 @@ pub struct EmbeddedStore {
     overflow_replica_tls: RwLock<Option<Arc<OverflowReplicaTlsRuntime>>>,
     #[cfg(feature = "telemetry")]
     metrics: Option<Arc<CacheTelemetry>>,
+}
+
+pub(crate) struct EmbeddedSnapshotIterator<'a> {
+    store: &'a EmbeddedStore,
+    shard_id: usize,
+    keys: Vec<Bytes>,
+    next_key: usize,
+    pending: VecDeque<SnapshotEntrySource>,
+    page_bytes: usize,
+    now_ms: u64,
+    deadline: Option<Instant>,
+    failed: bool,
+}
+
+impl Iterator for EmbeddedSnapshotIterator<'_> {
+    type Item = crate::Result<StoredEntry>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        loop {
+            if let Some(deadline) = self.deadline
+                && Instant::now() >= deadline
+            {
+                self.failed = true;
+                return Some(Err(crate::ShardCacheError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "snapshot materialization deadline exceeded",
+                ))));
+            }
+            if let Some(source) = self.pending.pop_front() {
+                return Some(match source {
+                    SnapshotEntrySource::Resident(entry) => Ok(entry),
+                    SnapshotEntrySource::Remote {
+                        key,
+                        object,
+                        expire_at_ms,
+                        governance,
+                        runtime,
+                    } => {
+                        let value = match self.deadline {
+                            Some(deadline) => runtime.get_value_with_timeout(
+                                &object,
+                                deadline
+                                    .checked_duration_since(Instant::now())
+                                    .unwrap_or_default()
+                                    .max(std::time::Duration::from_millis(1)),
+                            ),
+                            None => runtime.get_value(&object),
+                        };
+                        value.map(|value| StoredEntry {
+                            key,
+                            value: value.as_ref().to_vec(),
+                            expire_at_ms,
+                            governance: governance.as_deref().map(<[u8]>::to_vec),
+                        })
+                    }
+                });
+            }
+            if self.next_key >= self.keys.len() {
+                return None;
+            }
+            let page = {
+                let shard = self.store.shards[self.shard_id].read();
+                shard.map.snapshot_entry_source_page(
+                    &self.keys,
+                    self.next_key,
+                    self.page_bytes,
+                    self.now_ms,
+                )
+            };
+            match page {
+                Ok((sources, consumed)) if consumed != 0 => {
+                    self.next_key = self.next_key.saturating_add(consumed);
+                    self.pending.extend(sources);
+                }
+                Ok(_) => {
+                    self.failed = true;
+                    return Some(Err(crate::ShardCacheError::Protocol(
+                        "snapshot iterator made no progress".into(),
+                    )));
+                }
+                Err(error) => {
+                    self.failed = true;
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
 }
 
 #[inline(always)]

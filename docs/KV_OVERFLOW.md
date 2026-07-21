@@ -42,7 +42,7 @@ promotion. See [`EXACT_GOVERNANCE.md`](EXACT_GOVERNANCE.md).
 
 ```toml
 [dependencies]
-shardmap = { version = "0.7.1", features = ["kv-overflow"] }
+shardmap = { version = "0.8.0", features = ["kv-overflow"] }
 ```
 
 ```rust,ignore
@@ -265,7 +265,7 @@ compatible managed service as the overflow tier:
 
 ```toml
 [dependencies]
-shardmap = { version = "0.7.1", features = ["kv-overflow-redis"] }
+shardmap = { version = "0.8.0", features = ["kv-overflow-redis"] }
 ```
 
 ```toml
@@ -360,6 +360,9 @@ node_id = "overflow-replica-a"
 region = "us-east-1"
 force_path_style = true
 allow_http = true
+# For HTTPS RustFS with a private CA:
+# tls_verify = true
+# tls_ca_path = "/etc/shardcache/rustfs-ca.pem"
 access_key_env = "RUSTFS_ACCESS_KEY"
 secret_key_env = "RUSTFS_SECRET_KEY"
 min_value_bytes = 4096
@@ -368,6 +371,18 @@ compression = "zstd"
 worker_threads = 2
 queue_capacity = 1024
 ```
+
+S3/RustFS requires both credential environment-variable names. Shardcache does
+not fall back to instance-metadata credentials when either name is absent. The
+values are loaded when the object-overflow runtime starts; rotate them by
+restarting the process after updating both variables.
+
+Production S3/RustFS endpoints should use HTTPS with `tls_verify = true`.
+`tls_ca_path` accepts a bounded PEM bundle of additional trusted roots for
+private PKI deployments. Do not use `tls_verify = false` outside isolated test
+environments. `server_side_encryption = "AES256"` emits the standard SSE-S3
+request header; the RustFS deployment must have its encryption service/KMS
+configured before enabling it.
 
 Do not enable `[kv_overflow]` on this server. It is an overflow node whose
 local memory policy cascades to object storage, not another embedded primary.

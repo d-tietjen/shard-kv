@@ -352,7 +352,11 @@ fn run_replicated_tcp(
         },
         {
             let store = Arc::clone(&store);
-            move |key, value| store.set(key.to_vec(), value.to_vec(), None)
+            move |key, value| {
+                store
+                    .set(key.to_vec(), value.to_vec(), None)
+                    .expect("replicated benchmark write");
+            }
         },
     )?;
     thread::sleep(Duration::from_millis(250));
@@ -485,7 +489,9 @@ fn prepopulate_replicated_store(
         .enumerate()
         .take(key_count.min(10_000))
     {
-        store.set(key.clone(), values.value_for(key_index).to_vec(), None);
+        store
+            .set(key.clone(), values.value_for(key_index).to_vec(), None)
+            .expect("replicated prepopulation");
     }
 }
 

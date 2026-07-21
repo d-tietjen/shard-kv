@@ -55,6 +55,6 @@ fn getbit_value(store: &EmbeddedStore, key: &[u8], offset: usize) -> std::result
     }) {
         RedisStringLookup::Hit => Ok(value),
         RedisStringLookup::Miss => Ok(0),
-        RedisStringLookup::WrongType => Err(()),
+        RedisStringLookup::WrongType | RedisStringLookup::BackendError => Err(()),
     }
 }

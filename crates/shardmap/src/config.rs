@@ -269,6 +269,9 @@ pub struct ObjectOverflowConfig {
     pub allow_http: bool,
     /// Verify TLS certificates for HTTPS S3-compatible stores.
     pub tls_verify: bool,
+    /// Optional PEM bundle containing additional trusted roots for an HTTPS
+    /// S3-compatible endpoint.
+    pub tls_ca_path: Option<PathBuf>,
     /// Optional server-side encryption algorithm or key reference.
     pub server_side_encryption: Option<String>,
     /// Environment variable that contains the access key for rust-fs/S3 stores.
@@ -312,6 +315,15 @@ pub struct ObjectOverflowConfig {
     /// Delete remote payloads when a key is overwritten or removed.
     pub delete_on_overwrite: bool,
 }
+
+pub const MAX_OBJECT_OVERFLOW_WORKERS: usize = 256;
+pub const MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY: usize = 1_048_576;
+pub const MAX_OBJECT_OVERFLOW_RETRIES: usize = 32;
+pub const MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS: u64 = 600_000;
+pub const MAX_OBJECT_OVERFLOW_RETRY_BACKOFF_MS: u64 = 60_000;
+pub const MAX_OBJECT_OVERFLOW_DEGRADED_THRESHOLD: usize = 1_000_000;
+pub const MAX_OBJECT_OVERFLOW_COOLDOWN_MS: u64 = 86_400_000;
+pub const MAX_OBJECT_OVERFLOW_CLEANUP_SECONDS: u64 = 31_536_000;
 
 /// Object-overflow backend.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -588,7 +600,7 @@ pub struct WalTcpExportConfig {
 }
 
 /// Native replication configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReplicationConfig {
     /// Enable native mutation-stream replication.
@@ -601,6 +613,14 @@ pub struct ReplicationConfig {
     pub replica_of: Option<String>,
     /// Optional plaintext authentication token for native replication.
     pub auth_token: Option<String>,
+    /// File containing the current reloadable replication authentication token.
+    pub auth_token_path: Option<PathBuf>,
+    /// Optional previous-token file retained during a bounded rolling rotation.
+    pub previous_auth_token_path: Option<PathBuf>,
+    /// TLS identity used while serving native replication connections.
+    pub tls_server: ScnpTlsServerConfig,
+    /// TLS trust and mTLS identity used while connecting to a primary.
+    pub tls_client: ScnpTlsClientConfig,
     /// Compression algorithm for mutation batches and snapshot chunks.
     pub compression: ReplicationCompression,
     /// zstd compression level used when `compression = "zstd"`.
@@ -613,10 +633,28 @@ pub struct ReplicationConfig {
     pub batch_max_bytes: usize,
     /// Maximum time a non-empty batch may wait before flush.
     pub batch_max_delay_us: u64,
+    /// Maximum time canonical vector-set updates may be coalesced per key.
+    ///
+    /// Coalescing prevents repeated `VADD` calls from replicating every
+    /// increasingly large intermediate HNSW payload. Deletes, type changes,
+    /// and snapshots force an ordered flush before continuing.
+    pub vector_state_flush_ms: u64,
+    /// Maximum canonical vector-state bytes retained by the coalescer.
+    ///
+    /// A single state larger than this limit bypasses coalescing and is sent
+    /// immediately. Zero uses a one-byte limit, effectively disabling retained
+    /// vector state without disabling vector replication.
+    pub vector_state_pending_max_bytes: usize,
     /// Approximate retained in-memory backlog size for partial catch-up.
     pub backlog_bytes: usize,
     /// Snapshot chunk size before compression.
     pub snapshot_chunk_bytes: usize,
+    /// Maximum retained bytes while receiving one replication snapshot.
+    pub snapshot_receive_max_bytes: usize,
+    /// Maximum entries accepted in one replication snapshot.
+    pub snapshot_receive_max_entries: usize,
+    /// Maximum compressed or uncompressed payload accepted in one data frame.
+    pub receive_max_frame_bytes: usize,
     /// Per-shard bounded queue capacity for ready replication batches.
     ///
     /// The shard worker builds ordered mutation batches locally. When this
@@ -628,12 +666,69 @@ pub struct ReplicationConfig {
     pub max_replicas: usize,
     /// Maximum time spent opening one TCP connect attempt from a replica.
     pub connect_timeout_ms: u64,
+    /// Maximum time allowed to receive one complete replication frame.
+    pub read_timeout_ms: u64,
     /// Per-write timeout for replication TCP I/O.
     pub write_timeout_ms: u64,
+    /// Maximum wall-clock time for snapshot capture and delivery to one replica.
+    pub snapshot_bootstrap_timeout_ms: u64,
     /// Delay between reconnect attempts after a replica disconnect.
     pub reconnect_backoff_ms: u64,
     /// Per-subscriber outbound channel capacity.
     pub subscriber_channel_capacity: usize,
+}
+
+impl std::fmt::Debug for ReplicationConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ReplicationConfig")
+            .field("enabled", &self.enabled)
+            .field("role", &self.role)
+            .field("bind_addr", &self.bind_addr)
+            .field("replica_of", &self.replica_of)
+            .field("auth_token_configured", &self.auth_token.is_some())
+            .field("auth_token_path", &self.auth_token_path)
+            .field("previous_auth_token_path", &self.previous_auth_token_path)
+            .field("tls_server", &self.tls_server)
+            .field("tls_client", &self.tls_client)
+            .field("compression", &self.compression)
+            .field("zstd_level", &self.zstd_level)
+            .field("send_policy", &self.send_policy)
+            .field("batch_max_records", &self.batch_max_records)
+            .field("batch_max_bytes", &self.batch_max_bytes)
+            .field("batch_max_delay_us", &self.batch_max_delay_us)
+            .field("vector_state_flush_ms", &self.vector_state_flush_ms)
+            .field(
+                "vector_state_pending_max_bytes",
+                &self.vector_state_pending_max_bytes,
+            )
+            .field("backlog_bytes", &self.backlog_bytes)
+            .field("snapshot_chunk_bytes", &self.snapshot_chunk_bytes)
+            .field(
+                "snapshot_receive_max_bytes",
+                &self.snapshot_receive_max_bytes,
+            )
+            .field(
+                "snapshot_receive_max_entries",
+                &self.snapshot_receive_max_entries,
+            )
+            .field("receive_max_frame_bytes", &self.receive_max_frame_bytes)
+            .field("queue_capacity", &self.queue_capacity)
+            .field("max_replicas", &self.max_replicas)
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("read_timeout_ms", &self.read_timeout_ms)
+            .field("write_timeout_ms", &self.write_timeout_ms)
+            .field(
+                "snapshot_bootstrap_timeout_ms",
+                &self.snapshot_bootstrap_timeout_ms,
+            )
+            .field("reconnect_backoff_ms", &self.reconnect_backoff_ms)
+            .field(
+                "subscriber_channel_capacity",
+                &self.subscriber_channel_capacity,
+            )
+            .finish()
+    }
 }
 
 /// Native replication role.
@@ -784,6 +879,7 @@ impl Default for ObjectOverflowConfig {
             force_path_style: true,
             allow_http: false,
             tls_verify: true,
+            tls_ca_path: None,
             server_side_encryption: None,
             access_key_env: None,
             secret_key_env: None,
@@ -892,18 +988,29 @@ impl Default for ReplicationConfig {
             bind_addr: "127.0.0.1:7631".to_string(),
             replica_of: None,
             auth_token: None,
+            auth_token_path: None,
+            previous_auth_token_path: None,
+            tls_server: ScnpTlsServerConfig::default(),
+            tls_client: ScnpTlsClientConfig::default(),
             compression: ReplicationCompression::None,
             zstd_level: 3,
             send_policy: ReplicationSendPolicy::Batch,
             batch_max_records: 512,
             batch_max_bytes: 1024 * 1024,
             batch_max_delay_us: 750,
+            vector_state_flush_ms: 10,
+            vector_state_pending_max_bytes: 16 * 1024 * 1024,
             backlog_bytes: 64 * 1024 * 1024,
             snapshot_chunk_bytes: 1024 * 1024,
+            snapshot_receive_max_bytes: 1024 * 1024 * 1024,
+            snapshot_receive_max_entries: 10_000_000,
+            receive_max_frame_bytes: 64 * 1024 * 1024,
             queue_capacity: 16_384,
             max_replicas: 16,
             connect_timeout_ms: 500,
+            read_timeout_ms: 30_000,
             write_timeout_ms: 500,
+            snapshot_bootstrap_timeout_ms: 300_000,
             reconnect_backoff_ms: 200,
             subscriber_channel_capacity: 1_024,
         }
@@ -1033,13 +1140,21 @@ impl PersistenceConfig {
 mod tests {
     #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
     use super::KvOverflowBackend;
+    #[cfg(feature = "object-overflow-s3")]
+    use super::ObjectOverflowBackend;
     #[cfg(feature = "kv-overflow")]
     use super::{
         EvictionPolicy, KvOverflowConfig, KvOverflowReplica, KvOverflowReplicaServerConfig,
         MAX_KV_OVERFLOW_SLOT_COUNT, ScnpTlsClientConfig,
     };
-    use super::{ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser};
-    #[cfg(all(feature = "kv-overflow", feature = "scnp-tls"))]
+    #[cfg(feature = "object-overflow")]
+    use super::{
+        MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS, MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY,
+        MAX_OBJECT_OVERFLOW_WORKERS, ObjectOverflowConfig,
+    };
+    use super::{
+        ReplicationConfig, ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -1068,6 +1183,61 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "object-overflow")]
+    #[test]
+    fn object_overflow_rejects_resource_amplifying_configuration() {
+        let mut config = ShardCacheConfig {
+            max_memory_bytes: 1024,
+            eviction_policy: super::EvictionPolicy::Lru,
+            object_overflow: ObjectOverflowConfig {
+                enabled: true,
+                endpoint: "/tmp/shardcache-object-overflow-config-test".into(),
+                bucket: "bucket".into(),
+                ..ObjectOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        config.object_overflow.worker_threads = MAX_OBJECT_OVERFLOW_WORKERS + 1;
+        assert!(config.validate().is_err());
+        config.object_overflow.worker_threads = 1;
+        config.object_overflow.queue_capacity = MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY + 1;
+        assert!(config.validate().is_err());
+        config.object_overflow.queue_capacity = 1;
+        config.object_overflow.operation_timeout_ms = MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS + 1;
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(feature = "object-overflow-s3")]
+    #[test]
+    fn s3_object_overflow_requires_a_complete_credential_env_pair() {
+        let mut config = ShardCacheConfig {
+            max_memory_bytes: 1024,
+            eviction_policy: super::EvictionPolicy::Lru,
+            object_overflow: ObjectOverflowConfig {
+                enabled: true,
+                backend: ObjectOverflowBackend::S3,
+                endpoint: "https://object-store.example".into(),
+                bucket: "bucket".into(),
+                ..ObjectOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_err());
+        config.object_overflow.access_key_env = Some("OBJECT_ACCESS_KEY".into());
+        assert!(config.validate().is_err());
+        config.object_overflow.secret_key_env = Some("OBJECT_SECRET_KEY".into());
+        assert!(config.validate().is_ok());
+        config.object_overflow.tls_ca_path = Some(PathBuf::new());
+        assert!(config.validate().is_err());
+        config.object_overflow.tls_ca_path = Some("/etc/shardcache/object-ca.pem".into());
+        config.object_overflow.tls_verify = false;
+        assert!(config.validate().is_err());
+        config.object_overflow.tls_verify = true;
+        assert!(config.validate().is_ok());
+    }
+
     #[test]
     fn default_shard_count_is_power_of_two() {
         let shard_count = ShardCacheConfig::default_shard_count();
@@ -1092,6 +1262,62 @@ mod tests {
         config.persistence.wal_block_max_records = 64;
         config.persistence.wal_block_max_bytes = 0;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn replication_token_rotation_configuration_requires_a_current_file() {
+        let config = ShardCacheConfig {
+            replication: ReplicationConfig {
+                enabled: true,
+                previous_auth_token_path: Some(PathBuf::from("/run/secrets/old-token")),
+                ..ReplicationConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn replication_receive_limit_must_fit_configured_outbound_frames() {
+        let mut config = ShardCacheConfig::default();
+        config.replication.enabled = true;
+        config.replication.batch_max_bytes = 1_024;
+        config.replication.snapshot_chunk_bytes = 512;
+        config.replication.receive_max_frame_bytes = 1_024;
+        assert!(config.validate().is_err());
+
+        config.replication.batch_max_bytes = 512;
+        config.replication.snapshot_chunk_bytes = 4_097;
+        config.replication.receive_max_frame_bytes = 4_096;
+        assert!(config.validate().is_err());
+
+        config.replication.snapshot_chunk_bytes = 4_096;
+        assert!(config.validate().is_ok());
+    }
+
+    #[cfg(feature = "scnp-tls")]
+    #[test]
+    fn non_loopback_replication_requires_mtls_and_token_authentication() {
+        let mut config = ShardCacheConfig {
+            replication: ReplicationConfig {
+                enabled: true,
+                role: super::ReplicationRole::Replica,
+                replica_of: Some("10.0.0.10:7631".into()),
+                ..ReplicationConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_err());
+
+        config.replication.auth_token_path = Some(PathBuf::from("/run/secrets/token"));
+        config.replication.tls_client = ScnpTlsClientConfig {
+            enabled: true,
+            ca_path: PathBuf::from("/run/secrets/ca.pem"),
+            client_cert_path: Some(PathBuf::from("/run/secrets/client.pem")),
+            client_key_path: Some(PathBuf::from("/run/secrets/client-key.pem")),
+            server_name: Some("primary.internal".into()),
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]

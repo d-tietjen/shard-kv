@@ -4188,16 +4188,20 @@ impl KvOverflowStore {
         let key_hash = xxh3_64(key);
         let route = self.inner.route_key_prehashed(key_hash, key);
         let mut authorize = Some(authorize);
-        match self.inner.get_value_bytes_routed_with_governance_filter(
-            route,
-            key,
-            now_millis(),
-            |metadata| {
-                authorize
-                    .take()
-                    .expect("authorization filter is called at most once")(metadata)
-            },
-        ) {
+        match self
+            .inner
+            .try_get_value_bytes_routed_with_governance_filter(
+                route,
+                key,
+                now_millis(),
+                |metadata| {
+                    authorize
+                        .take()
+                        .expect("authorization filter is called at most once")(
+                        metadata
+                    )
+                },
+            )? {
             GovernedRead::Authorized(value) => return Ok(Some(value.to_vec())),
             GovernedRead::Denied => return Ok(None),
             GovernedRead::Missing => {}
@@ -4258,20 +4262,21 @@ impl KvOverflowStore {
     {
         let route = self.inner.route_key_prehashed(key_hash, key);
         let check_resident = |authorize: &mut Option<F>| {
-            self.inner.get_value_bytes_routed_with_governance_filter(
-                route,
-                key,
-                now_millis(),
-                |metadata| {
-                    authorize
-                        .take()
-                        .expect("authorization filter is called at most once")(
-                        metadata
-                    )
-                },
-            )
+            self.inner
+                .try_get_value_bytes_routed_with_governance_filter(
+                    route,
+                    key,
+                    now_millis(),
+                    |metadata| {
+                        authorize
+                            .take()
+                            .expect("authorization filter is called at most once")(
+                            metadata
+                        )
+                    },
+                )
         };
-        match check_resident(authorize) {
+        match check_resident(authorize)? {
             GovernedRead::Authorized(value) => {
                 return Ok(FaultInOutcome::Return(Some(value.to_vec())));
             }
@@ -4290,7 +4295,7 @@ impl KvOverflowStore {
             .cluster
             .get_on_shard(expected.primary_shard, key_hash, key)?;
         let _key_gate = self.key_gate_for_hash(key_hash);
-        match check_resident(authorize) {
+        match check_resident(authorize)? {
             GovernedRead::Authorized(value) => {
                 return Ok(FaultInOutcome::Return(Some(value.to_vec())));
             }

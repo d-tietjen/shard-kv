@@ -3,12 +3,25 @@ use super::*;
 impl EmbeddedStore {
     /// Deletes a key and returns true when a value or object was removed.
     pub fn delete(&self, key: &[u8]) -> bool {
+        if !self.point_mutation_is_replicable(key, 0, None) {
+            return false;
+        }
         let now_ms = now_millis();
         let route = self.route_key(key);
-        let deleted = self.delete_routed_then(route, key, now_ms, || {});
         #[cfg(feature = "redis")]
-        if !deleted {
-            return self.delete_pinned_vector_value_if_distinct(route, key, now_ms);
+        let is_vector = self.clone_vector_value(key).is_some();
+        let deleted = self.delete_routed_then(route, key, now_ms, || {
+            #[cfg(feature = "redis")]
+            if is_vector {
+                return;
+            }
+            self.notify_point_mutation(PointMutationKind::Delete, key, None, None, None);
+        });
+        #[cfg(feature = "redis")]
+        let deleted = deleted || self.delete_pinned_vector_value_if_distinct(route, key, now_ms);
+        #[cfg(feature = "redis")]
+        if deleted && is_vector {
+            self.notify_vector_mutation(VectorMutationKind::Delete, key, None, None);
         }
         deleted
     }
@@ -258,8 +271,13 @@ impl EmbeddedStore {
 
     /// Removes the TTL from a key and returns true when a TTL was cleared.
     pub fn persist(&self, key: &[u8]) -> bool {
+        if !self.point_mutation_is_replicable(key, 0, None) {
+            return false;
+        }
         let route = self.route_key(key);
         let now_ms = now_millis();
+        #[cfg(feature = "redis")]
+        let is_vector = self.clone_vector_value(key).is_some();
         #[cfg(feature = "redis")]
         if self.objects.shard_has_objects(route.shard_id) {
             let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
@@ -274,6 +292,7 @@ impl EmbeddedStore {
             }
             let persisted = bucket.persist(key, now_ms);
             if persisted {
+                self.notify_point_mutation(PointMutationKind::Expire, key, None, None, None);
                 return true;
             }
             if bucket.contains_object(key) {
@@ -291,20 +310,51 @@ impl EmbeddedStore {
         }
         let persisted = shard.map.persist(key, now_ms);
         #[cfg(feature = "redis")]
-        if !persisted {
-            return self.persist_pinned_vector_value_if_distinct(route, key, now_ms);
+        let persisted =
+            persisted || self.persist_pinned_vector_value_if_distinct(route, key, now_ms);
+        #[cfg(feature = "redis")]
+        if persisted && is_vector {
+            self.notify_vector_mutation(VectorMutationKind::Expire, key, None, None);
+        }
+        #[cfg(feature = "redis")]
+        if persisted && !is_vector {
+            self.notify_point_mutation(PointMutationKind::Expire, key, None, None, None);
+        }
+        #[cfg(not(feature = "redis"))]
+        if persisted {
+            self.notify_point_mutation(PointMutationKind::Expire, key, None, None, None);
         }
         persisted
     }
 
     /// Sets an absolute expiration timestamp in Unix milliseconds.
     pub fn expire(&self, key: &[u8], expire_at_ms: u64) -> bool {
+        if !self.point_mutation_is_replicable(key, 0, None) {
+            return false;
+        }
         let route = self.route_key(key);
         let now_ms = now_millis();
-        let changed = self.expire_routed_then(route, key, expire_at_ms, now_ms, || {});
         #[cfg(feature = "redis")]
-        if !changed {
-            return self.expire_pinned_vector_value_if_distinct(route, key, expire_at_ms, now_ms);
+        let is_vector = self.clone_vector_value(key).is_some();
+        let changed = self.expire_routed_then(route, key, expire_at_ms, now_ms, || {
+            #[cfg(feature = "redis")]
+            if is_vector {
+                return;
+            }
+            self.notify_point_mutation(
+                PointMutationKind::Expire,
+                key,
+                None,
+                Some(expire_at_ms),
+                None,
+            );
+        });
+        #[cfg(feature = "redis")]
+        let changed = changed
+            || self.expire_pinned_vector_value_if_distinct(route, key, expire_at_ms, now_ms);
+        #[cfg(feature = "redis")]
+        if changed && is_vector {
+            self.notify_vector_mutation(VectorMutationKind::Expire, key, None, Some(expire_at_ms));
         }
         changed
     }
@@ -535,7 +585,10 @@ impl EmbeddedStore {
                     hot,
                     warm,
                     cold,
-                    object_overflow: shard.map.object_overflow_stats().into(),
+                    object_overflow: shard
+                        .map
+                        .object_overflow_stats_with_worker_stats(shard_id == 0)
+                        .into(),
                 }
             })
             .collect()
@@ -593,6 +646,13 @@ impl EmbeddedStore {
             {
                 continue;
             }
+            #[cfg(feature = "redis")]
+            let route = if entry.value.starts_with(crate::storage::VECTOR_SET_PREFIX) {
+                self.route_vector_key(&entry.key)
+            } else {
+                self.route_key(&entry.key)
+            };
+            #[cfg(not(feature = "redis"))]
             let route = self.route_key(&entry.key);
             let mut shard = self.shards[route.shard_id].write();
             if let Some(session_prefix) = derived_session_storage_prefix(&entry.key) {

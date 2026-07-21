@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 
@@ -8,8 +9,8 @@ use crate::commands::redis::{
 };
 #[cfg(feature = "server")]
 use crate::commands::redis::{
-    write_frame, write_resp_array_header, write_resp_null, write_resp_wrong_arity,
-    write_resp_wrongtype,
+    write_fast_frame, write_frame, write_resp_array_header, write_resp_null,
+    write_resp_wrong_arity, write_resp_wrongtype,
 };
 use crate::protocol::Frame;
 #[cfg(feature = "server")]
@@ -22,6 +23,7 @@ use bytes::BytesMut;
 
 const HNSW_VECTOR_SET_FORMAT: u32 = 0x484e_5357; // HNSW
 const HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO: u32 = 0x4853_4e57; // HSNW
+const HNSW_GOVERNED_VECTOR_SET_FORMAT: u32 = 0x484e_5347; // HNSG
 const DEFAULT_HNSW_M: usize = 16;
 const DEFAULT_HNSW_EF_CONSTRUCTION: usize = 64;
 const DEFAULT_HNSW_EF_SEARCH: usize = 64;
@@ -36,6 +38,13 @@ const VECTOR_LOOKUP_CACHE_MAX_ENTRIES: usize = 256;
 const VECTOR_LOOKUP_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const VECTOR_ATTRIBUTE_VALIDATION_CACHE_MAX_ENTRIES: usize = 128;
 const VECTOR_ATTRIBUTE_VALIDATION_CACHE_MAX_VALUE_BYTES: usize = 64 * 1024;
+const MAX_VECTOR_GOVERNANCE_BYTES: usize = 64 * 1024;
+const MAX_VECTOR_DIMENSIONS: usize = 65_536;
+const MAX_VECTOR_SET_ENTRIES: usize = 1_000_000;
+const MAX_HNSW_M: usize = 1_024;
+const MAX_HNSW_EF_CONSTRUCTION: usize = 1_000_000;
+const MAX_VECTOR_RESPONSE_ITEMS: usize = 65_536;
+const MAX_VECTOR_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 macro_rules! define_vector_command {
     ($type:ident, $static_name:ident, $name:literal, $mutates:expr) => {
@@ -131,6 +140,7 @@ struct VectorEntry {
     element: Bytes,
     vector: Vec<f64>,
     attributes: Option<Bytes>,
+    governance: Option<Bytes>,
     links: Vec<Vec<u64>>,
 }
 
@@ -157,6 +167,7 @@ enum VectorEntryLookup {
 struct VectorEntrySnapshot {
     vector: Option<Vec<f64>>,
     attributes: Option<Bytes>,
+    governance: Option<Bytes>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,21 +178,38 @@ enum VectorDecodeMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VectorLookupProjection {
-    Exists,
-    Attributes,
-    Vector,
-    VectorAndAttributes,
+    AttributesAndGovernance,
+    Governance,
+    VectorAndGovernance,
+    VectorAttributesAndGovernance,
 }
 
 impl VectorLookupProjection {
     #[inline(always)]
     fn include_vector(self) -> bool {
-        matches!(self, Self::Vector | Self::VectorAndAttributes)
+        matches!(
+            self,
+            Self::VectorAndGovernance | Self::VectorAttributesAndGovernance
+        )
     }
 
     #[inline(always)]
     fn include_attributes(self) -> bool {
-        matches!(self, Self::Attributes | Self::VectorAndAttributes)
+        matches!(
+            self,
+            Self::AttributesAndGovernance | Self::VectorAttributesAndGovernance
+        )
+    }
+
+    #[inline(always)]
+    fn include_governance(self) -> bool {
+        matches!(
+            self,
+            Self::Governance
+                | Self::AttributesAndGovernance
+                | Self::VectorAndGovernance
+                | Self::VectorAttributesAndGovernance
+        )
     }
 }
 
@@ -194,7 +222,7 @@ struct VectorDecodeCacheKey {
 
 struct VectorDecodeCacheEntry {
     key: VectorDecodeCacheKey,
-    raw_len: usize,
+    retained_bytes: usize,
     _raw: bytes::Bytes,
     set: Arc<VectorSetState>,
 }
@@ -202,7 +230,7 @@ struct VectorDecodeCacheEntry {
 #[derive(Default)]
 struct VectorDecodeCache {
     entries: Vec<VectorDecodeCacheEntry>,
-    raw_bytes: usize,
+    retained_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,25 +325,59 @@ impl VectorDecodeCache {
     }
 
     fn insert(&mut self, key: VectorDecodeCacheKey, raw: bytes::Bytes, set: Arc<VectorSetState>) {
-        let raw_len = raw.len();
-        self.raw_bytes = self.raw_bytes.saturating_add(raw_len);
+        let retained_bytes = raw.len().saturating_add(decoded_vector_set_bytes(&set));
+        if retained_bytes > VECTOR_DECODE_CACHE_MAX_BYTES {
+            return;
+        }
+        self.retained_bytes = self.retained_bytes.saturating_add(retained_bytes);
         self.entries.push(VectorDecodeCacheEntry {
             key,
-            raw_len,
+            retained_bytes,
             _raw: raw,
             set,
         });
         while self.entries.len() > VECTOR_DECODE_CACHE_MAX_ENTRIES
-            || self.raw_bytes > VECTOR_DECODE_CACHE_MAX_BYTES
+            || self.retained_bytes > VECTOR_DECODE_CACHE_MAX_BYTES
         {
             if self.entries.is_empty() {
-                self.raw_bytes = 0;
+                self.retained_bytes = 0;
                 break;
             }
             let removed = self.entries.remove(0);
-            self.raw_bytes = self.raw_bytes.saturating_sub(removed.raw_len);
+            self.retained_bytes = self.retained_bytes.saturating_sub(removed.retained_bytes);
         }
     }
+}
+
+fn decoded_vector_set_bytes(set: &VectorSetState) -> usize {
+    let mut bytes = std::mem::size_of::<VectorSetState>().saturating_add(
+        set.entries
+            .capacity()
+            .saturating_mul(std::mem::size_of::<VectorEntry>()),
+    );
+    for entry in &set.entries {
+        bytes = bytes
+            .saturating_add(entry.element.capacity())
+            .saturating_add(
+                entry
+                    .vector
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<f64>()),
+            )
+            .saturating_add(entry.attributes.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(entry.governance.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(
+                entry
+                    .links
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Vec<u64>>()),
+            );
+        for layer in &entry.links {
+            bytes =
+                bytes.saturating_add(layer.capacity().saturating_mul(std::mem::size_of::<u64>()));
+        }
+    }
+    bytes
 }
 
 impl VectorLexRangeCache {
@@ -444,7 +506,9 @@ fn vector_attribute_validation_cache() -> &'static Mutex<VectorAttributeValidati
 
 impl crate::commands::redis::RedisCommand for VAdd {
     #[cfg(feature = "server")]
-    vector_write_fast_from_resp!();
+    fn write_fast(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_fast_frame(out, &Self::execute(store, args));
+    }
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         let [key, rest @ ..] = args else {
@@ -481,20 +545,34 @@ impl crate::commands::redis::RedisCommand for VAdd {
                     store,
                     key,
                     &parsed.element,
-                    VectorLookupProjection::VectorAndAttributes,
+                    VectorLookupProjection::VectorAttributesAndGovernance,
                 ) {
                     Ok(VectorEntryLookup::Found(snapshot)) => {
+                        if !governance_mutation_authorized(
+                            snapshot.governance.as_deref(),
+                            parsed.expected_governance.as_deref(),
+                        ) {
+                            return error("NOPERM vector governance authorization failed");
+                        }
                         let vector_changed =
                             snapshot.vector.as_deref() != Some(parsed.vector.as_slice());
                         let attributes_changed =
                             parsed.attributes.as_deref().is_some_and(|attributes| {
                                 Some(attributes) != snapshot.attributes.as_deref()
                             });
-                        if !vector_changed && !attributes_changed {
+                        let governance_changed = parsed.clear_governance
+                            || parsed.governance.as_deref().is_some_and(|governance| {
+                                Some(governance) != snapshot.governance.as_deref()
+                            });
+                        if !vector_changed && !attributes_changed && !governance_changed {
                             return int(0);
                         }
                     }
-                    Ok(VectorEntryLookup::MissingElement | VectorEntryLookup::MissingKey) => {}
+                    Ok(VectorEntryLookup::MissingElement | VectorEntryLookup::MissingKey) => {
+                        if parsed.expected_governance.is_some() {
+                            return error("NOPERM vector governance authorization failed");
+                        }
+                    }
                     Err(frame) => return frame,
                 }
             }
@@ -538,12 +616,24 @@ impl crate::commands::redis::RedisCommand for VAdd {
                 .find(|entry| entry.element == parsed.element)
             {
                 Some(entry) => {
+                    if !governance_mutation_authorized(
+                        entry.governance.as_deref(),
+                        parsed.expected_governance.as_deref(),
+                    ) {
+                        return VectorWriteResult::Unchanged(error(
+                            "NOPERM vector governance authorization failed",
+                        ));
+                    }
                     let vector_changed = entry.vector != parsed.vector;
                     let attributes_changed = parsed
                         .attributes
                         .as_deref()
                         .is_some_and(|attributes| Some(attributes) != entry.attributes.as_deref());
-                    if !vector_changed && !attributes_changed {
+                    let governance_changed = parsed.clear_governance
+                        || parsed.governance.as_deref().is_some_and(|governance| {
+                            Some(governance) != entry.governance.as_deref()
+                        });
+                    if !vector_changed && !attributes_changed && !governance_changed {
                         return VectorWriteResult::Unchanged(int(0));
                     }
                     if vector_changed {
@@ -552,20 +642,43 @@ impl crate::commands::redis::RedisCommand for VAdd {
                     if attributes_changed {
                         entry.attributes = parsed.attributes;
                     }
+                    if governance_changed {
+                        entry.governance = if parsed.clear_governance {
+                            None
+                        } else {
+                            parsed.governance
+                        };
+                    }
                     if vector_changed {
                         set.rebuild_hnsw();
                     }
                     VectorWriteResult::Changed(int(0))
                 }
                 None => {
+                    if parsed.expected_governance.is_some() {
+                        return VectorWriteResult::Unchanged(error(
+                            "NOPERM vector governance authorization failed",
+                        ));
+                    }
                     let uid = set.next_uid;
-                    set.next_uid = set.next_uid.saturating_add(1).max(1);
+                    let Some(next_uid) = uid.checked_add(1) else {
+                        return VectorWriteResult::Unchanged(error(
+                            "ERR vector UID space exhausted",
+                        ));
+                    };
+                    if uid == 0 {
+                        return VectorWriteResult::Unchanged(error(
+                            "ERR vector UID space exhausted",
+                        ));
+                    }
+                    set.next_uid = next_uid;
                     set.insert_hnsw_entry(VectorEntry {
                         uid,
                         level: hnsw_level(&parsed.element),
                         element: parsed.element,
                         vector: parsed.vector,
                         attributes: parsed.attributes,
+                        governance: parsed.governance,
                         links: Vec::new(),
                     });
                     VectorWriteResult::Changed(int(1))
@@ -637,27 +750,39 @@ impl crate::commands::redis::RedisCommand for VEmb {
         let [key, element, options @ ..] = args else {
             return wrong_arity("VEMB");
         };
-        let raw = match options {
-            [] => false,
-            [option] if eq_ignore_ascii_case(option, b"RAW") => true,
-            _ => return error("ERR syntax error"),
+        let (raw, expected_governance) = match parse_vector_read_options(options, true) {
+            Ok(parsed) => parsed,
+            Err(frame) => return frame,
         };
         let metadata = match vector_read_metadata(store, key) {
             Ok(Some(metadata)) => metadata,
             Ok(None) => return Frame::Null,
             Err(frame) => return frame,
         };
-        match vector_lookup_entry(store, key, element, VectorLookupProjection::Vector) {
-            Ok(VectorEntryLookup::Found(snapshot)) => match snapshot.vector {
-                Some(vector) if raw => raw_vector_values_frame(&vector, metadata.quantization),
-                Some(vector) => array_bulk(
-                    vector
-                        .iter()
-                        .map(|value| format_number(*value).into_bytes())
-                        .collect(),
-                ),
-                None => Frame::Null,
-            },
+        match vector_lookup_entry(
+            store,
+            key,
+            element,
+            VectorLookupProjection::VectorAndGovernance,
+        ) {
+            Ok(VectorEntryLookup::Found(snapshot))
+                if governance_read_authorized(
+                    snapshot.governance.as_deref(),
+                    expected_governance.as_deref(),
+                ) =>
+            {
+                match snapshot.vector {
+                    Some(vector) if raw => raw_vector_values_frame(&vector, metadata.quantization),
+                    Some(vector) => array_bulk(
+                        vector
+                            .iter()
+                            .map(|value| format_number(*value).into_bytes())
+                            .collect(),
+                    ),
+                    None => Frame::Null,
+                }
+            }
+            Ok(VectorEntryLookup::Found(_)) => Frame::Null,
             Ok(VectorEntryLookup::MissingKey | VectorEntryLookup::MissingElement) => Frame::Null,
             Err(frame) => frame,
         }
@@ -669,11 +794,28 @@ impl crate::commands::redis::RedisCommand for VGetAttr {
     vector_write_fast_from_resp!();
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let [key, element] = args else {
+        let [key, element, options @ ..] = args else {
             return wrong_arity("VGETATTR");
         };
-        match vector_lookup_entry(store, key, element, VectorLookupProjection::Attributes) {
-            Ok(VectorEntryLookup::Found(snapshot)) => snapshot.attributes.map_or(Frame::Null, bulk),
+        let expected_governance = match parse_governance_guard(options) {
+            Ok(expected) => expected,
+            Err(frame) => return frame,
+        };
+        match vector_lookup_entry(
+            store,
+            key,
+            element,
+            VectorLookupProjection::AttributesAndGovernance,
+        ) {
+            Ok(VectorEntryLookup::Found(snapshot))
+                if governance_read_authorized(
+                    snapshot.governance.as_deref(),
+                    expected_governance.as_deref(),
+                ) =>
+            {
+                snapshot.attributes.map_or(Frame::Null, bulk)
+            }
+            Ok(VectorEntryLookup::Found(_)) => Frame::Null,
             Ok(VectorEntryLookup::MissingKey | VectorEntryLookup::MissingElement) => Frame::Null,
             Err(frame) => frame,
         }
@@ -681,11 +823,7 @@ impl crate::commands::redis::RedisCommand for VGetAttr {
 
     #[cfg(feature = "server")]
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-        let [key, element] = args else {
-            write_resp_wrong_arity(out, "VGETATTR");
-            return;
-        };
-        write_vector_attribute_resp(store, key, element, out);
+        write_frame(out, &Self::execute(store, args));
     }
 }
 
@@ -694,21 +832,37 @@ impl crate::commands::redis::RedisCommand for VSetAttr {
     vector_write_fast_from_resp!();
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let [key, element, attributes] = args else {
+        let [key, element, attributes, options @ ..] = args else {
             return wrong_arity("VSETATTR");
         };
+        let expected_governance = match parse_governance_guard(options) {
+            Ok(expected) => expected,
+            Err(frame) => return frame,
+        };
         let next_attributes = (!attributes.is_empty()).then(|| (*attributes).to_vec());
-        match vector_lookup_entry(store, key, element, VectorLookupProjection::Attributes) {
+        match vector_lookup_entry(
+            store,
+            key,
+            element,
+            VectorLookupProjection::AttributesAndGovernance,
+        ) {
             Ok(VectorEntryLookup::MissingKey | VectorEntryLookup::MissingElement) => {
                 if let Err(frame) = validate_attributes(attributes) {
                     return frame;
                 }
                 return int(0);
             }
-            Ok(VectorEntryLookup::Found(snapshot)) if snapshot.attributes == next_attributes => {
-                return int(1);
+            Ok(VectorEntryLookup::Found(snapshot)) => {
+                if !governance_mutation_authorized(
+                    snapshot.governance.as_deref(),
+                    expected_governance.as_deref(),
+                ) {
+                    return int(0);
+                }
+                if snapshot.attributes == next_attributes {
+                    return int(1);
+                }
             }
-            Ok(VectorEntryLookup::Found(_)) => {}
             Err(frame) => return frame,
         }
         if let Err(frame) = validate_attributes(attributes) {
@@ -718,6 +872,12 @@ impl crate::commands::redis::RedisCommand for VSetAttr {
             let Some(entry) = set.entry_mut(element) else {
                 return VectorWriteResult::Unchanged(int(0));
             };
+            if !governance_mutation_authorized(
+                entry.governance.as_deref(),
+                expected_governance.as_deref(),
+            ) {
+                return VectorWriteResult::Unchanged(int(0));
+            }
             let next_attributes = (!attributes.is_empty()).then(|| (*attributes).to_vec());
             if entry.attributes == next_attributes {
                 return VectorWriteResult::Unchanged(int(1));
@@ -729,33 +889,7 @@ impl crate::commands::redis::RedisCommand for VSetAttr {
 
     #[cfg(feature = "server")]
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-        let [key, element, attributes] = args else {
-            write_resp_wrong_arity(out, "VSETATTR");
-            return;
-        };
-        let next_attributes = (!attributes.is_empty()).then_some(*attributes);
-        match vector_lookup_entry(store, key, element, VectorLookupProjection::Attributes) {
-            Ok(VectorEntryLookup::MissingKey | VectorEntryLookup::MissingElement) => {
-                if let Err(frame) = validate_attributes(attributes) {
-                    write_frame(out, &frame);
-                    return;
-                }
-                ServerWire::write_resp_integer(out, 0);
-            }
-            Ok(VectorEntryLookup::Found(snapshot))
-                if snapshot.attributes.as_deref() == next_attributes =>
-            {
-                ServerWire::write_resp_integer(out, 1);
-            }
-            Ok(VectorEntryLookup::Found(_)) => {
-                if let Err(frame) = validate_attributes(attributes) {
-                    write_frame(out, &frame);
-                    return;
-                }
-                write_frame(out, &vector_setattr_update(store, key, element, attributes));
-            }
-            Err(frame) => write_frame(out, &frame),
-        }
+        write_frame(out, &Self::execute(store, args));
     }
 }
 
@@ -764,11 +898,23 @@ impl crate::commands::redis::RedisCommand for VIsMember {
     vector_write_fast_from_resp!();
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let [key, element] = args else {
+        let [key, element, options @ ..] = args else {
             return wrong_arity("VISMEMBER");
         };
-        match vector_lookup_entry(store, key, element, VectorLookupProjection::Exists) {
-            Ok(VectorEntryLookup::Found(_)) => int(1),
+        let expected_governance = match parse_governance_guard(options) {
+            Ok(expected) => expected,
+            Err(frame) => return frame,
+        };
+        match vector_lookup_entry(store, key, element, VectorLookupProjection::Governance) {
+            Ok(VectorEntryLookup::Found(snapshot))
+                if governance_read_authorized(
+                    snapshot.governance.as_deref(),
+                    expected_governance.as_deref(),
+                ) =>
+            {
+                int(1)
+            }
+            Ok(VectorEntryLookup::Found(_)) => int(0),
             Ok(VectorEntryLookup::MissingKey | VectorEntryLookup::MissingElement) => int(0),
             Err(frame) => frame,
         }
@@ -776,57 +922,61 @@ impl crate::commands::redis::RedisCommand for VIsMember {
 
     #[cfg(feature = "server")]
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-        let [key, element] = args else {
-            write_resp_wrong_arity(out, "VISMEMBER");
-            return;
-        };
-        write_vector_exists_resp(store, key, element, out);
+        write_frame(out, &Self::execute(store, args));
     }
 }
 
 impl crate::commands::redis::RedisCommand for VRem {
     #[cfg(feature = "server")]
-    vector_write_fast_from_resp!();
+    fn write_fast(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_fast_frame(out, &Self::execute(store, args));
+    }
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let [key, element] = args else {
+        let [key, element, options @ ..] = args else {
             return wrong_arity("VREM");
         };
-        match vector_lookup_entry(store, key, element, VectorLookupProjection::Exists) {
+        let expected_governance = match parse_governance_guard(options) {
+            Ok(expected) => expected,
+            Err(frame) => return frame,
+        };
+        match vector_lookup_entry(store, key, element, VectorLookupProjection::Governance) {
             Ok(VectorEntryLookup::MissingKey | VectorEntryLookup::MissingElement) => {
                 return int(0);
             }
-            Ok(VectorEntryLookup::Found(_)) => {}
+            Ok(VectorEntryLookup::Found(snapshot)) => {
+                if !governance_mutation_authorized(
+                    snapshot.governance.as_deref(),
+                    expected_governance.as_deref(),
+                ) {
+                    return int(0);
+                }
+            }
             Err(frame) => return frame,
         }
         vector_write_existing_maybe(store, key, |set| {
-            let before = set.entries.len();
-            set.entries
-                .retain(|entry| entry.element.as_slice() != *element);
-            if before == set.entries.len() {
+            let Some(index) = set
+                .entries
+                .iter()
+                .position(|entry| entry.element.as_slice() == *element)
+            else {
                 return VectorWriteResult::Unchanged(int(0));
-            } else {
-                set.rebuild_hnsw();
+            };
+            if !governance_mutation_authorized(
+                set.entries[index].governance.as_deref(),
+                expected_governance.as_deref(),
+            ) {
+                return VectorWriteResult::Unchanged(int(0));
             }
+            set.entries.remove(index);
+            set.rebuild_hnsw();
             VectorWriteResult::Changed(int(1))
         })
     }
 
     #[cfg(feature = "server")]
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-        let [key, element] = args else {
-            write_resp_wrong_arity(out, "VREM");
-            return;
-        };
-        match vector_lookup_entry(store, key, element, VectorLookupProjection::Exists) {
-            Ok(VectorEntryLookup::MissingKey | VectorEntryLookup::MissingElement) => {
-                ServerWire::write_resp_integer(out, 0);
-            }
-            Ok(VectorEntryLookup::Found(_)) => {
-                write_frame(out, &vector_rem_remove(store, key, element));
-            }
-            Err(frame) => write_frame(out, &frame),
-        }
+        write_frame(out, &Self::execute(store, args));
     }
 }
 
@@ -884,16 +1034,34 @@ impl crate::commands::redis::RedisCommand for VLinks {
         let [key, element, options @ ..] = args else {
             return wrong_arity("VLINKS");
         };
-        let with_scores = match options {
-            [] => false,
-            [option] if eq_ignore_ascii_case(option, b"WITHSCORES") => true,
-            _ => return error("ERR syntax error"),
-        };
+        let mut with_scores = false;
+        let mut allowed_governance = Vec::new();
+        let mut index = 0;
+        while index < options.len() {
+            if eq_ignore_ascii_case(options[index], b"WITHSCORES") {
+                with_scores = true;
+                index += 1;
+            } else if eq_ignore_ascii_case(options[index], b"GOVERNANCE") {
+                let Some(raw) = options.get(index + 1) else {
+                    return error("ERR syntax error");
+                };
+                if raw.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                    return error("ERR vector governance metadata is too large");
+                }
+                allowed_governance.push((*raw).to_vec());
+                index += 2;
+            } else {
+                return error("ERR syntax error");
+            }
+        }
         match vector_read_cached(store, key, VectorDecodeMode::Full) {
             Ok(Some(set)) => {
                 let Some(source) = set.entry(element) else {
                     return Frame::Null;
                 };
+                if !governance_visible(source.governance.as_deref(), &allowed_governance) {
+                    return Frame::Null;
+                }
                 let levels = source
                     .links
                     .iter()
@@ -903,6 +1071,12 @@ impl crate::commands::redis::RedisCommand for VLinks {
                             let Some(neighbor) = set.entry_by_uid(*uid) else {
                                 continue;
                             };
+                            if !governance_visible(
+                                neighbor.governance.as_deref(),
+                                &allowed_governance,
+                            ) {
+                                continue;
+                            }
                             level.push(bulk(neighbor.element.clone()));
                             if with_scores {
                                 level.push(bulk(
@@ -930,38 +1104,40 @@ impl crate::commands::redis::RedisCommand for VRandMember {
     vector_write_fast_from_resp!();
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let [key, count @ ..] = args else {
+        let [key, rest @ ..] = args else {
             return wrong_arity("VRANDMEMBER");
         };
-        let count = match count {
-            [] => None,
-            [raw] => match parse_i64(raw) {
-                Ok(value) => Some(value),
-                Err(()) => return error("ERR value is not an integer or out of range"),
-            },
-            _ => return wrong_arity("VRANDMEMBER"),
+        let (count, options) = match rest {
+            [] => (None, &[][..]),
+            [token, tail @ ..] if !eq_ignore_ascii_case(token, b"GOVERNANCE") => {
+                let count = match parse_i64(token) {
+                    Ok(value) => value,
+                    Err(()) => return error("ERR value is not an integer or out of range"),
+                };
+                (Some(count), tail)
+            }
+            options => (None, options),
         };
+        let allowed_governance = match parse_allowed_governance(options) {
+            Ok(allowed) => allowed,
+            Err(frame) => return frame,
+        };
+        if count.is_some_and(|count| count.unsigned_abs() as usize > MAX_VECTOR_SET_ENTRIES) {
+            return error("ERR count is out of range");
+        }
         if count.is_none_or(|count| count >= 0) {
             let limit = count.map_or(1, |count| count as usize);
-            return match vector_read_prefix_elements(store, key, limit) {
+            return match vector_read_prefix_elements(store, key, limit, &allowed_governance) {
                 Ok(Some(elements)) => match count {
-                    None => elements
-                        .first()
-                        .map(|element| bulk(element.clone()))
-                        .unwrap_or(Frame::Null),
+                    None => elements.first().cloned().map_or(Frame::Null, bulk),
                     Some(_) => array_bulk(elements),
                 },
-                Ok(None) => {
-                    if count.is_some() {
-                        Frame::Array(Vec::new())
-                    } else {
-                        Frame::Null
-                    }
-                }
+                Ok(None) if count.is_some() => Frame::Array(Vec::new()),
+                Ok(None) => Frame::Null,
                 Err(frame) => frame,
             };
         }
-        match vector_read_elements(store, key) {
+        match vector_read_authorized_elements(store, key, &allowed_governance) {
             Ok(Some(elements)) => match count {
                 None => elements
                     .first()
@@ -995,27 +1171,41 @@ impl crate::commands::redis::RedisCommand for VRange {
     vector_write_fast_from_resp!();
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
-        let [key, start, end, count @ ..] = args else {
+        let [key, start, end, rest @ ..] = args else {
             return wrong_arity("VRANGE");
         };
-        let count = match count {
-            [] => None,
-            [raw] => match parse_i64(raw) {
-                Ok(value) => Some(value),
-                Err(()) => return error("ERR value is not an integer or out of range"),
-            },
-            _ => return wrong_arity("VRANGE"),
+        let (count, options) = match rest {
+            [] => (None, &[][..]),
+            [token, tail @ ..] if !eq_ignore_ascii_case(token, b"GOVERNANCE") => {
+                let count = match parse_i64(token) {
+                    Ok(value) => value,
+                    Err(()) => return error("ERR value is not an integer or out of range"),
+                };
+                (Some(count), tail)
+            }
+            options => (None, options),
+        };
+        let allowed_governance = match parse_allowed_governance(options) {
+            Ok(allowed) => allowed,
+            Err(frame) => return frame,
         };
         if let Some(count) = count
             && count >= 0
         {
-            return match vector_read_lex_range(store, key, start, end, count as usize) {
+            return match vector_read_lex_range(
+                store,
+                key,
+                start,
+                end,
+                count as usize,
+                &allowed_governance,
+            ) {
                 Ok(Some(elements)) => array_bulk(elements),
                 Ok(None) => Frame::Array(Vec::new()),
                 Err(frame) => frame,
             };
         }
-        match vector_read_elements(store, key) {
+        match vector_read_authorized_elements(store, key, &allowed_governance) {
             Ok(Some(mut elements)) => {
                 elements.sort();
                 elements.retain(|element| lex_in_range(element, start, end));
@@ -1033,49 +1223,15 @@ impl crate::commands::redis::RedisCommand for VRange {
 
     #[cfg(feature = "server")]
     fn write_resp(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
-        let [key, start, end, count @ ..] = args else {
-            write_resp_wrong_arity(out, "VRANGE");
-            return;
-        };
-        let count = match count {
-            [] => None,
-            [raw] => match parse_i64(raw) {
-                Ok(value) => Some(value),
-                Err(()) => {
-                    write_frame(out, &error("ERR value is not an integer or out of range"));
-                    return;
-                }
-            },
-            _ => {
-                write_resp_wrong_arity(out, "VRANGE");
-                return;
-            }
-        };
-        if let Some(count) = count
-            && count >= 0
-        {
-            match vector_read_lex_range(store, key, start, end, count as usize) {
-                Ok(Some(elements)) => write_vector_elements_resp(out, &elements),
-                Ok(None) => write_resp_array_header(out, 0),
-                Err(frame) => write_frame(out, &frame),
-            }
-            return;
-        }
-        match vector_read_elements(store, key) {
-            Ok(Some(mut elements)) => {
-                elements.sort();
-                elements.retain(|element| lex_in_range(element, start, end));
-                write_vector_elements_resp(out, &elements);
-            }
-            Ok(None) => write_resp_array_header(out, 0),
-            Err(frame) => write_frame(out, &frame),
-        }
+        write_frame(out, &Self::execute(store, args));
     }
 }
 
 impl crate::commands::redis::RedisCommand for VSim {
     #[cfg(feature = "server")]
-    vector_write_fast_from_resp!();
+    fn write_fast(store: &EmbeddedStore, args: &[&[u8]], out: &mut BytesMut) {
+        write_vector_array_fast(Self::execute(store, args), out);
+    }
 
     fn execute(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         let [key, rest @ ..] = args else {
@@ -1109,6 +1265,7 @@ impl crate::commands::redis::RedisCommand for VSim {
                 &set,
                 &parsed.vector,
                 parsed.filter.as_deref(),
+                &parsed.allowed_governance,
                 store.shard_count(),
             )
         } else {
@@ -1117,11 +1274,17 @@ impl crate::commands::redis::RedisCommand for VSim {
                 &parsed.vector,
                 parsed.count,
                 parsed.ef_search.unwrap_or(DEFAULT_HNSW_EF_SEARCH),
+                &parsed.allowed_governance,
             )
         };
         let mut scored = scored;
         scored.truncate(parsed.count);
-        if !parsed.with_scores && !parsed.with_attribs {
+        if vsim_response_bytes(&scored, &parsed)
+            .is_none_or(|bytes| bytes > MAX_VECTOR_RESPONSE_BYTES)
+        {
+            return error("ERR VSIM response exceeds the server byte limit");
+        }
+        if !parsed.with_scores && !parsed.with_attribs && !parsed.with_governance {
             return array_bulk(
                 scored
                     .into_iter()
@@ -1137,6 +1300,9 @@ impl crate::commands::redis::RedisCommand for VSim {
             }
             if parsed.with_attribs {
                 out.push(entry.attributes.clone().map_or(Frame::Null, bulk));
+            }
+            if parsed.with_governance {
+                out.push(entry.governance.clone().map_or(Frame::Null, bulk));
             }
         }
         Frame::Array(out)
@@ -1154,6 +1320,9 @@ struct VAddArgs {
     element: Bytes,
     vector: Vec<f64>,
     attributes: Option<Bytes>,
+    governance: Option<Bytes>,
+    expected_governance: Option<Bytes>,
+    clear_governance: bool,
     quantization: Option<Quantization>,
     reduce_dim: Option<usize>,
     hnsw_m: Option<usize>,
@@ -1166,9 +1335,30 @@ struct VSimArgs {
     count: usize,
     with_scores: bool,
     with_attribs: bool,
+    with_governance: bool,
+    allowed_governance: Vec<Bytes>,
     filter: Option<Bytes>,
     ef_search: Option<usize>,
     truth: bool,
+}
+
+fn governance_mutation_authorized(stored: Option<&[u8]>, expected: Option<&[u8]>) -> bool {
+    match stored {
+        Some(stored) => expected == Some(stored),
+        None => expected.is_none(),
+    }
+}
+
+fn governance_read_authorized(stored: Option<&[u8]>, expected: Option<&[u8]>) -> bool {
+    stored.is_none() || expected == stored
+}
+
+fn governance_visible(stored: Option<&[u8]>, allowed: &[Bytes]) -> bool {
+    stored.is_none_or(|stored| {
+        allowed
+            .iter()
+            .any(|candidate| candidate.as_slice() == stored)
+    })
 }
 
 impl VectorSetState {
@@ -1353,7 +1543,7 @@ fn vector_write_maybe(
     key: &[u8],
     op: impl FnOnce(&mut VectorSetState) -> VectorWriteResult,
 ) -> Frame {
-    match store.transform_raw_vector_value_no_ttl(
+    let result = store.transform_raw_vector_value_preserve_ttl(
         key,
         |existing| {
             let mut set = match decode_vector_set(existing) {
@@ -1361,19 +1551,36 @@ fn vector_write_maybe(
                 Err(()) => return Err(wrongtype()),
             };
             match op(&mut set) {
-                VectorWriteResult::Changed(frame) => Ok((frame, encode_vector_set(&set))),
+                VectorWriteResult::Changed(frame) => {
+                    let value = encode_vector_set(&set);
+                    if !store.vector_mutation_is_replicable(key, &value) {
+                        return Err(error("ERR vector state exceeds replication frame limit"));
+                    }
+                    Ok(((frame, true), value))
+                }
                 VectorWriteResult::Unchanged(frame) => {
                     let value = existing
                         .map(<[u8]>::to_vec)
                         .unwrap_or_else(|| encode_vector_set(&set));
-                    Ok((frame, value))
+                    Ok(((frame, false), value))
                 }
             }
         },
         wrongtype,
-    ) {
-        Ok(frame) => frame,
-        Err(frame) => frame,
+    );
+    match result {
+        Ok((frame, true)) => {
+            if let Some((value, expire_at_ms)) = store.clone_vector_value_state(key) {
+                store.notify_vector_mutation(
+                    crate::storage::VectorMutationKind::Set,
+                    key,
+                    Some(value),
+                    expire_at_ms,
+                );
+            }
+            frame
+        }
+        Ok((frame, false)) | Err(frame) => frame,
     }
 }
 
@@ -1387,39 +1594,6 @@ fn vector_write_existing_maybe(
         Ok(false) => int(0),
         Err(frame) => frame,
     }
-}
-
-fn vector_setattr_update(
-    store: &EmbeddedStore,
-    key: &[u8],
-    element: &[u8],
-    attributes: &[u8],
-) -> Frame {
-    vector_write_existing_maybe(store, key, |set| {
-        let Some(entry) = set.entry_mut(element) else {
-            return VectorWriteResult::Unchanged(int(0));
-        };
-        let next_attributes = (!attributes.is_empty()).then(|| attributes.to_vec());
-        if entry.attributes == next_attributes {
-            return VectorWriteResult::Unchanged(int(1));
-        }
-        entry.attributes = next_attributes;
-        VectorWriteResult::Changed(int(1))
-    })
-}
-
-fn vector_rem_remove(store: &EmbeddedStore, key: &[u8], element: &[u8]) -> Frame {
-    vector_write_existing_maybe(store, key, |set| {
-        let before = set.entries.len();
-        set.entries
-            .retain(|entry| entry.element.as_slice() != element);
-        if before == set.entries.len() {
-            return VectorWriteResult::Unchanged(int(0));
-        } else {
-            set.rebuild_hnsw();
-        }
-        VectorWriteResult::Changed(int(1))
-    })
 }
 
 #[cfg(feature = "server")]
@@ -1438,44 +1612,6 @@ fn write_vector_metadata_integer_resp(
 }
 
 #[cfg(feature = "server")]
-fn write_vector_exists_resp(store: &EmbeddedStore, key: &[u8], element: &[u8], out: &mut BytesMut) {
-    match vector_lookup_entry(store, key, element, VectorLookupProjection::Exists) {
-        Ok(VectorEntryLookup::Found(_)) => ServerWire::write_resp_integer(out, 1),
-        Ok(VectorEntryLookup::MissingKey | VectorEntryLookup::MissingElement) => {
-            ServerWire::write_resp_integer(out, 0);
-        }
-        Err(_) => write_resp_wrongtype(out),
-    }
-}
-
-#[cfg(feature = "server")]
-fn write_vector_attribute_resp(
-    store: &EmbeddedStore,
-    key: &[u8],
-    element: &[u8],
-    out: &mut BytesMut,
-) {
-    match vector_lookup_entry(store, key, element, VectorLookupProjection::Attributes) {
-        Ok(VectorEntryLookup::Found(snapshot)) => match snapshot.attributes {
-            Some(attributes) => ServerWire::write_resp_blob_string(out, &attributes),
-            None => write_resp_null(out),
-        },
-        Ok(VectorEntryLookup::MissingKey | VectorEntryLookup::MissingElement) => {
-            write_resp_null(out);
-        }
-        Err(_) => write_resp_wrongtype(out),
-    }
-}
-
-#[cfg(feature = "server")]
-fn write_vector_elements_resp(out: &mut BytesMut, elements: &[Bytes]) {
-    write_resp_array_header(out, elements.len());
-    for element in elements {
-        ServerWire::write_resp_blob_string(out, element);
-    }
-}
-
-#[cfg(feature = "server")]
 #[inline(always)]
 fn write_vector_fast_value(
     store: &EmbeddedStore,
@@ -1486,6 +1622,37 @@ fn write_vector_fast_value(
     let start = ServerWire::begin_fast_value(out);
     write(store, args, out);
     ServerWire::finish_fast_value(out, start);
+}
+
+#[cfg(feature = "server")]
+fn write_vector_array_fast(frame: Frame, out: &mut BytesMut) {
+    let Frame::Array(items) = frame else {
+        write_fast_frame(out, &frame);
+        return;
+    };
+    if items.iter().any(|item| {
+        !matches!(
+            item,
+            Frame::BlobString(_) | Frame::SimpleString(_) | Frame::Null
+        )
+    }) {
+        write_fast_frame(out, &Frame::Array(items));
+        return;
+    }
+    let mut values = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Frame::BlobString(value) => values.push(Some(value)),
+            Frame::SimpleString(value) => values.push(Some(value.into_bytes())),
+            Frame::Null => values.push(None),
+            _ => unreachable!("vector array item shape was validated"),
+        }
+    }
+    let start = ServerWire::begin_fast_array(out, values.len());
+    for value in &values {
+        ServerWire::write_fast_array_item(out, value.as_deref());
+    }
+    ServerWire::finish_fast_array(out, start);
 }
 
 #[cfg(feature = "server")]
@@ -1535,6 +1702,9 @@ fn vector_read_cached(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -1555,6 +1725,9 @@ fn vector_read_metadata(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -1575,6 +1748,9 @@ fn vector_lookup_entry(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(VectorEntryLookup::MissingKey),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -1618,54 +1794,53 @@ fn collect_vector_lookup(
                             .include_attributes()
                             .then(|| entry.attributes.clone())
                             .flatten(),
+                        governance: projection
+                            .include_governance()
+                            .then(|| entry.governance.clone())
+                            .flatten(),
                     })
                 })
         }),
     }
 }
 
-fn vector_read_elements(store: &EmbeddedStore, key: &[u8]) -> Result<Option<Vec<Bytes>>, Frame> {
-    let mut decoded = Ok(None);
-    match store.get_raw_vector_value_into(key, |bytes| {
-        decoded = if bytes.starts_with(VECTOR_SET_PREFIX) {
-            match hnsw_collect_elements(bytes.as_ref()) {
-                Ok(elements) => Ok(Some(elements)),
-                Err(()) => decode_vector_set(Some(bytes.as_ref()))
-                    .map(|set| {
-                        Some(
-                            set.entries
-                                .into_iter()
-                                .map(|entry| entry.element)
-                                .collect::<Vec<_>>(),
-                        )
-                    })
-                    .map_err(|_| wrongtype()),
-            }
-        } else {
-            Err(wrongtype())
-        };
-    }) {
-        crate::storage::RedisStringLookup::Hit => decoded,
-        crate::storage::RedisStringLookup::Miss => Ok(None),
-        crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
-    }
+fn vector_read_authorized_elements(
+    store: &EmbeddedStore,
+    key: &[u8],
+    allowed_governance: &[Bytes],
+) -> Result<Option<Vec<Bytes>>, Frame> {
+    let set = vector_read_cached(store, key, VectorDecodeMode::EntriesOnly)?;
+    Ok(set.map(|set| {
+        set.entries
+            .iter()
+            .filter(|entry| governance_visible(entry.governance.as_deref(), allowed_governance))
+            .map(|entry| entry.element.clone())
+            .collect()
+    }))
 }
 
 fn vector_read_prefix_elements(
     store: &EmbeddedStore,
     key: &[u8],
     limit: usize,
+    allowed_governance: &[Bytes],
 ) -> Result<Option<Vec<Bytes>>, Frame> {
     let mut decoded = Ok(None);
     match store.get_raw_vector_value_into(key, |bytes| {
         decoded = if bytes.starts_with(VECTOR_SET_PREFIX) {
-            match hnsw_collect_prefix_elements(bytes.as_ref(), limit) {
+            match hnsw_collect_prefix_elements(bytes.as_ref(), limit, allowed_governance) {
                 Ok(elements) => Ok(Some(elements)),
                 Err(()) => decode_vector_set(Some(bytes.as_ref()))
                     .map(|set| {
                         Some(
                             set.entries
                                 .into_iter()
+                                .filter(|entry| {
+                                    governance_visible(
+                                        entry.governance.as_deref(),
+                                        allowed_governance,
+                                    )
+                                })
                                 .take(limit)
                                 .map(|entry| entry.element)
                                 .collect::<Vec<_>>(),
@@ -1680,6 +1855,9 @@ fn vector_read_prefix_elements(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -1689,13 +1867,26 @@ fn vector_read_lex_range(
     start: &[u8],
     end: &[u8],
     limit: usize,
+    allowed_governance: &[Bytes],
 ) -> Result<Option<Vec<Bytes>>, Frame> {
     let mut decoded = Ok(None);
     match store.get_raw_vector_value_into(key, |bytes| {
         decoded = if bytes.starts_with(VECTOR_SET_PREFIX) {
-            cached_vector_lex_range(bytes, start, end, limit)
-                .map(Some)
-                .map_err(|_| wrongtype())
+            let format_offset = VECTOR_SET_PREFIX.len();
+            let governed = bytes
+                .get(format_offset..format_offset + 4)
+                .and_then(|raw| raw.try_into().ok())
+                .map(u32::from_le_bytes)
+                == Some(HNSW_GOVERNED_VECTOR_SET_FORMAT);
+            if governed {
+                hnsw_collect_lex_range(bytes.as_ref(), start, end, limit, allowed_governance)
+                    .map(Some)
+                    .map_err(|_| wrongtype())
+            } else {
+                cached_vector_lex_range(bytes, start, end, limit)
+                    .map(Some)
+                    .map_err(|_| wrongtype())
+            }
         } else {
             Err(wrongtype())
         };
@@ -1703,6 +1894,9 @@ fn vector_read_lex_range(
         crate::storage::RedisStringLookup::Hit => decoded,
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType => Err(wrongtype()),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -1721,6 +1915,9 @@ fn parse_vadd_args(args: &[&[u8]]) -> Result<VAddArgs, Frame> {
         if dim == 0 {
             return Err(error("ERR vector dimension must be positive"));
         }
+        if dim > MAX_VECTOR_DIMENSIONS {
+            return Err(error("ERR vector dimension is out of range"));
+        }
         reduce_dim = Some(dim);
         index += 2;
     }
@@ -1730,6 +1927,9 @@ fn parse_vadd_args(args: &[&[u8]]) -> Result<VAddArgs, Frame> {
     };
     index += 1;
     let mut attributes = None;
+    let mut governance = None;
+    let mut expected_governance = None;
+    let mut clear_governance = false;
     let mut quantization = None;
     let mut hnsw_m = None;
     let mut ef_construction = None;
@@ -1772,13 +1972,54 @@ fn parse_vadd_args(args: &[&[u8]]) -> Result<VAddArgs, Frame> {
                 attributes = Some((*raw).to_vec());
                 index += 2;
             }
+            token if eq_ignore_ascii_case(token, b"GOVERNANCE") => {
+                let Some(raw) = args.get(index + 1) else {
+                    return Err(error("ERR syntax error"));
+                };
+                if raw.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                    return Err(error("ERR vector governance metadata is too large"));
+                }
+                governance = Some((*raw).to_vec());
+                index += 2;
+            }
+            token if eq_ignore_ascii_case(token, b"IFGOVERNANCE") => {
+                let Some(raw) = args.get(index + 1) else {
+                    return Err(error("ERR syntax error"));
+                };
+                if raw.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                    return Err(error("ERR vector governance metadata is too large"));
+                }
+                expected_governance = Some((*raw).to_vec());
+                index += 2;
+            }
+            token if eq_ignore_ascii_case(token, b"CLEARGOVERNANCE") => {
+                clear_governance = true;
+                index += 1;
+            }
             _ => return Err(error("ERR syntax error")),
         }
+    }
+    if governance.is_some() && clear_governance {
+        return Err(error(
+            "ERR GOVERNANCE and CLEARGOVERNANCE are mutually exclusive",
+        ));
+    }
+    if clear_governance && expected_governance.is_none() {
+        return Err(error("ERR CLEARGOVERNANCE requires IFGOVERNANCE"));
+    }
+    if hnsw_m.is_some_and(|value| value > MAX_HNSW_M) {
+        return Err(error("ERR HNSW M is out of range"));
+    }
+    if ef_construction.is_some_and(|value| value > MAX_HNSW_EF_CONSTRUCTION) {
+        return Err(error("ERR HNSW EF is out of range"));
     }
     Ok(VAddArgs {
         element: (*element).to_vec(),
         vector,
         attributes,
+        governance,
+        expected_governance,
+        clear_governance,
         quantization,
         reduce_dim,
         hnsw_m,
@@ -1786,24 +2027,85 @@ fn parse_vadd_args(args: &[&[u8]]) -> Result<VAddArgs, Frame> {
     })
 }
 
+fn parse_governance_guard(options: &[&[u8]]) -> Result<Option<Bytes>, Frame> {
+    match options {
+        [] => Ok(None),
+        [token, governance] if eq_ignore_ascii_case(token, b"GOVERNANCE") => {
+            if governance.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                return Err(error("ERR vector governance metadata is too large"));
+            }
+            Ok(Some((*governance).to_vec()))
+        }
+        _ => Err(error("ERR syntax error")),
+    }
+}
+
+fn parse_allowed_governance(options: &[&[u8]]) -> Result<Vec<Bytes>, Frame> {
+    let mut allowed = Vec::new();
+    let mut index = 0;
+    while index < options.len() {
+        if !eq_ignore_ascii_case(options[index], b"GOVERNANCE") {
+            return Err(error("ERR syntax error"));
+        }
+        let Some(metadata) = options.get(index + 1) else {
+            return Err(error("ERR syntax error"));
+        };
+        if metadata.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+            return Err(error("ERR vector governance metadata is too large"));
+        }
+        allowed.push((*metadata).to_vec());
+        index += 2;
+    }
+    Ok(allowed)
+}
+
+fn parse_vector_read_options(
+    options: &[&[u8]],
+    allow_raw: bool,
+) -> Result<(bool, Option<Bytes>), Frame> {
+    let mut raw = false;
+    let mut governance = None;
+    let mut index = 0;
+    while index < options.len() {
+        if allow_raw && eq_ignore_ascii_case(options[index], b"RAW") {
+            raw = true;
+            index += 1;
+        } else if eq_ignore_ascii_case(options[index], b"GOVERNANCE") {
+            let Some(metadata) = options.get(index + 1) else {
+                return Err(error("ERR syntax error"));
+            };
+            if metadata.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                return Err(error("ERR vector governance metadata is too large"));
+            }
+            governance = Some((*metadata).to_vec());
+            index += 2;
+        } else {
+            return Err(error("ERR syntax error"));
+        }
+    }
+    Ok((raw, governance))
+}
+
 fn parse_vsim_args(args: &[&[u8]], set: &VectorSetState) -> Result<VSimArgs, Frame> {
     let mut index = 0usize;
-    let vector = match args.get(index) {
+    let (vector, source_governance) = match args.get(index) {
         Some(token) if eq_ignore_ascii_case(token, b"ELE") => {
             let Some(element) = args.get(index + 1) else {
                 return Err(error("ERR syntax error"));
             };
             index += 2;
             match set.entry(element) {
-                Some(entry) => entry.vector.clone(),
+                Some(entry) => (entry.vector.clone(), entry.governance.clone()),
                 None => return Err(error("ERR no such element")),
             }
         }
-        _ => parse_vector_arg(args, &mut index)?,
+        _ => (parse_vector_arg(args, &mut index)?, None),
     };
     let mut count = 10usize;
     let mut with_scores = false;
     let mut with_attribs = false;
+    let mut with_governance = false;
+    let mut allowed_governance = Vec::new();
     let mut filter = None;
     let mut ef_search = None;
     let mut truth = false;
@@ -1816,6 +2118,20 @@ fn parse_vsim_args(args: &[&[u8]], set: &VectorSetState) -> Result<VSimArgs, Fra
             token if eq_ignore_ascii_case(token, b"WITHATTRIBS") => {
                 with_attribs = true;
                 index += 1;
+            }
+            token if eq_ignore_ascii_case(token, b"WITHGOVERNANCE") => {
+                with_governance = true;
+                index += 1;
+            }
+            token if eq_ignore_ascii_case(token, b"GOVERNANCE") => {
+                let Some(raw) = args.get(index + 1) else {
+                    return Err(error("ERR syntax error"));
+                };
+                if raw.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                    return Err(error("ERR vector governance metadata is too large"));
+                }
+                allowed_governance.push((*raw).to_vec());
+                index += 2;
             }
             token if eq_ignore_ascii_case(token, b"COUNT") => {
                 let Some(raw) = args.get(index + 1) else {
@@ -1858,11 +2174,21 @@ fn parse_vsim_args(args: &[&[u8]], set: &VectorSetState) -> Result<VSimArgs, Fra
             _ => return Err(error("ERR syntax error")),
         }
     }
+    if !governance_visible(source_governance.as_deref(), &allowed_governance) {
+        return Err(error("ERR no such element"));
+    }
+    let tuple_width =
+        1 + usize::from(with_scores) + usize::from(with_attribs) + usize::from(with_governance);
+    if count > MAX_VECTOR_RESPONSE_ITEMS / tuple_width {
+        return Err(error("ERR VSIM count exceeds the server result limit"));
+    }
     Ok(VSimArgs {
         vector,
         count,
         with_scores,
         with_attribs,
+        with_governance,
+        allowed_governance,
         filter,
         ef_search,
         truth,
@@ -1886,8 +2212,13 @@ fn parse_vector_arg(args: &[&[u8]], index: &mut usize) -> Result<Vec<f64>, Frame
             };
             let count = parse_usize(raw_count)
                 .map_err(|_| error("ERR value is not an integer or out of range"))?;
+            if count == 0 || count > MAX_VECTOR_DIMENSIONS {
+                return Err(error("ERR vector dimension is out of range"));
+            }
             let start = *index + 2;
-            let end = start + count;
+            let end = start
+                .checked_add(count)
+                .ok_or_else(|| error("ERR vector dimension is out of range"))?;
             let Some(raw_values) = args.get(start..end) else {
                 return Err(error("ERR syntax error"));
             };
@@ -1902,6 +2233,9 @@ fn parse_vector_arg(args: &[&[u8]], index: &mut usize) -> Result<Vec<f64>, Frame
             let Some(blob) = args.get(*index + 1) else {
                 return Err(error("ERR syntax error"));
             };
+            if blob.len() / 4 > MAX_VECTOR_DIMENSIONS {
+                return Err(error("ERR vector dimension is out of range"));
+            }
             let values = fp32_values(blob)?;
             *index += 2;
             Ok(values)
@@ -1914,6 +2248,7 @@ fn exact_vector_scores<'a>(
     set: &'a VectorSetState,
     query: &[f64],
     filter: Option<&[u8]>,
+    allowed_governance: &[Bytes],
     shard_count: usize,
 ) -> Vec<(&'a VectorEntry, f64)> {
     let compiled_filter = filter.and_then(CompiledVectorFilter::parse);
@@ -1921,7 +2256,13 @@ fn exact_vector_scores<'a>(
         .map(usize::from)
         .unwrap_or(1);
     if set.entries.len() < VECTOR_SCAN_PARALLEL_MIN || workers <= 1 {
-        return exact_vector_scores_sequential(set, query, filter, compiled_filter.as_ref());
+        return exact_vector_scores_sequential(
+            set,
+            query,
+            filter,
+            compiled_filter.as_ref(),
+            allowed_governance,
+        );
     }
 
     let shard_count = shard_count.max(1);
@@ -1948,7 +2289,8 @@ fn exact_vector_scores<'a>(
                 let mut shard_scores = Vec::new();
                 for entries in shard_chunk {
                     shard_scores.extend(entries.iter().filter_map(|entry| {
-                        if !entry_matches_filter(entry, filter, compiled_filter) {
+                        if !entry_matches_filter(entry, filter, compiled_filter, allowed_governance)
+                        {
                             return None;
                         }
                         Some((*entry, cosine_similarity(&entry.vector, query)))
@@ -1969,11 +2311,14 @@ fn exact_vector_scores_sequential<'a>(
     query: &[f64],
     filter: Option<&[u8]>,
     compiled_filter: Option<&CompiledVectorFilter>,
+    allowed_governance: &[Bytes],
 ) -> Vec<(&'a VectorEntry, f64)> {
     sorted_scores(
         set.entries
             .iter()
-            .filter(|entry| entry_matches_filter(entry, filter, compiled_filter))
+            .filter(|entry| {
+                entry_matches_filter(entry, filter, compiled_filter, allowed_governance)
+            })
             .map(|entry| (entry, cosine_similarity(&entry.vector, query)))
             .collect(),
     )
@@ -1983,7 +2328,11 @@ fn entry_matches_filter(
     entry: &VectorEntry,
     filter: Option<&[u8]>,
     compiled_filter: Option<&CompiledVectorFilter>,
+    allowed_governance: &[Bytes],
 ) -> bool {
+    if !governance_visible(entry.governance.as_deref(), allowed_governance) {
+        return false;
+    }
     match (filter, compiled_filter) {
         (None, _) => true,
         (Some(_), Some(compiled)) => compiled.matches(entry.attributes.as_deref()),
@@ -1996,6 +2345,7 @@ fn hnsw_search<'a>(
     query: &[f64],
     count: usize,
     ef_search: usize,
+    allowed_governance: &[Bytes],
 ) -> Vec<(&'a VectorEntry, f64)> {
     if set.entries.is_empty() {
         return Vec::new();
@@ -2058,32 +2408,46 @@ fn hnsw_search<'a>(
     sorted_scores(
         visited
             .into_iter()
-            .map(|index| {
+            .filter_map(|index| {
                 let entry = &set.entries[index];
-                (entry, cosine_similarity(&entry.vector, query))
+                governance_visible(entry.governance.as_deref(), allowed_governance)
+                    .then(|| (entry, cosine_similarity(&entry.vector, query)))
             })
             .collect(),
     )
 }
 
-fn build_uid_index(set: &VectorSetState) -> Vec<Option<usize>> {
-    let max_uid = set.entries.iter().map(|entry| entry.uid).max().unwrap_or(0) as usize;
-    let mut uid_to_index = vec![None; max_uid.saturating_add(1)];
-    for (index, entry) in set.entries.iter().enumerate() {
-        if let Some(slot) = uid_to_index.get_mut(entry.uid as usize) {
-            *slot = Some(index);
+fn vsim_response_bytes(scored: &[(&VectorEntry, f64)], parsed: &VSimArgs) -> Option<usize> {
+    scored.iter().try_fold(0usize, |total, (entry, _)| {
+        let mut bytes = entry.element.len().checked_add(16)?;
+        if parsed.with_scores {
+            bytes = bytes.checked_add(32)?;
         }
+        if parsed.with_attribs {
+            bytes = bytes.checked_add(entry.attributes.as_ref().map_or(0, Vec::len) + 16)?;
+        }
+        if parsed.with_governance {
+            bytes = bytes.checked_add(entry.governance.as_ref().map_or(0, Vec::len) + 16)?;
+        }
+        total.checked_add(bytes)
+    })
+}
+
+fn build_uid_index(set: &VectorSetState) -> HashMap<u64, usize> {
+    let mut uid_to_index = HashMap::with_capacity(set.entries.len());
+    for (index, entry) in set.entries.iter().enumerate() {
+        uid_to_index.insert(entry.uid, index);
     }
     uid_to_index
 }
 
-fn lookup_uid_index(uid_to_index: &[Option<usize>], uid: u64) -> Option<usize> {
-    uid_to_index.get(uid as usize).and_then(|index| *index)
+fn lookup_uid_index(uid_to_index: &HashMap<u64, usize>, uid: u64) -> Option<usize> {
+    uid_to_index.get(&uid).copied()
 }
 
 fn greedy_hnsw_layer_index(
     set: &VectorSetState,
-    uid_to_index: &[Option<usize>],
+    uid_to_index: &HashMap<u64, usize>,
     start_index: usize,
     query: &[f64],
     level: usize,
@@ -2134,10 +2498,20 @@ fn decode_vector_set(existing: Option<&[u8]>) -> Result<VectorSetState, ()> {
         return Err(());
     }
     raw = &raw[VECTOR_SET_PREFIX.len()..];
-    decode_vector_set_payload(raw, VectorPayloadFormat::Hnsw, true)
+    decode_vector_set_payload(raw, VectorPayloadFormat::HnswGoverned, true)
+        .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Hnsw, true))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Current, true))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Quantized, true))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Legacy, true))
+}
+
+pub(crate) fn validate_vector_set_bytes(existing: &[u8]) -> Result<(), ()> {
+    decode_vector_set(Some(existing)).map(|_| ())
+}
+
+pub(crate) fn vector_set_contains_governance(existing: &[u8]) -> Result<bool, ()> {
+    decode_vector_set_entries(Some(existing))
+        .map(|set| set.entries.iter().any(|entry| entry.governance.is_some()))
 }
 
 fn decode_vector_set_entries(existing: Option<&[u8]>) -> Result<VectorSetState, ()> {
@@ -2148,7 +2522,8 @@ fn decode_vector_set_entries(existing: Option<&[u8]>) -> Result<VectorSetState, 
         return Err(());
     }
     raw = &raw[VECTOR_SET_PREFIX.len()..];
-    decode_vector_set_payload(raw, VectorPayloadFormat::Hnsw, false)
+    decode_vector_set_payload(raw, VectorPayloadFormat::HnswGoverned, false)
+        .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Hnsw, false))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Current, false))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Quantized, false))
         .or_else(|_| decode_vector_set_payload(raw, VectorPayloadFormat::Legacy, false))
@@ -2216,7 +2591,7 @@ fn collect_vector_lex_range(
     end: &[u8],
     limit: usize,
 ) -> Result<Vec<Bytes>, ()> {
-    hnsw_collect_lex_range(existing, start, end, limit).or_else(|_| {
+    hnsw_collect_lex_range(existing, start, end, limit, &[]).or_else(|_| {
         decode_vector_set(Some(existing)).map(|set| {
             let mut elements = set
                 .entries
@@ -2293,6 +2668,7 @@ fn vector_lookup_cache_bytes(lookup: &VectorEntryLookup) -> usize {
             .attributes
             .as_ref()
             .map_or(0, Vec::len)
+            .saturating_add(snapshot.governance.as_ref().map_or(0, Vec::len))
             .saturating_add(snapshot.vector.as_ref().map_or(0, |vector| {
                 vector.len().saturating_mul(std::mem::size_of::<f64>())
             })),
@@ -2309,7 +2685,11 @@ fn cache_edge_u64(bytes: &[u8], offset: usize) -> u64 {
 
 fn decode_vector_set_metadata(existing: &[u8]) -> Result<VectorSetMetadata, ()> {
     let mut raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
-    decode_vector_set_metadata_payload(raw, VectorPayloadFormat::Hnsw)
+    decode_vector_set_metadata_payload(raw, VectorPayloadFormat::HnswGoverned)
+        .or_else(|_| {
+            raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
+            decode_vector_set_metadata_payload(raw, VectorPayloadFormat::Hnsw)
+        })
         .or_else(|_| {
             raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
             decode_vector_set_metadata_payload(raw, VectorPayloadFormat::Current)
@@ -2341,6 +2721,10 @@ fn hnsw_find_entry(
                     .include_attributes()
                     .then(|| entry.attributes.map(<[u8]>::to_vec))
                     .flatten(),
+                governance: projection
+                    .include_governance()
+                    .then(|| entry.governance.map(<[u8]>::to_vec))
+                    .flatten(),
             })
         } else {
             None
@@ -2348,24 +2732,20 @@ fn hnsw_find_entry(
     })
 }
 
-fn hnsw_collect_elements(existing: &[u8]) -> Result<Vec<Bytes>, ()> {
-    let mut elements = Vec::new();
-    let matched = scan_hnsw_entries(existing, |entry| {
-        elements.push(entry.element.to_vec());
-        None::<()>
-    })?;
-    debug_assert!(matched.is_none());
-    Ok(elements)
-}
-
-fn hnsw_collect_prefix_elements(existing: &[u8], limit: usize) -> Result<Vec<Bytes>, ()> {
+fn hnsw_collect_prefix_elements(
+    existing: &[u8],
+    limit: usize,
+    allowed_governance: &[Bytes],
+) -> Result<Vec<Bytes>, ()> {
     if limit == 0 {
         validate_hnsw_payload(existing)?;
         return Ok(Vec::new());
     }
     let mut elements = Vec::with_capacity(limit.min(16));
     let matched = scan_hnsw_entries(existing, |entry| {
-        elements.push(entry.element.to_vec());
+        if governance_visible(entry.governance, allowed_governance) {
+            elements.push(entry.element.to_vec());
+        }
         (elements.len() >= limit).then_some(())
     })?;
     debug_assert!(matched.is_some() || elements.len() < limit);
@@ -2377,6 +2757,7 @@ fn hnsw_collect_lex_range(
     start: &[u8],
     end: &[u8],
     limit: usize,
+    allowed_governance: &[Bytes],
 ) -> Result<Vec<Bytes>, ()> {
     if limit == 0 {
         validate_hnsw_payload(existing)?;
@@ -2384,7 +2765,9 @@ fn hnsw_collect_lex_range(
     }
     let mut elements = Vec::with_capacity(limit.min(16));
     let matched = scan_hnsw_entries(existing, |entry| {
-        if lex_in_range(entry.element, start, end) {
+        if governance_visible(entry.governance, allowed_governance)
+            && lex_in_range(entry.element, start, end)
+        {
             insert_bounded_lex(&mut elements, entry.element, limit);
         }
         None::<()>
@@ -2394,13 +2777,17 @@ fn hnsw_collect_lex_range(
 }
 
 fn validate_hnsw_payload(existing: &[u8]) -> Result<(), ()> {
-    let mut raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
-    let format = read_u32(&mut raw)?;
-    if format == HNSW_VECTOR_SET_FORMAT || format == HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO {
-        Ok(())
-    } else {
-        Err(())
-    }
+    scan_hnsw_entries(existing, |_| None::<()>).map(|_| ())
+}
+
+#[inline(always)]
+fn is_hnsw_format(format: u32) -> bool {
+    matches!(
+        format,
+        HNSW_VECTOR_SET_FORMAT
+            | HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO
+            | HNSW_GOVERNED_VECTOR_SET_FORMAT
+    )
 }
 
 fn insert_bounded_lex(elements: &mut Vec<Bytes>, element: &[u8], limit: usize) {
@@ -2420,6 +2807,7 @@ struct HnswEntryView<'a> {
     element: &'a [u8],
     vector_raw: &'a [u8],
     attributes: Option<&'a [u8]>,
+    governance: Option<&'a [u8]>,
 }
 
 fn scan_hnsw_entries<T>(
@@ -2428,17 +2816,32 @@ fn scan_hnsw_entries<T>(
 ) -> Result<Option<T>, ()> {
     let mut raw = existing.strip_prefix(VECTOR_SET_PREFIX).ok_or(())?;
     let format = read_u32(&mut raw)?;
-    if format != HNSW_VECTOR_SET_FORMAT && format != HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO {
+    if !is_hnsw_format(format) {
         return Err(());
     }
-    let _dim = read_u32(&mut raw)?;
+    let governed = format == HNSW_GOVERNED_VECTOR_SET_FORMAT;
+    let dim = read_u32(&mut raw)? as usize;
     let _quantization = Quantization::from_tag(read_u32(&mut raw)?).ok_or(())?;
-    let _original_dim = read_u32(&mut raw)?;
-    let _hnsw_m = read_u32(&mut raw)?;
-    let _ef_construction = read_u32(&mut raw)?;
-    let _max_level = read_u32(&mut raw)?;
+    let original_dim = read_u32(&mut raw)? as usize;
+    let hnsw_m = read_u32(&mut raw)? as usize;
+    let ef_construction = read_u32(&mut raw)? as usize;
+    let max_level = read_u32(&mut raw)? as usize;
     let _next_uid = read_u64(&mut raw)?;
     let count = read_u32(&mut raw)? as usize;
+    let minimum_entry_bytes = if governed { 28 } else { 24 };
+    if dim > MAX_VECTOR_DIMENSIONS
+        || original_dim > MAX_VECTOR_DIMENSIONS
+        || hnsw_m == 0
+        || hnsw_m > MAX_HNSW_M
+        || ef_construction == 0
+        || ef_construction > MAX_HNSW_EF_CONSTRUCTION
+        || max_level > MAX_HNSW_LEVEL
+        || count > MAX_VECTOR_SET_ENTRIES
+        || count > raw.len() / minimum_entry_bytes
+        || (count != 0 && dim == 0)
+    {
+        return Err(());
+    }
     for _ in 0..count {
         let _uid = read_u64(&mut raw)?;
         let _level = read_u32(&mut raw)?;
@@ -2456,10 +2859,20 @@ fn scan_hnsw_entries<T>(
         } else {
             None
         };
+        let governance = if governed && read_u32(&mut raw)? != 0 {
+            let governance = read_bytes_slice(&mut raw)?;
+            if governance.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                return Err(());
+            }
+            Some(governance)
+        } else {
+            None
+        };
         if let Some(found) = visit(HnswEntryView {
             element,
             vector_raw,
             attributes,
+            governance,
         }) {
             return Ok(Some(found));
         }
@@ -2470,6 +2883,7 @@ fn scan_hnsw_entries<T>(
 #[derive(Debug, Clone, Copy)]
 enum VectorPayloadFormat {
     Hnsw,
+    HnswGoverned,
     Current,
     Quantized,
     Legacy,
@@ -2480,29 +2894,41 @@ fn decode_vector_set_metadata_payload(
     format: VectorPayloadFormat,
 ) -> Result<VectorSetMetadata, ()> {
     let dim = read_u32(&mut raw)? as usize;
-    if matches!(format, VectorPayloadFormat::Hnsw)
-        && dim as u32 != HNSW_VECTOR_SET_FORMAT
-        && dim as u32 != HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO
+    if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) && !is_hnsw_format(dim as u32)
     {
         return Err(());
     }
-    let dim = if matches!(format, VectorPayloadFormat::Hnsw) {
+    if matches!(format, VectorPayloadFormat::HnswGoverned)
+        && dim as u32 != HNSW_GOVERNED_VECTOR_SET_FORMAT
+    {
+        return Err(());
+    }
+    let dim = if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) {
         read_u32(&mut raw)? as usize
     } else {
         dim
     };
     let quantization = match format {
         VectorPayloadFormat::Hnsw
+        | VectorPayloadFormat::HnswGoverned
         | VectorPayloadFormat::Current
         | VectorPayloadFormat::Quantized => Quantization::from_tag(read_u32(&mut raw)?).ok_or(())?,
         VectorPayloadFormat::Legacy => Quantization::default(),
     };
     let original_dim = match format {
-        VectorPayloadFormat::Hnsw | VectorPayloadFormat::Current => read_u32(&mut raw)? as usize,
+        VectorPayloadFormat::Hnsw
+        | VectorPayloadFormat::HnswGoverned
+        | VectorPayloadFormat::Current => read_u32(&mut raw)? as usize,
         VectorPayloadFormat::Quantized | VectorPayloadFormat::Legacy => dim,
     };
     let (hnsw_m, ef_construction, max_level, next_uid) = match format {
-        VectorPayloadFormat::Hnsw => (
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned => (
             read_u32(&mut raw)? as usize,
             read_u32(&mut raw)? as usize,
             read_u32(&mut raw)? as usize,
@@ -2513,8 +2939,28 @@ fn decode_vector_set_metadata_payload(
         | VectorPayloadFormat::Legacy => (DEFAULT_HNSW_M, DEFAULT_HNSW_EF_CONSTRUCTION, 0, 1),
     };
     let count = read_u32(&mut raw)? as usize;
+    let minimum_entry_bytes = match format {
+        VectorPayloadFormat::HnswGoverned => 28,
+        VectorPayloadFormat::Hnsw => 24,
+        VectorPayloadFormat::Current
+        | VectorPayloadFormat::Quantized
+        | VectorPayloadFormat::Legacy => 12,
+    };
+    if dim > MAX_VECTOR_DIMENSIONS
+        || original_dim > MAX_VECTOR_DIMENSIONS
+        || hnsw_m == 0
+        || hnsw_m > MAX_HNSW_M
+        || ef_construction == 0
+        || ef_construction > MAX_HNSW_EF_CONSTRUCTION
+        || max_level > MAX_HNSW_LEVEL
+        || count > MAX_VECTOR_SET_ENTRIES
+        || count > raw.len() / minimum_entry_bytes
+        || (count != 0 && dim == 0)
+    {
+        return Err(());
+    }
     let next_uid = match format {
-        VectorPayloadFormat::Hnsw => next_uid,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned => next_uid,
         VectorPayloadFormat::Current
         | VectorPayloadFormat::Quantized
         | VectorPayloadFormat::Legacy => count as u64 + 1,
@@ -2537,29 +2983,44 @@ fn decode_vector_set_payload(
     decode_links: bool,
 ) -> Result<VectorSetState, ()> {
     let dim = read_u32(&mut raw)? as usize;
-    if matches!(format, VectorPayloadFormat::Hnsw)
-        && dim as u32 != HNSW_VECTOR_SET_FORMAT
-        && dim as u32 != HNSW_VECTOR_SET_FORMAT_LEGACY_TYPO
+    if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) && !is_hnsw_format(dim as u32)
     {
         return Err(());
     }
-    let dim = if matches!(format, VectorPayloadFormat::Hnsw) {
+    if matches!(format, VectorPayloadFormat::HnswGoverned)
+        && dim as u32 != HNSW_GOVERNED_VECTOR_SET_FORMAT
+    {
+        return Err(());
+    }
+    let dim = if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) {
         read_u32(&mut raw)? as usize
     } else {
         dim
     };
+    if dim > MAX_VECTOR_DIMENSIONS {
+        return Err(());
+    }
     let quantization = match format {
         VectorPayloadFormat::Hnsw
+        | VectorPayloadFormat::HnswGoverned
         | VectorPayloadFormat::Current
         | VectorPayloadFormat::Quantized => Quantization::from_tag(read_u32(&mut raw)?).ok_or(())?,
         VectorPayloadFormat::Legacy => Quantization::default(),
     };
     let original_dim = match format {
-        VectorPayloadFormat::Hnsw | VectorPayloadFormat::Current => read_u32(&mut raw)? as usize,
+        VectorPayloadFormat::Hnsw
+        | VectorPayloadFormat::HnswGoverned
+        | VectorPayloadFormat::Current => read_u32(&mut raw)? as usize,
         VectorPayloadFormat::Quantized | VectorPayloadFormat::Legacy => dim,
     };
     let (hnsw_m, ef_construction, max_level, next_uid) = match format {
-        VectorPayloadFormat::Hnsw => (
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned => (
             read_u32(&mut raw)? as usize,
             read_u32(&mut raw)? as usize,
             read_u32(&mut raw)? as usize,
@@ -2569,11 +3030,35 @@ fn decode_vector_set_payload(
         | VectorPayloadFormat::Quantized
         | VectorPayloadFormat::Legacy => (DEFAULT_HNSW_M, DEFAULT_HNSW_EF_CONSTRUCTION, 0, 1),
     };
+    if hnsw_m == 0
+        || hnsw_m > MAX_HNSW_M
+        || ef_construction == 0
+        || ef_construction > MAX_HNSW_EF_CONSTRUCTION
+        || max_level > MAX_HNSW_LEVEL
+    {
+        return Err(());
+    }
     let count = read_u32(&mut raw)? as usize;
-    let mut entries = Vec::with_capacity(count);
+    let minimum_entry_bytes = if matches!(format, VectorPayloadFormat::HnswGoverned) {
+        28
+    } else if matches!(format, VectorPayloadFormat::Hnsw) {
+        24
+    } else {
+        12
+    };
+    if count > MAX_VECTOR_SET_ENTRIES
+        || count > raw.len() / minimum_entry_bytes
+        || (count != 0 && dim == 0)
+    {
+        return Err(());
+    }
+    let mut entries = Vec::new();
+    entries.try_reserve_exact(count).map_err(|_| ())?;
     for _ in 0..count {
         let (uid, level) = match format {
-            VectorPayloadFormat::Hnsw => (read_u64(&mut raw)?, read_u32(&mut raw)? as usize),
+            VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned => {
+                (read_u64(&mut raw)?, read_u32(&mut raw)? as usize)
+            }
             VectorPayloadFormat::Current
             | VectorPayloadFormat::Quantized
             | VectorPayloadFormat::Legacy => {
@@ -2581,11 +3066,27 @@ fn decode_vector_set_payload(
                 (uid, hnsw_level_from_uid(uid))
             }
         };
+        if level > MAX_HNSW_LEVEL
+            || (matches!(
+                format,
+                VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+            ) && level > max_level)
+        {
+            return Err(());
+        }
         let element = read_bytes(&mut raw)?;
         let vector_len = read_u32(&mut raw)? as usize;
-        let mut vector = Vec::with_capacity(vector_len);
+        if vector_len != dim || vector_len > raw.len() / std::mem::size_of::<f64>() {
+            return Err(());
+        }
+        let mut vector = Vec::new();
+        vector.try_reserve_exact(vector_len).map_err(|_| ())?;
         for _ in 0..vector_len {
-            vector.push(read_f64(&mut raw)?);
+            let value = read_f64(&mut raw)?;
+            if !value.is_finite() {
+                return Err(());
+            }
+            vector.push(value);
         }
         let has_attributes = read_u32(&mut raw)? != 0;
         let attributes = if has_attributes {
@@ -2593,23 +3094,50 @@ fn decode_vector_set_payload(
         } else {
             None
         };
+        let governance =
+            if matches!(format, VectorPayloadFormat::HnswGoverned) && read_u32(&mut raw)? != 0 {
+                let governance = read_bytes(&mut raw)?;
+                if governance.len() > MAX_VECTOR_GOVERNANCE_BYTES {
+                    return Err(());
+                }
+                Some(governance)
+            } else {
+                None
+            };
         entries.push(VectorEntry {
             uid,
             level,
             element,
             vector,
             attributes,
+            governance,
             links: Vec::new(),
         });
     }
     let mut read_hnsw_links = false;
-    if matches!(format, VectorPayloadFormat::Hnsw) && !raw.is_empty() && decode_links {
+    if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) && !raw.is_empty()
+        && decode_links
+    {
         for entry in &mut entries {
             let layer_count = read_u32(&mut raw)? as usize;
-            let mut links = Vec::with_capacity(layer_count);
+            if layer_count != entry.level.saturating_add(1)
+                || layer_count > MAX_HNSW_LEVEL.saturating_add(1)
+                || layer_count > raw.len() / 4
+            {
+                return Err(());
+            }
+            let mut links = Vec::new();
+            links.try_reserve_exact(layer_count).map_err(|_| ())?;
             for _ in 0..layer_count {
                 let link_count = read_u32(&mut raw)? as usize;
-                let mut layer = Vec::with_capacity(link_count);
+                if link_count > hnsw_m || link_count > raw.len() / 8 {
+                    return Err(());
+                }
+                let mut layer = Vec::new();
+                layer.try_reserve_exact(link_count).map_err(|_| ())?;
                 for _ in 0..link_count {
                     layer.push(read_u64(&mut raw)?);
                 }
@@ -2618,7 +3146,11 @@ fn decode_vector_set_payload(
             entry.links = links;
         }
         read_hnsw_links = true;
-    } else if matches!(format, VectorPayloadFormat::Hnsw) && !decode_links {
+    } else if matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) && !decode_links
+    {
         raw = &[];
     }
     if !raw.is_empty() {
@@ -2634,19 +3166,77 @@ fn decode_vector_set_payload(
         max_level,
         next_uid,
     };
-    if !matches!(format, VectorPayloadFormat::Hnsw) {
+    if !matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) {
         set.next_uid = set.entries.len() as u64 + 1;
         set.rebuild_hnsw();
     } else if decode_links && !read_hnsw_links {
         set.rebuild_hnsw();
     }
+    let validate_links = !matches!(
+        format,
+        VectorPayloadFormat::Hnsw | VectorPayloadFormat::HnswGoverned
+    ) || decode_links;
+    validate_decoded_vector_set(&set, validate_links)?;
     Ok(set)
+}
+
+fn validate_decoded_vector_set(set: &VectorSetState, validate_links: bool) -> Result<(), ()> {
+    if set.next_uid == 0 {
+        return Err(());
+    }
+
+    let mut uid_levels = HashMap::with_capacity(set.entries.len());
+    let mut elements: HashSet<&[u8]> = HashSet::with_capacity(set.entries.len());
+    let mut max_uid = 0;
+    for entry in &set.entries {
+        if entry.uid == 0
+            || uid_levels.insert(entry.uid, entry.level).is_some()
+            || !elements.insert(entry.element.as_ref())
+            || entry.vector.iter().any(|value| !value.is_finite())
+        {
+            return Err(());
+        }
+        max_uid = max_uid.max(entry.uid);
+    }
+    if !set.entries.is_empty() && set.next_uid <= max_uid {
+        return Err(());
+    }
+    if !validate_links {
+        return Ok(());
+    }
+
+    for entry in &set.entries {
+        if entry.links.len() != entry.level.saturating_add(1) {
+            return Err(());
+        }
+        for (level, links) in entry.links.iter().enumerate() {
+            let mut seen = HashSet::with_capacity(links.len());
+            for uid in links {
+                let Some(target_level) = uid_levels.get(uid) else {
+                    return Err(());
+                };
+                if *uid == entry.uid || *target_level < level || !seen.insert(*uid) {
+                    return Err(());
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn encode_vector_set(set: &VectorSetState) -> Bytes {
     let mut out = Vec::new();
     out.extend_from_slice(VECTOR_SET_PREFIX);
-    out.extend_from_slice(&HNSW_VECTOR_SET_FORMAT.to_le_bytes());
+    let governed = set.entries.iter().any(|entry| entry.governance.is_some());
+    let format = if governed {
+        HNSW_GOVERNED_VECTOR_SET_FORMAT
+    } else {
+        HNSW_VECTOR_SET_FORMAT
+    };
+    out.extend_from_slice(&format.to_le_bytes());
     out.extend_from_slice(&(set.dim as u32).to_le_bytes());
     out.extend_from_slice(&set.quantization.tag().to_le_bytes());
     out.extend_from_slice(&(set.original_dim as u32).to_le_bytes());
@@ -2667,6 +3257,12 @@ fn encode_vector_set(set: &VectorSetState) -> Bytes {
         if let Some(attributes) = &entry.attributes {
             write_bytes(&mut out, attributes);
         }
+        if governed {
+            out.extend_from_slice(&(entry.governance.is_some() as u32).to_le_bytes());
+            if let Some(governance) = &entry.governance {
+                write_bytes(&mut out, governance);
+            }
+        }
     }
     for entry in &set.entries {
         out.extend_from_slice(&(entry.links.len() as u32).to_le_bytes());
@@ -2684,10 +3280,14 @@ fn fp32_values(blob: &[u8]) -> Result<Vec<f64>, Frame> {
     if !blob.len().is_multiple_of(4) {
         return Err(error("ERR invalid FP32 vector length"));
     }
-    Ok(blob
+    let values: Vec<f64> = blob
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()) as f64)
-        .collect())
+        .collect();
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(error("ERR value is not a float"));
+    }
+    Ok(values)
 }
 
 fn fp32_blob(values: &[f64]) -> Bytes {
@@ -3450,9 +4050,17 @@ fn read_f64_slice(raw: &[u8]) -> Result<Vec<f64>, ()> {
     if !raw.len().is_multiple_of(8) {
         return Err(());
     }
-    raw.chunks_exact(8)
-        .map(|chunk| Ok(f64::from_le_bytes(chunk.try_into().map_err(|_| ())?)))
-        .collect()
+    let values: Vec<f64> = raw
+        .chunks_exact(8)
+        .map(|chunk| {
+            let bytes: [u8; 8] = chunk.try_into().map_err(|_| ())?;
+            Ok::<f64, ()>(f64::from_le_bytes(bytes))
+        })
+        .collect::<Result<_, ()>>()?;
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(());
+    }
+    Ok(values)
 }
 
 fn read_bytes_slice<'a>(raw: &mut &'a [u8]) -> Result<&'a [u8], ()> {
@@ -3472,7 +4080,10 @@ fn read_bytes(raw: &mut &[u8]) -> Result<Bytes, ()> {
     }
     let (head, tail) = raw.split_at(len);
     *raw = tail;
-    Ok(head.to_vec())
+    let mut out = Vec::new();
+    out.try_reserve_exact(len).map_err(|_| ())?;
+    out.extend_from_slice(head);
+    Ok(out)
 }
 
 fn write_bytes(out: &mut Vec<u8>, value: &[u8]) {
@@ -3483,6 +4094,437 @@ fn write_bytes(out: &mut Vec<u8>, value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::redis::RedisCommand;
+
+    fn one_entry_set(governance: Option<&[u8]>) -> VectorSetState {
+        VectorSetState {
+            dim: 2,
+            original_dim: 2,
+            quantization: Quantization::NoQuant,
+            hnsw_m: DEFAULT_HNSW_M,
+            ef_construction: DEFAULT_HNSW_EF_CONSTRUCTION,
+            max_level: 0,
+            next_uid: 2,
+            entries: vec![VectorEntry {
+                uid: 1,
+                level: 0,
+                element: b"doc-a".to_vec(),
+                vector: vec![1.0, 0.0],
+                attributes: None,
+                governance: governance.map(<[u8]>::to_vec),
+                links: vec![Vec::new()],
+            }],
+        }
+    }
+
+    #[test]
+    fn sparse_large_hnsw_uids_do_not_drive_dense_allocations() {
+        let mut set = one_entry_set(None);
+        set.entries[0].uid = u64::MAX - 1;
+        set.next_uid = u64::MAX;
+        let encoded = encode_vector_set(&set);
+        let decoded = decode_vector_set(Some(&encoded)).expect("valid sparse UID state");
+
+        assert_eq!(build_uid_index(&decoded).len(), 1);
+        assert_eq!(hnsw_search(&decoded, &[1.0, 0.0], 1, 1, &[]).len(), 1);
+    }
+
+    #[test]
+    fn canonical_vector_state_rejects_invalid_identity_graph_and_numbers() {
+        let mut duplicate_uid = one_entry_set(None);
+        let mut second = duplicate_uid.entries[0].clone();
+        second.element = b"doc-b".to_vec();
+        duplicate_uid.entries.push(second);
+        duplicate_uid.next_uid = 3;
+        assert!(validate_vector_set_bytes(&encode_vector_set(&duplicate_uid)).is_err());
+
+        let mut duplicate_element = one_entry_set(None);
+        let mut second = duplicate_element.entries[0].clone();
+        second.uid = 2;
+        duplicate_element.entries.push(second);
+        duplicate_element.next_uid = 3;
+        assert!(validate_vector_set_bytes(&encode_vector_set(&duplicate_element)).is_err());
+
+        let mut dangling_link = one_entry_set(None);
+        dangling_link.entries[0].links[0].push(99);
+        assert!(validate_vector_set_bytes(&encode_vector_set(&dangling_link)).is_err());
+
+        let mut non_finite = one_entry_set(None);
+        non_finite.entries[0].vector[0] = f64::NAN;
+        assert!(validate_vector_set_bytes(&encode_vector_set(&non_finite)).is_err());
+    }
+
+    #[test]
+    fn fp32_input_rejects_non_finite_values() {
+        assert!(fp32_values(&f32::NAN.to_le_bytes()).is_err());
+        assert!(fp32_values(&f32::INFINITY.to_le_bytes()).is_err());
+    }
+
+    #[test]
+    fn vector_add_rejects_exhausted_uid_space() {
+        let store = EmbeddedStore::new(1);
+        let mut set = one_entry_set(None);
+        set.entries[0].uid = u64::MAX - 1;
+        set.next_uid = u64::MAX;
+        store.set_value_bytes(
+            b"objects",
+            bytes::Bytes::from(encode_vector_set(&set)),
+            None,
+        );
+
+        assert!(matches!(
+            VAdd::execute(
+                &store,
+                &[b"objects", b"VALUES", b"2", b"0", b"1", b"doc-b"],
+            ),
+            Frame::Error(message) if message.contains("UID space exhausted")
+        ));
+        assert_eq!(VCard::execute(&store, &[b"objects"]), Frame::Integer(1));
+    }
+
+    #[test]
+    fn governed_vector_format_round_trips_without_changing_ungoverned_format() {
+        let mut set = one_entry_set(None);
+
+        let ungoverned = encode_vector_set(&set);
+        assert_eq!(
+            u32::from_le_bytes(
+                ungoverned[VECTOR_SET_PREFIX.len()..VECTOR_SET_PREFIX.len() + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            HNSW_VECTOR_SET_FORMAT
+        );
+
+        set.entries[0].governance = Some(b"tenant=acme".to_vec());
+        let governed = encode_vector_set(&set);
+        assert_eq!(
+            u32::from_le_bytes(
+                governed[VECTOR_SET_PREFIX.len()..VECTOR_SET_PREFIX.len() + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            HNSW_GOVERNED_VECTOR_SET_FORMAT
+        );
+        let decoded = decode_vector_set(Some(&governed)).unwrap();
+        assert_eq!(
+            decoded.entries[0].governance.as_deref(),
+            Some(b"tenant=acme".as_slice())
+        );
+    }
+
+    #[test]
+    fn malformed_vector_headers_are_rejected_before_allocation() {
+        let valid = encode_vector_set(&one_entry_set(None));
+        assert!(validate_vector_set_bytes(&valid).is_ok());
+
+        let mut excessive_dim = valid.clone();
+        let dim_offset = VECTOR_SET_PREFIX.len() + 4;
+        excessive_dim[dim_offset..dim_offset + 4]
+            .copy_from_slice(&((MAX_VECTOR_DIMENSIONS as u32) + 1).to_le_bytes());
+        assert!(validate_vector_set_bytes(&excessive_dim).is_err());
+
+        let mut excessive_m = valid.clone();
+        let m_offset = VECTOR_SET_PREFIX.len() + 16;
+        excessive_m[m_offset..m_offset + 4]
+            .copy_from_slice(&((MAX_HNSW_M as u32) + 1).to_le_bytes());
+        assert!(validate_vector_set_bytes(&excessive_m).is_err());
+
+        let mut impossible_count = valid;
+        let count_offset = VECTOR_SET_PREFIX.len() + 36;
+        impossible_count[count_offset..count_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(validate_vector_set_bytes(&impossible_count).is_err());
+    }
+
+    #[test]
+    fn decoded_cache_accounting_includes_heap_owned_state() {
+        let set = one_entry_set(Some(b"tenant=acme"));
+        let encoded = encode_vector_set(&set);
+        let retained = encoded.len().saturating_add(decoded_vector_set_bytes(&set));
+        assert!(retained > encoded.len());
+
+        let mut cache = VectorDecodeCache::default();
+        let raw = bytes::Bytes::from(encoded);
+        cache.insert(
+            vector_decode_cache_key(&raw, VectorDecodeMode::Full),
+            raw,
+            Arc::new(set),
+        );
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.retained_bytes, retained);
+    }
+
+    #[test]
+    fn governed_vectors_fail_closed_and_support_guarded_rotation() {
+        let store = EmbeddedStore::new(1);
+        assert_eq!(
+            VAdd::execute(
+                &store,
+                &[
+                    b"objects",
+                    b"VALUES",
+                    b"2",
+                    b"1",
+                    b"0",
+                    b"doc-a",
+                    b"GOVERNANCE",
+                    b"tenant=acme",
+                ],
+            ),
+            Frame::Integer(1)
+        );
+
+        assert_eq!(VEmb::execute(&store, &[b"objects", b"doc-a"]), Frame::Null);
+        assert_eq!(
+            VIsMember::execute(&store, &[b"objects", b"doc-a"]),
+            Frame::Integer(0)
+        );
+        assert_eq!(
+            VSetAttr::execute(&store, &[b"objects", b"doc-a", br#"{"ok":true}"#]),
+            Frame::Integer(0)
+        );
+        assert_eq!(
+            VRem::execute(&store, &[b"objects", b"doc-a"]),
+            Frame::Integer(0)
+        );
+        assert_eq!(
+            VRange::execute(&store, &[b"objects", b"-", b"+"]),
+            Frame::Array(Vec::new())
+        );
+        assert_eq!(VRandMember::execute(&store, &[b"objects"]), Frame::Null);
+        assert_eq!(
+            VLinks::execute(&store, &[b"objects", b"doc-a"]),
+            Frame::Null
+        );
+        assert_eq!(
+            VRange::execute(
+                &store,
+                &[b"objects", b"-", b"+", b"GOVERNANCE", b"tenant=acme"],
+            ),
+            Frame::Array(vec![bulk(b"doc-a".to_vec())])
+        );
+        assert_eq!(
+            VRandMember::execute(&store, &[b"objects", b"GOVERNANCE", b"tenant=acme"],),
+            bulk(b"doc-a".to_vec())
+        );
+        assert!(matches!(
+            VLinks::execute(
+                &store,
+                &[b"objects", b"doc-a", b"GOVERNANCE", b"tenant=acme"],
+            ),
+            Frame::Array(_)
+        ));
+        assert_eq!(
+            VSim::execute(&store, &[b"objects", b"VALUES", b"2", b"1", b"0", b"TRUTH"],),
+            Frame::Array(Vec::new())
+        );
+        assert!(matches!(
+            VSim::execute(
+                &store,
+                &[b"objects", b"ELE", b"doc-a", b"COUNT", b"1", b"TRUTH"],
+            ),
+            Frame::Error(message) if message.contains("no such element")
+        ));
+        assert_eq!(
+            VSim::execute(
+                &store,
+                &[
+                    b"objects",
+                    b"VALUES",
+                    b"2",
+                    b"1",
+                    b"0",
+                    b"GOVERNANCE",
+                    b"tenant=acme",
+                    b"WITHGOVERNANCE",
+                    b"TRUTH",
+                ],
+            ),
+            Frame::Array(vec![bulk(b"doc-a".to_vec()), bulk(b"tenant=acme".to_vec()),])
+        );
+        assert_eq!(
+            VSim::execute(
+                &store,
+                &[
+                    b"objects",
+                    b"VALUES",
+                    b"2",
+                    b"1",
+                    b"0",
+                    b"COUNT",
+                    b"1",
+                    b"GOVERNANCE",
+                    b"tenant=acme",
+                ],
+            ),
+            Frame::Array(vec![bulk(b"doc-a".to_vec())])
+        );
+
+        let denied = VAdd::execute(
+            &store,
+            &[
+                b"objects",
+                b"VALUES",
+                b"2",
+                b"0",
+                b"1",
+                b"doc-a",
+                b"IFGOVERNANCE",
+                b"tenant=other",
+            ],
+        );
+        assert!(matches!(denied, Frame::Error(message) if message.contains("NOPERM")));
+
+        assert_eq!(
+            VAdd::execute(
+                &store,
+                &[
+                    b"objects",
+                    b"VALUES",
+                    b"2",
+                    b"0",
+                    b"1",
+                    b"doc-a",
+                    b"IFGOVERNANCE",
+                    b"tenant=acme",
+                    b"GOVERNANCE",
+                    b"tenant=beta",
+                ],
+            ),
+            Frame::Integer(0)
+        );
+        assert_eq!(
+            VEmb::execute(
+                &store,
+                &[b"objects", b"doc-a", b"GOVERNANCE", b"tenant=acme"],
+            ),
+            Frame::Null
+        );
+        assert!(matches!(
+            VEmb::execute(
+                &store,
+                &[b"objects", b"doc-a", b"GOVERNANCE", b"tenant=beta"],
+            ),
+            Frame::Array(_)
+        ));
+        assert_eq!(
+            VAdd::execute(
+                &store,
+                &[
+                    b"objects",
+                    b"VALUES",
+                    b"2",
+                    b"0",
+                    b"1",
+                    b"doc-a",
+                    b"IFGOVERNANCE",
+                    b"tenant=beta",
+                    b"CLEARGOVERNANCE",
+                ],
+            ),
+            Frame::Integer(0)
+        );
+        assert!(matches!(
+            VEmb::execute(&store, &[b"objects", b"doc-a"]),
+            Frame::Array(_)
+        ));
+
+        assert_eq!(
+            VAdd::execute(
+                &store,
+                &[b"objects", b"VALUES", b"2", b"1", b"0", b"public"],
+            ),
+            Frame::Integer(1)
+        );
+        assert!(matches!(
+            VEmb::execute(
+                &store,
+                &[b"objects", b"public", b"GOVERNANCE", b"tenant=beta"],
+            ),
+            Frame::Array(_)
+        ));
+    }
+
+    #[test]
+    fn vsim_bounds_result_items_and_retained_response_bytes() {
+        let store = EmbeddedStore::new(1);
+        assert_eq!(
+            VAdd::execute(&store, &[b"objects", b"VALUES", b"2", b"1", b"0", b"doc-a"],),
+            Frame::Integer(1)
+        );
+        let excessive_count = (MAX_VECTOR_RESPONSE_ITEMS + 1).to_string();
+        assert!(matches!(
+            VSim::execute(
+                &store,
+                &[
+                    b"objects",
+                    b"VALUES",
+                    b"2",
+                    b"1",
+                    b"0",
+                    b"COUNT",
+                    excessive_count.as_bytes(),
+                ],
+            ),
+            Frame::Error(message) if message.contains("result limit")
+        ));
+
+        let entry = VectorEntry {
+            uid: 1,
+            level: 0,
+            element: b"doc-a".to_vec(),
+            vector: vec![1.0, 0.0],
+            attributes: None,
+            governance: Some(vec![b'x'; MAX_VECTOR_GOVERNANCE_BYTES]),
+            links: Vec::new(),
+        };
+        let scored = vec![(&entry, 1.0); 300];
+        let parsed = VSimArgs {
+            vector: vec![1.0, 0.0],
+            count: scored.len(),
+            with_scores: false,
+            with_attribs: false,
+            with_governance: true,
+            allowed_governance: vec![entry.governance.clone().unwrap()],
+            filter: None,
+            ef_search: None,
+            truth: false,
+        };
+        assert!(
+            vsim_response_bytes(&scored, &parsed)
+                .is_some_and(|bytes| bytes > MAX_VECTOR_RESPONSE_BYTES)
+        );
+    }
+
+    #[test]
+    fn governed_hnsw_does_not_scan_arbitrary_unvisited_entries() {
+        let entry = |uid, element: &'static [u8], governance: Option<&'static [u8]>| VectorEntry {
+            uid,
+            level: 0,
+            element: element.to_vec(),
+            vector: vec![1.0, 0.0],
+            attributes: None,
+            governance: governance.map(<[u8]>::to_vec),
+            links: vec![Vec::new()],
+        };
+        let set = VectorSetState {
+            dim: 2,
+            original_dim: 2,
+            quantization: Quantization::NoQuant,
+            hnsw_m: DEFAULT_HNSW_M,
+            ef_construction: DEFAULT_HNSW_EF_CONSTRUCTION,
+            max_level: 0,
+            next_uid: 4,
+            entries: vec![
+                entry(1, b"allowed-but-unvisited", Some(b"tenant=allowed")),
+                entry(2, b"denied-a", Some(b"tenant=denied")),
+                entry(3, b"denied-entrypoint", Some(b"tenant=denied")),
+            ],
+        };
+
+        let results = hnsw_search(&set, &[1.0, 0.0], 1, 1, &[b"tenant=allowed".to_vec()]);
+        assert!(results.is_empty());
+    }
 
     #[test]
     fn exact_vector_scan_uses_parallel_shard_partition_path() {
@@ -3493,6 +4535,7 @@ mod tests {
             element: b"top".to_vec(),
             vector: vec![1.0, 0.0],
             attributes: Some(br#"{"keep":true}"#.to_vec()),
+            governance: Some(b"tenant=acme".to_vec()),
             links: Vec::new(),
         });
         for index in 1..=VECTOR_SCAN_PARALLEL_MIN {
@@ -3502,6 +4545,7 @@ mod tests {
                 element: format!("member:{index:04}").into_bytes(),
                 vector: vec![0.0, 1.0],
                 attributes: Some(br#"{"keep":false}"#.to_vec()),
+                governance: None,
                 links: Vec::new(),
             });
         }
@@ -3516,12 +4560,17 @@ mod tests {
             entries,
         };
 
-        let scored = exact_vector_scores(&set, &[1.0, 0.0], None, 8);
-        assert_eq!(scored.len(), VECTOR_SCAN_PARALLEL_MIN + 1);
-        assert_eq!(scored[0].0.element, b"top".to_vec());
-        assert_eq!(scored[0].1, 1.0);
+        let scored = exact_vector_scores(&set, &[1.0, 0.0], None, &[], 8);
+        assert_eq!(scored.len(), VECTOR_SCAN_PARALLEL_MIN);
+        assert_ne!(scored[0].0.element, b"top".to_vec());
 
-        let filtered = exact_vector_scores(&set, &[1.0, 0.0], Some(b".keep == true"), 8);
+        let filtered = exact_vector_scores(
+            &set,
+            &[1.0, 0.0],
+            Some(b".keep == true"),
+            &[b"tenant=acme".to_vec()],
+            8,
+        );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0.element, b"top".to_vec());
     }

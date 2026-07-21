@@ -1457,6 +1457,8 @@ impl RawCommandDispatcher {
             crate::protocol::FastCommandKind::SetEx => Some(&crate::commands::setex::COMMAND),
             crate::protocol::FastCommandKind::PSetEx => Some(&crate::commands::psetex::COMMAND),
             #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::Ping => Some(&crate::commands::ping::COMMAND),
+            #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ExpireAt => Some(&crate::commands::expireat::COMMAND),
             #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::PExpireAt => {

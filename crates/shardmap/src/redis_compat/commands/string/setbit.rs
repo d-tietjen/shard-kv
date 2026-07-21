@@ -58,6 +58,9 @@ fn setbit_value(
             return Ok(previous.expect("previous bit captured on hit"));
         }
         RedisStringLookup::WrongType => return Err(wrongtype()),
+        RedisStringLookup::BackendError => {
+            return Err(error("ERR object overflow read failed"));
+        }
         RedisStringLookup::Hit | RedisStringLookup::Miss => {}
     }
 

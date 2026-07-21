@@ -11,6 +11,37 @@ mod metrics;
 mod protocol;
 mod transport;
 
+use crate::config::ReplicationConfig;
+use crate::{Result, ShardCacheError};
+
+fn validate_frame_limits(config: &ReplicationConfig) -> Result<()> {
+    if config.batch_max_records == 0
+        || config.batch_max_bytes == 0
+        || config.snapshot_chunk_bytes == 0
+        || config.receive_max_frame_bytes == 0
+    {
+        return Err(ShardCacheError::Config(
+            "replication batch, snapshot, and frame limits must be > 0".into(),
+        ));
+    }
+    if config.receive_max_frame_bytes > protocol::MAX_FCRP_PAYLOAD_BYTES {
+        return Err(ShardCacheError::Config(
+            "replication receive frame limit exceeds the FCRP protocol maximum".into(),
+        ));
+    }
+    if config.receive_max_frame_bytes < config.batch_max_bytes.saturating_add(4) {
+        return Err(ShardCacheError::Config(
+            "replication receive frame limit cannot fit the configured mutation batch".into(),
+        ));
+    }
+    if config.receive_max_frame_bytes < config.snapshot_chunk_bytes.max(4 * 1024) {
+        return Err(ShardCacheError::Config(
+            "replication receive frame limit cannot fit the configured snapshot chunk".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Immutable FCRP wire frame shared by backlog, subscribers, and transports.
 ///
 /// Keeping the encoded frame in the same byte owner used by `bytes-handoff`

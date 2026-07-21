@@ -73,6 +73,9 @@ impl crate::commands::redis::RedisCommand for IncrByFloat {
                         ServerWire::write_resp_blob_string(out, &bytes);
                     }
                     RedisStringLookup::WrongType => write_resp_wrongtype(out),
+                    RedisStringLookup::BackendError => {
+                        ServerWire::write_resp_error(out, "ERR object overflow read failed")
+                    }
                 }
             }
             _ => write_resp_wrong_arity(out, "INCRBYFLOAT"),
