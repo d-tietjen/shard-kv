@@ -486,10 +486,12 @@ async fn stream_snapshot(
             if !buffer.is_empty() && buffer_bytes.saturating_add(entry_bytes) > target {
                 write_monoio_snapshot_chunk(
                     stream,
-                    &watermarks,
-                    chunk_index,
-                    false,
-                    std::mem::take(&mut buffer),
+                    ReplicationSnapshotChunk {
+                        watermarks: watermarks.clone(),
+                        chunk_index,
+                        is_last: false,
+                        entries: std::mem::take(&mut buffer),
+                    },
                     compression,
                     config.zstd_level,
                     bootstrap_write_timeout(bootstrap_deadline, per_frame_timeout)?,
@@ -519,10 +521,12 @@ async fn stream_snapshot(
     }
     write_monoio_snapshot_chunk(
         stream,
-        &watermarks,
-        chunk_index,
-        true,
-        std::mem::take(&mut buffer),
+        ReplicationSnapshotChunk {
+            watermarks: watermarks.clone(),
+            chunk_index,
+            is_last: true,
+            entries: std::mem::take(&mut buffer),
+        },
         if saw_entry {
             compression
         } else {
@@ -546,20 +550,12 @@ async fn stream_snapshot(
 
 async fn write_monoio_snapshot_chunk(
     stream: &mut monoio::net::TcpStream,
-    watermarks: &ShardWatermarks,
-    chunk_index: u64,
-    is_last: bool,
-    entries: Vec<StoredEntry>,
+    chunk: ReplicationSnapshotChunk,
     compression: ReplicationCompressionMode,
     zstd_level: i32,
     timeout: Duration,
 ) -> Result<()> {
-    let payload = encode_snapshot_chunk(&ReplicationSnapshotChunk {
-        watermarks: watermarks.clone(),
-        chunk_index,
-        is_last,
-        entries,
-    });
+    let payload = encode_snapshot_chunk(&chunk);
     let frame = crate::replication::protocol::encode_frame_with_payload_limit(
         FrameKind::SnapshotChunk,
         compression,
