@@ -7,7 +7,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::num::NonZeroU64;
 use std::ops::Deref;
@@ -22,9 +22,11 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
-use xxhash_rust::xxh3::Xxh3;
 
-use crate::storage::{EmbeddedKeyRoute, EmbeddedStore, hash_key, now_millis, ttl_now_millis};
+use crate::storage::{
+    EmbeddedKeyRoute, EmbeddedStore, FastHashBuilder, hash_key, local_table_hash,
+    local_table_hasher, now_millis, ttl_now_millis,
+};
 use crate::{Result, ShardCacheError};
 
 #[cfg(feature = "active-sync-consensus-ordered-eventual")]
@@ -985,9 +987,9 @@ struct ActiveShardState {
     pending_block_gaps: BTreeMap<BlockOrigin, BTreeMap<u64, [u8; 32]>>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ActiveVersionMap {
-    entries: HashBrownMap<ActiveVersionKey, VersionState, BuildHasherDefault<Xxh3>>,
+    entries: HashBrownMap<ActiveVersionKey, VersionState, FastHashBuilder>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -995,7 +997,15 @@ struct ActiveVersionKey(SharedBytes);
 
 impl Hash for ActiveVersionKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write(&self.0);
+        state.write_u64(hash_key(&self.0));
+    }
+}
+
+impl Default for ActiveVersionMap {
+    fn default() -> Self {
+        Self {
+            entries: HashBrownMap::with_hasher(local_table_hasher()),
+        }
     }
 }
 
@@ -1012,8 +1022,9 @@ impl ActiveVersionMap {
         match self
             .entries
             .raw_entry_mut()
-            .from_hash(hash, |stored_key| stored_key.0.as_ref() == key)
-        {
+            .from_hash(local_table_hash(hash), |stored_key| {
+                stored_key.0.as_ref() == key
+            }) {
             hashbrown::hash_map::RawEntryMut::Occupied(occupied) => Some(occupied.into_mut()),
             hashbrown::hash_map::RawEntryMut::Vacant(_) => None,
         }
@@ -1023,7 +1034,9 @@ impl ActiveVersionMap {
     fn get_key_value_hashed(&self, hash: u64, key: &[u8]) -> Option<(&SharedBytes, &VersionState)> {
         self.entries
             .raw_entry()
-            .from_hash(hash, |stored_key| stored_key.0.as_ref() == key)
+            .from_hash(local_table_hash(hash), |stored_key| {
+                stored_key.0.as_ref() == key
+            })
             .map(|(stored_key, version)| (&stored_key.0, version))
     }
 
@@ -1047,13 +1060,18 @@ impl ActiveVersionMap {
         match self
             .entries
             .raw_entry_mut()
-            .from_hash(hash, |stored_key| stored_key.0.as_ref() == key.as_ref())
-        {
+            .from_hash(local_table_hash(hash), |stored_key| {
+                stored_key.0.as_ref() == key.as_ref()
+            }) {
             hashbrown::hash_map::RawEntryMut::Occupied(mut occupied) => {
                 Some(std::mem::replace(occupied.get_mut(), replacement))
             }
             hashbrown::hash_map::RawEntryMut::Vacant(vacant) => {
-                vacant.insert_hashed_nocheck(hash, ActiveVersionKey(key), replacement);
+                vacant.insert_hashed_nocheck(
+                    local_table_hash(hash),
+                    ActiveVersionKey(key),
+                    replacement,
+                );
                 None
             }
         }

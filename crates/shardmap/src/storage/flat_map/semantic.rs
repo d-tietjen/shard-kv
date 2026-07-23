@@ -61,10 +61,9 @@ impl FlatMap {
         let token = self.semantic_index.insert(hash, key, &embedding);
         let governance = governance_metadata.map(shared_bytes_from_slice);
 
-        let Some(entry) = self
-            .entries
-            .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))
-        else {
+        let Some(entry) = self.entries.find_mut(local_table_hash(hash), |entry| {
+            entry.matches_hashed_key(hash, key)
+        }) else {
             return Ok(());
         };
         let previous_entry_bytes = entry.stored_bytes();
@@ -152,9 +151,11 @@ impl FlatMap {
         now_ms: u64,
         governance_filter: &mut impl FnMut(Option<&[u8]>) -> bool,
     ) -> Option<SemanticMatch> {
-        let entry = self.entries.find(candidate.hash, |entry| {
-            entry.matches_hashed_key(candidate.hash, candidate.key)
-        })?;
+        let entry = self
+            .entries
+            .find(local_table_hash(candidate.hash), |entry| {
+                entry.matches_hashed_key(candidate.hash, candidate.key)
+            })?;
         if entry.is_expired(now_ms) {
             return None;
         }

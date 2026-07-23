@@ -32,10 +32,11 @@ impl FlatMap {
         #[cfg(feature = "telemetry")]
         let (key_delta, memory_delta): (isize, isize);
 
-        match self
-            .entries
-            .entry(hash, |entry| entry.matches(hash, &key), |entry| entry.hash)
-        {
+        match self.entries.entry(
+            local_table_hash(hash),
+            |entry| entry.matches(hash, &key),
+            |entry| local_table_hash(entry.hash),
+        ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
                 let had_ttl = entry.expire_at_ms.is_some();
@@ -152,9 +153,9 @@ impl FlatMap {
         let (key_delta, memory_delta): (isize, isize);
 
         match self.entries.entry(
-            hash,
+            local_table_hash(hash),
             |entry| entry.matches_prepared(hash, key, key_tag),
-            |entry| entry.hash,
+            |entry| local_table_hash(entry.hash),
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -329,9 +330,9 @@ impl FlatMap {
         let (key_delta, memory_delta): (isize, isize);
 
         match self.entries.entry(
-            hash,
+            local_table_hash(hash),
             |entry| entry.matches_prepared(hash, key, key_tag),
-            |entry| entry.hash,
+            |entry| local_table_hash(entry.hash),
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();

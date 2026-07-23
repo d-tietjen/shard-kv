@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::config::EvictionPolicy;
 use crate::storage::flat_map::EvictionRank;
-use crate::storage::{Bytes, hash_key};
+use crate::storage::{Bytes, FastHashBuilder, hash_key, local_table_hash};
 
 #[derive(Debug)]
 pub(super) struct SessionSlotEntry {
@@ -116,7 +116,7 @@ pub(super) struct SessionSlotSlab {
 
 #[derive(Debug, Default)]
 pub(crate) struct SessionSlotMap {
-    sessions: HashBrownMap<Bytes, SessionSlotSlab, xxhash_rust::xxh3::Xxh3DefaultBuilder>,
+    sessions: HashBrownMap<Bytes, SessionSlotSlab, FastHashBuilder>,
     active_readers: AtomicUsize,
     retired_values: Vec<Box<[u8]>>,
     retired_slabs: Vec<SessionSlotSlab>,
@@ -247,9 +247,9 @@ impl SessionSlotSlab {
         let value_len = value.len();
 
         match self.entries.entry(
-            hash,
+            local_table_hash(hash),
             |entry| entry.matches(hash, key_ref),
-            |entry| entry.hash,
+            |entry| local_table_hash(entry.hash),
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -305,9 +305,9 @@ impl SessionSlotSlab {
         };
 
         match self.entries.entry(
-            hash,
+            local_table_hash(hash),
             |entry| entry.matches(hash, key_ref),
-            |entry| entry.hash,
+            |entry| local_table_hash(entry.hash),
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -423,7 +423,7 @@ impl SessionSlotMap {
             .from_key(session_prefix)
             .and_then(|(_, slab)| {
                 slab.entries
-                    .find(hash, |entry| entry.matches(hash, key))
+                    .find(local_table_hash(hash), |entry| entry.matches(hash, key))
                     .map(|entry| slab.entry_value_slice(entry))
             })
     }
@@ -443,7 +443,8 @@ impl SessionSlotMap {
                     packed_values,
                     ..
                 } = slab;
-                let entry = entries.find_mut(hash, |entry| entry.matches(hash, key))?;
+                let entry =
+                    entries.find_mut(local_table_hash(hash), |entry| entry.matches(hash, key))?;
                 entry.access.record_access(tick);
                 Some(match &entry.value {
                     SessionSlotValue::Owned(bytes) => bytes.as_ref(),
@@ -457,7 +458,7 @@ impl SessionSlotMap {
         } else {
             self.sessions.get(session_prefix).and_then(|slab| {
                 slab.entries
-                    .find(hash, |entry| entry.matches(hash, key))
+                    .find(local_table_hash(hash), |entry| entry.matches(hash, key))
                     .map(|entry| slab.entry_value_slice(entry))
             })
         }
@@ -479,7 +480,8 @@ impl SessionSlotMap {
                     packed_values,
                     ..
                 } = slab;
-                let entry = entries.find_mut(hash, |entry| entry.matches(hash, key))?;
+                let entry =
+                    entries.find_mut(local_table_hash(hash), |entry| entry.matches(hash, key))?;
                 entry.access.record_access(tick);
                 Some(match &entry.value {
                     SessionSlotValue::Owned(bytes) => bytes.as_ref(),
@@ -493,7 +495,7 @@ impl SessionSlotMap {
         } else {
             self.sessions.get(session_prefix).and_then(|slab| {
                 slab.entries
-                    .find(hash, |entry| entry.matches(hash, key))
+                    .find(local_table_hash(hash), |entry| entry.matches(hash, key))
                     .map(|entry| slab.entry_value_slice(entry))
             })
         }
@@ -518,10 +520,9 @@ impl SessionSlotMap {
             let mut hit_count = 0usize;
             let mut total_bytes = 0usize;
             for (key, key_hash) in keys.iter().zip(key_hashes.iter().copied()) {
-                let Some(entry) = slab
-                    .entries
-                    .find_mut(key_hash, |entry| entry.matches(key_hash, key))
-                else {
+                let Some(entry) = slab.entries.find_mut(local_table_hash(key_hash), |entry| {
+                    entry.matches(key_hash, key)
+                }) else {
                     offsets.push(usize::MAX);
                     lengths.push(0);
                     continue;
@@ -551,10 +552,9 @@ impl SessionSlotMap {
             let mut hit_count = 0usize;
             let mut total_bytes = 0usize;
             for (key, key_hash) in keys.iter().zip(key_hashes.iter().copied()) {
-                let Some(entry) = slab
-                    .entries
-                    .find(key_hash, |entry| entry.matches(key_hash, key))
-                else {
+                let Some(entry) = slab.entries.find(local_table_hash(key_hash), |entry| {
+                    entry.matches(key_hash, key)
+                }) else {
                     offsets.push(usize::MAX);
                     lengths.push(0);
                     continue;
@@ -613,10 +613,11 @@ impl SessionSlotMap {
             }
         };
 
-        match slab
-            .entries
-            .entry(hash, |entry| entry.matches(hash, key), |entry| entry.hash)
-        {
+        match slab.entries.entry(
+            local_table_hash(hash),
+            |entry| entry.matches(hash, key),
+            |entry| local_table_hash(entry.hash),
+        ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let mut retired_value = None;
                 let entry = occupied.get_mut();
@@ -682,7 +683,7 @@ impl SessionSlotMap {
                     let slab = session.get_mut();
                     let Some(entry) = slab
                         .entries
-                        .find_entry(hash, |entry| entry.matches(hash, key))
+                        .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
                         .ok()
                     else {
                         return false;
@@ -728,7 +729,7 @@ impl SessionSlotMap {
                     let slab = session.get_mut();
                     let Some(entry) = slab
                         .entries
-                        .find_entry(hash, |entry| entry.matches(hash, key))
+                        .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
                         .ok()
                     else {
                         return false;

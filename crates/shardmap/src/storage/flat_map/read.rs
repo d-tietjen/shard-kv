@@ -19,7 +19,9 @@ impl FlatMap {
 
         let can_mutate = self
             .entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_hashed_key(hash, key)
+            })
             .is_some_and(|entry| {
                 !entry.is_protected() && entry.expire_at_ms.is_none() && entry.value.is_unique()
             });
@@ -29,9 +31,9 @@ impl FlatMap {
         if should_touch_access {
             self.record_lru_touch(hash, access_tick);
         }
-        let entry = self
-            .entries
-            .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))?;
+        let entry = self.entries.find_mut(local_table_hash(hash), |entry| {
+            entry.matches_hashed_key(hash, key)
+        })?;
         let previous_entry_bytes = entry.stored_bytes();
         if should_touch_access {
             entry.access.record_access(access_tick);
@@ -65,7 +67,9 @@ impl FlatMap {
 
         let can_mutate = self
             .entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_hashed_key(hash, key)
+            })
             .is_some_and(|entry| {
                 !entry.is_protected() && entry.expire_at_ms.is_none() && entry.value.is_unique()
             });
@@ -75,9 +79,9 @@ impl FlatMap {
         if should_touch_access {
             self.record_lru_touch(hash, access_tick);
         }
-        let entry = self
-            .entries
-            .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))?;
+        let entry = self.entries.find_mut(local_table_hash(hash), |entry| {
+            entry.matches_hashed_key(hash, key)
+        })?;
         let previous_entry_bytes = entry.stored_bytes();
         if should_touch_access {
             entry.access.record_access(access_tick);
@@ -120,11 +124,15 @@ impl FlatMap {
             }
             return self
                 .entries
-                .find(hash, |entry| entry.matches_readable(hash, key))
+                .find(local_table_hash(hash), |entry| {
+                    entry.matches_readable(hash, key)
+                })
                 .map(|entry| entry.value.as_ref());
         }
         self.entries
-            .find(hash, |entry| entry.matches_readable(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_readable(hash, key)
+            })
             .filter(|entry| !entry.is_expired(now_ms))
             .map(|entry| entry.value.as_ref())
     }
@@ -150,7 +158,9 @@ impl FlatMap {
             }
             return self
                 .entries
-                .find(hash, |entry| entry.matches_hashed_key(hash, key))
+                .find(local_table_hash(hash), |entry| {
+                    entry.matches_hashed_key(hash, key)
+                })
                 .map(|entry| entry.expire_at_ms);
         }
         if self.entry_is_expired_hashed(hash, key, now_ms) {
@@ -158,7 +168,7 @@ impl FlatMap {
             return None;
         }
         self.entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
             .map(|entry| entry.expire_at_ms)
     }
 
@@ -174,7 +184,9 @@ impl FlatMap {
             return Some(None);
         }
         self.entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_hashed_key(hash, key)
+            })
             .map(|_| None)
     }
 
@@ -185,7 +197,9 @@ impl FlatMap {
             return Some(value.as_ref());
         }
         self.entries
-            .find(hash, |entry| entry.matches_readable(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_readable(hash, key)
+            })
             .map(|entry| entry.value.as_ref())
     }
 
@@ -201,7 +215,7 @@ impl FlatMap {
             return Some(value.as_ref());
         }
         self.entries
-            .find(hash, |entry| {
+            .find(local_table_hash(hash), |entry| {
                 entry.matches_readable_prepared(hash, key, key_tag)
             })
             .map(|entry| entry.value.as_ref())
@@ -222,10 +236,9 @@ impl FlatMap {
             write(value);
             return true;
         }
-        if let Some(entry) = self
-            .entries
-            .find(hash, |entry| entry.matches_readable(hash, key))
-        {
+        if let Some(entry) = self.entries.find(local_table_hash(hash), |entry| {
+            entry.matches_readable(hash, key)
+        }) {
             write(&entry.value);
             true
         } else {
@@ -244,7 +257,9 @@ impl FlatMap {
             return Some(value);
         }
         self.entries
-            .find(hash, |entry| entry.matches_readable(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_readable(hash, key)
+            })
             .map(|entry| &entry.value)
     }
 
@@ -260,7 +275,7 @@ impl FlatMap {
             return Some(value);
         }
         self.entries
-            .find(hash, |entry| {
+            .find(local_table_hash(hash), |entry| {
                 entry.matches_readable_prepared(hash, key, key_tag)
             })
             .map(|entry| &entry.value)
@@ -278,7 +293,7 @@ impl FlatMap {
             return Some(value);
         }
         self.entries
-            .find(hash, |entry| {
+            .find(local_table_hash(hash), |entry| {
                 entry.matches_readable_tagged(hash, key_tag, key_len)
             })
             .map(|entry| &entry.value)
@@ -297,7 +312,9 @@ impl FlatMap {
     {
         if let Some(entry) = self
             .entries
-            .find(hash, |entry| entry.matches_readable(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_readable(hash, key)
+            })
             .filter(|entry| !entry.is_expired(now_ms))
         {
             write(&entry.value);
@@ -315,7 +332,9 @@ impl FlatMap {
         now_ms: u64,
     ) -> Option<&SharedBytes> {
         self.entries
-            .find(hash, |entry| entry.matches_readable(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_readable(hash, key)
+            })
             .filter(|entry| !entry.is_expired(now_ms))
             .map(|entry| &entry.value)
     }
@@ -335,7 +354,9 @@ impl FlatMap {
             return Some(value.clone());
         }
         self.entries
-            .find(hash, |entry| entry.matches_readable(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_readable(hash, key)
+            })
             .filter(|entry| !entry.is_expired(now_ms))
             .map(|entry| entry.value.clone())
     }
@@ -389,7 +410,9 @@ impl FlatMap {
         }
         if let Some(entry) = self
             .entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_hashed_key(hash, key)
+            })
             .filter(|entry| !entry.is_expired(now_ms))
         {
             if !authorize(entry.governance.as_deref()) {
@@ -420,7 +443,9 @@ impl FlatMap {
     #[inline(always)]
     pub(crate) fn is_value_protected_hashed(&self, hash: u64, key: &[u8], now_ms: u64) -> bool {
         self.entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_hashed_key(hash, key)
+            })
             .filter(|entry| !entry.is_expired(now_ms))
             .is_some_and(FlatEntry::is_protected)
             || self.remote_entries.get(key).is_some_and(|entry| {
@@ -441,7 +466,7 @@ impl FlatMap {
             return Some(value.clone());
         }
         self.entries
-            .find(hash, |entry| {
+            .find(local_table_hash(hash), |entry| {
                 entry.matches_readable_prepared(hash, key, key_tag)
             })
             .filter(|entry| !entry.is_expired(now_ms))
@@ -462,7 +487,9 @@ impl FlatMap {
 
         let mut entry = self
             .entries
-            .find_entry(hash, |entry| entry.matches_readable(hash, key))
+            .find_entry(local_table_hash(hash), |entry| {
+                entry.matches_readable(hash, key)
+            })
             .ok()?;
         if entry.get().is_expired(now_ms) {
             let _ = entry;
@@ -496,7 +523,9 @@ impl FlatMap {
 
         let Some(mut entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches_readable(hash, key))
+            .find_entry(local_table_hash(hash), |entry| {
+                entry.matches_readable(hash, key)
+            })
             .ok()
         else {
             return false;
@@ -615,7 +644,9 @@ impl FlatMap {
             return false;
         }
         self.entries
-            .find(hash, |entry| entry.matches_readable(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_readable(hash, key)
+            })
             .is_some()
             || self
                 .remote_entries

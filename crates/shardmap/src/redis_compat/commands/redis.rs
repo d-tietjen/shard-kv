@@ -44,3 +44,26 @@ pub(crate) use parse::{
     eq_ignore_ascii_case, parse_f64, parse_i64, parse_lex_bound, parse_score_bound, parse_u64,
     parse_usize,
 };
+
+/// Returns the Redis-compatible XXH3 digest of a value as lowercase hex.
+#[inline]
+pub(crate) fn value_digest_hex(value: &[u8]) -> [u8; 16] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = xxhash_rust::xxh3::xxh3_64(value).to_be_bytes();
+    let mut encoded = [0u8; 16];
+    for (index, byte) in digest.iter().copied().enumerate() {
+        encoded[index * 2] = HEX[(byte >> 4) as usize];
+        encoded[index * 2 + 1] = HEX[(byte & 0x0f) as usize];
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::value_digest_hex;
+
+    #[test]
+    fn value_digest_is_redis_xxh3_hex() {
+        assert_eq!(value_digest_hex(b"abc").as_slice(), b"78af5f94892f3950");
+    }
+}

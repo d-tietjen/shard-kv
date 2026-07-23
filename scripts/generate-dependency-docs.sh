@@ -63,7 +63,7 @@ declared compatible version ranges.
 | `fast-telemetry` | `telemetry` | Metrics integration. |
 | `serde`, `serde_json`, `toml` | Configuration and persistence metadata | Structured configuration and metadata encoding. |
 | `crossbeam-channel`, `crossbeam-utils`, `parking_lot`, `rblock` | Core concurrency | Bounded channels and shard-local synchronization. |
-| `hashbrown`, `indextreemap`, `smallvec`, `xxhash-rust` | Core storage and routing | Tables, ordered indexes, inline collections, and stable fast hashing. |
+| `ahash`, `hashbrown`, `indextreemap`, `smallvec`, `xxhash-rust` | Core storage and routing | Randomly keyed local tables, ordered indexes, inline collections, and stable XXH3 routing. |
 
 TLS dependency policy is enforced by
 [`scripts/check-tls-dependency-policy.sh`](../scripts/check-tls-dependency-policy.sh):

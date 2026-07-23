@@ -32,7 +32,7 @@ declared compatible version ranges.
 | `fast-telemetry` | `telemetry` | Metrics integration. |
 | `serde`, `serde_json`, `toml` | Configuration and persistence metadata | Structured configuration and metadata encoding. |
 | `crossbeam-channel`, `crossbeam-utils`, `parking_lot`, `rblock` | Core concurrency | Bounded channels and shard-local synchronization. |
-| `hashbrown`, `indextreemap`, `smallvec`, `xxhash-rust` | Core storage and routing | Tables, ordered indexes, inline collections, and stable fast hashing. |
+| `ahash`, `hashbrown`, `indextreemap`, `smallvec`, `xxhash-rust` | Core storage and routing | Randomly keyed local tables, ordered indexes, inline collections, and stable XXH3 routing. |
 
 TLS dependency policy is enforced by
 [`scripts/check-tls-dependency-policy.sh`](../scripts/check-tls-dependency-policy.sh):
@@ -64,14 +64,14 @@ the generated tables below.
 | Package | Version | License | Manifest |
 | --- | --- | --- | --- |
 | `deterministic-test-env` | `2.0.0-pre-release` | MIT | `crates/deterministic-test-env/Cargo.toml` |
-| `shardcache-benchmarks` | `0.8.0` | Apache-2.0 | `benchmarks/Cargo.toml` |
-| `shardcache-c` | `0.8.0` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
-| `shardcache-client-rs` | `0.8.0` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
-| `shardcache-formal` | `0.8.0` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
-| `shardcache-py` | `0.8.0` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
-| `shardcache-runtime` | `0.8.0` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
-| `shardcache` | `0.8.0` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
-| `shardmap` | `0.8.0` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
+| `shardcache-benchmarks` | `0.8.1` | Apache-2.0 | `benchmarks/Cargo.toml` |
+| `shardcache-c` | `0.8.1` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
+| `shardcache-client-rs` | `0.8.1` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
+| `shardcache-formal` | `0.8.1` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
+| `shardcache-py` | `0.8.1` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
+| `shardcache-runtime` | `0.8.1` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
+| `shardcache` | `0.8.1` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
+| `shardmap` | `0.8.1` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
 
 ## Third-Party Packages (377)
 

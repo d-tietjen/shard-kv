@@ -19,7 +19,7 @@ impl FlatMap {
         self.reclaim_retired_if_quiescent();
         let Some(entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             return self.remove_remote_value_hashed(hash, key, now_ms);
@@ -63,7 +63,7 @@ impl FlatMap {
         self.reclaim_retired_if_quiescent();
         let Some(entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             return self.delete_remote_hashed(hash, key, reason);
@@ -95,7 +95,7 @@ impl FlatMap {
         self.disable_fast_point_map();
         let Some(entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             return self.delete_remote_hashed(hash, key, reason);
@@ -136,7 +136,7 @@ impl FlatMap {
         };
         let Some(entry_ref) = self
             .entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
             .filter(|entry| !entry.is_expired(now_ms))
         else {
             return ObjectOffloadAttempt::NotEligible;
@@ -313,7 +313,7 @@ impl FlatMap {
                     if runtime.failure_policy() == ObjectOverflowFailurePolicy::EvictResident
                         && self
                             .entries
-                            .find(pending.hash, |entry| {
+                            .find(local_table_hash(pending.hash), |entry| {
                                 entry.matches(pending.hash, &pending.key)
                                     && entry.value == pending.source_value
                             })
@@ -331,7 +331,7 @@ impl FlatMap {
             };
             let is_current = self
                 .entries
-                .find(pending.hash, |entry| {
+                .find(local_table_hash(pending.hash), |entry| {
                     entry.matches(pending.hash, &pending.key)
                         && entry.value == pending.source_value
                         && !entry.is_expired(now_ms)
@@ -343,7 +343,7 @@ impl FlatMap {
             }
             let entry = self
                 .entries
-                .find_entry(pending.hash, |entry| {
+                .find_entry(local_table_hash(pending.hash), |entry| {
                     entry.matches(pending.hash, &pending.key)
                 })
                 .expect("validated pending object entry");
@@ -450,7 +450,10 @@ impl FlatMap {
     pub fn ttl_seconds(&mut self, key: &[u8], now_ms: u64) -> i64 {
         self.disable_fast_point_map();
         let hash = hash_key(key);
-        let Some(entry) = self.entries.find(hash, |entry| entry.matches(hash, key)) else {
+        let Some(entry) = self
+            .entries
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
+        else {
             return self.remote_ttl(hash, key, now_ms, true);
         };
         let Some(expire_at_ms) = entry.expire_at_ms else {
@@ -466,7 +469,10 @@ impl FlatMap {
     pub fn ttl_millis(&mut self, key: &[u8], now_ms: u64) -> i64 {
         self.disable_fast_point_map();
         let hash = hash_key(key);
-        let Some(entry) = self.entries.find(hash, |entry| entry.matches(hash, key)) else {
+        let Some(entry) = self
+            .entries
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
+        else {
             return self.remote_ttl(hash, key, now_ms, false);
         };
         let Some(expire_at_ms) = entry.expire_at_ms else {
@@ -509,7 +515,7 @@ impl FlatMap {
 
         let Some(mut entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             let Some(remote) = self.remote_entries.get_mut(key) else {
@@ -543,7 +549,7 @@ impl FlatMap {
 
         let Some(mut entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             let Some(remote) = self.remote_entries.get_mut(key) else {
@@ -634,7 +640,7 @@ impl FlatMap {
         let mut consumed = 0usize;
         for key in &keys[start..] {
             let hash = hash_key(key);
-            let source = if let Some(entry) = self.entries.find(hash, |entry| {
+            let source = if let Some(entry) = self.entries.find(local_table_hash(hash), |entry| {
                 entry.matches(hash, key) && !entry.is_expired(now_ms)
             }) {
                 Some(SnapshotEntrySource::Resident(StoredEntry {
