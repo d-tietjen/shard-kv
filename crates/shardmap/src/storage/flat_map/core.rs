@@ -237,7 +237,7 @@ impl FlatMap {
     #[inline(always)]
     pub(super) fn entry_is_expired_hashed(&self, hash: u64, key: &[u8], now_ms: u64) -> bool {
         self.entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
             .is_some_and(|entry| entry.is_expired(now_ms))
             || self
                 .remote_entries
@@ -254,14 +254,18 @@ impl FlatMap {
         if self.should_sample_read() {
             let tick = self.next_access_tick();
             self.entries
-                .find_mut(hash, |entry| entry.matches_readable(hash, key))
+                .find_mut(local_table_hash(hash), |entry| {
+                    entry.matches_readable(hash, key)
+                })
                 .map(|entry| {
                     entry.access.record_access(tick);
                     entry.value.as_ref()
                 })
         } else {
             self.entries
-                .find(hash, |entry| entry.matches_readable(hash, key))
+                .find(local_table_hash(hash), |entry| {
+                    entry.matches_readable(hash, key)
+                })
                 .map(|entry| entry.value.as_ref())
         }
     }
@@ -280,7 +284,7 @@ impl FlatMap {
         if self.should_sample_read() {
             let tick = self.next_access_tick();
             self.entries
-                .find_mut(hash, |entry| {
+                .find_mut(local_table_hash(hash), |entry| {
                     entry.matches_readable_prepared(hash, key, key_tag)
                 })
                 .map(|entry| {
@@ -289,7 +293,7 @@ impl FlatMap {
                 })
         } else {
             self.entries
-                .find(hash, |entry| {
+                .find(local_table_hash(hash), |entry| {
                     entry.matches_readable_prepared(hash, key, key_tag)
                 })
                 .map(|entry| entry.value.as_ref())
@@ -318,7 +322,9 @@ impl FlatMap {
             for fast_entry in self.fast_points.take_entries_and_disable() {
                 let entry = fast_entry.into_flat_entry();
                 self.entries
-                    .insert_unique(entry.hash, entry, |entry| entry.hash);
+                    .insert_unique(local_table_hash(entry.hash), entry, |entry| {
+                        local_table_hash(entry.hash)
+                    });
             }
         }
     }
@@ -465,7 +471,9 @@ impl FlatMap {
             while let Some(touch) = self.lru_touch_log.pop_front() {
                 let Some(entry) = self
                     .entries
-                    .find_entry(touch.hash, |entry| entry.access.last_touch == touch.tick)
+                    .find_entry(local_table_hash(touch.hash), |entry| {
+                        entry.access.last_touch == touch.tick
+                    })
                     .ok()
                 else {
                     continue;
@@ -569,7 +577,9 @@ impl FlatMap {
             };
             let Some(entry) = self
                 .entries
-                .find_entry(touch.hash, |entry| entry.access.last_touch == touch.tick)
+                .find_entry(local_table_hash(touch.hash), |entry| {
+                    entry.access.last_touch == touch.tick
+                })
                 .ok()
             else {
                 continue;

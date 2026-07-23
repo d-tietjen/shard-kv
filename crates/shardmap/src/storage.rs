@@ -146,8 +146,8 @@ pub use stats::{
     WalStatsSnapshot,
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Once, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "telemetry")]
@@ -162,10 +162,16 @@ pub use telemetry::{
 pub type Bytes = Vec<u8>;
 #[cfg(feature = "redis")]
 pub(crate) const VECTOR_SET_PREFIX: &[u8] = b"FC:VSET:v1\0";
-/// Hash map with the crate's default XXH3 hasher.
-pub type FastHashMap<K, V> = HashMap<K, V, xxhash_rust::xxh3::Xxh3DefaultBuilder>;
-/// Hash set with the crate's default XXH3 hasher.
-pub type FastHashSet<T> = HashSet<T, xxhash_rust::xxh3::Xxh3DefaultBuilder>;
+/// Randomly keyed high-throughput hash builder for process-local tables.
+///
+/// Routing remains on stable XXH3. Local tables use per-instance random keys so
+/// callers cannot precompute bucket collisions from shardcache's public routing
+/// algorithm.
+pub type FastHashBuilder = ahash::RandomState;
+/// Hash map with the crate's randomly keyed high-throughput hasher.
+pub type FastHashMap<K, V> = HashMap<K, V, FastHashBuilder>;
+/// Hash set with the crate's randomly keyed high-throughput hasher.
+pub type FastHashSet<T> = HashSet<T, FastHashBuilder>;
 
 /// A packed copy-out batch result.
 ///
@@ -247,6 +253,27 @@ impl PackedBatch {
 #[inline(always)]
 pub fn hash_key(key: &[u8]) -> u64 {
     xxhash_rust::xxh3::xxh3_64(key)
+}
+
+/// Re-keys a stable route hash for process-local raw hash tables.
+///
+/// The returned value must never be persisted or sent over the wire. Exact-key
+/// comparisons still resolve collisions in every raw-table lookup.
+#[inline(always)]
+pub(crate) fn local_table_hash(route_hash: u64) -> u64 {
+    local_table_hasher_ref().hash_one(route_hash)
+}
+
+/// Returns the process-local builder used by raw maps that re-key route hashes.
+#[cfg(any(feature = "active-sync-causal-eventual", feature = "kv-overflow"))]
+pub(crate) fn local_table_hasher() -> FastHashBuilder {
+    local_table_hasher_ref().clone()
+}
+
+#[inline(always)]
+fn local_table_hasher_ref() -> &'static FastHashBuilder {
+    static HASH_BUILDER: OnceLock<FastHashBuilder> = OnceLock::new();
+    HASH_BUILDER.get_or_init(FastHashBuilder::default)
 }
 
 /// Computes the key tag associated with an already-computed primary key hash.

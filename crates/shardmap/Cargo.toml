@@ -127,6 +127,7 @@ embedded-read-biased-lock = []
 unsafe = []
 
 [dependencies]
+ahash = { workspace = true }
 bytes = "1"
 bytes-handoff = { version = "1.2.0", optional = true }
 clap = { workspace = true, optional = true }

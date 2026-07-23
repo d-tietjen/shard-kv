@@ -14,9 +14,10 @@ use shardmap_crate::cuda::CudaConfig;
 use shardmap_crate::persistence::{PersistenceRuntime, WalAppender, load_recovery_state};
 use shardmap_crate::storage::{
     Bytes, EmbeddedBatchReadView, EmbeddedKeyRoute, EmbeddedReadSlice, EmbeddedReadView,
-    EmbeddedRouteMode, EmbeddedSessionRoute, EmbeddedStore, FastHashMap, LocalEmbeddedStore,
-    MutationBytes, MutationOp, MutationRecord, OwnedEmbeddedBatchReadView, OwnedEmbeddedReadView,
-    PackedBatch, PackedSessionWrite, StoredEntry, now_millis, shift_for, stripe_index,
+    EmbeddedRouteMode, EmbeddedSessionRoute, EmbeddedStore, FastHashBuilder, FastHashMap,
+    LocalEmbeddedStore, MutationBytes, MutationOp, MutationRecord, OwnedEmbeddedBatchReadView,
+    OwnedEmbeddedReadView, PackedBatch, PackedSessionWrite, StoredEntry, now_millis, shift_for,
+    stripe_index,
 };
 #[cfg(feature = "telemetry")]
 use shardmap_crate::storage::{CacheMetricsSnapshot, CacheTelemetry};
@@ -4321,7 +4322,7 @@ impl PyStore {
 
 #[pyclass(name = "DashMapStore")]
 struct PyDashMapStore {
-    inner: DashMap<Bytes, DashEntry, xxhash_rust::xxh3::Xxh3DefaultBuilder>,
+    inner: DashMap<Bytes, DashEntry, FastHashBuilder>,
     shards: usize,
 }
 
@@ -4334,7 +4335,7 @@ impl PyDashMapStore {
         Self {
             inner: DashMap::with_capacity_and_hasher_and_shard_amount(
                 1_024,
-                xxhash_rust::xxh3::Xxh3DefaultBuilder,
+                FastHashBuilder::default(),
                 shard_amount,
             ),
             shards: shard_amount,

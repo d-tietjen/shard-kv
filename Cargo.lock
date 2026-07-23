@@ -15,6 +15,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if",
+ "getrandom 0.3.4",
  "once_cell",
  "version_check",
  "zerocopy",
@@ -2405,7 +2406,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "clap",
  "shardmap",
@@ -2414,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-benchmarks"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bytes",
  "clap",
@@ -2440,7 +2441,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-c"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bytes",
  "shardmap",
@@ -2448,7 +2449,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-client-rs"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "libc",
  "rustls",
@@ -2459,14 +2460,14 @@ dependencies = [
 
 [[package]]
 name = "shardcache-formal"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "creusot-std",
 ]
 
 [[package]]
 name = "shardcache-py"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "core_affinity",
  "dashmap",
@@ -2476,12 +2477,11 @@ dependencies = [
  "shardcache-client-rs",
  "shardcache-runtime",
  "shardmap",
- "xxhash-rust",
 ]
 
 [[package]]
 name = "shardcache-runtime"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "cust",
  "serde",
@@ -2500,8 +2500,9 @@ dependencies = [
 
 [[package]]
 name = "shardmap"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
+ "ahash",
  "bytes",
  "bytes-handoff",
  "clap",

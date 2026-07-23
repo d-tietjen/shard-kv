@@ -12,6 +12,7 @@ use crate::storage::{
     Bytes, FastHashMap, ObjectOverflowRuntime, ObjectOverflowTicket, ObjectValueRef,
     SemanticCacheError, SemanticEmbedding, SemanticIndex, SemanticIndexCandidate,
     SemanticIndexToken, SemanticMatch, StoredEntry, hash_key, hash_key_tag_from_hash,
+    local_table_hash,
 };
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetryHandle, LatencySampleStart};

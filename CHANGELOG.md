@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.1 - 2026-07-23
+
+### Security
+
+- Re-keyed process-local maps and raw tables with per-process randomized AHash
+  before bucket selection. Stable XXH3 key routing and exact-key comparisons
+  remain unchanged, while authenticated clients that can choose keys can no
+  longer precompute colliding local buckets from the public routing hash.
+  Redis-compatible XXH3 `DIGEST` and `IFDEQ`/`IFDNE` tokens remain unchanged;
+  they are fast comparison hints, not authorization or cryptographic integrity
+  primitives.
+
 ## 0.8.0 - 2026-07-20
 
 ### Added

@@ -62,9 +62,9 @@ impl FlatMap {
 
         let key_tag = hash_key_tag_from_hash(hash);
         match self.entries.entry(
-            hash,
+            local_table_hash(hash),
             |entry| entry.matches_hashed_key(hash, key),
-            |entry| entry.hash,
+            |entry| local_table_hash(entry.hash),
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -184,9 +184,9 @@ impl FlatMap {
 
         let key_tag = hash_key_tag_from_hash(hash);
         match self.entries.entry(
-            hash,
+            local_table_hash(hash),
             |entry| entry.matches_hashed_key(hash, key),
-            |entry| entry.hash,
+            |entry| local_table_hash(entry.hash),
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -266,7 +266,9 @@ impl FlatMap {
         }
         let previous_bytes = self
             .entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_hashed_key(hash, key)
+            })
             .map(FlatEntry::stored_bytes)
             .or_else(|| {
                 self.remote_entries
@@ -306,7 +308,9 @@ impl FlatMap {
         );
         let entry = self
             .entries
-            .find_mut(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find_mut(local_table_hash(hash), |entry| {
+                entry.matches_hashed_key(hash, key)
+            })
             .expect("overflow value was inserted under the same shard lock");
         entry.overflow_generation = generation.saturating_add(1);
     }
@@ -319,7 +323,9 @@ impl FlatMap {
         generation: u64,
     ) -> bool {
         self.entries
-            .find(hash, |entry| entry.matches_hashed_key(hash, key))
+            .find(local_table_hash(hash), |entry| {
+                entry.matches_hashed_key(hash, key)
+            })
             .is_some_and(|entry| entry.overflow_generation == generation.saturating_add(1))
     }
 
@@ -355,10 +361,11 @@ impl FlatMap {
         #[cfg(feature = "telemetry")]
         let (key_delta, memory_delta): (isize, isize);
 
-        match self
-            .entries
-            .entry(hash, |entry| entry.matches(hash, &key), |entry| entry.hash)
-        {
+        match self.entries.entry(
+            local_table_hash(hash),
+            |entry| entry.matches(hash, &key),
+            |entry| local_table_hash(entry.hash),
+        ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
                 let had_ttl = entry.expire_at_ms.is_some();
@@ -458,9 +465,9 @@ impl FlatMap {
             0
         };
         match self.entries.entry(
-            hash,
+            local_table_hash(hash),
             |entry| entry.matches_hashed_key(hash, key),
-            |entry| entry.hash,
+            |entry| local_table_hash(entry.hash),
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();
@@ -629,9 +636,9 @@ impl FlatMap {
 
         let key_tag = hash_key_tag_from_hash(hash);
         match self.entries.entry(
-            hash,
+            local_table_hash(hash),
             |entry| entry.matches_hashed_key(hash, key),
-            |entry| entry.hash,
+            |entry| local_table_hash(entry.hash),
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();

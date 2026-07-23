@@ -42,7 +42,7 @@ promotion. See [`EXACT_GOVERNANCE.md`](EXACT_GOVERNANCE.md).
 
 ```toml
 [dependencies]
-shardmap = { version = "0.8.0", features = ["kv-overflow"] }
+shardmap = { version = "0.8.1", features = ["kv-overflow"] }
 ```
 
 ```rust,ignore
@@ -265,7 +265,7 @@ compatible managed service as the overflow tier:
 
 ```toml
 [dependencies]
-shardmap = { version = "0.8.0", features = ["kv-overflow-redis"] }
+shardmap = { version = "0.8.1", features = ["kv-overflow-redis"] }
 ```
 
 ```toml
