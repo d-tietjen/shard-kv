@@ -9,7 +9,7 @@ use indextreemap::IndexTreeSet;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
 
-use crate::storage::{Bytes, FastHashMap, FastHashSet, hash_key};
+use crate::storage::{Bytes, FastHashMap, FastHashSet, hash_key, local_table_hash};
 
 const OBJECT_BUCKETS: usize = 256;
 const SMALL_HASH_INLINE: usize = 4;
@@ -43,10 +43,18 @@ pub enum RedisObjectError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedisKeyError {
+    WrongType,
+    MissingKey,
+    ReplicationLimit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RedisStringLookup {
     Hit,
     Miss,
     WrongType,
+    BackendError,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

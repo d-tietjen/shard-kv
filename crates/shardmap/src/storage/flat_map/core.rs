@@ -5,6 +5,9 @@ impl FlatMap {
         Self {
             entries: HashTable::new(),
             remote_entries: FastHashMap::default(),
+            pending_object_offloads: FastHashMap::default(),
+            pending_object_faults: 0,
+            pending_object_fault_bytes: 0,
             semantic_index: SemanticIndex::default(),
             #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             fast_points: FastPointMap::default(),
@@ -81,24 +84,40 @@ impl FlatMap {
 
     #[inline(always)]
     pub fn object_overflow_stats(&self) -> ObjectOverflowStats {
+        self.object_overflow_stats_with_worker_stats(true)
+    }
+
+    pub(crate) fn object_overflow_stats_with_worker_stats(
+        &self,
+        include_worker_stats: bool,
+    ) -> ObjectOverflowStats {
         let mut stats = self.object_overflow_stats.clone();
         stats.remote_entries = self.remote_entries.len();
+        stats.pending_offloads = self.pending_object_offloads.len();
+        stats.pending_faults = self.pending_object_faults;
+        stats.pending_fault_bytes = self.pending_object_fault_bytes;
         stats.remote_value_bytes = self.remote_value_bytes;
         stats.remote_stored_bytes = self
             .remote_entries
             .values()
             .map(|entry| entry.object.stored_len)
-            .sum();
+            .fold(0usize, usize::saturating_add);
         if let Some(object_overflow) = &self.object_overflow {
             let health = object_overflow.health_snapshot();
             stats.enabled = health.enabled;
             stats.backend = health.backend;
             stats.degraded = health.degraded;
+            if !include_worker_stats {
+                return stats;
+            }
             stats.queue_capacity = health.queue_capacity;
             stats.queue_depth = health.queue_depth;
             stats.pending_jobs = health.pending_jobs;
             stats.active_workers = health.active_workers;
+            stats.live_workers = health.live_workers;
             stats.worker_threads = health.worker_threads;
+            stats.max_worker_threads = health.max_worker_threads;
+            stats.worker_capacity_exhausted = health.worker_capacity_exhausted;
             stats.encode_ops = health.stats.encode_ops;
             stats.compress_ops = health.stats.compress_ops;
             stats.upload_ops = health.stats.upload_ops;
@@ -154,10 +173,34 @@ impl FlatMap {
         object_overflow: Option<ObjectOverflowRuntime>,
         shard_id: usize,
         now_ms: u64,
-    ) {
+    ) -> crate::Result<()> {
+        self.validate_object_overflow_reconfiguration(object_overflow.as_ref())?;
         self.object_overflow = object_overflow;
         self.object_overflow_shard_id = shard_id;
         self.enforce_memory_limit(now_ms);
+        Ok(())
+    }
+
+    pub(crate) fn validate_object_overflow_reconfiguration(
+        &self,
+        object_overflow: Option<&ObjectOverflowRuntime>,
+    ) -> crate::Result<()> {
+        let unchanged = match (&self.object_overflow, object_overflow) {
+            (None, None) => true,
+            (Some(current), Some(next)) => current.same_instance(next),
+            _ => false,
+        };
+        if unchanged
+            || (self.remote_entries.is_empty()
+                && self.pending_object_offloads.is_empty()
+                && self.pending_object_faults == 0)
+        {
+            return Ok(());
+        }
+        Err(ShardCacheError::Config(
+            "object overflow cannot be replaced or disabled while remote or pending values still depend on the current runtime"
+                .into(),
+        ))
     }
 
     #[cfg(feature = "telemetry")]
@@ -194,7 +237,7 @@ impl FlatMap {
     #[inline(always)]
     pub(super) fn entry_is_expired_hashed(&self, hash: u64, key: &[u8], now_ms: u64) -> bool {
         self.entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
             .is_some_and(|entry| entry.is_expired(now_ms))
             || self
                 .remote_entries
@@ -211,14 +254,18 @@ impl FlatMap {
         if self.should_sample_read() {
             let tick = self.next_access_tick();
             self.entries
-                .find_mut(hash, |entry| entry.matches_readable(hash, key))
+                .find_mut(local_table_hash(hash), |entry| {
+                    entry.matches_readable(hash, key)
+                })
                 .map(|entry| {
                     entry.access.record_access(tick);
                     entry.value.as_ref()
                 })
         } else {
             self.entries
-                .find(hash, |entry| entry.matches_readable(hash, key))
+                .find(local_table_hash(hash), |entry| {
+                    entry.matches_readable(hash, key)
+                })
                 .map(|entry| entry.value.as_ref())
         }
     }
@@ -237,7 +284,7 @@ impl FlatMap {
         if self.should_sample_read() {
             let tick = self.next_access_tick();
             self.entries
-                .find_mut(hash, |entry| {
+                .find_mut(local_table_hash(hash), |entry| {
                     entry.matches_readable_prepared(hash, key, key_tag)
                 })
                 .map(|entry| {
@@ -246,7 +293,7 @@ impl FlatMap {
                 })
         } else {
             self.entries
-                .find(hash, |entry| {
+                .find(local_table_hash(hash), |entry| {
                     entry.matches_readable_prepared(hash, key, key_tag)
                 })
                 .map(|entry| entry.value.as_ref())
@@ -275,7 +322,9 @@ impl FlatMap {
             for fast_entry in self.fast_points.take_entries_and_disable() {
                 let entry = fast_entry.into_flat_entry();
                 self.entries
-                    .insert_unique(entry.hash, entry, |entry| entry.hash);
+                    .insert_unique(local_table_hash(entry.hash), entry, |entry| {
+                        local_table_hash(entry.hash)
+                    });
             }
         }
     }
@@ -373,6 +422,7 @@ impl FlatMap {
     }
 
     pub(super) fn enforce_memory_limit(&mut self, now_ms: u64) {
+        self.process_object_overflow_completions(now_ms);
         let Some(limit) = self.memory_limit_bytes else {
             return;
         };
@@ -421,7 +471,9 @@ impl FlatMap {
             while let Some(touch) = self.lru_touch_log.pop_front() {
                 let Some(entry) = self
                     .entries
-                    .find_entry(touch.hash, |entry| entry.access.last_touch == touch.tick)
+                    .find_entry(local_table_hash(touch.hash), |entry| {
+                        entry.access.last_touch == touch.tick
+                    })
                     .ok()
                 else {
                     continue;
@@ -525,7 +577,9 @@ impl FlatMap {
             };
             let Some(entry) = self
                 .entries
-                .find_entry(touch.hash, |entry| entry.access.last_touch == touch.tick)
+                .find_entry(local_table_hash(touch.hash), |entry| {
+                    entry.access.last_touch == touch.tick
+                })
                 .ok()
             else {
                 continue;

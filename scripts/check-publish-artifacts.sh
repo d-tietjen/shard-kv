@@ -13,19 +13,19 @@ pkg_version() {
 package_crate() {
   local package="$1"
   shift
-  cargo package -p "$package" --locked "$@"
+  cargo package -p "$package" --locked --allow-dirty "$@"
 }
 
 package_crate_with_local_shardmap_patch() {
   local package="$1"
   shift
-  cargo package -p "$package" --locked \
+  cargo package -p "$package" --locked --allow-dirty \
     --config "patch.crates-io.shardmap.path=\"$root/crates/shardmap\"" \
     "$@"
 }
 
 package_shardmap_with_local_client_patch() {
-  cargo package -p shardmap --locked --all-features \
+  cargo package -p shardmap --locked --allow-dirty --all-features \
     --config "patch.crates-io.shardcache-client-rs.path=\"$root/crates/shardcache-client-rs\""
 }
 

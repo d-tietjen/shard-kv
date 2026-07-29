@@ -29,19 +29,18 @@ impl PyScnpStore {
 
     fn get(&self, py: Python<'_>, key: Vec<u8>) -> PyResult<Option<Vec<u8>>> {
         let mut out = Vec::new();
-        let found =
-            py.allow_threads(|| self.with_client(|client| client.get_into(&key, &mut out)))?;
+        let found = py.detach(|| self.with_client(|client| client.get_into(&key, &mut out)))?;
         Ok(found.then_some(out))
     }
 
     fn batch_get(&self, py: Python<'_>, keys: Vec<Vec<u8>>) -> PyResult<Vec<Option<Vec<u8>>>> {
-        py.allow_threads(|| self.with_client(|client| pipeline_get_keys(client, &keys)))
+        py.detach(|| self.with_client(|client| pipeline_get_keys(client, &keys)))
     }
 
     #[pyo3(signature = (key, value, ttl=None))]
     fn set(&self, py: Python<'_>, key: Vec<u8>, value: Vec<u8>, ttl: Option<u64>) -> PyResult<()> {
         reject_ttl(ttl)?;
-        py.allow_threads(|| self.with_client(|client| client.set(&key, &value)))
+        py.detach(|| self.with_client(|client| client.set(&key, &value)))
     }
 
     #[pyo3(signature = (items, ttl=None))]
@@ -52,7 +51,7 @@ impl PyScnpStore {
         ttl: Option<u64>,
     ) -> PyResult<()> {
         reject_ttl(ttl)?;
-        py.allow_threads(|| self.with_client(|client| pipeline_set_items(client, &items)))
+        py.detach(|| self.with_client(|client| pipeline_set_items(client, &items)))
     }
 
     fn prepare_lmcache_put_batch_encoded_keys(
@@ -61,7 +60,7 @@ impl PyScnpStore {
         keys: Vec<PyBackedBytes>,
         metadata_blobs: Vec<PyBackedBytes>,
     ) -> PyResult<crate::PyPreparedLmcachePutBatch> {
-        py.allow_threads(|| {
+        py.detach(|| {
             Ok(crate::PyPreparedLmcachePutBatch {
                 inner: Arc::new(crate::prepare_lmcache_put_batch_from_pybacked_parts(
                     &keys,
@@ -75,11 +74,11 @@ impl PyScnpStore {
         &self,
         py: Python<'_>,
         keys: Vec<PyBackedBytes>,
-        payloads: Vec<PyObject>,
+        payloads: Vec<Py<PyAny>>,
         metadata_blobs: Vec<PyBackedBytes>,
     ) -> PyResult<()> {
         let items = lmcache_items_from_parts(py, &keys, &payloads, &metadata_blobs)?;
-        py.allow_threads(|| self.with_client(|client| pipeline_set_items(client, &items)))
+        py.detach(|| self.with_client(|client| pipeline_set_items(client, &items)))
     }
 
     fn batch_put_lmcache_payload_bytes_and_metadata_encoded_keys(
@@ -95,7 +94,7 @@ impl PyScnpStore {
             metadata_blobs.len(),
             "payload byte blobs",
         )?;
-        py.allow_threads(move || {
+        py.detach(move || {
             self.with_client(|client| {
                 pipeline_lmcache_byte_parts(client, &keys, &payloads, &metadata_blobs)
             })
@@ -106,11 +105,11 @@ impl PyScnpStore {
         &self,
         py: Python<'_>,
         prepared: &Bound<'_, crate::PyPreparedLmcachePutBatch>,
-        payloads: Vec<PyObject>,
+        payloads: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let prepared = Arc::clone(&prepared.borrow().inner);
         let items = lmcache_items_from_prepared_parts(py, &prepared, &payloads)?;
-        py.allow_threads(|| self.with_client(|client| pipeline_set_items(client, &items)))
+        py.detach(|| self.with_client(|client| pipeline_set_items(client, &items)))
     }
 
     fn batch_put_lmcache_payload_bytes_prepared(
@@ -121,7 +120,7 @@ impl PyScnpStore {
     ) -> PyResult<()> {
         let prepared = Arc::clone(&prepared.borrow().inner);
         validate_prepared_payload_len(&prepared, payloads.len(), "payload byte blobs")?;
-        py.allow_threads(move || {
+        py.detach(move || {
             self.with_client(|client| {
                 pipeline_lmcache_prepared_byte_parts(client, &prepared, &payloads)
             })
@@ -132,12 +131,12 @@ impl PyScnpStore {
         &self,
         py: Python<'_>,
         prepared: &Bound<'_, crate::PyPreparedLmcachePutBatch>,
-        objs: Vec<PyObject>,
+        objs: Vec<Py<PyAny>>,
     ) -> PyResult<()> {
         let prepared = Arc::clone(&prepared.borrow().inner);
         let payloads = crate::extract_lmcache_memory_obj_bytes_payloads(py, &objs)?;
         validate_prepared_payload_len(&prepared, payloads.len(), "payload byte blobs")?;
-        py.allow_threads(move || {
+        py.detach(move || {
             self.with_client(|client| {
                 pipeline_lmcache_prepared_byte_parts(client, &prepared, &payloads)
             })
@@ -146,7 +145,7 @@ impl PyScnpStore {
 
     fn exists(&self, py: Python<'_>, key: Vec<u8>) -> PyResult<bool> {
         let mut out = Vec::new();
-        py.allow_threads(|| self.with_client(|client| client.get_into(&key, &mut out)))
+        py.detach(|| self.with_client(|client| client.get_into(&key, &mut out)))
     }
 
     fn delete(&self, _key: Vec<u8>) -> PyResult<bool> {
@@ -305,7 +304,7 @@ fn pipeline_lmcache_prepared_byte_parts(
 fn lmcache_items_from_parts(
     py: Python<'_>,
     keys: &[PyBackedBytes],
-    payloads: &[PyObject],
+    payloads: &[Py<PyAny>],
     metadata_blobs: &[PyBackedBytes],
 ) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
     validate_lmcache_put_lengths(keys.len(), payloads.len(), metadata_blobs.len(), "payloads")?;
@@ -323,7 +322,7 @@ fn lmcache_items_from_parts(
 fn lmcache_items_from_prepared_parts(
     py: Python<'_>,
     prepared: &crate::PreparedLmcachePutBatch,
-    payloads: &[PyObject],
+    payloads: &[Py<PyAny>],
 ) -> PyResult<Vec<(Vec<u8>, Vec<u8>)>> {
     validate_prepared_payload_len(prepared, payloads.len(), "payloads")?;
 

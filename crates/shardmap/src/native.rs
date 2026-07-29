@@ -10,7 +10,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
-use std::hash::{BuildHasher, Hash};
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -22,8 +22,8 @@ use parking_lot::{RwLock, RwLockReadGuard};
 use crate::cache::DEFAULT_CACHE_SHARDS;
 use crate::storage::EmbeddedKeyRoute;
 
-/// Hasher used by the native typed [`ShardMap`].
-pub type ShardMapHasher = xxhash_rust::xxh3::Xxh3DefaultBuilder;
+/// Randomly keyed hasher used by the native typed [`ShardMap`].
+pub type ShardMapHasher = crate::storage::FastHashBuilder;
 
 type NativeShard<K, V> = CachePadded<RwLock<HashMap<K, NativeValue<V>, ShardMapHasher>>>;
 
@@ -108,7 +108,7 @@ impl<K, V, const SHARDS: usize> Clone for ShardMap<K, V, SHARDS> {
     fn clone(&self) -> Self {
         Self {
             shards: Arc::clone(&self.shards),
-            hasher: self.hasher,
+            hasher: self.hasher.clone(),
             default_ttl_ms: self.default_ttl_ms,
         }
     }
@@ -157,17 +157,16 @@ impl<K, V, const SHARDS: usize> ShardMap<K, V, SHARDS> {
             .capacity_hint
             .map(|capacity| capacity.div_ceil(SHARDS))
             .unwrap_or_default();
+        let hasher = ShardMapHasher::default();
         Self {
             shards: Arc::new(array::from_fn(|_| {
                 let map = match per_shard_capacity {
-                    0 => HashMap::with_hasher(ShardMapHasher::default()),
-                    capacity => {
-                        HashMap::with_capacity_and_hasher(capacity, ShardMapHasher::default())
-                    }
+                    0 => HashMap::with_hasher(hasher.clone()),
+                    capacity => HashMap::with_capacity_and_hasher(capacity, hasher.clone()),
                 };
                 CachePadded::new(RwLock::new(map))
             })),
-            hasher: ShardMapHasher::default(),
+            hasher,
             default_ttl_ms: options.default_ttl_ms,
         }
     }

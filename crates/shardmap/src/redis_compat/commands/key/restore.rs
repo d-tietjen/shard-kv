@@ -12,7 +12,7 @@ use crate::protocol::Frame;
 use crate::server::wire::ServerWire;
 #[cfg(feature = "server")]
 use crate::storage::hash_key_tag_from_hash;
-use crate::storage::{EmbeddedStore, RedisKeyStore, now_millis};
+use crate::storage::{EmbeddedStore, RedisKeyStore, VECTOR_SET_PREFIX, now_millis};
 
 define_redis_command!(Restore, "RESTORE", true, aliases: ["RESTORE-ASKING"]);
 
@@ -29,6 +29,9 @@ impl crate::commands::redis::RedisCommand for Restore {
             }
             Err(RestoreError::InvalidIdleOrFreq) => {
                 error("ERR value is not an integer or out of range")
+            }
+            Err(RestoreError::ReplicationLimit) => {
+                error("ERR vector state rejected by an installed storage extension")
             }
         }
     }
@@ -70,6 +73,7 @@ enum RestoreError {
     BusyKey,
     BadPayload,
     InvalidIdleOrFreq,
+    ReplicationLimit,
 }
 
 #[derive(Debug, Default)]
@@ -163,6 +167,13 @@ fn restore_key(store: &EmbeddedStore, args: &[&[u8]]) -> Result<(), RestoreError
     };
 
     match value {
+        DumpRestoreValue::String(value) if value.starts_with(VECTOR_SET_PREFIX) => {
+            crate::commands::vector_set::validate_vector_set_bytes(&value)
+                .map_err(|_| RestoreError::BadPayload)?;
+            store
+                .set_pinned_vector_value(key, value.into(), ttl_ms)
+                .map_err(|_| RestoreError::ReplicationLimit)?;
+        }
         DumpRestoreValue::String(value) => store.set_value_bytes(key, value.into(), ttl_ms),
         DumpRestoreValue::Object(value) => store.set_object_value(key, value, ttl_ms),
     }
@@ -193,6 +204,9 @@ fn restore_key_owned_shard(
         Ok(value) => value,
         Err(_) => return None,
     };
+    if value.starts_with(VECTOR_SET_PREFIX) {
+        return None;
+    }
     let route = store.route_key(key);
     if route.shard_id != owned_shard_id {
         return None;
@@ -249,6 +263,10 @@ fn write_restore_error(out: &mut BytesMut, error: RestoreError) {
         RestoreError::InvalidIdleOrFreq => {
             ServerWire::write_resp_error(out, "ERR value is not an integer or out of range")
         }
+        RestoreError::ReplicationLimit => ServerWire::write_resp_error(
+            out,
+            "ERR vector state rejected by an installed storage extension",
+        ),
     }
 }
 
@@ -280,5 +298,25 @@ fn validate_freq_value(value: &[u8]) -> Result<(), RestoreError> {
     match parse_i64(value).map_err(|_| RestoreError::InvalidIdleOrFreq)? {
         value if (0..=255).contains(&value) => Ok(()),
         _ => Err(RestoreError::InvalidIdleOrFreq),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::dump_restore::encode_string_dump_value;
+
+    #[test]
+    fn restore_rejects_checksum_valid_malformed_vector_state() {
+        let store = EmbeddedStore::new(1);
+        let mut malformed = VECTOR_SET_PREFIX.to_vec();
+        malformed.extend_from_slice(b"malformed-vector-state");
+        let payload = encode_string_dump_value(&malformed);
+
+        assert_eq!(
+            restore_key(&store, &[b"vectors", b"0", &payload]),
+            Err(RestoreError::BadPayload)
+        );
+        assert!(!store.exists(b"vectors"));
     }
 }

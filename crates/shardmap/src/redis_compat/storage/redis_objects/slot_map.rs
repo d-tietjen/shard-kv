@@ -20,14 +20,14 @@ impl SlotMap {
     pub(super) fn get(&self, key: &[u8]) -> Option<&SlotId> {
         let hash = hash_key(key);
         self.table
-            .find(hash, |entry| entry.key.as_slice() == key)
+            .find(local_table_hash(hash), |entry| entry.key.as_slice() == key)
             .map(|entry| &entry.slot)
     }
 
     #[inline(always)]
     pub(super) fn get_hashed(&self, hash: u64, key: &[u8]) -> Option<SlotId> {
         self.table
-            .find(hash, |entry| entry.key.as_slice() == key)
+            .find(local_table_hash(hash), |entry| entry.key.as_slice() == key)
             .map(|entry| entry.slot)
     }
 
@@ -39,14 +39,16 @@ impl SlotMap {
 
     #[inline(always)]
     pub(super) fn insert_hashed(&mut self, hash: u64, key: Bytes, slot: SlotId) -> Option<SlotId> {
-        if let Some(entry) = self
-            .table
-            .find_mut(hash, |entry| entry.key.as_slice() == key.as_slice())
-        {
+        if let Some(entry) = self.table.find_mut(local_table_hash(hash), |entry| {
+            entry.key.as_slice() == key.as_slice()
+        }) {
             return Some(std::mem::replace(&mut entry.slot, slot));
         }
-        self.table
-            .insert_unique(hash, SlotEntry { hash, key, slot }, |entry| entry.hash);
+        self.table.insert_unique(
+            local_table_hash(hash),
+            SlotEntry { hash, key, slot },
+            |entry| local_table_hash(entry.hash),
+        );
         None
     }
 
@@ -59,7 +61,7 @@ impl SlotMap {
     #[inline(always)]
     pub(super) fn remove_hashed(&mut self, hash: u64, key: &[u8]) -> Option<SlotId> {
         self.table
-            .find_entry(hash, |entry| entry.key.as_slice() == key)
+            .find_entry(local_table_hash(hash), |entry| entry.key.as_slice() == key)
             .ok()
             .map(|entry| entry.remove().0.slot)
     }

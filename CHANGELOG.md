@@ -1,12 +1,64 @@
 # Changelog
 
-## 0.6.0 - Unreleased
+## 0.9.0 - 2026-07-29
+
+### Changed
+
+- Narrowed the public workspace to local storage, persistence, overflow,
+  protocol, compatibility, and benchmark surfaces.
+- Added runtime-neutral embedded-store extension contracts for routed
+  operations, mutation admission and observation, ordered callbacks, and
+  bounded snapshots.
+- Aligned the optional parent telemetry runtime with `fast-telemetry 0.9.0`;
+  the 0.9 public crates now require Rust 1.93.
+
+### Removed
+
+- Removed non-OSS distributed deployment implementations, feature flags,
+  configuration, transports, examples, tests, formal models, documentation,
+  and benchmark drivers from the public crates.
+
+## 0.8.1 - 2026-07-23
+
+### Security
+
+- Re-keyed process-local maps and raw tables with per-process randomized AHash
+  before bucket selection. Stable XXH3 key routing and exact-key comparisons
+  remain unchanged, while authenticated clients that can choose keys can no
+  longer precompute colliding local buckets from the public routing hash.
+  Redis-compatible XXH3 `DIGEST` and `IFDEQ`/`IFDNE` tokens remain unchanged;
+  they are fast comparison hints, not authorization or cryptographic integrity
+  primitives.
+
+## 0.8.0 - 2026-07-20
+
+### Added
+
+- Added typed vector operations, bounded request/response decoding, vector
+  governance metadata, fail-closed governance guards, and reproducible Object
+  RAG benchmarks.
+- Added canonical vector snapshot and restore handling, TTL preservation,
+  bounded HNSW search, and malformed-state rejection.
+
+### Fixed
+
+- Hardened object-overflow startup, cleanup, materialization, snapshots,
+  filesystem access, S3 private-CA handling, and benchmark acknowledgement.
+- Corrected vector routing, TTL preservation, governance filtering, response
+  encoding, UID allocation, and non-finite input validation.
+
+## 0.7.x - Archived
+
+- This pre-1.0 experimental release line covered non-OSS distributed
+  deployment work and is not part of the 0.9 public crate surface.
+
+## 0.6.0 - 2026-07-14
 
 ### Added
 
 - Added fail-closed governance metadata for exact point values through
-  `EmbeddedStore`, shared and worker-local stores, native replication, WAL and
-  snapshots, object overflow, and partitioned KV overflow. Protected entries
+  `EmbeddedStore`, shared and worker-local stores, WAL and snapshots, object
+  overflow, and partitioned KV overflow. Protected entries
   require a governed filter and cannot be released by ordinary GET, mutable,
   visitor, removal-return, or Redis paths.
 - Added versioned governed KV-overflow envelopes for SCNP and Redis/Valkey,
@@ -28,9 +80,10 @@
 - Added unit coverage for placement, cold-only eviction, failed-write
   retention, fault-in, and snapshot materialization, plus a live two-server
   SCNP integration test for disjoint placement and direct reads.
-- Added bounded asynchronous replication with per-key ordered worker lanes,
-  generation-safe acknowledgments, queue backpressure, explicit remote flush,
-  and queue/worker health counters so primary writes do not wait on SCNP I/O.
+- Added bounded asynchronous overflow mirroring with per-key ordered worker
+  lanes, generation-safe acknowledgments, queue backpressure, explicit remote
+  flush, and queue/worker health counters so primary writes do not wait on
+  SCNP I/O.
 - Added ordered 64-write Redis pipelines, O(1) fixed-slot owner lookup, and
   striped acknowledgment metadata to keep primary overhead bounded while
   overflow endpoints scale horizontally.
@@ -42,7 +95,7 @@
   mutex is shared across shards.
 - Replaced allocation-backed worker queues with preallocated shard-local rings,
   split primary and worker counters onto separate cache lines, made generation
-  counters shard-local, aggregated replication metrics per batch, and replaced
+  counters shard-local, aggregated overflow metrics per batch, and replaced
   topology-sized batch allocation with reusable sparse owner grouping.
 - Changed pipeline coalescing to wait once and then drain the shard ring instead
   of waking the network worker for each arriving item, substantially reducing
@@ -51,8 +104,8 @@
 - Reused each operation's xxh3 key hash in striped overflow metadata tables.
   Hashbrown raw-entry lookups now avoid a second key hash on primary admission,
   completion, retry, and delete paths while retaining resize-safe hashing.
-- Stored queued generations in resident entries so successful replication no
-  longer requires a pending-metadata insertion, and limited pipelines by both
+- Stored queued generations in resident entries so successful remote completion
+  no longer requires a pending-metadata insertion, and limited pipelines by both
   item count and encoded bytes to bound large-value allocation and tail cost.
 - Added independent target-local SCNP tasks on one current-thread runtime for
   shards that own multiple remote targets. Single-target shards retain the
@@ -79,7 +132,7 @@
   health, and handoff progress reporting.
 - Added independent resident-value and key-metadata ceilings, bounded cleanup,
   key/value and slot-table limits, decompression expansion limits, and bounded
-  RESP, SCNP, FCRP, and client response collection decoding.
+  RESP, SCNP, and client response collection decoding.
 - Added filesystem-backed cascading-tier, restart, TLS, topology, stalled
   target, malformed-frame, and memory-amplification tests.
 - Added a public 0.6 feature and migration guide plus a CI-verified inventory
@@ -114,15 +167,15 @@
 - Five-run release benchmarks on Adam with four producers and 1 KiB values
   measured 954 ns/op primary admission and 339K end-to-end writes/second for
   one Valkey endpoint. Four disjoint endpoints with four workers each admitted
-  writes at 1,309 ns/op and replicated 740K writes/second end to end.
+  writes at 1,309 ns/op and completed 740K writes/second end to end.
 - Redis worker pipelining improved a one-endpoint, four-worker production-path
-  benchmark from 34.4K to 347K replicated writes/second, approximately 10.1x.
+  benchmark from 34.4K to 347K completed writes/second, approximately 10.1x.
 - A final interleaved A/B on Adam compared the hardened branch with commit
   `46a4ca8`. The fully bounded KV enqueue path sustained a median 2.05M
-  writes/second, 3.5% below the pre-hardening baseline. Embedded, local/TCP
-  replication, RESP, and SCNP median throughput deltas all stayed within 3.6%;
-  the worst measured median p99 change was 4.9%. No replication drops,
-  backpressure, or server protocol errors were observed.
+  writes/second, 3.5% below the pre-hardening baseline. Embedded, RESP, and
+  SCNP median throughput deltas all stayed within 3.6%; the worst measured
+  median p99 change was 4.9%. No overflow drops, backpressure, or server
+  protocol errors were observed.
 
 ## 0.5.0 - Unreleased
 

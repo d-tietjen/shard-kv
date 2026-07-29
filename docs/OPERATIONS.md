@@ -1,7 +1,6 @@
 # Operations
 
-This page is the short operational contract for running `shardcache` in
-0.6.x-style deployments.
+This page is the short operational contract for running `shardcache` 0.9.
 
 For the container-specific runbook, see
 [`SHARDCACHE_DOCKER.md`](SHARDCACHE_DOCKER.md).
@@ -10,17 +9,51 @@ For the container-specific runbook, see
 
 | Build | Command | Use When |
 | --- | --- | --- |
-| Embedded crate | `shardmap = "0.6.0"` | In-process Rust cache use. |
-| Server crate | `shardcache = "0.6.0"` | Install or depend on the RESP/SCNP server package. |
-| Native client crate | `shardcache-client-rs = "0.6.0"` | SCNP client access from Rust applications. |
+| Embedded crate | `shardmap = "0.9.0"` | In-process Rust cache use. |
+| Server crate | `shardcache = "0.9.0"` | Install or depend on the RESP/SCNP server package. |
+| Native client crate | `shardcache-client-rs = "0.9.0"` | SCNP client access from Rust applications. |
 | Server | `cargo run -p shardcache --features server --bin shardcache -- ...` | RESP/SCNP TCP access without the full Redis command catalog. |
 | Redis-compatible server | `cargo run -p shardcache --features redis-server --bin shardcache -- ...` | Redis/Valkey-compatible command and object behavior. |
 
 `shardmap`, `shardcache`, and `shardcache-client-rs` are the crates.io crates
-for 0.6.x. Publish `shardcache-client-rs` first, then `shardmap`, then
+for 0.9. Publish `shardcache-client-rs` first, then `shardmap`, then
 `shardcache`; the optional `kv-overflow` adapter makes that order necessary.
 Python, C ABI, runtime, benchmark, and
 integration packages remain source-workspace packages.
+
+## Object Overflow Safety
+
+Object overflow uses bounded background workers. Uploads retain the resident
+value until the acknowledgement is observed, and upload, fault-in, and delete
+requests never wait while a shard lock is held. A GET that reaches a remote
+value materializes it before returning; server protocols report a backend
+error rather than an ordinary cache miss when that read fails. Persistence
+snapshots and entry visitors use fallible materialization and fail if a remote
+value cannot be verified.
+
+Each `SCOVF2` payload is compressed within an exact decoded-size bound and is
+authenticated with a process-generation HMAC-SHA256 key bound to its object
+key. Remote references are intentionally not durable recovery state, so a new
+process receives a new authentication key and recovers authoritative values
+from local WAL and snapshots. S3 bodies, generation markers, and cleanup key
+listings are bounded before retention. Filesystem operations use
+descriptor-relative, no-follow traversal on Unix, and each cleanup prefix is
+traversed once with a total limit of 100,000 keys or 16 MiB of key names.
+Generation markers are replaced with a synced same-directory rename, and
+generation cleanup uses a heartbeat independent of the cleanup scan interval.
+S3 credentials must be named explicitly as an access-key/secret-key environment
+pair; the adapter never falls back to instance metadata. Private HTTPS
+endpoints can add a bounded PEM trust bundle with `tls_ca_path` while retaining
+certificate verification.
+
+Configuration validation caps worker, queue, retry, timeout, cooldown, and
+cleanup settings. Entropy acquisition and required worker/cleanup thread
+creation are fallible startup operations and never intentionally panic.
+Replacing or disabling a runtime is rejected while remote or pending entries
+still depend on it. Cleanup scans fail closed above their total key or retained
+name limits. `EmbeddedStore::try_batch_set`
+preflights the complete batch; `batch_set` also rejects the whole batch rather
+than partially applying invalid point mutations.
 
 `redis-server` implies `server`, `redis`, `redis-functions`, and
 `redis-modules`. Embedded-only builds stay separate from the Redis-compatible
@@ -124,6 +157,19 @@ with `SHARDCACHE_DIRECT_SHARD_BASE_PORT`.
 Use a stable `--data-dir` for persistent deployments. Benchmark and
 compatibility proof runs often pass `--disable-persistence` so the storage path
 does not dominate command measurements.
+
+With persistence enabled, each storage shard exclusively owns a local WAL
+block appender. Mutations accumulate until `wal_block_max_records`,
+`wal_block_max_bytes`, or `fsync_interval_ms` seals the block. Per-shard bounded
+queues feed one background merger, which preserves each shard's mutation order,
+writes the existing canonical segment format, and calls `sync_data` at the
+configured interval. A full shard queue applies backpressure only to that shard;
+there is no producer lock shared by storage workers.
+
+The defaults seal at 64 records or 256 KiB. Smaller blocks reduce the amount of
+data exposed to process failure before handoff but increase channel and merger
+overhead. The fsync interval remains the upper durability window; shutdown
+flushes partial blocks and performs a final data sync before recovery can begin.
 
 ## Logs And Shutdown
 

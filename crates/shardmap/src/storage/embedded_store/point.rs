@@ -12,6 +12,15 @@ impl EmbeddedStore {
         self.get_with_route(route, key, now_ms)
     }
 
+    /// Returns an owned value using a route computed by [`Self::route_key`].
+    ///
+    /// This advanced extension API avoids recomputing placement when a caller
+    /// already carries the route alongside a storage operation.
+    #[inline(always)]
+    pub fn get_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Option<Bytes> {
+        self.get_with_route(route, key, now_millis())
+    }
+
     /// Returns a borrowed value guard for `key` without copying value bytes.
     ///
     /// The returned guard holds the routed shard lock for as long as the value
@@ -146,6 +155,9 @@ impl EmbeddedStore {
         value: &[u8],
         ttl_ms: Option<u64>,
     ) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
+            return;
+        }
         #[cfg(not(feature = "unsafe"))]
         {
             self.set_slice_prehashed(key_hash, key, value, ttl_ms);
@@ -167,6 +179,7 @@ impl EmbeddedStore {
                     unsafe { shard.map.set_slice_hashed_no_ttl_hot(key_hash, key, value) };
                     #[cfg(feature = "redis")]
                     self.refresh_string_key_count(0, shard);
+                    self.notify_point_set_slice(key, value, None);
                     return;
                 }
                 let now_ms = write_now_ms(ttl_ms, shard.memory_limit_bytes);
@@ -181,6 +194,7 @@ impl EmbeddedStore {
                     .set_slice_hashed(key_hash, key, value, expire_at_ms, now_ms);
                 #[cfg(feature = "redis")]
                 self.refresh_string_key_count(0, shard);
+                self.notify_point_set_slice(key, value, expire_at_ms);
                 return;
             }
 
@@ -199,6 +213,7 @@ impl EmbeddedStore {
                 .set_slice_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
             #[cfg(feature = "redis")]
             self.refresh_string_key_count(route.shard_id, shard);
+            self.notify_point_set_slice(key, value, expire_at_ms);
         }
     }
 
@@ -216,6 +231,9 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
+            return;
+        }
         #[cfg(not(feature = "unsafe"))]
         {
             let _ = key_tag;
@@ -238,6 +256,7 @@ impl EmbeddedStore {
             };
             #[cfg(feature = "redis")]
             self.refresh_string_key_count(0, shard);
+            self.notify_point_set_slice(key, value, None);
         }
     }
 
@@ -338,6 +357,9 @@ impl EmbeddedStore {
         value: &[u8],
         ttl_ms: Option<u64>,
     ) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
+            return;
+        }
         if !can_route_with_key_hash(self.route_mode, self.shards.len(), key) {
             self.set(key.to_vec(), value.to_vec(), ttl_ms);
             return;
@@ -366,6 +388,7 @@ impl EmbeddedStore {
                 .set_slice_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
             shard.enforce_memory_limit(now_ms);
             self.refresh_string_key_count(route.shard_id, &shard);
+            self.notify_point_set_slice(key, value, expire_at_ms);
             return;
         }
         let mut shard = self.shards[route.shard_id].write();
@@ -382,6 +405,7 @@ impl EmbeddedStore {
         shard.enforce_memory_limit(now_ms);
         #[cfg(feature = "redis")]
         self.refresh_string_key_count(route.shard_id, &shard);
+        self.notify_point_set_slice(key, value, expire_at_ms);
     }
 
     /// Zero-copy `GET` for the multi-direct hot path. Returns the stored
@@ -389,9 +413,15 @@ impl EmbeddedStore {
     /// avoiding the `Vec<u8>` allocation that `get` performs to materialize
     /// `Bytes = Vec<u8>` for the public API.
     pub fn get_value_bytes(&self, key: &[u8]) -> Option<bytes::Bytes> {
+        self.try_get_value_bytes(key).ok().flatten()
+    }
+
+    /// Fallible owned GET that distinguishes an absent key from a cold-tier
+    /// materialization failure.
+    pub fn try_get_value_bytes(&self, key: &[u8]) -> crate::Result<Option<bytes::Bytes>> {
         let now_ms = now_millis();
         let route = self.route_key(key);
-        self.get_value_bytes_routed(route, key, now_ms)
+        self.try_get_value_bytes_routed(route, key, now_ms)
     }
 
     /// Returns an exact point value only when `authorize` accepts its borrowed
@@ -409,15 +439,30 @@ impl EmbeddedStore {
     where
         F: FnOnce(Option<&[u8]>) -> bool,
     {
+        self.try_get_value_bytes_with_governance_filter(key, authorize)
+            .ok()
+            .flatten()
+    }
+
+    /// Fallible governed GET that distinguishes a denied or missing key from
+    /// a cold-tier materialization failure.
+    pub fn try_get_value_bytes_with_governance_filter<F>(
+        &self,
+        key: &[u8],
+        authorize: F,
+    ) -> crate::Result<Option<bytes::Bytes>>
+    where
+        F: FnOnce(Option<&[u8]>) -> bool,
+    {
         let route = self.route_key(key);
-        match self.get_value_bytes_routed_with_governance_filter(
+        match self.try_get_value_bytes_routed_with_governance_filter(
             route,
             key,
             now_millis(),
             authorize,
-        ) {
-            GovernedRead::Authorized(value) => Some(value),
-            GovernedRead::Missing | GovernedRead::Denied => None,
+        )? {
+            GovernedRead::Authorized(value) => Ok(Some(value)),
+            GovernedRead::Missing | GovernedRead::Denied => Ok(None),
         }
     }
 
@@ -444,12 +489,20 @@ impl EmbeddedStore {
     /// FastCodec GET path that calls `write` while the value reference is
     /// still protected by the shard read lock. This avoids the refcount bump
     /// and drop from returning `bytes::Bytes` on the native GET hot path.
-    pub fn with_value_bytes_route_hashed<F>(
+    pub fn with_value_bytes_route_hashed<F>(&self, route_hash: u64, key: &[u8], write: F) -> bool
+    where
+        F: FnMut(&[u8]),
+    {
+        self.try_with_value_bytes_route_hashed(route_hash, key, write)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn try_with_value_bytes_route_hashed<F>(
         &self,
         route_hash: u64,
         key: &[u8],
         mut write: F,
-    ) -> bool
+    ) -> crate::Result<bool>
     where
         F: FnMut(&[u8]),
     {
@@ -458,14 +511,14 @@ impl EmbeddedStore {
                 shard_id: self.route_hash(route_hash),
                 key_hash: route_hash,
             };
-            return self.with_value_bytes_routed(route, key, &mut write);
+            return self.try_with_value_bytes_routed(route, key, &mut write);
         }
 
-        if let Some(value) = self.get_value_bytes(key) {
+        if let Some(value) = self.try_get_value_bytes(key)? {
             write(value.as_ref());
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -477,8 +530,21 @@ impl EmbeddedStore {
         &self,
         route_hash: u64,
         key: &[u8],
-        mut write: F,
+        write: F,
     ) -> bool
+    where
+        F: FnMut(&bytes::Bytes),
+    {
+        self.try_with_shared_value_bytes_route_hashed(route_hash, key, write)
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn try_with_shared_value_bytes_route_hashed<F>(
+        &self,
+        route_hash: u64,
+        key: &[u8],
+        mut write: F,
+    ) -> crate::Result<bool>
     where
         F: FnMut(&bytes::Bytes),
     {
@@ -487,14 +553,14 @@ impl EmbeddedStore {
                 shard_id: self.route_hash(route_hash),
                 key_hash: route_hash,
             };
-            return self.with_shared_value_bytes_routed(route, key, &mut write);
+            return self.try_with_shared_value_bytes_routed(route, key, &mut write);
         }
 
-        if let Some(value) = self.get_value_bytes(key) {
+        if let Some(value) = self.try_get_value_bytes(key)? {
             write(&value);
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
@@ -653,9 +719,28 @@ impl EmbeddedStore {
     where
         F: FnMut(&[u8]),
     {
+        // SAFETY: forwarded from this function's contract.
+        unsafe { self.try_with_value_bytes_route_hashed_single_threaded(route_hash, key, write) }
+            .unwrap_or(false)
+    }
+
+    /// Fallible variant of [`Self::with_value_bytes_route_hashed_single_threaded`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee exclusive access to every shard.
+    pub(crate) unsafe fn try_with_value_bytes_route_hashed_single_threaded<F>(
+        &self,
+        route_hash: u64,
+        key: &[u8],
+        write: F,
+    ) -> crate::Result<bool>
+    where
+        F: FnMut(&[u8]),
+    {
         #[cfg(not(feature = "unsafe"))]
         {
-            self.with_value_bytes_route_hashed(route_hash, key, write)
+            self.try_with_value_bytes_route_hashed(route_hash, key, write)
         }
         #[cfg(feature = "unsafe")]
         {
@@ -674,7 +759,7 @@ impl EmbeddedStore {
                         };
                         if let Some(value) = value {
                             write(value);
-                            return true;
+                            return Ok(true);
                         }
                     }
                 }
@@ -695,12 +780,12 @@ impl EmbeddedStore {
                     };
                     if let Some(value) = value {
                         write(value);
-                        return true;
+                        return Ok(true);
                     }
                 }
             }
 
-            self.with_value_bytes_route_hashed(route_hash, key, write)
+            self.try_with_value_bytes_route_hashed(route_hash, key, write)
         }
     }
 
@@ -722,9 +807,30 @@ impl EmbeddedStore {
     where
         F: FnMut(&bytes::Bytes),
     {
+        // SAFETY: forwarded from this function's contract.
+        unsafe {
+            self.try_with_shared_value_bytes_route_hashed_single_threaded(route_hash, key, write)
+        }
+        .unwrap_or(false)
+    }
+
+    /// Fallible variant of [`Self::with_shared_value_bytes_route_hashed_single_threaded`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee exclusive access to every shard.
+    pub(crate) unsafe fn try_with_shared_value_bytes_route_hashed_single_threaded<F>(
+        &self,
+        route_hash: u64,
+        key: &[u8],
+        write: F,
+    ) -> crate::Result<bool>
+    where
+        F: FnMut(&bytes::Bytes),
+    {
         #[cfg(not(feature = "unsafe"))]
         {
-            self.with_shared_value_bytes_route_hashed(route_hash, key, write)
+            self.try_with_shared_value_bytes_route_hashed(route_hash, key, write)
         }
         #[cfg(feature = "unsafe")]
         {
@@ -739,7 +845,7 @@ impl EmbeddedStore {
                                 .map
                                 .with_shared_value_bytes_hashed_no_ttl(route_hash, key, &mut write)
                             {
-                                return true;
+                                return Ok(true);
                             }
                         } else if shard.map.with_shared_value_bytes_hashed(
                             route_hash,
@@ -747,7 +853,7 @@ impl EmbeddedStore {
                             now_millis(),
                             &mut write,
                         ) {
-                            return true;
+                            return Ok(true);
                         }
                     }
                 }
@@ -765,7 +871,7 @@ impl EmbeddedStore {
                             key,
                             &mut write,
                         ) {
-                            return true;
+                            return Ok(true);
                         }
                     } else if shard.map.with_shared_value_bytes_hashed(
                         route.key_hash,
@@ -773,16 +879,16 @@ impl EmbeddedStore {
                         now_millis(),
                         &mut write,
                     ) {
-                        return true;
+                        return Ok(true);
                     }
                 }
             }
 
-            if let Some(value) = self.get_value_bytes(key) {
+            if let Some(value) = self.try_get_value_bytes(key)? {
                 write(&value);
-                true
+                Ok(true)
             } else {
-                false
+                Ok(false)
             }
         }
     }
@@ -1092,6 +1198,9 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
+            return false;
+        }
         if shard_id >= self.shards.len() {
             return false;
         }
@@ -1111,6 +1220,7 @@ impl EmbeddedStore {
             key,
             value,
         );
+        self.notify_point_set_slice(key, value, None);
         true
     }
 
@@ -1130,6 +1240,9 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
+            return false;
+        }
         #[cfg(not(feature = "unsafe"))]
         {
             let _ = (shard_id, session_hash, key_hash, session_prefix, key, value);
@@ -1157,6 +1270,7 @@ impl EmbeddedStore {
                 key,
                 value,
             );
+            self.notify_point_set_slice(key, value, None);
             true
         }
     }
@@ -1176,6 +1290,9 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
+            return false;
+        }
         if shard_id >= self.shards.len() {
             return false;
         }
@@ -1221,6 +1338,7 @@ impl EmbeddedStore {
         }
         #[cfg(feature = "redis")]
         self.refresh_string_key_count(shard_id, &shard);
+        self.notify_point_set_slice(key, value, None);
         true
     }
 
@@ -1239,6 +1357,9 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
+            return false;
+        }
         #[cfg(not(feature = "unsafe"))]
         {
             let _ = (shard_id, key_hash, key_tag, key, value);
@@ -1299,6 +1420,7 @@ impl EmbeddedStore {
             }
             #[cfg(feature = "redis")]
             self.refresh_string_key_count(shard_id, shard);
+            self.notify_point_set_slice(key, value, None);
             true
         }
     }
@@ -1395,13 +1517,24 @@ impl EmbeddedStore {
         key: &[u8],
         now_ms: u64,
     ) -> Option<bytes::Bytes> {
+        self.try_get_value_bytes_routed(route, key, now_ms)
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) fn try_get_value_bytes_routed(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        now_ms: u64,
+    ) -> crate::Result<Option<bytes::Bytes>> {
         if uses_flat_key_storage(self.route_mode, key) {
             let shard = self.shards[route.shard_id].read();
             if let Some(value) = shard
                 .map
                 .get_value_bytes_hashed(route.key_hash, key, now_ms)
             {
-                return Some(value);
+                return Ok(Some(value));
             }
             drop(shard);
             let mut shard = self.shards[route.shard_id].write();
@@ -1409,9 +1542,19 @@ impl EmbeddedStore {
                 .map
                 .get_value_bytes_hashed(route.key_hash, key, now_ms)
             {
-                return Some(value);
+                return Ok(Some(value));
             }
-            return shard.map.fault_remote_hashed(route.key_hash, key, now_ms);
+            let Some(plan) =
+                shard
+                    .map
+                    .prepare_object_fault_hashed(route.key_hash, key, now_ms, false)
+            else {
+                return Ok(None);
+            };
+            drop(shard);
+            let result = plan.fetch();
+            let mut shard = self.shards[route.shard_id].write();
+            return shard.map.finish_object_fault(plan, result, now_millis());
         }
         // Session-prefixed keys still go through the legacy path (write lock,
         // value copied). Bench workload doesn't use session keys.
@@ -1422,33 +1565,45 @@ impl EmbeddedStore {
                     .session_slots
                     .get_ref_hashed(&session_prefix, route.key_hash, key)
         {
-            return Some(bytes::Bytes::copy_from_slice(value));
+            return Ok(Some(bytes::Bytes::copy_from_slice(value)));
         }
-        shard
+        Ok(shard
             .map
-            .get_value_bytes_hashed(route.key_hash, key, now_ms)
+            .get_value_bytes_hashed(route.key_hash, key, now_ms))
     }
 
-    pub(crate) fn get_value_bytes_routed_with_governance_filter<F>(
+    pub(crate) fn try_get_value_bytes_routed_with_governance_filter<F>(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],
         now_ms: u64,
         authorize: F,
-    ) -> GovernedRead<bytes::Bytes>
+    ) -> crate::Result<GovernedRead<bytes::Bytes>>
     where
         F: FnOnce(Option<&[u8]>) -> bool,
     {
         if uses_flat_key_storage(self.route_mode, key) {
-            return self.shards[route.shard_id]
-                .write()
-                .map
-                .get_value_bytes_hashed_with_governance_filter(
-                    route.key_hash,
-                    key,
-                    now_ms,
-                    authorize,
-                );
+            let mut shard = self.shards[route.shard_id].write();
+            let decision = shard.map.prepare_governed_object_fault_hashed(
+                route.key_hash,
+                key,
+                now_ms,
+                authorize,
+            );
+            return match decision {
+                GovernedObjectFault::Missing => Ok(GovernedRead::Missing),
+                GovernedObjectFault::Denied => Ok(GovernedRead::Denied),
+                GovernedObjectFault::Resident(value) => Ok(GovernedRead::Authorized(value)),
+                GovernedObjectFault::Remote(plan) => {
+                    drop(shard);
+                    let result = plan.fetch();
+                    let mut shard = self.shards[route.shard_id].write();
+                    shard
+                        .map
+                        .finish_object_fault(*plan, result, now_millis())
+                        .map(|value| value.map_or(GovernedRead::Missing, GovernedRead::Authorized))
+                }
+            };
         }
 
         let mut shard = self.shards[route.shard_id].write();
@@ -1459,17 +1614,19 @@ impl EmbeddedStore {
                     .get_ref_hashed(&session_prefix, route.key_hash, key)
         {
             return if authorize(None) {
-                GovernedRead::Authorized(bytes::Bytes::copy_from_slice(value))
+                Ok(GovernedRead::Authorized(bytes::Bytes::copy_from_slice(
+                    value,
+                )))
             } else {
-                GovernedRead::Denied
+                Ok(GovernedRead::Denied)
             };
         }
-        shard.map.get_value_bytes_hashed_with_governance_filter(
+        Ok(shard.map.get_value_bytes_hashed_with_governance_filter(
             route.key_hash,
             key,
             now_ms,
             authorize,
-        )
+        ))
     }
 
     #[cfg(feature = "kv-overflow")]
@@ -1484,7 +1641,12 @@ impl EmbeddedStore {
             .is_value_protected_hashed(route.key_hash, key, now_ms)
     }
 
-    fn with_value_bytes_routed<F>(&self, route: EmbeddedKeyRoute, key: &[u8], write: &mut F) -> bool
+    fn try_with_value_bytes_routed<F>(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        write: &mut F,
+    ) -> crate::Result<bool>
     where
         F: FnMut(&[u8]),
     {
@@ -1499,25 +1661,25 @@ impl EmbeddedStore {
             };
             if let Some(value) = value {
                 write(value);
-                return true;
+                return Ok(true);
             }
             drop(shard);
         }
 
-        if let Some(value) = self.get_value_bytes_routed(route, key, now_millis()) {
+        if let Some(value) = self.try_get_value_bytes_routed(route, key, now_millis())? {
             write(value.as_ref());
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
     }
 
-    pub(super) fn with_shared_value_bytes_routed<F>(
+    pub(super) fn try_with_shared_value_bytes_routed<F>(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],
         write: &mut F,
-    ) -> bool
+    ) -> crate::Result<bool>
     where
         F: FnMut(&bytes::Bytes),
     {
@@ -1533,17 +1695,31 @@ impl EmbeddedStore {
                     .with_shared_value_bytes_hashed(route.key_hash, key, now_millis(), write)
             };
             if found {
-                return true;
+                return Ok(true);
             }
             drop(shard);
         }
 
-        if let Some(value) = self.get_value_bytes_routed(route, key, now_millis()) {
+        if let Some(value) = self.try_get_value_bytes_routed(route, key, now_millis())? {
             write(&value);
-            true
+            Ok(true)
         } else {
-            false
+            Ok(false)
         }
+    }
+
+    #[cfg(feature = "redis")]
+    pub(super) fn with_shared_value_bytes_routed<F>(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        write: &mut F,
+    ) -> bool
+    where
+        F: FnMut(&bytes::Bytes),
+    {
+        self.try_with_shared_value_bytes_routed(route, key, write)
+            .unwrap_or(false)
     }
 
     fn getex_value_bytes_routed(
@@ -1704,6 +1880,9 @@ impl EmbeddedStore {
             key: bytes::Bytes::copy_from_slice(key),
             key_hash: route.key_hash,
             expire_at_ms,
+            point_mutation_observer: self.point_mutation_observer.read().clone(),
+            point_mutation_validator: self.point_mutation_validator.read().clone(),
+            notify_on_drop: false,
             _not_send: std::marker::PhantomData,
         })
     }

@@ -40,6 +40,9 @@ impl crate::commands::redis::RedisCommand for GetSet {
                     store.set((*key).to_vec(), (*value).to_vec(), None);
                 }
                 RedisStringLookup::WrongType => write_resp_wrongtype(out),
+                RedisStringLookup::BackendError => {
+                    ServerWire::write_resp_error(out, "ERR object overflow read failed")
+                }
             },
             _ => write_resp_wrong_arity(out, "GETSET"),
         }

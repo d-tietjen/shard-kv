@@ -1,0 +1,2 @@
+run_id,resolved_plan_id,suite,scenario,category,target,family,command,case,clients,key_shards,pipeline_depth,vcpus,duration_s,ops,ops_per_sec,avg_us,p50_us,p95_us,p99_us,p999_us,errors,expected_errors,profile,memory_budget_mib,command_budget,command_bytes,host
+adam-object-rag-072-shardmap-scnp-run1,object-rag-1024x16-count10-ef64,redis-v8-vector,object-rag,vector,shardmap-scnp,vector,VSIM,VSIM typed object rag,1,1,1,1,10,144399,14439.900,69.175,67.839,74.303,78.207,97.407,0,0,small,128,0,134217558,unknown

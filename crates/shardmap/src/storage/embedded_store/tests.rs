@@ -2,19 +2,89 @@ use super::{
     EmbeddedRouteMode, EmbeddedStore, OverflowReplicaAuthRuntime, PackedSessionWrite,
     ShardArcEmbeddedStore,
 };
-use crate::config::EvictionPolicy;
+use crate::config::{
+    EvictionPolicy, ObjectOverflowBackend, ObjectOverflowCompression, ObjectOverflowFailurePolicy,
+};
 #[cfg(feature = "redis")]
 use crate::storage::RedisZSetStore;
-use crate::storage::hash_key;
 #[cfg(feature = "telemetry")]
 use crate::storage::{
     CacheTelemetry, CacheTelemetryClock, TelemetryRuntime, TelemetryRuntimeConfig,
 };
+use crate::storage::{
+    ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore, hash_key, now_millis,
+};
 #[cfg(feature = "redis")]
 use crate::storage::{RedisObjectResult, RedisStringLookup};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+#[derive(Debug)]
+struct BlockingSnapshotObjectStore {
+    values: Mutex<HashMap<String, bytes::Bytes>>,
+    get_started: crossbeam_channel::Sender<()>,
+    release_get: crossbeam_channel::Receiver<()>,
+}
+
+impl ObjectOverflowStore for BlockingSnapshotObjectStore {
+    fn put_value(&self, object_key: &str, value: &[u8]) -> crate::Result<()> {
+        self.values
+            .lock()
+            .expect("object values lock")
+            .insert(object_key.to_string(), bytes::Bytes::copy_from_slice(value));
+        Ok(())
+    }
+
+    fn get_value(&self, object_key: &str) -> crate::Result<bytes::Bytes> {
+        self.get_started.send(()).expect("signal blocked GET");
+        self.release_get.recv().expect("release blocked GET");
+        self.values
+            .lock()
+            .expect("object values lock")
+            .get(object_key)
+            .cloned()
+            .ok_or_else(|| crate::ShardCacheError::Persistence("object value missing".into()))
+    }
+
+    fn delete_value(&self, object_key: &str) -> crate::Result<()> {
+        self.values
+            .lock()
+            .expect("object values lock")
+            .remove(object_key);
+        Ok(())
+    }
+}
+
+fn blocking_snapshot_overflow(store: Arc<BlockingSnapshotObjectStore>) -> ObjectOverflowRuntime {
+    ObjectOverflowRuntime::new(
+        store,
+        ObjectOverflowRuntimeOptions {
+            backend: ObjectOverflowBackend::File,
+            min_value_bytes: 4,
+            offload_min_idle_ticks: 0,
+            offload_max_frequency: u32::MAX,
+            compression: ObjectOverflowCompression::None,
+            zstd_level: 3,
+            failure_policy: ObjectOverflowFailurePolicy::RetainResident,
+            max_retries: 0,
+            retry_backoff: Duration::from_millis(1),
+            operation_timeout: Duration::from_secs(5),
+            worker_threads: 1,
+            queue_capacity: 8,
+            degraded_failure_threshold: 8,
+            degraded_cooldown: Duration::from_secs(1),
+            fetch_on_get: true,
+            delete_on_overwrite: true,
+            prefix: "snapshot-test".into(),
+            node_id: "node".into(),
+            generation_id: "generation".into(),
+            cleanup_on_start: false,
+            cleanup_grace: Duration::from_secs(60),
+        },
+    )
+    .expect("object overflow runtime")
+}
 
 #[test]
 fn exact_governance_is_fail_closed_and_replacement_is_atomic() {
@@ -30,10 +100,12 @@ fn exact_governance_is_fail_closed_and_replacement_is_atomic() {
     assert_eq!(store.get_value_bytes(b"private"), None);
     assert!(store.get_mut(b"private").is_none());
     let mut visited = Vec::new();
-    store.visit_string_entries(|key, _, _| {
-        visited.push(key.to_vec());
-        true
-    });
+    store
+        .visit_string_entries(|key, _, _| {
+            visited.push(key.to_vec());
+            true
+        })
+        .unwrap();
     assert!(!visited.iter().any(|key| key == b"private"));
     assert_eq!(
         store.get_value_bytes_with_governance_filter(b"private", |metadata| {
@@ -88,6 +160,199 @@ fn exact_governance_snapshot_restore_remains_fail_closed() {
             .as_deref(),
         Some(b"model-state".as_slice())
     );
+}
+
+#[test]
+fn object_overflow_health_identity_is_reported_for_every_shard() {
+    let (get_started_tx, _get_started_rx) = crossbeam_channel::bounded(1);
+    let (_release_get_tx, release_get_rx) = crossbeam_channel::bounded(1);
+    let object_store = Arc::new(BlockingSnapshotObjectStore {
+        values: Mutex::new(HashMap::new()),
+        get_started: get_started_tx,
+        release_get: release_get_rx,
+    });
+    let store = EmbeddedStore::new(2);
+    store
+        .configure_object_overflow(Some(blocking_snapshot_overflow(object_store)))
+        .unwrap();
+
+    let stats = store.shard_stats_snapshot();
+    assert_eq!(stats.len(), 2);
+    assert!(stats.iter().all(|shard| shard.object_overflow.enabled));
+    assert!(
+        stats
+            .iter()
+            .all(|shard| shard.object_overflow.backend == "file")
+    );
+}
+
+#[test]
+fn object_snapshot_fetch_does_not_hold_the_shard_read_lock() {
+    let (get_started_tx, get_started_rx) = crossbeam_channel::bounded(1);
+    let (release_get_tx, release_get_rx) = crossbeam_channel::bounded(1);
+    let object_store = Arc::new(BlockingSnapshotObjectStore {
+        values: Mutex::new(HashMap::new()),
+        get_started: get_started_tx,
+        release_get: release_get_rx,
+    });
+    let store = Arc::new(EmbeddedStore::new(1));
+    store
+        .configure_object_overflow(Some(blocking_snapshot_overflow(object_store)))
+        .unwrap();
+    store.configure_memory_policy(Some(8), EvictionPolicy::Lru);
+    store.set(b"cold".to_vec(), b"remote-value".to_vec(), None);
+    for _ in 0..200 {
+        store.process_maintenance();
+        if store.shards[0].read().map.remote_value_bytes() == 12 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(store.shards[0].read().map.remote_value_bytes(), 12);
+    store.configure_memory_policy(None, EvictionPolicy::Lru);
+
+    let snapshot_store = Arc::clone(&store);
+    let (snapshot_done_tx, snapshot_done_rx) = crossbeam_channel::bounded(1);
+    let snapshot = std::thread::spawn(move || {
+        let result: crate::Result<Vec<crate::storage::StoredEntry>> = snapshot_store
+            .try_shard_entry_snapshot_iter(0, now_millis(), 64, usize::MAX, None)
+            .and_then(Iterator::collect);
+        snapshot_done_tx.send(result).expect("snapshot result");
+    });
+    get_started_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("snapshot object GET started");
+
+    let writer_store = Arc::clone(&store);
+    let (writer_done_tx, writer_done_rx) = crossbeam_channel::bounded(1);
+    let writer = std::thread::spawn(move || {
+        writer_store.set(b"same-shard".to_vec(), b"write".to_vec(), None);
+        writer_done_tx.send(()).expect("writer result");
+    });
+    writer_done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("same-shard write must not wait for object GET");
+
+    release_get_tx.send(()).expect("release object GET");
+    let entries = snapshot_done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("snapshot completion")
+        .expect("snapshot materialization");
+    snapshot.join().expect("snapshot thread");
+    writer.join().expect("writer thread");
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, b"cold");
+    assert_eq!(entries[0].value, b"remote-value");
+    assert_eq!(store.get(b"same-shard"), Some(b"write".to_vec()));
+}
+
+#[test]
+fn object_fault_does_not_reinsert_a_value_that_expires_during_io() {
+    let (get_started_tx, get_started_rx) = crossbeam_channel::bounded(1);
+    let (release_get_tx, release_get_rx) = crossbeam_channel::bounded(1);
+    let object_store = Arc::new(BlockingSnapshotObjectStore {
+        values: Mutex::new(HashMap::new()),
+        get_started: get_started_tx,
+        release_get: release_get_rx,
+    });
+    let store = Arc::new(EmbeddedStore::new(1));
+    store
+        .configure_object_overflow(Some(blocking_snapshot_overflow(object_store)))
+        .unwrap();
+    store.configure_memory_policy(Some(8), EvictionPolicy::Lru);
+    store.set(b"short-lived".to_vec(), b"remote-value".to_vec(), Some(30));
+    for _ in 0..200 {
+        store.process_maintenance();
+        if store.shards[0].read().map.remote_value_bytes() == 12 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    store.configure_memory_policy(None, EvictionPolicy::Lru);
+    let fault_store = Arc::clone(&store);
+    let fault = std::thread::spawn(move || fault_store.get(b"short-lived"));
+    get_started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("fault GET started");
+
+    let writer_store = Arc::clone(&store);
+    let writer = std::thread::spawn(move || {
+        writer_store.set(b"same-shard".to_vec(), b"write".to_vec(), None);
+    });
+    writer.join().expect("writer must not wait for fault I/O");
+    std::thread::sleep(Duration::from_millis(40));
+    release_get_tx.send(()).expect("release fault GET");
+    assert_eq!(fault.join().expect("fault thread"), None);
+    for _ in 0..200 {
+        store.process_maintenance();
+        if store.shards[0].read().map.remote_value_bytes() == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    assert_eq!(store.get(b"short-lived"), None);
+    assert_eq!(store.shards[0].read().map.remote_value_bytes(), 0);
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn redis_string_lookup_faults_remote_values_on_the_first_read() {
+    let (get_started_tx, get_started_rx) = crossbeam_channel::bounded(1);
+    let (release_get_tx, release_get_rx) = crossbeam_channel::bounded(1);
+    let object_store = Arc::new(BlockingSnapshotObjectStore {
+        values: Mutex::new(HashMap::new()),
+        get_started: get_started_tx,
+        release_get: release_get_rx,
+    });
+    let store = EmbeddedStore::new(1);
+    store
+        .configure_object_overflow(Some(blocking_snapshot_overflow(object_store)))
+        .unwrap();
+    store.configure_memory_policy(Some(8), EvictionPolicy::Lru);
+    store.set(b"cold".to_vec(), b"remote-value".to_vec(), None);
+    for _ in 0..200 {
+        store.process_maintenance();
+        if store.shards[0].read().map.remote_value_bytes() == 12 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    store.configure_memory_policy(None, EvictionPolicy::Lru);
+
+    let reader = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let mut value = None;
+            let lookup = store.get_string_value_into(b"cold", |bytes| {
+                value = Some(bytes.clone());
+            });
+            (lookup, value)
+        });
+        get_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("remote GET started");
+        release_get_tx.send(()).expect("release remote GET");
+        reader.join().expect("reader")
+    });
+    assert_eq!(reader.0, RedisStringLookup::Hit);
+    assert_eq!(reader.1.as_deref(), Some(b"remote-value".as_slice()));
+}
+
+#[test]
+fn snapshot_key_index_is_bounded_before_materialization() {
+    let store = EmbeddedStore::new(1);
+    store.set(b"first".to_vec(), b"value".to_vec(), None);
+    store.set(b"second".to_vec(), b"value".to_vec(), None);
+
+    let result = store.try_shard_entry_snapshot_iter(0, now_millis(), 64, 1, None);
+    match result {
+        Err(crate::ShardCacheError::Persistence(message)) => {
+            assert!(message.contains("snapshot key index exceeds retained-byte limit"));
+        }
+        Err(error) => panic!("unexpected snapshot error: {error}"),
+        Ok(_) => panic!("snapshot key index should exceed its retained-byte limit"),
+    }
 }
 
 #[test]
@@ -220,10 +485,12 @@ fn visit_string_keys_and_entries_do_not_require_snapshots() {
     assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec()]);
 
     let mut entries = BTreeMap::new();
-    store.visit_string_entries(|key, value, expire_at_ms| {
-        entries.insert(key.to_vec(), (value.to_vec(), expire_at_ms.is_some()));
-        true
-    });
+    store
+        .visit_string_entries(|key, value, expire_at_ms| {
+            entries.insert(key.to_vec(), (value.to_vec(), expire_at_ms.is_some()));
+            true
+        })
+        .unwrap();
     assert_eq!(
         entries.get(b"a".as_slice()),
         Some(&(b"one".to_vec(), false))

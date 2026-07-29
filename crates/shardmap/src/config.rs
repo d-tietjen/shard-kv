@@ -50,8 +50,6 @@ pub struct ShardCacheConfig {
     pub kv_overflow: KvOverflowConfig,
     /// Enables this server as a shard-addressable key-value overflow replica.
     pub kv_overflow_replica: KvOverflowReplicaServerConfig,
-    /// Native mutation-stream replication configuration.
-    pub replication: ReplicationConfig,
     /// Redis transaction execution mode.
     pub transaction_mode: TransactionMode,
     /// Public server endpoint topology.
@@ -227,8 +225,12 @@ pub struct PersistenceConfig {
     pub compress_snapshots: bool,
     /// Compress WAL segments.
     pub compress_wal: bool,
-    /// Bounded channel capacity for WAL append requests.
+    /// Approximate per-shard record capacity of the bounded WAL block queue.
     pub wal_channel_capacity: usize,
+    /// Maximum records accumulated by one shard before publishing a WAL block.
+    pub wal_block_max_records: usize,
+    /// Approximate maximum bytes accumulated in one shard-local WAL block.
+    pub wal_block_max_bytes: usize,
     /// Optional live WAL export over TCP.
     pub tcp_export: WalTcpExportConfig,
 }
@@ -265,6 +267,9 @@ pub struct ObjectOverflowConfig {
     pub allow_http: bool,
     /// Verify TLS certificates for HTTPS S3-compatible stores.
     pub tls_verify: bool,
+    /// Optional PEM bundle containing additional trusted roots for an HTTPS
+    /// S3-compatible endpoint.
+    pub tls_ca_path: Option<PathBuf>,
     /// Optional server-side encryption algorithm or key reference.
     pub server_side_encryption: Option<String>,
     /// Environment variable that contains the access key for rust-fs/S3 stores.
@@ -308,6 +313,15 @@ pub struct ObjectOverflowConfig {
     /// Delete remote payloads when a key is overwritten or removed.
     pub delete_on_overwrite: bool,
 }
+
+pub const MAX_OBJECT_OVERFLOW_WORKERS: usize = 256;
+pub const MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY: usize = 1_048_576;
+pub const MAX_OBJECT_OVERFLOW_RETRIES: usize = 32;
+pub const MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS: u64 = 600_000;
+pub const MAX_OBJECT_OVERFLOW_RETRY_BACKOFF_MS: u64 = 60_000;
+pub const MAX_OBJECT_OVERFLOW_DEGRADED_THRESHOLD: usize = 1_000_000;
+pub const MAX_OBJECT_OVERFLOW_COOLDOWN_MS: u64 = 86_400_000;
+pub const MAX_OBJECT_OVERFLOW_CLEANUP_SECONDS: u64 = 31_536_000;
 
 /// Object-overflow backend.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -583,88 +597,6 @@ pub struct WalTcpExportConfig {
     pub backpressure_on_full: bool,
 }
 
-/// Native replication configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ReplicationConfig {
-    /// Enable native mutation-stream replication.
-    pub enabled: bool,
-    /// Runtime role for this process.
-    pub role: ReplicationRole,
-    /// Address a primary listens on for replicas and service subscribers.
-    pub bind_addr: String,
-    /// Primary address a replica connects to.
-    pub replica_of: Option<String>,
-    /// Optional plaintext authentication token for native replication.
-    pub auth_token: Option<String>,
-    /// Compression algorithm for mutation batches and snapshot chunks.
-    pub compression: ReplicationCompression,
-    /// zstd compression level used when `compression = "zstd"`.
-    pub zstd_level: i32,
-    /// Send policy for primary mutation flushes.
-    pub send_policy: ReplicationSendPolicy,
-    /// Maximum records in one mutation batch.
-    pub batch_max_records: usize,
-    /// Maximum uncompressed bytes in one mutation batch.
-    pub batch_max_bytes: usize,
-    /// Maximum time a non-empty batch may wait before flush.
-    pub batch_max_delay_us: u64,
-    /// Approximate retained in-memory backlog size for partial catch-up.
-    pub backlog_bytes: usize,
-    /// Snapshot chunk size before compression.
-    pub snapshot_chunk_bytes: usize,
-    /// Per-shard bounded queue capacity for ready replication batches.
-    ///
-    /// The shard worker builds ordered mutation batches locally. When this
-    /// queue is full, that shard's emitting thread blocks until its exporter
-    /// drains a batch. Increase this if export lanes cannot keep up with
-    /// bursty writes.
-    pub queue_capacity: usize,
-    /// Maximum simultaneously-connected replicas in `listen` mode.
-    pub max_replicas: usize,
-    /// Maximum time spent opening one TCP connect attempt from a replica.
-    pub connect_timeout_ms: u64,
-    /// Per-write timeout for replication TCP I/O.
-    pub write_timeout_ms: u64,
-    /// Delay between reconnect attempts after a replica disconnect.
-    pub reconnect_backoff_ms: u64,
-    /// Per-subscriber outbound channel capacity.
-    pub subscriber_channel_capacity: usize,
-}
-
-/// Native replication role.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ReplicationRole {
-    /// Emit local writes and serve replicas.
-    #[default]
-    Primary,
-    /// Receive and apply writes from a primary.
-    Replica,
-}
-
-/// Native replication compression.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ReplicationCompression {
-    /// Do not compress replication payloads.
-    None,
-    /// Compress replication payloads with zstd.
-    #[default]
-    Zstd,
-}
-
-/// Native replication send policy.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ReplicationSendPolicy {
-    /// Flush each mutation as a one-record batch.
-    Immediate,
-    /// Accumulate mutations until a record, byte, or delay threshold is reached.
-    #[default]
-    Batch,
-}
-
 /// TCP WAL export topology.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -712,7 +644,6 @@ impl Default for ShardCacheConfig {
             object_overflow: ObjectOverflowConfig::default(),
             kv_overflow: KvOverflowConfig::default(),
             kv_overflow_replica: KvOverflowReplicaServerConfig::default(),
-            replication: ReplicationConfig::default(),
             transaction_mode: TransactionMode::default(),
             server_endpoint_mode: ServerEndpointMode::default(),
         }
@@ -760,6 +691,8 @@ impl Default for PersistenceConfig {
             compress_snapshots: true,
             compress_wal: true,
             wal_channel_capacity: 16_384,
+            wal_block_max_records: 64,
+            wal_block_max_bytes: 256 * 1024,
             tcp_export: WalTcpExportConfig::default(),
         }
     }
@@ -778,6 +711,7 @@ impl Default for ObjectOverflowConfig {
             force_path_style: true,
             allow_http: false,
             tls_verify: true,
+            tls_ca_path: None,
             server_side_encryption: None,
             access_key_env: None,
             secret_key_env: None,
@@ -874,32 +808,6 @@ impl Default for WalTcpExportConfig {
             write_timeout_ms: 250,
             reconnect_backoff_ms: 100,
             backpressure_on_full: false,
-        }
-    }
-}
-
-impl Default for ReplicationConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            role: ReplicationRole::Primary,
-            bind_addr: "127.0.0.1:7631".to_string(),
-            replica_of: None,
-            auth_token: None,
-            compression: ReplicationCompression::None,
-            zstd_level: 3,
-            send_policy: ReplicationSendPolicy::Batch,
-            batch_max_records: 512,
-            batch_max_bytes: 1024 * 1024,
-            batch_max_delay_us: 750,
-            backlog_bytes: 64 * 1024 * 1024,
-            snapshot_chunk_bytes: 1024 * 1024,
-            queue_capacity: 16_384,
-            max_replicas: 16,
-            connect_timeout_ms: 500,
-            write_timeout_ms: 500,
-            reconnect_backoff_ms: 200,
-            subscriber_channel_capacity: 1_024,
         }
     }
 }
@@ -1027,13 +935,20 @@ impl PersistenceConfig {
 mod tests {
     #[cfg(all(feature = "kv-overflow", feature = "kv-overflow-redis"))]
     use super::KvOverflowBackend;
+    #[cfg(feature = "object-overflow-s3")]
+    use super::ObjectOverflowBackend;
     #[cfg(feature = "kv-overflow")]
     use super::{
         EvictionPolicy, KvOverflowConfig, KvOverflowReplica, KvOverflowReplicaServerConfig,
         MAX_KV_OVERFLOW_SLOT_COUNT, ScnpTlsClientConfig,
     };
+    #[cfg(feature = "object-overflow")]
+    use super::{
+        MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS, MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY,
+        MAX_OBJECT_OVERFLOW_WORKERS, ObjectOverflowConfig,
+    };
     use super::{ServerEndpointMode, ShardCacheConfig, geometry::CacheSizeParser};
-    #[cfg(all(feature = "kv-overflow", feature = "scnp-tls"))]
+    #[cfg(any(feature = "object-overflow", feature = "kv-overflow"))]
     use std::path::PathBuf;
 
     #[test]
@@ -1062,6 +977,61 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "object-overflow")]
+    #[test]
+    fn object_overflow_rejects_resource_amplifying_configuration() {
+        let mut config = ShardCacheConfig {
+            max_memory_bytes: 1024,
+            eviction_policy: super::EvictionPolicy::Lru,
+            object_overflow: ObjectOverflowConfig {
+                enabled: true,
+                endpoint: "/tmp/shardcache-object-overflow-config-test".into(),
+                bucket: "bucket".into(),
+                ..ObjectOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        config.object_overflow.worker_threads = MAX_OBJECT_OVERFLOW_WORKERS + 1;
+        assert!(config.validate().is_err());
+        config.object_overflow.worker_threads = 1;
+        config.object_overflow.queue_capacity = MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY + 1;
+        assert!(config.validate().is_err());
+        config.object_overflow.queue_capacity = 1;
+        config.object_overflow.operation_timeout_ms = MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS + 1;
+        assert!(config.validate().is_err());
+    }
+
+    #[cfg(feature = "object-overflow-s3")]
+    #[test]
+    fn s3_object_overflow_requires_a_complete_credential_env_pair() {
+        let mut config = ShardCacheConfig {
+            max_memory_bytes: 1024,
+            eviction_policy: super::EvictionPolicy::Lru,
+            object_overflow: ObjectOverflowConfig {
+                enabled: true,
+                backend: ObjectOverflowBackend::S3,
+                endpoint: "https://object-store.example".into(),
+                bucket: "bucket".into(),
+                ..ObjectOverflowConfig::default()
+            },
+            ..ShardCacheConfig::default()
+        };
+        assert!(config.validate().is_err());
+        config.object_overflow.access_key_env = Some("OBJECT_ACCESS_KEY".into());
+        assert!(config.validate().is_err());
+        config.object_overflow.secret_key_env = Some("OBJECT_SECRET_KEY".into());
+        assert!(config.validate().is_ok());
+        config.object_overflow.tls_ca_path = Some(PathBuf::new());
+        assert!(config.validate().is_err());
+        config.object_overflow.tls_ca_path = Some("/etc/shardcache/object-ca.pem".into());
+        config.object_overflow.tls_verify = false;
+        assert!(config.validate().is_err());
+        config.object_overflow.tls_verify = true;
+        assert!(config.validate().is_ok());
+    }
+
     #[test]
     fn default_shard_count_is_power_of_two() {
         let shard_count = ShardCacheConfig::default_shard_count();
@@ -1075,6 +1045,17 @@ mod tests {
             ShardCacheConfig::default().server_endpoint_mode,
             ServerEndpointMode::Fanout
         );
+    }
+
+    #[test]
+    fn persistence_requires_nonzero_wal_block_limits() {
+        let mut config = ShardCacheConfig::default();
+        config.persistence.wal_block_max_records = 0;
+        assert!(config.validate().is_err());
+
+        config.persistence.wal_block_max_records = 64;
+        config.persistence.wal_block_max_bytes = 0;
+        assert!(config.validate().is_err());
     }
 
     #[test]

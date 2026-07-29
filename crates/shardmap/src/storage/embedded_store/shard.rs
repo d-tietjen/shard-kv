@@ -64,7 +64,7 @@ impl EmbeddedShard {
         &self,
         now_ms: u64,
         visitor: &mut impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
-    ) -> bool {
+    ) -> crate::Result<bool> {
         self.map.visit_entries(now_ms, visitor)
     }
 
@@ -152,6 +152,19 @@ impl EmbeddedShard {
     ) -> std::result::Result<R, E> {
         self.map
             .transform_value_hashed_no_ttl(hash, key, now_ms, transform)
+    }
+
+    #[cfg(feature = "redis")]
+    #[inline(always)]
+    pub(crate) fn transform_value_hashed_preserve_ttl<R, E>(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+        transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
+    ) -> std::result::Result<R, E> {
+        self.map
+            .transform_value_hashed_preserve_ttl(hash, key, now_ms, transform)
     }
 
     #[inline(always)]

@@ -19,6 +19,8 @@ use crate::commands::resp::RespCommand;
 use crate::commands::set::{self, Set};
 use crate::commands::setex::{self, SetEx};
 use crate::commands::ttl::{self, Ttl};
+#[cfg(feature = "vector")]
+use crate::commands::vector::{Ping, VAdd, VAddOptions, VRem, VSim, VSimMatch, VSimOptions};
 use crate::connection::ScnpConnection;
 use crate::error::{Result, ShardCacheClientError};
 #[cfg(feature = "redis")]
@@ -163,6 +165,52 @@ impl ShardCacheClient {
     /// Sets a millisecond TTL on `key`, returning `true` when the TTL changed.
     pub fn expire(&mut self, key: &[u8], ttl_ms: u64) -> Result<bool> {
         self.conn.execute(Expire::new(key, ttl_ms))
+    }
+
+    /// Checks the SCNP server and returns its typed `PONG` payload.
+    #[cfg(feature = "vector")]
+    pub fn ping(&mut self) -> Result<Vec<u8>> {
+        self.conn.execute(Ping)
+    }
+
+    /// Adds or updates one vector element through the native SCNP `VADD` opcode.
+    ///
+    /// Returns `true` only when a new element was inserted. A successful update
+    /// returns `false`, matching Redis `VADD` integer reply semantics.
+    #[cfg(feature = "vector")]
+    pub fn vadd(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        vector: &[f32],
+        options: VAddOptions<'_>,
+    ) -> Result<bool> {
+        self.conn
+            .execute(VAdd::new(None, key, element, vector, options)?)
+    }
+
+    /// Returns scored and attributed nearest matches through native SCNP `VSIM`.
+    #[cfg(feature = "vector")]
+    pub fn vsim(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        options: VSimOptions<'_>,
+    ) -> Result<Vec<VSimMatch>> {
+        self.conn.execute(VSim::new(None, key, vector, options)?)
+    }
+
+    /// Removes one vector element through the native SCNP `VREM` opcode.
+    #[cfg(feature = "vector")]
+    pub fn vrem(&mut self, key: &[u8], element: &[u8]) -> Result<bool> {
+        self.conn.execute(VRem::new(None, key, element, None)?)
+    }
+
+    /// Removes a governed vector element when its current label matches.
+    #[cfg(feature = "vector")]
+    pub fn vrem_governed(&mut self, key: &[u8], element: &[u8], governance: &[u8]) -> Result<bool> {
+        self.conn
+            .execute(VRem::new(None, key, element, Some(governance))?)
     }
 
     /// Returns the first-party Redis command namespace.
@@ -558,6 +606,28 @@ impl ShardCacheDirectClient {
         Self::connect_with_router(router)
     }
 
+    /// Connects to all direct shard ports with operation deadlines and auth.
+    pub fn connect_with_timeouts_and_auth(
+        addr: impl ToSocketAddrs,
+        shard_count: usize,
+        connect_timeout: Duration,
+        operation_timeout: Duration,
+        auth_token: Option<&[u8]>,
+    ) -> Result<Self> {
+        let router = ShardCacheDirectRouter::new(addr, shard_count)?;
+        let mut conns = Vec::with_capacity(router.shard_count());
+        for shard_id in 0..router.shard_count() {
+            let mut conn = ScnpConnection::connect_with_timeouts(
+                router.shard_addr(shard_id)?,
+                connect_timeout,
+                operation_timeout,
+            )?;
+            conn.authenticate(auth_token)?;
+            conns.push(conn);
+        }
+        Ok(Self { router, conns })
+    }
+
     fn connect_with_router(router: ShardCacheDirectRouter) -> Result<Self> {
         let mut conns = Vec::with_capacity(router.shard_count());
         for shard_id in 0..router.shard_count() {
@@ -612,6 +682,58 @@ impl ShardCacheDirectClient {
     pub fn expire(&mut self, key: &[u8], ttl_ms: u64) -> Result<bool> {
         let route = self.router.route_key(key);
         self.conns[route.shard_id].execute(Expire::routed(route, key, ttl_ms))
+    }
+
+    /// Checks one direct shard connection and returns its typed `PONG` payload.
+    #[cfg(feature = "vector")]
+    pub fn ping_shard(&mut self, shard_id: usize) -> Result<Vec<u8>> {
+        let shard_count = self.conns.len();
+        let conn = self.conns.get_mut(shard_id).ok_or_else(|| {
+            ShardCacheClientError::Config(format!(
+                "shard {shard_id} is outside configured shard count {shard_count}"
+            ))
+        })?;
+        conn.execute(Ping)
+    }
+
+    /// Adds or updates one vector element on the dedicated vector shard.
+    /// Returns `true` only for insertion; successful updates return `false`.
+    #[cfg(feature = "vector")]
+    pub fn vadd(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        vector: &[f32],
+        options: VAddOptions<'_>,
+    ) -> Result<bool> {
+        let route = self.router.route_vector_key(key);
+        self.conns[route.shard_id].execute(VAdd::new(Some(route), key, element, vector, options)?)
+    }
+
+    /// Returns scored and attributed nearest matches from the dedicated vector shard.
+    #[cfg(feature = "vector")]
+    pub fn vsim(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        options: VSimOptions<'_>,
+    ) -> Result<Vec<VSimMatch>> {
+        let route = self.router.route_vector_key(key);
+        self.conns[route.shard_id].execute(VSim::new(Some(route), key, vector, options)?)
+    }
+
+    /// Removes one vector element from the dedicated vector shard.
+    #[cfg(feature = "vector")]
+    pub fn vrem(&mut self, key: &[u8], element: &[u8]) -> Result<bool> {
+        let route = self.router.route_vector_key(key);
+        self.conns[route.shard_id].execute(VRem::new(Some(route), key, element, None)?)
+    }
+
+    /// Removes a governed vector element from the dedicated vector shard.
+    #[cfg(feature = "vector")]
+    pub fn vrem_governed(&mut self, key: &[u8], element: &[u8], governance: &[u8]) -> Result<bool> {
+        let route = self.router.route_vector_key(key);
+        self.conns[route.shard_id].execute(VRem::new(Some(route), key, element, Some(governance))?)
     }
 
     /// Returns the first-party Redis command namespace for direct shard routing.
@@ -756,6 +878,56 @@ impl ShardCacheDirectShardClient {
     pub fn expire(&mut self, key: &[u8], ttl_ms: u64) -> Result<bool> {
         let route = self.checked_route(key)?;
         self.conn.execute(Expire::routed(route, key, ttl_ms))
+    }
+
+    /// Checks this direct shard connection and returns its typed `PONG` payload.
+    #[cfg(feature = "vector")]
+    pub fn ping(&mut self) -> Result<Vec<u8>> {
+        self.conn.execute(Ping)
+    }
+
+    /// Adds or updates one vector element on the dedicated vector shard.
+    /// Returns `true` only for insertion; successful updates return `false`.
+    #[cfg(feature = "vector")]
+    pub fn vadd(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        vector: &[f32],
+        options: VAddOptions<'_>,
+    ) -> Result<bool> {
+        let route = self.checked_vector_route(key)?;
+        self.conn
+            .execute(VAdd::new(Some(route), key, element, vector, options)?)
+    }
+
+    /// Returns scored and attributed matches from the dedicated vector shard.
+    #[cfg(feature = "vector")]
+    pub fn vsim(
+        &mut self,
+        key: &[u8],
+        vector: &[f32],
+        options: VSimOptions<'_>,
+    ) -> Result<Vec<VSimMatch>> {
+        let route = self.checked_vector_route(key)?;
+        self.conn
+            .execute(VSim::new(Some(route), key, vector, options)?)
+    }
+
+    /// Removes one vector element from the dedicated vector shard.
+    #[cfg(feature = "vector")]
+    pub fn vrem(&mut self, key: &[u8], element: &[u8]) -> Result<bool> {
+        let route = self.checked_vector_route(key)?;
+        self.conn
+            .execute(VRem::new(Some(route), key, element, None)?)
+    }
+
+    /// Removes a governed vector element from this dedicated vector shard.
+    #[cfg(feature = "vector")]
+    pub fn vrem_governed(&mut self, key: &[u8], element: &[u8], governance: &[u8]) -> Result<bool> {
+        let route = self.checked_vector_route(key)?;
+        self.conn
+            .execute(VRem::new(Some(route), key, element, Some(governance))?)
     }
 
     /// Returns the first-party Redis command namespace for this shard.
@@ -947,6 +1119,18 @@ impl ShardCacheDirectShardClient {
         }
         Ok(route)
     }
+
+    #[cfg(feature = "vector")]
+    fn checked_vector_route(&self, key: &[u8]) -> Result<crate::routing::ShardCacheRoute> {
+        let route = self.router.route_vector_key(key);
+        if route.shard_id != self.shard_id {
+            return Err(ShardCacheClientError::Config(format!(
+                "vector commands route to shard {}, but client is connected to shard {}",
+                route.shard_id, self.shard_id
+            )));
+        }
+        Ok(route)
+    }
 }
 
 #[cfg(feature = "redis")]
@@ -993,9 +1177,17 @@ fn redis_direct_route(
         RedisCommandRouteKeys::Keys(keys) => keys,
     };
 
-    let first_route = router.route_key(keys[0]);
+    let first_route = if command.uses_vector_shard() {
+        router.route_vector_key(keys[0])
+    } else {
+        router.route_key(keys[0])
+    };
     for key in keys.iter().skip(1) {
-        let route = router.route_key(key);
+        let route = if command.uses_vector_shard() {
+            router.route_vector_key(key)
+        } else {
+            router.route_key(key)
+        };
         if route.shard_id != first_route.shard_id {
             return Err(ShardCacheClientError::Config(format!(
                 "{} keys span multiple direct shards",

@@ -1,6 +1,6 @@
 use crate::commands::redis::{
     bulk, eq_ignore_ascii_case, error, int, optional_string_value, parse_f64, parse_i64, parse_u64,
-    wrong_arity,
+    value_digest_hex, wrong_arity,
 };
 use crate::protocol::Frame;
 use crate::storage::{EmbeddedStore, now_millis};
@@ -30,7 +30,7 @@ impl crate::commands::redis::RedisCommand for Digest {
             return wrong_arity("DIGEST");
         };
         match optional_string_value(store, key, true) {
-            Ok(Some(value)) => bulk(value_digest_hex(&value).into_bytes()),
+            Ok(Some(value)) => bulk(value_digest_hex(&value).to_vec()),
             Ok(None) => Frame::Null,
             Err(frame) => frame,
         }
@@ -209,10 +209,10 @@ impl ValueCondition<'_> {
             Self::Eq(expected) => value == expected,
             Self::Ne(expected) => value != expected,
             Self::DigestEq(expected) => value_digest_hex(value)
-                .as_bytes()
+                .as_slice()
                 .eq_ignore_ascii_case(expected),
             Self::DigestNe(expected) => !value_digest_hex(value)
-                .as_bytes()
+                .as_slice()
                 .eq_ignore_ascii_case(expected),
         }
     }
@@ -492,8 +492,4 @@ fn format_number(value: f64) -> String {
     } else {
         value.to_string()
     }
-}
-
-fn value_digest_hex(value: &[u8]) -> String {
-    format!("{:016x}", xxhash_rust::xxh3::xxh3_64(value))
 }

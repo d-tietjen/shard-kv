@@ -19,7 +19,7 @@ impl FlatMap {
         self.reclaim_retired_if_quiescent();
         let Some(entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             return self.remove_remote_value_hashed(hash, key, now_ms);
@@ -63,7 +63,7 @@ impl FlatMap {
         self.reclaim_retired_if_quiescent();
         let Some(entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             return self.delete_remote_hashed(hash, key, reason);
@@ -95,7 +95,7 @@ impl FlatMap {
         self.disable_fast_point_map();
         let Some(entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             return self.delete_remote_hashed(hash, key, reason);
@@ -118,7 +118,7 @@ impl FlatMap {
 
     pub(super) fn evict_or_offload_hashed(&mut self, hash: u64, key: &[u8], now_ms: u64) -> bool {
         match self.try_offload_hashed(hash, key, now_ms) {
-            ObjectOffloadAttempt::Offloaded => true,
+            ObjectOffloadAttempt::Pending => false,
             ObjectOffloadAttempt::NotEligible | ObjectOffloadAttempt::FailedEvictResident => {
                 self.delete_hashed_internal(hash, key, now_ms, DeleteReason::Evicted)
             }
@@ -128,12 +128,15 @@ impl FlatMap {
     }
 
     fn try_offload_hashed(&mut self, hash: u64, key: &[u8], now_ms: u64) -> ObjectOffloadAttempt {
+        if self.pending_object_offloads.contains_key(key) {
+            return ObjectOffloadAttempt::Pending;
+        }
         let Some(object_overflow) = self.object_overflow.clone() else {
             return ObjectOffloadAttempt::NotEligible;
         };
         let Some(entry_ref) = self
             .entries
-            .find(hash, |entry| entry.matches(hash, key))
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
             .filter(|entry| !entry.is_expired(now_ms))
         else {
             return ObjectOffloadAttempt::NotEligible;
@@ -164,8 +167,10 @@ impl FlatMap {
             hash,
             self.object_overflow_sequence.wrapping_add(1),
         );
-        let object = match object_overflow.put_value(&object_key, entry_ref.value.as_ref()) {
-            Ok(object) => object,
+        let source_value = entry_ref.value.clone();
+        let key_bytes = entry_ref.key.clone();
+        let ticket = match object_overflow.enqueue_put_value(&object_key, source_value.clone()) {
+            Ok(ticket) => ticket,
             Err(_) => {
                 self.object_overflow_stats.offload_failures = self
                     .object_overflow_stats
@@ -182,47 +187,28 @@ impl FlatMap {
             }
         };
         self.object_overflow_sequence = self.object_overflow_sequence.wrapping_add(1);
-
-        let Some(entry) = self
-            .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
-            .ok()
-        else {
-            return ObjectOffloadAttempt::NotEligible;
-        };
-        let removed_bytes = entry.get().stored_bytes();
-        let (removed, _) = entry.remove();
-        let remote = RemoteEntry {
-            hash: removed.hash,
-            key_len: removed.key_len,
-            key: removed.key.clone(),
-            object,
-            expire_at_ms: removed.expire_at_ms,
-            governance: removed.governance,
-        };
-        let remote_bytes = remote.stored_bytes();
-        self.stored_bytes = self
-            .stored_bytes
-            .saturating_sub(removed_bytes)
-            .saturating_add(remote_bytes);
-        self.remote_value_bytes = self.remote_value_bytes.saturating_add(removed.value.len());
-        self.retire_value(removed.value);
-        self.remote_entries
-            .insert(remote.key.as_ref().to_vec(), remote);
-        self.evictions = self.evictions.saturating_add(1);
-        self.object_overflow_stats.offload_successes = self
-            .object_overflow_stats
-            .offload_successes
-            .saturating_add(1);
-        ObjectOffloadAttempt::Offloaded
+        self.pending_object_offloads.insert(
+            key_bytes.as_ref().to_vec(),
+            PendingObjectOffload {
+                hash,
+                key: key_bytes,
+                source_value,
+                ticket,
+            },
+        );
+        ObjectOffloadAttempt::Pending
     }
 
+    #[inline]
     pub(super) fn delete_remote_hashed(
         &mut self,
         hash: u64,
         key: &[u8],
         reason: DeleteReason,
     ) -> bool {
+        if self.remote_entries.is_empty() {
+            return false;
+        }
         let Some(remote) = self.remote_entries.remove(key) else {
             return false;
         };
@@ -264,13 +250,14 @@ impl FlatMap {
             let _ = self.delete_remote_hashed(hash, key, DeleteReason::Explicit);
             return None;
         }
-        let bytes = self
-            .object_overflow
-            .as_ref()?
-            .get_value(&remote.object)
-            .ok()?;
-        let _ = self.delete_remote_hashed(hash, key, DeleteReason::Explicit);
-        Some(bytes)
+        let plan = self.prepare_object_fault_hashed(hash, key, now_ms, false)?;
+        let result = plan.fetch();
+        let value = self
+            .finish_object_fault(plan, result, now_ms)
+            .ok()
+            .flatten()?;
+        let _ = self.delete_hashed_internal(hash, key, now_ms, DeleteReason::Explicit);
+        Some(value)
     }
 
     pub(super) fn delete_remote_object(&mut self, object: &ObjectValueRef) {
@@ -284,7 +271,10 @@ impl FlatMap {
             .object_overflow_stats
             .remote_delete_attempts
             .saturating_add(1);
-        if object_overflow.delete_value(&object.object_key).is_err() {
+        if object_overflow
+            .enqueue_delete_value(&object.object_key)
+            .is_err()
+        {
             self.object_overflow_stats.remote_delete_failures = self
                 .object_overflow_stats
                 .remote_delete_failures
@@ -292,10 +282,178 @@ impl FlatMap {
         }
     }
 
+    pub(super) fn process_object_overflow_completions(&mut self, now_ms: u64) {
+        let Some(runtime) = self.object_overflow.clone() else {
+            self.pending_object_offloads.clear();
+            self.pending_object_faults = 0;
+            self.pending_object_fault_bytes = 0;
+            return;
+        };
+
+        let offload_keys = self
+            .pending_object_offloads
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in offload_keys {
+            let Some(pending) = self.pending_object_offloads.remove(key.as_slice()) else {
+                continue;
+            };
+            let Some(result) = runtime.poll_put_value(&pending.ticket) else {
+                self.pending_object_offloads.insert(key, pending);
+                continue;
+            };
+            let object = match result {
+                Ok(object) => object,
+                Err(_) => {
+                    self.object_overflow_stats.offload_failures = self
+                        .object_overflow_stats
+                        .offload_failures
+                        .saturating_add(1);
+                    if runtime.failure_policy() == ObjectOverflowFailurePolicy::EvictResident
+                        && self
+                            .entries
+                            .find(local_table_hash(pending.hash), |entry| {
+                                entry.matches(pending.hash, &pending.key)
+                                    && entry.value == pending.source_value
+                            })
+                            .is_some()
+                    {
+                        let _ = self.delete_hashed_internal(
+                            pending.hash,
+                            &pending.key,
+                            now_ms,
+                            DeleteReason::Evicted,
+                        );
+                    }
+                    continue;
+                }
+            };
+            let is_current = self
+                .entries
+                .find(local_table_hash(pending.hash), |entry| {
+                    entry.matches(pending.hash, &pending.key)
+                        && entry.value == pending.source_value
+                        && !entry.is_expired(now_ms)
+                })
+                .is_some();
+            if !is_current {
+                let _ = runtime.enqueue_delete_value(&object.object_key);
+                continue;
+            }
+            let entry = self
+                .entries
+                .find_entry(local_table_hash(pending.hash), |entry| {
+                    entry.matches(pending.hash, &pending.key)
+                })
+                .expect("validated pending object entry");
+            let removed_bytes = entry.get().stored_bytes();
+            let (removed, _) = entry.remove();
+            let remote = RemoteEntry {
+                hash: removed.hash,
+                key_len: removed.key_len,
+                key: removed.key.clone(),
+                object,
+                expire_at_ms: removed.expire_at_ms,
+                governance: removed.governance,
+            };
+            let remote_bytes = remote.stored_bytes();
+            self.stored_bytes = self
+                .stored_bytes
+                .saturating_sub(removed_bytes)
+                .saturating_add(remote_bytes);
+            self.remote_value_bytes = self.remote_value_bytes.saturating_add(removed.value.len());
+            self.retire_value(removed.value);
+            self.remote_entries
+                .insert(remote.key.as_ref().to_vec(), remote);
+            self.evictions = self.evictions.saturating_add(1);
+            self.object_overflow_stats.offload_successes = self
+                .object_overflow_stats
+                .offload_successes
+                .saturating_add(1);
+        }
+    }
+
+    pub(crate) fn finish_object_fault(
+        &mut self,
+        plan: ObjectFaultPlan,
+        result: crate::Result<SharedBytes>,
+        now_ms: u64,
+    ) -> crate::Result<Option<SharedBytes>> {
+        self.pending_object_faults = self.pending_object_faults.saturating_sub(1);
+        self.pending_object_fault_bytes = self
+            .pending_object_fault_bytes
+            .saturating_sub(plan.reserved_bytes);
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.object_overflow_stats.fault_failures =
+                    self.object_overflow_stats.fault_failures.saturating_add(1);
+                if matches!(error, ShardCacheError::ObjectIntegrity(_)) {
+                    self.object_overflow_stats.checksum_failures = self
+                        .object_overflow_stats
+                        .checksum_failures
+                        .saturating_add(1);
+                }
+                return Err(error);
+            }
+        };
+
+        let current = self
+            .remote_entries
+            .get(plan.key.as_ref())
+            .is_some_and(|remote| {
+                remote.matches(plan.hash, &plan.key) && remote.object == plan.object
+            });
+        if current {
+            let expired = self
+                .remote_entries
+                .get(plan.key.as_ref())
+                .is_some_and(|remote| remote.is_expired(now_ms));
+            if expired {
+                let _ = self.delete_remote_hashed(plan.hash, &plan.key, DeleteReason::Expired);
+                self.object_overflow_stats.fault_successes =
+                    self.object_overflow_stats.fault_successes.saturating_add(1);
+                return Ok(None);
+            } else {
+                let remote = self
+                    .remote_entries
+                    .get(plan.key.as_ref())
+                    .expect("validated remote object fault");
+                let expire_at_ms = remote.expire_at_ms;
+                let governance = remote.governance.clone();
+                let key_bytes = remote.key.as_ref().to_vec();
+                let _ = self.delete_remote_hashed(plan.hash, &plan.key, DeleteReason::Explicit);
+                let memory_limit = self.memory_limit_bytes.take();
+                self.set_bytes_hashed_with_governance_option(
+                    plan.hash,
+                    &key_bytes,
+                    value.clone(),
+                    governance,
+                    expire_at_ms,
+                    now_ms,
+                );
+                self.memory_limit_bytes = memory_limit;
+                if self
+                    .memory_limit_bytes
+                    .is_some_and(|limit| self.stored_bytes > limit)
+                {
+                    let _ = self.try_offload_hashed(plan.hash, &key_bytes, now_ms);
+                }
+            }
+        }
+        self.object_overflow_stats.fault_successes =
+            self.object_overflow_stats.fault_successes.saturating_add(1);
+        Ok(Some(value))
+    }
+
     pub fn ttl_seconds(&mut self, key: &[u8], now_ms: u64) -> i64 {
         self.disable_fast_point_map();
         let hash = hash_key(key);
-        let Some(entry) = self.entries.find(hash, |entry| entry.matches(hash, key)) else {
+        let Some(entry) = self
+            .entries
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
+        else {
             return self.remote_ttl(hash, key, now_ms, true);
         };
         let Some(expire_at_ms) = entry.expire_at_ms else {
@@ -311,7 +469,10 @@ impl FlatMap {
     pub fn ttl_millis(&mut self, key: &[u8], now_ms: u64) -> i64 {
         self.disable_fast_point_map();
         let hash = hash_key(key);
-        let Some(entry) = self.entries.find(hash, |entry| entry.matches(hash, key)) else {
+        let Some(entry) = self
+            .entries
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
+        else {
             return self.remote_ttl(hash, key, now_ms, false);
         };
         let Some(expire_at_ms) = entry.expire_at_ms else {
@@ -354,7 +515,7 @@ impl FlatMap {
 
         let Some(mut entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             let Some(remote) = self.remote_entries.get_mut(key) else {
@@ -388,7 +549,7 @@ impl FlatMap {
 
         let Some(mut entry) = self
             .entries
-            .find_entry(hash, |entry| entry.matches(hash, key))
+            .find_entry(local_table_hash(hash), |entry| entry.matches(hash, key))
             .ok()
         else {
             let Some(remote) = self.remote_entries.get_mut(key) else {
@@ -410,6 +571,122 @@ impl FlatMap {
 
     pub fn snapshot_entries(&self, now_ms: u64) -> Vec<StoredEntry> {
         self.try_snapshot_entries(now_ms).unwrap_or_default()
+    }
+
+    pub(crate) fn snapshot_entry_keys(
+        &self,
+        now_ms: u64,
+        deadline: Option<std::time::Instant>,
+        max_retained_bytes: usize,
+    ) -> crate::Result<Vec<Bytes>> {
+        let mut keys = Vec::new();
+        let mut retained_bytes = 0usize;
+        for (index, entry) in self.entries.iter().enumerate() {
+            if index % 256 == 0
+                && deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            {
+                return Err(ShardCacheError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "snapshot key capture deadline exceeded",
+                )));
+            }
+            if !entry.is_expired(now_ms) {
+                retained_bytes = retained_bytes
+                    .checked_add(std::mem::size_of::<Bytes>())
+                    .and_then(|bytes| bytes.checked_add(entry.key.len()))
+                    .filter(|bytes| *bytes <= max_retained_bytes)
+                    .ok_or_else(|| {
+                        ShardCacheError::Persistence(format!(
+                            "snapshot key index exceeds retained-byte limit {max_retained_bytes}"
+                        ))
+                    })?;
+                keys.push(entry.key.as_ref().to_vec());
+            }
+        }
+        for (index, entry) in self.remote_entries.values().enumerate() {
+            if index % 256 == 0
+                && deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+            {
+                return Err(ShardCacheError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "snapshot key capture deadline exceeded",
+                )));
+            }
+            if !entry.is_expired(now_ms) {
+                retained_bytes = retained_bytes
+                    .checked_add(std::mem::size_of::<Bytes>())
+                    .and_then(|bytes| bytes.checked_add(entry.key.len()))
+                    .filter(|bytes| *bytes <= max_retained_bytes)
+                    .ok_or_else(|| {
+                        ShardCacheError::Persistence(format!(
+                            "snapshot key index exceeds retained-byte limit {max_retained_bytes}"
+                        ))
+                    })?;
+                keys.push(entry.key.as_ref().to_vec());
+            }
+        }
+        Ok(keys)
+    }
+
+    pub(crate) fn snapshot_entry_source_page(
+        &self,
+        keys: &[Bytes],
+        start: usize,
+        max_retained_bytes: usize,
+        now_ms: u64,
+    ) -> crate::Result<(Vec<SnapshotEntrySource>, usize)> {
+        let mut sources = Vec::new();
+        let mut retained_bytes = 0usize;
+        let mut consumed = 0usize;
+        for key in &keys[start..] {
+            let hash = hash_key(key);
+            let source = if let Some(entry) = self.entries.find(local_table_hash(hash), |entry| {
+                entry.matches(hash, key) && !entry.is_expired(now_ms)
+            }) {
+                Some(SnapshotEntrySource::Resident(StoredEntry {
+                    key: entry.key.as_ref().to_vec(),
+                    value: entry.value.as_ref().to_vec(),
+                    expire_at_ms: entry.expire_at_ms,
+                    governance: entry.governance.as_deref().map(<[u8]>::to_vec),
+                }))
+            } else if let Some(entry) = self
+                .remote_entries
+                .get(key)
+                .filter(|entry| entry.matches(hash, key) && !entry.is_expired(now_ms))
+            {
+                let runtime = self.object_overflow.clone().ok_or_else(|| {
+                    ShardCacheError::Persistence(
+                        "object overflow remote entry exists without runtime".into(),
+                    )
+                })?;
+                Some(SnapshotEntrySource::Remote {
+                    key: entry.key.as_ref().to_vec(),
+                    object: entry.object.clone(),
+                    expire_at_ms: entry.expire_at_ms,
+                    governance: entry.governance.clone(),
+                    runtime: Box::new(runtime),
+                })
+            } else {
+                None
+            };
+            consumed += 1;
+            let Some(source) = source else {
+                continue;
+            };
+            let source_bytes = source.retained_bytes();
+            if !sources.is_empty()
+                && retained_bytes.saturating_add(source_bytes) > max_retained_bytes
+            {
+                consumed -= 1;
+                break;
+            }
+            retained_bytes = retained_bytes.saturating_add(source_bytes);
+            sources.push(source);
+            if retained_bytes >= max_retained_bytes {
+                break;
+            }
+        }
+        Ok((sources, consumed))
     }
 
     pub fn try_snapshot_entries(&self, now_ms: u64) -> crate::Result<Vec<StoredEntry>> {
@@ -531,10 +808,10 @@ impl FlatMap {
         &self,
         now_ms: u64,
         visit: &mut impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
-    ) -> bool {
+    ) -> crate::Result<bool> {
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
-            return self.fast_points.visit_entries(visit);
+            return Ok(self.fast_points.visit_entries(visit));
         }
 
         for entry in self
@@ -543,30 +820,24 @@ impl FlatMap {
             .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
         {
             if !visit(entry.key.as_ref(), entry.value.as_ref(), entry.expire_at_ms) {
-                return false;
+                return Ok(false);
             }
         }
-        for entry in self
+        if self
             .remote_entries
             .values()
-            .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
+            .any(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
         {
-            let Some(value) = self
-                .object_overflow
-                .as_ref()
-                .and_then(|overflow| overflow.get_value(&entry.object).ok())
-            else {
-                continue;
-            };
-            if !visit(entry.key.as_ref(), value.as_ref(), entry.expire_at_ms) {
-                return false;
-            }
+            return Err(ShardCacheError::Persistence(
+                "remote object-overflow values require the fallible snapshot visitor".into(),
+            ));
         }
-        true
+        Ok(true)
     }
 
     pub fn process_maintenance(&mut self, now_ms: u64) -> usize {
         self.reclaim_retired_if_quiescent();
+        self.process_object_overflow_completions(now_ms);
         if self.ttl_entries == 0 {
             return 0;
         }

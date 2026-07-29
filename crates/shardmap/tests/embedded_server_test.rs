@@ -1,20 +1,19 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use shardmap::config::{
-    ReplicationCompression, ReplicationConfig, ReplicationRole, ReplicationSendPolicy,
-    ServerEndpointMode,
-};
+use shardcache_client_rs::{ShardCacheClient, ShardCacheDirectRouter, VAddOptions, VSimOptions};
+use shardmap::config::ServerEndpointMode;
 use shardmap::protocol::{FastCodec, FastCommand, FastRequest, FastResponse, Frame};
-use shardmap::replication::{ReplicatedEmbeddedStore, ReplicationReplicaClient};
 use shardmap::storage::{
     EmbeddedStore, hash_key, take_local_embedded_store, with_local_embedded_store,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use common::{send_command, test_config};
+
+static SERVER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn fast_request<'a>(command: FastCommand<'a>, key: Option<&'a [u8]>) -> FastRequest<'a> {
     FastRequest {
@@ -60,7 +59,7 @@ fn key_for_shard(store: &EmbeddedStore, shard_id: usize) -> Vec<u8> {
     panic!("unable to find key for shard {shard_id}");
 }
 
-fn free_consecutive_ports() -> (u16, u16) {
+fn reserve_consecutive_ports() -> (std::net::TcpListener, std::net::TcpListener) {
     for _ in 0..100 {
         let first = std::net::TcpListener::bind("127.0.0.1:0").expect("bind first port");
         let first_port = first.local_addr().expect("first addr").port();
@@ -68,17 +67,59 @@ fn free_consecutive_ports() -> (u16, u16) {
             continue;
         };
         let second_addr = format!("127.0.0.1:{second_port}");
-        if let Ok(second) = std::net::TcpListener::bind(&second_addr) {
-            drop(second);
-            drop(first);
-            return (first_port, second_port);
+        if let Ok(second) = std::net::TcpListener::bind(second_addr) {
+            return (first, second);
         }
     }
     panic!("unable to find consecutive free ports");
 }
 
+fn free_consecutive_ports() -> (u16, u16) {
+    let (first, second) = reserve_consecutive_ports();
+    let ports = (
+        first.local_addr().expect("first addr").port(),
+        second.local_addr().expect("second addr").port(),
+    );
+    drop(second);
+    drop(first);
+    ports
+}
+
+fn free_consecutive_ports_for_shards(shard_count: usize) -> (u16, u16) {
+    for _ in 0..100 {
+        let first = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fanout port");
+        let first_port = first.local_addr().expect("fanout addr").port();
+        let mut listeners = vec![first];
+        let mut complete = true;
+        for offset in 1..=shard_count {
+            let Ok(offset) = u16::try_from(offset) else {
+                complete = false;
+                break;
+            };
+            let Some(port) = first_port.checked_add(offset) else {
+                complete = false;
+                break;
+            };
+            match std::net::TcpListener::bind(("127.0.0.1", port)) {
+                Ok(listener) => listeners.push(listener),
+                Err(_) => {
+                    complete = false;
+                    break;
+                }
+            }
+        }
+        if complete {
+            let direct_port = first_port + 1;
+            drop(listeners);
+            return (first_port, direct_port);
+        }
+    }
+    panic!("unable to find fanout and direct shard port range");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn embedded_store_can_be_exposed_as_tcp_server() {
+    let _test_guard = SERVER_TEST_LOCK.lock().await;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -158,6 +199,7 @@ async fn embedded_store_can_be_exposed_as_tcp_server() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn embedded_server_direct_shard_endpoint_shares_store_memory() {
+    let _test_guard = SERVER_TEST_LOCK.lock().await;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -223,7 +265,174 @@ async fn embedded_server_direct_shard_endpoint_shares_store_memory() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn typed_scnp_vector_client_round_trips_fanout_and_direct_shard() {
+    let _test_guard = SERVER_TEST_LOCK.lock().await;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let temp_dir = tempfile::TempDir::new().unwrap();
+            let shard_count = 4;
+            let (fanout_port, direct_port) = free_consecutive_ports_for_shards(shard_count);
+            let mut config = test_config(temp_dir.path().join("typed-vector-client"), false);
+            config.bind_addr = format!("127.0.0.1:{fanout_port}");
+            config.shard_count = shard_count;
+            config.persistence.enabled = false;
+            config.server_endpoint_mode = ServerEndpointMode::DirectShard;
+
+            let store = Arc::new(EmbeddedStore::new(shard_count));
+            let vector_key = key_for_shard(&store, 2);
+            let server =
+                shardmap::server::ShardCacheServer::from_embedded_store(config.clone(), store);
+            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+            let join = tokio::task::spawn_local(async move {
+                server
+                    .run_with_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+            });
+
+            let fanout_addr = config.bind_addr.clone();
+            let direct_addr = format!("127.0.0.1:{direct_port}");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let fanout_ready = tokio::net::TcpStream::connect(&fanout_addr).await.is_ok();
+                let direct_ready = tokio::net::TcpStream::connect(&direct_addr).await.is_ok();
+                if fanout_ready && direct_ready {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "typed vector server did not start in time"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+
+            tokio::task::spawn_blocking(move || {
+                let timeout = Duration::from_secs(2);
+                let mut client = ShardCacheClient::connect_with_timeouts_and_auth(
+                    &fanout_addr,
+                    timeout,
+                    timeout,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(client.ping().unwrap(), b"PONG");
+                assert!(
+                    client
+                        .vadd(
+                            &vector_key,
+                            b"doc-a",
+                            &[1.0, 0.0],
+                            VAddOptions::new()
+                                .attributes(br#"{"kind":"a"}"#)
+                                .governance_metadata(b"tenant=acme"),
+                        )
+                        .unwrap()
+                );
+                assert!(
+                    client
+                        .vadd(
+                            &vector_key,
+                            b"doc-b",
+                            &[0.0, 1.0],
+                            VAddOptions::new().attributes(br#"{"kind":"b"}"#),
+                        )
+                        .unwrap()
+                );
+                let matches = client
+                    .vsim(
+                        &vector_key,
+                        &[1.0, 0.0],
+                        VSimOptions::new()
+                            .count(2)
+                            .exact(true)
+                            .allow_governance(b"tenant=acme")
+                            .with_governance(true),
+                    )
+                    .unwrap();
+                assert_eq!(matches.len(), 2);
+                assert_eq!(matches[0].element, b"doc-a");
+                assert!((matches[0].score - 1.0).abs() < 1e-6);
+                assert_eq!(
+                    matches[0].attributes.as_deref(),
+                    Some(br#"{"kind":"a"}"#.as_slice())
+                );
+                assert_eq!(
+                    matches[0].governance.as_deref(),
+                    Some(b"tenant=acme".as_slice())
+                );
+                assert!(matches[1].governance.is_none());
+
+                let router = ShardCacheDirectRouter::new(&direct_addr, shard_count).unwrap();
+                let mut direct = router
+                    .connect_shard_with_timeouts_and_auth(0, timeout, timeout, None)
+                    .unwrap();
+                assert_eq!(direct.ping().unwrap(), b"PONG");
+                let direct_matches = direct
+                    .vsim(
+                        &vector_key,
+                        &[0.0, 1.0],
+                        VSimOptions::new().count(1).exact(true),
+                    )
+                    .unwrap();
+                assert_eq!(direct_matches[0].element, b"doc-b");
+                assert!(!direct.vrem(&vector_key, b"doc-a").unwrap());
+                assert!(
+                    direct
+                        .vrem_governed(&vector_key, b"doc-a", b"tenant=acme")
+                        .unwrap()
+                );
+                assert!(!direct.vrem(&vector_key, b"doc-a").unwrap());
+            })
+            .await
+            .unwrap();
+
+            shutdown_tx.send(()).unwrap();
+            join.await.unwrap().unwrap();
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn embedded_server_reports_direct_shard_bind_failure() {
+    let _test_guard = SERVER_TEST_LOCK.lock().await;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let (fanout_reservation, direct_reservation) = reserve_consecutive_ports();
+    let fanout_port = fanout_reservation.local_addr().unwrap().port();
+    let direct_port = direct_reservation.local_addr().unwrap().port();
+    assert_eq!(direct_port, fanout_port + 1);
+    drop(fanout_reservation);
+
+    let mut config = test_config(temp_dir.path().join("embedded-direct-bind-failure"), false);
+    config.bind_addr = format!("127.0.0.1:{fanout_port}");
+    config.shard_count = 1;
+    config.persistence.enabled = false;
+    config.server_endpoint_mode = ServerEndpointMode::DirectShard;
+
+    let server = shardmap::server::ShardCacheServer::from_embedded_store(
+        config,
+        Arc::new(EmbeddedStore::new(1)),
+    );
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        server.run_with_shutdown(std::future::pending()),
+    )
+    .await
+    .expect("direct-shard bind failure should return immediately");
+    let error = result.expect_err("occupied direct-shard port must fail startup");
+    assert!(matches!(
+        error,
+        shardmap::ShardCacheError::Io(ref source)
+            if source.kind() == std::io::ErrorKind::AddrInUse
+    ));
+
+    drop(direct_reservation);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn thread_local_embedded_store_can_be_exposed_as_tcp_server() {
+    let _test_guard = SERVER_TEST_LOCK.lock().await;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -305,6 +514,7 @@ async fn thread_local_embedded_store_can_be_exposed_as_tcp_server() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn embedded_public_server_rejects_cross_shard_commands() {
+    let _test_guard = SERVER_TEST_LOCK.lock().await;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -369,65 +579,4 @@ async fn embedded_public_server_rejects_cross_shard_commands() {
             join.await.unwrap().unwrap();
         })
         .await;
-}
-
-#[test]
-fn replicated_embedded_store_can_serve_read_replica() {
-    let addr = format!("127.0.0.1:{}", common::free_port());
-    let primary_config = ReplicationConfig {
-        enabled: true,
-        role: ReplicationRole::Primary,
-        bind_addr: addr.clone(),
-        compression: ReplicationCompression::None,
-        send_policy: ReplicationSendPolicy::Immediate,
-        batch_max_records: 1,
-        batch_max_delay_us: 1_000,
-        snapshot_chunk_bytes: 4 * 1024,
-        ..ReplicationConfig::default()
-    };
-    let primary = Arc::new(
-        ReplicatedEmbeddedStore::new(4, primary_config.clone()).expect("replicated primary"),
-    );
-    primary.set(b"before-connect".to_vec(), b"snapshot-value".to_vec(), None);
-
-    let server = primary
-        .serve_replicas(primary_config)
-        .expect("replication listener");
-    let replica = ReplicationReplicaClient::start(ReplicationConfig {
-        enabled: true,
-        role: ReplicationRole::Replica,
-        replica_of: Some(addr),
-        compression: ReplicationCompression::None,
-        ..ReplicationConfig::default()
-    })
-    .expect("replica client");
-
-    assert_eq!(
-        await_replica_value(&replica, b"before-connect", Duration::from_secs(3)),
-        Some(b"snapshot-value".to_vec())
-    );
-
-    primary.set(b"after-connect".to_vec(), b"streamed-value".to_vec(), None);
-    assert_eq!(
-        await_replica_value(&replica, b"after-connect", Duration::from_secs(3)),
-        Some(b"streamed-value".to_vec())
-    );
-
-    replica.shutdown().ok();
-    server.shutdown().ok();
-}
-
-fn await_replica_value(
-    client: &ReplicationReplicaClient,
-    key: &[u8],
-    timeout: Duration,
-) -> Option<Vec<u8>> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if let Some(value) = client.replica().lock().get(key) {
-            return Some(value);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    None
 }

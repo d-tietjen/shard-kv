@@ -68,8 +68,15 @@ pub use embedded_store::{
     OwnedEmbeddedShard, OwnedEmbeddedWorkerReadSession, OwnedEmbeddedWorkerShards,
     PackedSessionWrite, shift_for, stripe_index,
 };
+#[doc(hidden)]
+pub use embedded_store::{
+    EmbeddedSnapshotIterator, PointMutationFn, PointMutationKind, PointMutationValidatorFn,
+};
 #[cfg(feature = "redis-modules")]
 pub use embedded_store::{RedisModuleApi, RedisModuleApiResult, RedisModuleFamily};
+#[cfg(feature = "redis")]
+#[doc(hidden)]
+pub use embedded_store::{VectorMutationFn, VectorMutationKind, VectorMutationValidatorFn};
 #[cfg(feature = "sharded")]
 pub use embedded_store_sharded::{
     LocalRouteError, LocalStoreAccessError, LocalStoreInstallError,
@@ -105,7 +112,8 @@ pub(crate) use engine::{
     ExpirationChange, RESP_SPANNED_VALUE_MIN, ShardKey, ShardOperation, ShardReply, ShardValue,
 };
 pub use flat_map::FlatMap;
-pub(crate) use flat_map::GovernedRead;
+pub(crate) use flat_map::SnapshotEntrySource;
+pub(crate) use flat_map::{GovernedObjectFault, GovernedRead};
 #[cfg(feature = "kv-overflow-redis")]
 pub use kv_overflow::RedisKvOverflowNode;
 #[cfg(feature = "kv-overflow")]
@@ -114,6 +122,9 @@ pub use kv_overflow::{
     KvOverflowOptions, KvOverflowPrimaryOwnershipSnapshot, KvOverflowPutRequest, KvOverflowStore,
     KvOverflowValue, ScnpKvOverflowNode,
 };
+#[cfg(feature = "object-overflow")]
+pub use object_overflow::FileObjectOverflowStore;
+pub(crate) use object_overflow::ObjectOverflowTicket;
 pub use object_overflow::{
     ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore, ObjectValueRef,
 };
@@ -123,12 +134,12 @@ pub(crate) use redis_objects::{
     HashFieldExpireCond, HashFieldGetExpireAction, HashFieldSetCondition, HashFieldSetExpireAction,
 };
 #[cfg(feature = "redis")]
+pub use redis_objects::{RedisKeyError, RedisObjectError, RedisObjectResult, RedisStringLookup};
+#[cfg(feature = "redis")]
 pub(crate) use redis_objects::{
     RedisObjectBucket, RedisObjectReadOutcome, RedisObjectStore, RedisObjectValue,
     RedisObjectWriteAttempt, RedisObjectZSetRangeItem, WRONGTYPE_MESSAGE,
 };
-#[cfg(feature = "redis")]
-pub use redis_objects::{RedisObjectError, RedisObjectResult, RedisStringLookup};
 pub use semantic::{SemanticCacheError, SemanticMatch};
 pub(crate) use semantic::{
     SemanticEmbedding, SemanticIndex, SemanticIndexCandidate, SemanticIndexToken,
@@ -139,8 +150,8 @@ pub use stats::{
     WalStatsSnapshot,
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::Once;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Once, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(feature = "telemetry")]
@@ -154,11 +165,18 @@ pub use telemetry::{
 /// Owned byte buffer used for cache keys and values.
 pub type Bytes = Vec<u8>;
 #[cfg(feature = "redis")]
-pub(crate) const VECTOR_SET_PREFIX: &[u8] = b"FC:VSET:v1\0";
-/// Hash map with the crate's default XXH3 hasher.
-pub type FastHashMap<K, V> = HashMap<K, V, xxhash_rust::xxh3::Xxh3DefaultBuilder>;
-/// Hash set with the crate's default XXH3 hasher.
-pub type FastHashSet<T> = HashSet<T, xxhash_rust::xxh3::Xxh3DefaultBuilder>;
+#[doc(hidden)]
+pub const VECTOR_SET_PREFIX: &[u8] = b"FC:VSET:v1\0";
+/// Randomly keyed high-throughput hash builder for process-local tables.
+///
+/// Routing remains on stable XXH3. Local tables use per-instance random keys so
+/// callers cannot precompute bucket collisions from shardcache's public routing
+/// algorithm.
+pub type FastHashBuilder = ahash::RandomState;
+/// Hash map with the crate's randomly keyed high-throughput hasher.
+pub type FastHashMap<K, V> = HashMap<K, V, FastHashBuilder>;
+/// Hash set with the crate's randomly keyed high-throughput hasher.
+pub type FastHashSet<T> = HashSet<T, FastHashBuilder>;
 
 /// A packed copy-out batch result.
 ///
@@ -242,6 +260,27 @@ pub fn hash_key(key: &[u8]) -> u64 {
     xxhash_rust::xxh3::xxh3_64(key)
 }
 
+/// Re-keys a stable route hash for process-local raw hash tables.
+///
+/// The returned value must never be persisted or sent over the wire. Exact-key
+/// comparisons still resolve collisions in every raw-table lookup.
+#[inline(always)]
+pub(crate) fn local_table_hash(route_hash: u64) -> u64 {
+    local_table_hasher_ref().hash_one(route_hash)
+}
+
+/// Returns the process-local builder used by raw maps that re-key route hashes.
+#[cfg(feature = "kv-overflow")]
+pub(crate) fn local_table_hasher() -> FastHashBuilder {
+    local_table_hasher_ref().clone()
+}
+
+#[inline(always)]
+fn local_table_hasher_ref() -> &'static FastHashBuilder {
+    static HASH_BUILDER: OnceLock<FastHashBuilder> = OnceLock::new();
+    HASH_BUILDER.get_or_init(FastHashBuilder::default)
+}
+
 /// Computes the key tag associated with an already-computed primary key hash.
 ///
 /// This mirrors hash-table control-byte style filtering without hashing the
@@ -270,7 +309,8 @@ pub fn now_millis() -> u64 {
 /// millisecond from an atomic. If the updater cannot start, callers fall back
 /// to the exact clock.
 #[inline(always)]
-pub(crate) fn ttl_now_millis() -> u64 {
+#[doc(hidden)]
+pub fn ttl_now_millis() -> u64 {
     TTL_CLOCK_START.call_once(start_ttl_clock);
     if TTL_CLOCK_RUNNING.load(Ordering::Relaxed) {
         TTL_CLOCK_MS.load(Ordering::Relaxed)

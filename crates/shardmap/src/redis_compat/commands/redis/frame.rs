@@ -72,6 +72,9 @@ pub(crate) fn optional_string_value(
         crate::storage::RedisStringLookup::Miss => Ok(None),
         crate::storage::RedisStringLookup::WrongType if wrongtype_errors => Err(wrongtype()),
         crate::storage::RedisStringLookup::WrongType => Ok(None),
+        crate::storage::RedisStringLookup::BackendError => {
+            Err(error("ERR object overflow read failed"))
+        }
     }
 }
 
@@ -161,7 +164,7 @@ pub(crate) fn int(value: i64) -> Frame {
 }
 
 #[cfg(feature = "server")]
-pub(super) fn write_fast_frame(out: &mut BytesMut, frame: &Frame) {
+pub(crate) fn write_fast_frame(out: &mut BytesMut, frame: &Frame) {
     match frame {
         Frame::SimpleString(value) => ServerWire::write_fast_value(out, value.as_bytes()),
         Frame::BlobString(value) => ServerWire::write_fast_value(out, value),

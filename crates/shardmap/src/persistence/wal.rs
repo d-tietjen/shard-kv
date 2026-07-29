@@ -162,6 +162,7 @@ impl SegmentWriter {
 
     pub fn flush(&mut self) -> Result<()> {
         self.file.flush()?;
+        self.file.get_ref().sync_data()?;
         Ok(())
     }
 
@@ -176,7 +177,7 @@ impl SegmentWriter {
     }
 
     fn rotate(&mut self) -> Result<()> {
-        self.file.flush()?;
+        self.flush()?;
         self.segment_sequence = self.segment_sequence.saturating_add(1);
         let path = WalSegmentName::path(
             &self.data_dir,

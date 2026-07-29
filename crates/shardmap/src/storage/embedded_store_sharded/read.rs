@@ -45,6 +45,13 @@ impl WorkerLocalEmbeddedStore {
         Ok(self.inner.local_get(key))
     }
 
+    pub(crate) fn try_get_if_local(&mut self, key: &[u8]) -> crate::Result<Option<Bytes>> {
+        self.local_key_route(key).map_err(|error| {
+            crate::ShardCacheError::Command(format!("worker-local GET route failed: {error}"))
+        })?;
+        self.inner.local_try_get(key)
+    }
+
     pub fn get_with_governance_filter<F>(&mut self, key: &[u8], authorize: F) -> Option<Bytes>
     where
         F: FnOnce(Option<&[u8]>) -> bool,

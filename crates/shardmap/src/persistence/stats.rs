@@ -4,6 +4,7 @@ use crate::storage::WalStatsSnapshot;
 
 pub(super) struct WalStats {
     enabled: AtomicBool,
+    blocks_merged: AtomicU64,
     entries_written: AtomicU64,
     segments_rotated: AtomicU64,
     bytes_written: AtomicU64,
@@ -34,6 +35,7 @@ impl WalStats {
     pub(super) fn snapshot(&self) -> WalStatsSnapshot {
         WalStatsSnapshot {
             enabled: self.enabled.load(Ordering::Relaxed),
+            blocks_merged: self.blocks_merged.load(Ordering::Relaxed),
             entries_written: self.entries_written.load(Ordering::Relaxed),
             segments_rotated: self.segments_rotated.load(Ordering::Relaxed),
             bytes_written: self.bytes_written.load(Ordering::Relaxed),
@@ -63,6 +65,10 @@ impl WalStats {
         atomic_add_u64(&self.entries_written, 1);
         atomic_add_u64(&self.bytes_written, bytes as u64);
         atomic_add_u64(&self.segments_rotated, rotations);
+    }
+
+    pub(super) fn record_block_merged(&self) {
+        atomic_add_u64(&self.blocks_merged, 1);
     }
 
     pub(super) fn record_flush(&self, timestamp_ms: u64) {
@@ -115,6 +121,7 @@ impl WalStats {
     fn new(enabled: bool) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
+            blocks_merged: AtomicU64::new(0),
             entries_written: AtomicU64::new(0),
             segments_rotated: AtomicU64::new(0),
             bytes_written: AtomicU64::new(0),
@@ -148,6 +155,7 @@ mod tests {
     #[test]
     fn snapshot_reflects_lock_free_updates() {
         let stats = WalStats::enabled();
+        stats.record_block_merged();
         stats.record_append(128, 2);
         stats.record_flush(42);
         stats.enable_tcp_export();
@@ -163,6 +171,7 @@ mod tests {
         let snapshot = stats.snapshot();
         assert!(snapshot.enabled);
         assert!(snapshot.tcp_export_enabled);
+        assert_eq!(snapshot.blocks_merged, 1);
         assert_eq!(snapshot.entries_written, 1);
         assert_eq!(snapshot.bytes_written, 128);
         assert_eq!(snapshot.segments_rotated, 2);
