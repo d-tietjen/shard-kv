@@ -17,7 +17,7 @@ Use the published crate from crates.io:
 
 ```toml
 [dependencies]
-shardcache-client-rs = "0.8.1"
+shardcache-client-rs = "0.9.0"
 ```
 
 From a workspace checkout, use a path dependency:
@@ -200,7 +200,7 @@ without enabling the complete optional Redis command API:
 
 ```toml
 [dependencies]
-shardcache-client-rs = { version = "0.8.1", features = ["vector"] }
+shardcache-client-rs = { version = "0.9.0", features = ["vector"] }
 ```
 
 `VSIM` always requests `WITHSCORES WITHATTRIBS`, giving every successful query
@@ -282,7 +282,7 @@ building RESP request frames in user code.
 
 ```toml
 [dependencies]
-shardcache-client-rs = { version = "0.8.1", features = ["redis"] }
+shardcache-client-rs = { version = "0.9.0", features = ["redis"] }
 ```
 
 The primary API is the first-party Redis namespace on the client. Common

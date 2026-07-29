@@ -200,9 +200,9 @@ impl RedisStringStore for EmbeddedStore {
         let result =
             shard.transform_value_hashed_no_ttl(route.key_hash, key, now_ms, |existing| {
                 let (result, value) = transform(existing)?;
-                if !self.point_mutation_is_replicable(key, value.len(), None) {
+                if !self.point_mutation_is_accepted(key, value.len(), None) {
                     return Err(crate::commands::redis::error(
-                        "ERR mutation exceeds the configured replication frame limit",
+                        "ERR mutation rejected by an installed storage extension",
                     ));
                 }
                 observed = Some(bytes::Bytes::copy_from_slice(&value));

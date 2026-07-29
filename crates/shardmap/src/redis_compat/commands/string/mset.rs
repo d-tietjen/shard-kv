@@ -19,9 +19,9 @@ impl crate::commands::redis::RedisCommand for MSet {
         }
         if args
             .chunks_exact(2)
-            .any(|pair| !store.point_mutation_is_replicable(pair[0], pair[1].len(), None))
+            .any(|pair| !store.point_mutation_is_accepted(pair[0], pair[1].len(), None))
         {
-            return error("ERR mutation exceeds the configured replication frame limit");
+            return error("ERR mutation rejected by an installed storage extension");
         }
         for pair in args.chunks_exact(2) {
             store.set(pair[0].to_vec(), pair[1].to_vec(), None);
@@ -37,11 +37,11 @@ impl crate::commands::redis::RedisCommand for MSet {
         }
         if args
             .chunks_exact(2)
-            .any(|pair| !store.point_mutation_is_replicable(pair[0], pair[1].len(), None))
+            .any(|pair| !store.point_mutation_is_accepted(pair[0], pair[1].len(), None))
         {
             ServerWire::write_resp_error(
                 out,
-                "ERR mutation exceeds the configured replication frame limit",
+                "ERR mutation rejected by an installed storage extension",
             );
             return;
         }

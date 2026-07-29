@@ -1553,8 +1553,10 @@ fn vector_write_maybe(
             match op(&mut set) {
                 VectorWriteResult::Changed(frame) => {
                     let value = encode_vector_set(&set);
-                    if !store.vector_mutation_is_replicable(key, &value) {
-                        return Err(error("ERR vector state exceeds replication frame limit"));
+                    if !store.vector_mutation_is_accepted(key, &value) {
+                        return Err(error(
+                            "ERR vector state rejected by an installed storage extension",
+                        ));
                     }
                     Ok(((frame, true), value))
                 }
@@ -2507,6 +2509,11 @@ fn decode_vector_set(existing: Option<&[u8]>) -> Result<VectorSetState, ()> {
 
 pub(crate) fn validate_vector_set_bytes(existing: &[u8]) -> Result<(), ()> {
     decode_vector_set(Some(existing)).map(|_| ())
+}
+
+#[doc(hidden)]
+pub fn is_valid_vector_set_bytes(existing: &[u8]) -> bool {
+    validate_vector_set_bytes(existing).is_ok()
 }
 
 pub(crate) fn vector_set_contains_governance(existing: &[u8]) -> Result<bool, ()> {

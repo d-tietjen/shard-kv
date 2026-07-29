@@ -23,10 +23,10 @@ impl RawDirectCommand for Set {
         } = ctx;
         match SetRawArgs::from_args(store, args.as_slice()) {
             SetRawArgs::Ready { key, value, ttl_ms } => {
-                if !store.point_mutation_is_replicable(key, value.len(), None) {
+                if !store.point_mutation_is_accepted(key, value.len(), None) {
                     ServerWire::write_resp_error(
                         out,
-                        "ERR mutation exceeds the configured replication frame limit",
+                        "ERR mutation rejected by an installed storage extension",
                     );
                     return;
                 }
@@ -132,7 +132,7 @@ impl FastDirectCommand for Set {
                 ) {
                     ServerWire::write_fast_error(
                         ctx.out,
-                        "ERR mutation exceeds the configured replication frame limit",
+                        "ERR mutation rejected by an installed storage extension",
                     );
                 } else {
                     ServerWire::write_fast_ok(ctx.out);

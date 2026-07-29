@@ -8,5 +8,3 @@ pub mod range;
 pub mod rank;
 #[path = "../../shardmap/src/redis_compat/commands/formal/transactions.rs"]
 pub mod transactions;
-
-pub mod active_sync_conflict;

@@ -31,7 +31,7 @@ impl crate::commands::redis::RedisCommand for Restore {
                 error("ERR value is not an integer or out of range")
             }
             Err(RestoreError::ReplicationLimit) => {
-                error("ERR vector state exceeds replication frame limit")
+                error("ERR vector state rejected by an installed storage extension")
             }
         }
     }
@@ -263,9 +263,10 @@ fn write_restore_error(out: &mut BytesMut, error: RestoreError) {
         RestoreError::InvalidIdleOrFreq => {
             ServerWire::write_resp_error(out, "ERR value is not an integer or out of range")
         }
-        RestoreError::ReplicationLimit => {
-            ServerWire::write_resp_error(out, "ERR vector state exceeds replication frame limit")
-        }
+        RestoreError::ReplicationLimit => ServerWire::write_resp_error(
+            out,
+            "ERR vector state rejected by an installed storage extension",
+        ),
     }
 }
 

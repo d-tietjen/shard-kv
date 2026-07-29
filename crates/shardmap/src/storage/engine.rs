@@ -15,7 +15,6 @@ use crate::commands::EngineCommandCatalog;
 use crate::config::ShardCacheConfig;
 use crate::persistence::{PersistenceRuntime, load_recovery_state};
 use crate::protocol::{CommandSpanFrame, FastRequest, FastResponse, Frame, RespCodec};
-use crate::replication::{ReplicationBatchBuilder, ReplicationMutation, ReplicationPrimary};
 #[cfg(feature = "parent-telemetry-runtime")]
 use crate::storage::TelemetryRuntime;
 use crate::storage::command::{BorrowedCommand, Command};
@@ -41,7 +40,6 @@ struct EngineInner {
     shard_senders: Vec<Sender<ShardMessage>>,
     shard_threads: Mutex<Vec<JoinHandle<()>>>,
     persistence: PersistenceRuntime,
-    replication: Option<Arc<ReplicationPrimary>>,
     #[cfg(feature = "telemetry")]
     metrics: Option<Arc<CacheTelemetry>>,
 }
@@ -138,13 +136,6 @@ impl ShardValue {
             Self::Shared(value) => value,
         }
     }
-
-    fn len(&self) -> usize {
-        match self {
-            Self::Inline(value) => value.len(),
-            Self::Shared(value) => value.len(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -221,8 +212,6 @@ struct ShardState {
     shard_id: usize,
     map: FlatMap,
     wal: Option<crate::persistence::WalAppender>,
-    replication: Option<Arc<ReplicationPrimary>>,
-    replication_batch: Option<ReplicationBatchBuilder>,
     sequence: u64,
 }
 
@@ -240,7 +229,6 @@ impl EngineHandle {
             let recovery = load_recovery_state(&config.persistence)?;
             let persistence =
                 PersistenceRuntime::start(config.shard_count, config.persistence.clone())?;
-            let replication = start_replication_primary(&config)?;
             let object_overflow = ObjectOverflowRuntime::from_config(&config.object_overflow)?;
             let shift = shift_for(config.shard_count);
             let route_mode = configured_engine_route_mode(&config);
@@ -253,7 +241,6 @@ impl EngineHandle {
                 let shard_entries = recovered.get(&shard_id).cloned().unwrap_or_default();
                 let shard_config = config.clone();
                 let wal = persistence.appender(shard_id);
-                let replication = replication.clone();
                 let object_overflow = object_overflow.clone();
                 let join = thread::Builder::new()
                     .name(format!("shardcache-shard-{shard_id}"))
@@ -264,7 +251,6 @@ impl EngineHandle {
                             config: shard_config,
                             recovered_entries: shard_entries,
                             wal,
-                            replication,
                             object_overflow,
                         })
                     })
@@ -286,7 +272,6 @@ impl EngineHandle {
                     shard_senders,
                     shard_threads: Mutex::new(shard_threads),
                     persistence,
-                    replication,
                 }),
             })
         }
@@ -306,7 +291,6 @@ impl EngineHandle {
             config.persistence.clone(),
             metrics.clone(),
         )?;
-        let replication = start_replication_primary(&config)?;
         let object_overflow = ObjectOverflowRuntime::from_config(&config.object_overflow)?;
         let shift = shift_for(config.shard_count);
         let route_mode = configured_engine_route_mode(&config);
@@ -319,7 +303,6 @@ impl EngineHandle {
             let shard_entries = recovered.get(&shard_id).cloned().unwrap_or_default();
             let shard_config = config.clone();
             let wal = persistence.appender(shard_id);
-            let replication = replication.clone();
             let object_overflow = object_overflow.clone();
             let shard_metrics = metrics.clone();
             let join = thread::Builder::new()
@@ -331,7 +314,6 @@ impl EngineHandle {
                         config: shard_config,
                         recovered_entries: shard_entries,
                         wal,
-                        replication,
                         object_overflow,
                         metrics: shard_metrics,
                     })
@@ -352,7 +334,6 @@ impl EngineHandle {
                 shard_senders,
                 shard_threads: Mutex::new(shard_threads),
                 persistence,
-                replication,
                 metrics,
             }),
         })
@@ -493,9 +474,6 @@ impl EngineHandle {
                 .map_err(|_| ShardCacheError::TaskJoin("shard thread panicked".into()))?;
         }
         self.inner.persistence.shutdown()?;
-        if let Some(replication) = &self.inner.replication {
-            replication.shutdown()?;
-        }
         Ok(())
     }
 
@@ -582,23 +560,9 @@ struct ShardWorkerStart {
     config: ShardCacheConfig,
     recovered_entries: Vec<StoredEntry>,
     wal: Option<crate::persistence::WalAppender>,
-    replication: Option<Arc<ReplicationPrimary>>,
     object_overflow: Option<ObjectOverflowRuntime>,
     #[cfg(feature = "telemetry")]
     metrics: Option<Arc<CacheTelemetry>>,
-}
-
-fn start_replication_primary(config: &ShardCacheConfig) -> Result<Option<Arc<ReplicationPrimary>>> {
-    if !config.replication.enabled {
-        return Ok(None);
-    }
-    if config.replication.role != crate::config::ReplicationRole::Primary {
-        return Ok(None);
-    }
-    Ok(Some(Arc::new(ReplicationPrimary::start(
-        config.shard_count,
-        config.replication.clone(),
-    )?)))
 }
 
 impl ShardWorker {
@@ -609,7 +573,6 @@ impl ShardWorker {
             config,
             recovered_entries,
             wal,
-            replication,
             object_overflow,
             #[cfg(feature = "telemetry")]
             metrics,
@@ -634,40 +597,30 @@ impl ShardWorker {
             shard_id,
             map,
             wal,
-            replication_batch: replication
-                .as_ref()
-                .map(|_| ReplicationBatchBuilder::new(config.replication.clone())),
-            replication,
             sequence: 0,
         };
         let maintenance_interval = config.ttl_sweep_interval();
         let mut next_maintenance = Instant::now() + maintenance_interval;
 
         loop {
-            state.flush_replication_due();
             state.flush_wal_due();
             let timeout = state.next_worker_timeout(next_maintenance);
             match receiver.recv_timeout(timeout) {
                 Ok(ShardMessage::Execute { op, reply }) => {
                     let _ = reply.send(state.execute(op));
-                    state.flush_replication_due();
                 }
                 Ok(ShardMessage::Snapshot { reply }) => {
                     let _ = reply.send(state.map.try_snapshot_entries(now_millis()));
-                    state.flush_replication_due();
                 }
                 Ok(ShardMessage::Stats { reply }) => {
                     let _ = reply.send(state.stats_snapshot());
-                    state.flush_replication_due();
                 }
                 Ok(ShardMessage::Shutdown { reply }) => {
-                    state.flush_replication();
                     state.flush_wal();
                     let _ = reply.send(());
                     break;
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    state.flush_replication_due();
                     state.flush_wal_due();
                     if Instant::now() >= next_maintenance {
                         state.map.process_maintenance(now_millis());
@@ -677,7 +630,6 @@ impl ShardWorker {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
-        state.flush_replication();
         state.flush_wal();
     }
 
@@ -752,10 +704,7 @@ impl ShardState {
         expire_at_ms: Option<u64>,
         timestamp_ms: u64,
     ) -> Result<()> {
-        if let Some(replication) = &self.replication {
-            replication.validate_mutation_lengths(key.as_ref().len(), value.len(), None)?;
-        }
-        if self.wal.is_some() || self.replication.is_some() {
+        if self.wal.is_some() {
             self.sequence = self.sequence.saturating_add(1);
             let key = key.into_shared();
             let value = value.into_shared();
@@ -777,11 +726,8 @@ impl ShardState {
                 governance: None,
             };
             if let Some(wal) = &mut self.wal {
-                wal.append(record.clone())?;
+                wal.append(record)?;
             }
-            self.emit_replication(ReplicationMutation::from_record_with_key_hash(
-                &record, key_hash,
-            ));
         } else {
             match value {
                 ShardValue::Inline(value) => {
@@ -813,10 +759,7 @@ impl ShardState {
         key: ShardKey,
         timestamp_ms: u64,
     ) -> Result<bool> {
-        if let Some(replication) = &self.replication {
-            replication.validate_mutation_lengths(key.as_ref().len(), 0, None)?;
-        }
-        if self.wal.is_some() || self.replication.is_some() {
+        if self.wal.is_some() {
             self.sequence = self.sequence.saturating_add(1);
             let key = key.into_shared();
             let deleted = self.map.delete_hashed(key_hash, key.as_ref(), timestamp_ms);
@@ -831,11 +774,8 @@ impl ShardState {
                 governance: None,
             };
             if let Some(wal) = &mut self.wal {
-                wal.append(record.clone())?;
+                wal.append(record)?;
             }
-            self.emit_replication(ReplicationMutation::from_record_with_key_hash(
-                &record, key_hash,
-            ));
             return Ok(deleted);
         }
 
@@ -844,14 +784,11 @@ impl ShardState {
 
     fn apply_expiration_change(
         &mut self,
-        key_hash: u64,
+        _key_hash: u64,
         key: ShardKey,
         expiration: ExpirationChange,
         timestamp_ms: u64,
     ) -> Result<bool> {
-        if let Some(replication) = &self.replication {
-            replication.validate_mutation_lengths(key.as_ref().len(), 0, None)?;
-        }
         let changed = match expiration {
             ExpirationChange::Keep => false,
             ExpirationChange::ExpireAt(expire_at_ms) => {
@@ -862,7 +799,7 @@ impl ShardState {
         if !changed {
             return Ok(false);
         }
-        if self.wal.is_some() || self.replication.is_some() {
+        if self.wal.is_some() {
             self.sequence = self.sequence.saturating_add(1);
             let key = key.into_shared();
             let record = MutationRecord {
@@ -876,50 +813,10 @@ impl ShardState {
                 governance: None,
             };
             if let Some(wal) = &mut self.wal {
-                wal.append(record.clone())?;
+                wal.append(record)?;
             }
-            self.emit_replication(ReplicationMutation::from_record_with_key_hash(
-                &record, key_hash,
-            ));
         }
         Ok(true)
-    }
-
-    fn emit_replication(&mut self, mutation: ReplicationMutation) {
-        let Some(replication) = &self.replication else {
-            return;
-        };
-        let Some(batch_builder) = &mut self.replication_batch else {
-            replication.emit(mutation);
-            return;
-        };
-        for batch in batch_builder.push(mutation) {
-            replication.export_batch_direct(batch);
-        }
-    }
-
-    fn flush_replication_due(&mut self) {
-        let Some(replication) = &self.replication else {
-            return;
-        };
-        let Some(batch_builder) = &mut self.replication_batch else {
-            return;
-        };
-        if let Some(batch) = batch_builder.flush_due() {
-            replication.export_batch_direct(batch);
-        }
-    }
-
-    fn flush_replication(&mut self) {
-        let Some(replication) = &self.replication else {
-            return;
-        };
-        let Some(batch_builder) = &mut self.replication_batch else {
-            return;
-        };
-        if let Some(batch) = batch_builder.flush() {
-            replication.export_batch_direct(batch);
-        }
     }
 
     fn flush_wal_due(&mut self) {
@@ -948,13 +845,6 @@ impl ShardState {
         let mut timeout = next_maintenance
             .checked_duration_since(Instant::now())
             .unwrap_or_default();
-        if let Some(replication_timeout) = self
-            .replication_batch
-            .as_ref()
-            .and_then(ReplicationBatchBuilder::next_timeout)
-        {
-            timeout = timeout.min(replication_timeout);
-        }
         if let Some(wal_timeout) = self.wal.as_ref().and_then(|wal| wal.next_flush_timeout()) {
             timeout = timeout.min(wal_timeout);
         }
@@ -1030,37 +920,6 @@ mod tests {
         let response = engine.execute_borrowed(get).await.expect("GET response");
         assert_eq!(response, Frame::BlobString(value));
 
-        engine.shutdown().await.expect("shutdown");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn replication_rejects_oversized_set_before_local_commit() {
-        let mut config = ShardCacheConfig {
-            shard_count: 2,
-            ..ShardCacheConfig::default()
-        };
-        config.persistence.enabled = false;
-        config.replication.enabled = true;
-        config.replication.batch_max_bytes = 512;
-        config.replication.snapshot_chunk_bytes = 4 * 1024;
-        config.replication.receive_max_frame_bytes = 4 * 1024;
-
-        let engine = EngineHandle::open(config).expect("engine");
-        let set = Command::from_frame(Frame::Array(vec![
-            Frame::BlobString(b"SET".to_vec()),
-            Frame::BlobString(b"oversized".to_vec()),
-            Frame::BlobString(vec![b'x'; 4 * 1024]),
-        ]))
-        .expect("SET command");
-        let response = engine.execute(set).await;
-        assert!(matches!(response, Err(ShardCacheError::Config(_))));
-
-        let get = BorrowedCommand::from_parts(&[b"GET".as_slice(), b"oversized".as_slice()])
-            .expect("GET command");
-        assert_eq!(
-            engine.execute_borrowed(get).await.expect("GET"),
-            Frame::Null
-        );
         engine.shutdown().await.expect("shutdown");
     }
 

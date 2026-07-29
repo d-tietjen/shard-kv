@@ -1,6 +1,6 @@
 use super::{
-    EvictionPolicy, KvOverflowConfig, ObjectOverflowConfig, PersistenceConfig, ReplicationConfig,
-    ReplicationRole, ServerEndpointMode, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
+    EvictionPolicy, KvOverflowConfig, ObjectOverflowConfig, PersistenceConfig, ServerEndpointMode,
+    ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
 };
 #[cfg(feature = "kv-overflow")]
 use super::{KvOverflowBackend, KvOverflowCompression, MAX_KV_OVERFLOW_SLOT_COUNT};
@@ -46,7 +46,6 @@ enum ConfigValidationRule {
     ObjectOverflow,
     KvOverflow,
     KvOverflowReplica,
-    Replication,
     Cuda,
 }
 
@@ -62,10 +61,6 @@ struct ObjectOverflowValidation<'a> {
     config: &'a ObjectOverflowConfig,
     #[cfg(feature = "object-overflow")]
     root: &'a ShardCacheConfig,
-}
-
-struct ReplicationValidation<'a> {
-    config: &'a ReplicationConfig,
 }
 
 struct KvOverflowValidation<'a> {
@@ -100,7 +95,6 @@ impl ConfigValidationRule {
             Self::ObjectOverflow,
             Self::KvOverflow,
             Self::KvOverflowReplica,
-            Self::Replication,
             Self::Cuda,
         ]
     }
@@ -228,7 +222,6 @@ impl ConfigValidationRule {
                     "kv overflow replica eviction requires object_overflow or allow_lossy_eviction = true",
                 )
             }
-            Self::Replication => ReplicationValidation::new(&config.replication).validate(),
             Self::Cuda => Self::validate_cuda(config),
         }
     }
@@ -912,199 +905,6 @@ impl<'a> WalTcpExportValidation<'a> {
             "persistence.tcp_export timeouts must be > 0",
         )
     }
-}
-
-impl<'a> ReplicationValidation<'a> {
-    fn new(config: &'a ReplicationConfig) -> Self {
-        Self { config }
-    }
-
-    fn validate(&self) -> Result<()> {
-        match self.config.enabled {
-            false => Ok(()),
-            true => {
-                ConfigCheck::require(
-                    !self.config.bind_addr.trim().is_empty(),
-                    "replication.bind_addr must be set when replication is enabled",
-                )?;
-                self.validate_role()?;
-                ConfigCheck::optional_token(
-                    self.config.auth_token.as_deref(),
-                    "replication.auth_token must not be empty",
-                )?;
-                ConfigCheck::require(
-                    self.config.auth_token.is_none() || self.config.auth_token_path.is_none(),
-                    "configure only one of replication.auth_token or auth_token_path",
-                )?;
-                ConfigCheck::require(
-                    self.config.previous_auth_token_path.is_none()
-                        || self.config.auth_token_path.is_some(),
-                    "replication.previous_auth_token_path requires auth_token_path",
-                )?;
-                self.validate_tls()?;
-                self.validate_batch_limits()?;
-                self.validate_export_limits()?;
-                self.validate_timeouts()
-            }
-        }
-    }
-
-    fn validate_tls(&self) -> Result<()> {
-        let server = &self.config.tls_server;
-        let client = &self.config.tls_client;
-        if server.enabled || client.enabled {
-            #[cfg(not(feature = "scnp-tls"))]
-            return Err(ShardCacheError::Config(
-                "replication TLS requires the scnp-tls feature".into(),
-            ));
-        }
-        #[cfg(feature = "scnp-tls")]
-        {
-            if server.enabled {
-                ConfigCheck::require(
-                    !server.cert_path.as_os_str().is_empty()
-                        && !server.key_path.as_os_str().is_empty()
-                        && server.client_ca_path.is_some(),
-                    "replication.tls_server requires cert_path, key_path, and client_ca_path for mTLS",
-                )?;
-                ConfigCheck::require(
-                    server.handshake_timeout_ms > 0
-                        && server.reload_interval_ms > 0
-                        && server.max_concurrent_handshakes > 0,
-                    "replication TLS handshake and reload limits must be > 0",
-                )?;
-                ConfigCheck::require(
-                    self.config.max_replicas <= server.max_concurrent_handshakes,
-                    "replication max_replicas must not exceed TLS max_concurrent_handshakes",
-                )?;
-                ConfigCheck::require(
-                    server.client_cert_sha256.iter().all(|fingerprint| {
-                        let compact = fingerprint.replace(':', "");
-                        compact.len() == 64 && compact.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    }),
-                    "replication TLS client fingerprints must be SHA-256 hexadecimal values",
-                )?;
-            }
-            if client.enabled {
-                ConfigCheck::require(
-                    !client.ca_path.as_os_str().is_empty()
-                        && client
-                            .server_name
-                            .as_deref()
-                            .is_some_and(|name| !name.trim().is_empty()),
-                    "replication.tls_client requires ca_path and server_name",
-                )?;
-                ConfigCheck::require(
-                    client.client_cert_path.is_some() && client.client_key_path.is_some(),
-                    "replication.tls_client requires a client certificate and key for mTLS",
-                )?;
-            }
-        }
-        let primary_non_loopback = self.config.role == ReplicationRole::Primary
-            && !is_loopback_replication_endpoint(&self.config.bind_addr);
-        let replica_non_loopback = self.config.role == ReplicationRole::Replica
-            && self
-                .config
-                .replica_of
-                .as_deref()
-                .is_some_and(|address| !is_loopback_replication_endpoint(address));
-        ConfigCheck::require(
-            !primary_non_loopback || server.enabled,
-            "non-loopback replication primary listeners require TLS",
-        )?;
-        ConfigCheck::require(
-            !replica_non_loopback || client.enabled,
-            "non-loopback replication replica connections require TLS",
-        )?;
-        ConfigCheck::require(
-            !(primary_non_loopback || replica_non_loopback)
-                || self.config.auth_token.is_some()
-                || self.config.auth_token_path.is_some(),
-            "non-loopback replication requires token authentication in addition to mTLS",
-        )
-    }
-
-    fn validate_role(&self) -> Result<()> {
-        match self.config.role {
-            ReplicationRole::Primary => Ok(()),
-            ReplicationRole::Replica => ConfigCheck::require(
-                self.config
-                    .replica_of
-                    .as_deref()
-                    .is_some_and(|addr| !addr.is_empty()),
-                "replication.replica_of must be set for replica role",
-            ),
-        }
-    }
-
-    fn validate_batch_limits(&self) -> Result<()> {
-        ConfigCheck::require(
-            [
-                self.config.batch_max_records,
-                self.config.batch_max_bytes,
-                self.config.backlog_bytes,
-                self.config.snapshot_chunk_bytes,
-                self.config.snapshot_receive_max_bytes,
-                self.config.snapshot_receive_max_entries,
-                self.config.receive_max_frame_bytes,
-            ]
-            .into_iter()
-            .all(|limit| limit > 0),
-            "replication batch, backlog, and snapshot limits must be > 0",
-        )?;
-        ConfigCheck::require(
-            self.config.read_timeout_ms > 0,
-            "replication.read_timeout_ms must be > 0",
-        )?;
-        ConfigCheck::require(
-            self.config.receive_max_frame_bytes <= 256 * 1024 * 1024,
-            "replication.receive_max_frame_bytes cannot exceed the FCRP protocol limit",
-        )?;
-        ConfigCheck::require(
-            self.config.receive_max_frame_bytes >= self.config.batch_max_bytes.saturating_add(4),
-            "replication.receive_max_frame_bytes must accommodate batch_max_bytes plus its record-count header",
-        )?;
-        ConfigCheck::require(
-            self.config.receive_max_frame_bytes >= self.config.snapshot_chunk_bytes.max(4 * 1024),
-            "replication.receive_max_frame_bytes must accommodate snapshot_chunk_bytes",
-        )
-    }
-
-    fn validate_export_limits(&self) -> Result<()> {
-        ConfigCheck::require(
-            [
-                self.config.queue_capacity,
-                self.config.max_replicas,
-                self.config.subscriber_channel_capacity,
-            ]
-            .into_iter()
-            .all(|limit| limit > 0),
-            "replication queue and subscriber limits must be > 0",
-        )
-    }
-
-    fn validate_timeouts(&self) -> Result<()> {
-        ConfigCheck::require(
-            [
-                self.config.connect_timeout_ms,
-                self.config.write_timeout_ms,
-                self.config.snapshot_bootstrap_timeout_ms,
-                self.config.reconnect_backoff_ms,
-            ]
-            .into_iter()
-            .all(|timeout| timeout > 0),
-            "replication timeouts must be > 0",
-        )
-    }
-}
-
-fn is_loopback_replication_endpoint(endpoint: &str) -> bool {
-    endpoint
-        .parse::<std::net::SocketAddr>()
-        .is_ok_and(|address| address.ip().is_loopback())
-        || endpoint
-            .strip_prefix("localhost:")
-            .is_some_and(|port| port.parse::<u16>().is_ok())
 }
 
 impl ConfigCheck {

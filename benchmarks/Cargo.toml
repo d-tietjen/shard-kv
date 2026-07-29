@@ -36,12 +36,6 @@ object-overflow = ["shardmap/object-overflow"]
 kv-overflow = ["shardmap/kv-overflow"]
 kv-overflow-redis = ["kv-overflow", "shardmap/kv-overflow-redis"]
 scnp-tls = ["kv-overflow", "shardmap/scnp-tls", "shardcache-client-rs/tls"]
-active-sync-causal-eventual = ["shardmap/active-sync-causal-eventual"]
-active-sync-tls = ["active-sync-causal-eventual", "shardmap/active-sync-tls"]
-active-sync-consensus-ordered-eventual = [
-    "active-sync-causal-eventual",
-    "shardmap/active-sync-consensus-ordered-eventual",
-]
 # Build the benchmark-only server that exposes a caller-owned shardmap store
 # through the shardcache RESP/SCNP server path.
 embedded-server = ["shardmap/redis-server"]
@@ -83,29 +77,6 @@ path = "src/bin/saturation.rs"
 [[bin]]
 name = "curve"
 path = "src/bin/curve.rs"
-
-[[bin]]
-name = "replication_cost"
-path = "src/bin/replication_cost.rs"
-
-[[bin]]
-name = "active_sync_cost"
-path = "src/bin/active_sync_cost.rs"
-required-features = ["active-sync-consensus-ordered-eventual"]
-
-[[bin]]
-name = "active_sync_conflict_cost"
-path = "src/bin/active_sync_conflict_cost.rs"
-required-features = ["active-sync-consensus-ordered-eventual"]
-
-[[bin]]
-name = "active_sync_tls_latency"
-path = "src/bin/active_sync_tls_latency.rs"
-required-features = ["active-sync-tls"]
-
-[[bin]]
-name = "replication_tcp_cost"
-path = "src/bin/replication_tcp_cost.rs"
 
 [[bin]]
 name = "wal_tcp_export_cost"

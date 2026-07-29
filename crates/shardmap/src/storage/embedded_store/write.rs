@@ -100,10 +100,11 @@ impl EmbeddedStore {
     }
 
     /// Stores an already-owned value using precomputed routing and an absolute
-    /// expiry timestamp. This is used by native replication apply paths, where
-    /// the wire frame already carries both the shard sequence and absolute TTL.
+    /// expiry timestamp. Advanced extensions can use this when they already
+    /// carry an absolute TTL.
     #[cfg(feature = "redis")]
-    pub(crate) fn set_value_bytes_routed_expire_at(
+    #[doc(hidden)]
+    pub fn set_value_bytes_routed_expire_at(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],
@@ -114,7 +115,8 @@ impl EmbeddedStore {
         self.set_value_bytes_routed_expire_at_then(route, key, value, expire_at_ms, now_ms, || {});
     }
 
-    pub(crate) fn set_value_bytes_routed_expire_at_with_governance(
+    #[doc(hidden)]
+    pub fn set_value_bytes_routed_expire_at_with_governance(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],
@@ -234,7 +236,8 @@ impl EmbeddedStore {
 
     /// Stores an already-owned value without reading the wall clock and runs
     /// `after_write` before releasing the shard write lock.
-    pub(crate) fn set_value_bytes_routed_no_ttl_then(
+    #[doc(hidden)]
+    pub fn set_value_bytes_routed_no_ttl_then(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],
@@ -253,7 +256,8 @@ impl EmbeddedStore {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn set_value_bytes_routed_with_governance_then(
+    #[doc(hidden)]
+    pub fn set_value_bytes_routed_with_governance_then(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],
@@ -263,7 +267,7 @@ impl EmbeddedStore {
         now_ms: u64,
         after_write: impl FnOnce(),
     ) {
-        if !self.point_mutation_is_replicable(
+        if !self.point_mutation_is_accepted(
             key,
             value.len(),
             governance.as_ref().map(bytes::Bytes::len),
@@ -271,7 +275,7 @@ impl EmbeddedStore {
             tracing::warn!(
                 key_len = key.len(),
                 value_len = value.len(),
-                "point mutation rejected before commit because it exceeds replication limits"
+                "point mutation rejected by an installed storage extension"
             );
             return;
         }
@@ -327,9 +331,10 @@ impl EmbeddedStore {
     }
 
     /// Stores an already-owned value and runs `after_write` before releasing
-    /// the shard write lock. Replication uses this to preserve same-shard
-    /// mutation order without adding a second ordering mutex around storage.
-    pub(crate) fn set_value_bytes_routed_expire_at_then(
+    /// the shard write lock. Advanced extensions can use this to preserve
+    /// same-shard mutation order without a second ordering mutex.
+    #[doc(hidden)]
+    pub fn set_value_bytes_routed_expire_at_then(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],
@@ -476,14 +481,14 @@ impl EmbeddedStore {
 
     /// Atomically validates a byte-string batch before applying any item.
     /// Returns `false` without mutating the store when any item is not valid
-    /// for the configured point-mutation and replication limits.
+    /// for the configured point-mutation extension limits.
     pub fn try_batch_set(&self, items: Vec<(Bytes, Bytes)>, ttl_ms: Option<u64>) -> bool {
         if items.is_empty() {
             return true;
         }
         if !items
             .iter()
-            .all(|(key, value)| self.point_mutation_is_replicable(key, value.len(), None))
+            .all(|(key, value)| self.point_mutation_is_accepted(key, value.len(), None))
         {
             return false;
         }

@@ -7,11 +7,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use shardmap::config::{
-    EvictionPolicy, PersistenceConfig, ReplicationConfig, ReplicationRole, ReplicationSendPolicy,
-    ServerEndpointMode, ShardCacheConfig,
-};
-use shardmap::replication::ReplicatedEmbeddedStore;
+use shardmap::config::{EvictionPolicy, PersistenceConfig, ServerEndpointMode, ShardCacheConfig};
 use shardmap::server::{ServerRuntime, ShardCacheServer};
 use shardmap::storage::{EmbeddedRouteMode, EmbeddedStore};
 
@@ -41,10 +37,6 @@ struct Args {
     /// Expose shard-owned direct ports in addition to the owner-routed fanout endpoint.
     #[arg(long)]
     direct_shard_ports: bool,
-
-    /// Enable native HA replication and bind its FCRP listener here.
-    #[arg(long)]
-    replication_bind_addr: Option<String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -78,28 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         true => EmbeddedRouteMode::SessionPrefix,
         false => EmbeddedRouteMode::FullKey,
     };
-    let mut replicated_owner = None;
-    let mut replication_listener = None;
-    let store = if let Some(bind_addr) = args.replication_bind_addr {
-        let replication = ReplicationConfig {
-            enabled: true,
-            role: ReplicationRole::Primary,
-            bind_addr,
-            send_policy: ReplicationSendPolicy::Batch,
-            ..ReplicationConfig::default()
-        };
-        let owner = Arc::new(ReplicatedEmbeddedStore::with_route_mode(
-            args.shard_count,
-            route_mode,
-            replication.clone(),
-        )?);
-        replication_listener = Some(owner.serve_replicas(replication)?);
-        let store = owner.shared_inner();
-        replicated_owner = Some(owner);
-        store
-    } else {
-        Arc::new(EmbeddedStore::with_route_mode(args.shard_count, route_mode))
-    };
+    let store = Arc::new(EmbeddedStore::with_route_mode(args.shard_count, route_mode));
     if args.max_memory_bytes > 0 {
         let per_shard = args
             .max_memory_bytes
@@ -118,8 +89,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     runtime.block_on(async move {
-        let _replicated_owner = replicated_owner;
-        let _replication_listener = replication_listener;
         ShardCacheServer::from_embedded_store(config, store)
             .run()
             .await

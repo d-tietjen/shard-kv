@@ -3,7 +3,7 @@ use super::*;
 impl EmbeddedStore {
     /// Deletes a key and returns true when a value or object was removed.
     pub fn delete(&self, key: &[u8]) -> bool {
-        if !self.point_mutation_is_replicable(key, 0, None) {
+        if !self.point_mutation_is_accepted(key, 0, None) {
             return false;
         }
         let now_ms = now_millis();
@@ -100,7 +100,8 @@ impl EmbeddedStore {
 
     /// Deletes a routed key and runs `after_delete` before releasing the shard
     /// write lock when a mutation actually occurred.
-    pub(crate) fn delete_routed_then(
+    #[doc(hidden)]
+    pub fn delete_routed_then(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],
@@ -271,7 +272,7 @@ impl EmbeddedStore {
 
     /// Removes the TTL from a key and returns true when a TTL was cleared.
     pub fn persist(&self, key: &[u8]) -> bool {
-        if !self.point_mutation_is_replicable(key, 0, None) {
+        if !self.point_mutation_is_accepted(key, 0, None) {
             return false;
         }
         let route = self.route_key(key);
@@ -329,7 +330,7 @@ impl EmbeddedStore {
 
     /// Sets an absolute expiration timestamp in Unix milliseconds.
     pub fn expire(&self, key: &[u8], expire_at_ms: u64) -> bool {
-        if !self.point_mutation_is_replicable(key, 0, None) {
+        if !self.point_mutation_is_accepted(key, 0, None) {
             return false;
         }
         let route = self.route_key(key);
@@ -428,7 +429,8 @@ impl EmbeddedStore {
 
     /// Updates an absolute expiration timestamp and runs `after_expire` before
     /// releasing the shard write lock when a TTL mutation actually occurred.
-    pub(crate) fn expire_routed_then(
+    #[doc(hidden)]
+    pub fn expire_routed_then(
         &self,
         route: EmbeddedKeyRoute,
         key: &[u8],

@@ -30,11 +30,6 @@ include = [
 [lib]
 name = "shardmap"
 
-[[example]]
-name = "active_sync"
-path = "examples/active_sync.rs"
-required-features = ["active-sync-causal-eventual"]
-
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(creusot)"] }
 
@@ -105,9 +100,6 @@ object-overflow = []
 object-overflow-s3 = ["object-overflow", "dep:futures-util", "dep:object_store"]
 kv-overflow = ["embedded", "dep:shardcache-client-rs"]
 kv-overflow-redis = ["kv-overflow", "dep:redis-client"]
-active-sync-causal-eventual = ["embedded"]
-active-sync-consensus-ordered-eventual = ["active-sync-causal-eventual"]
-active-sync-tls = ["active-sync-causal-eventual", "dep:rustls"]
 scnp-tls = [
     "server",
     "kv-overflow",
@@ -167,7 +159,6 @@ xxhash-rust = { workspace = true }
 zstd = { workspace = true }
 
 [dev-dependencies]
-deterministic-test-env = { path = "../deterministic-test-env" }
 rcgen = "0.14"
 shardcache-client-rs = { workspace = true, features = ["vector"] }
 tempfile = { workspace = true }

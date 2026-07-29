@@ -1,15 +1,11 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use shardcache_client_rs::{ShardCacheClient, ShardCacheDirectRouter, VAddOptions, VSimOptions};
-use shardmap::config::{
-    ReplicationCompression, ReplicationConfig, ReplicationRole, ReplicationSendPolicy,
-    ServerEndpointMode,
-};
+use shardmap::config::ServerEndpointMode;
 use shardmap::protocol::{FastCodec, FastCommand, FastRequest, FastResponse, Frame};
-use shardmap::replication::{ReplicatedEmbeddedStore, ReplicationReplicaClient};
 use shardmap::storage::{
     EmbeddedStore, hash_key, take_local_embedded_store, with_local_embedded_store,
 };
@@ -583,70 +579,4 @@ async fn embedded_public_server_rejects_cross_shard_commands() {
             join.await.unwrap().unwrap();
         })
         .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn replicated_embedded_store_can_serve_read_replica() {
-    let _test_guard = SERVER_TEST_LOCK.lock().await;
-    let addr = format!("127.0.0.1:{}", common::free_port());
-    let primary_config = ReplicationConfig {
-        enabled: true,
-        role: ReplicationRole::Primary,
-        bind_addr: addr.clone(),
-        compression: ReplicationCompression::None,
-        send_policy: ReplicationSendPolicy::Immediate,
-        batch_max_records: 1,
-        batch_max_delay_us: 1_000,
-        snapshot_chunk_bytes: 4 * 1024,
-        ..ReplicationConfig::default()
-    };
-    let primary = Arc::new(
-        ReplicatedEmbeddedStore::new(4, primary_config.clone()).expect("replicated primary"),
-    );
-    primary
-        .set(b"before-connect".to_vec(), b"snapshot-value".to_vec(), None)
-        .unwrap();
-
-    let server = primary
-        .serve_replicas(primary_config)
-        .expect("replication listener");
-    let replica = ReplicationReplicaClient::start(ReplicationConfig {
-        enabled: true,
-        role: ReplicationRole::Replica,
-        replica_of: Some(addr),
-        compression: ReplicationCompression::None,
-        ..ReplicationConfig::default()
-    })
-    .expect("replica client");
-
-    assert_eq!(
-        await_replica_value(&replica, b"before-connect", Duration::from_secs(3)),
-        Some(b"snapshot-value".to_vec())
-    );
-
-    primary
-        .set(b"after-connect".to_vec(), b"streamed-value".to_vec(), None)
-        .unwrap();
-    assert_eq!(
-        await_replica_value(&replica, b"after-connect", Duration::from_secs(3)),
-        Some(b"streamed-value".to_vec())
-    );
-
-    replica.shutdown().ok();
-    server.shutdown().ok();
-}
-
-fn await_replica_value(
-    client: &ReplicationReplicaClient,
-    key: &[u8],
-    timeout: Duration,
-) -> Option<Vec<u8>> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if let Some(value) = client.replica().lock().get(key) {
-            return Some(value);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    None
 }

@@ -620,13 +620,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
-name = "deterministic-test-env"
-version = "2.0.0-pre-release"
-dependencies = [
- "tokio",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -687,9 +680,9 @@ dependencies = [
 
 [[package]]
 name = "fast-telemetry"
-version = "0.7.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b93dbb54b63cc759f2696414e2d77648a55f1ee2109323e849a14038271e359"
+checksum = "1a7e9cf7b3faad0a699cce0c23456bc3257f1630be02357057fca68be56d0719"
 dependencies = [
  "crossbeam-utils",
  "fast-telemetry-macros",
@@ -701,9 +694,9 @@ dependencies = [
 
 [[package]]
 name = "fast-telemetry-macros"
-version = "0.7.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e5fddff928459a923869bbca0f19ebf9d0dbf2f9e35f13be4a49a2ea427140d"
+checksum = "7aeacbd5a6da5ab7f7b716fe4297e2b577747ecf0d9a9c24e160050b2d8f5629"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2406,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "clap",
  "shardmap",
@@ -2415,7 +2408,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-benchmarks"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "clap",
@@ -2441,7 +2434,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-c"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "bytes",
  "shardmap",
@@ -2449,7 +2442,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-client-rs"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "libc",
  "rustls",
@@ -2460,14 +2453,14 @@ dependencies = [
 
 [[package]]
 name = "shardcache-formal"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "creusot-std",
 ]
 
 [[package]]
 name = "shardcache-py"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "core_affinity",
  "dashmap",
@@ -2481,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "shardcache-runtime"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "cust",
  "serde",
@@ -2500,7 +2493,7 @@ dependencies = [
 
 [[package]]
 name = "shardmap"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "ahash",
  "bytes",
@@ -2511,7 +2504,6 @@ dependencies = [
  "creusot-std",
  "crossbeam-channel",
  "crossbeam-utils",
- "deterministic-test-env",
  "fast-telemetry",
  "flume",
  "futures-util",

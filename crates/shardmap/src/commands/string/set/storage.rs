@@ -15,7 +15,7 @@ pub(crate) trait EmbeddedStringWrite {
         ttl_ms: Option<u64>,
         single_threaded: bool,
     ) -> bool {
-        if !store.point_mutation_is_replicable(key, value.len(), None) {
+        if !store.point_mutation_is_accepted(key, value.len(), None) {
             return false;
         }
         let routed_key_hash = key_hash.filter(|_| Self::route_hash_is_key_hash(store, key));
@@ -37,7 +37,7 @@ pub(crate) trait EmbeddedStringWrite {
         ttl_ms: Option<u64>,
         single_threaded: bool,
     ) -> bool {
-        if !store.point_mutation_is_replicable(key, value.len(), None) {
+        if !store.point_mutation_is_accepted(key, value.len(), None) {
             return false;
         }
         EmbeddedStringWriteTarget::prehashed(

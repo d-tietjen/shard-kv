@@ -316,10 +316,10 @@ impl EmbeddedStore {
         keys
     }
 
-    /// Returns currently live string entries for persistence or replication.
+    /// Returns currently live string entries for persistence or external
+    /// storage extensions.
     ///
-    /// Redis object values are intentionally excluded; the native replication
-    /// stream v1 covers byte-string cache mutations.
+    /// Redis object values are intentionally excluded.
     pub fn entry_snapshot(&self) -> Vec<StoredEntry> {
         self.try_entry_snapshot().unwrap_or_default()
     }
@@ -336,7 +336,8 @@ impl EmbeddedStore {
         Ok(entries)
     }
 
-    pub(crate) fn try_shard_entry_snapshot(
+    #[doc(hidden)]
+    pub fn try_shard_entry_snapshot(
         &self,
         shard_id: usize,
         now_ms: u64,
@@ -345,7 +346,8 @@ impl EmbeddedStore {
             .collect()
     }
 
-    pub(crate) fn try_shard_entry_snapshot_iter(
+    #[doc(hidden)]
+    pub fn try_shard_entry_snapshot_iter(
         &self,
         shard_id: usize,
         now_ms: u64,
@@ -474,7 +476,8 @@ impl EmbeddedStore {
     }
 
     #[inline(always)]
-    pub(crate) fn route_key_prehashed(&self, key_hash: u64, key: &[u8]) -> EmbeddedKeyRoute {
+    #[doc(hidden)]
+    pub fn route_key_prehashed(&self, key_hash: u64, key: &[u8]) -> EmbeddedKeyRoute {
         if can_route_with_key_hash(self.route_mode, self.shard_count(), key) {
             EmbeddedKeyRoute {
                 shard_id: self.route_hash(key_hash),
@@ -509,18 +512,22 @@ impl EmbeddedStore {
         compute_key_route(self.route_mode, self.shift, key)
     }
 
-    pub(crate) fn configure_point_mutation_observer(&self, observer: Option<Arc<PointMutationFn>>) {
+    /// Installs an advanced extension callback invoked after point mutations.
+    #[doc(hidden)]
+    pub fn configure_point_mutation_observer(&self, observer: Option<Arc<PointMutationFn>>) {
         *self.point_mutation_observer.write() = observer.map(PointMutationObserver);
     }
 
-    pub(crate) fn configure_point_mutation_validator(
+    /// Installs an advanced extension callback that may reject point mutations.
+    #[doc(hidden)]
+    pub fn configure_point_mutation_validator(
         &self,
         validator: Option<Arc<PointMutationValidatorFn>>,
     ) {
         *self.point_mutation_validator.write() = validator.map(PointMutationValidator);
     }
 
-    pub(crate) fn point_mutation_is_replicable(
+    pub(crate) fn point_mutation_is_accepted(
         &self,
         key: &[u8],
         value_len: usize,
@@ -573,15 +580,16 @@ impl EmbeddedStore {
     }
 
     #[cfg(feature = "redis")]
-    pub(crate) fn configure_vector_mutation_observer(
-        &self,
-        observer: Option<Arc<VectorMutationFn>>,
-    ) {
+    /// Installs an advanced extension callback invoked after vector mutations.
+    #[doc(hidden)]
+    pub fn configure_vector_mutation_observer(&self, observer: Option<Arc<VectorMutationFn>>) {
         *self.vector_mutation_observer.write() = observer.map(VectorMutationObserver);
     }
 
     #[cfg(feature = "redis")]
-    pub(crate) fn configure_vector_mutation_validator(
+    /// Installs an advanced extension callback that may reject vector mutations.
+    #[doc(hidden)]
+    pub fn configure_vector_mutation_validator(
         &self,
         validator: Option<Arc<VectorMutationValidatorFn>>,
     ) {
@@ -589,7 +597,7 @@ impl EmbeddedStore {
     }
 
     #[cfg(feature = "redis")]
-    pub(crate) fn vector_mutation_is_replicable(&self, key: &[u8], value: &[u8]) -> bool {
+    pub(crate) fn vector_mutation_is_accepted(&self, key: &[u8], value: &[u8]) -> bool {
         self.vector_mutation_validator
             .read()
             .as_ref()
@@ -611,7 +619,8 @@ impl EmbeddedStore {
     }
 
     #[cfg(feature = "redis")]
-    pub(crate) fn clone_vector_value(&self, key: &[u8]) -> Option<bytes::Bytes> {
+    #[doc(hidden)]
+    pub fn clone_vector_value(&self, key: &[u8]) -> Option<bytes::Bytes> {
         self.clone_vector_value_state(key).map(|(value, _)| value)
     }
 

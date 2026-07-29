@@ -63,7 +63,7 @@ impl RedisKeyStore for EmbeddedStore {
         value: bytes::Bytes,
         ttl_ms: Option<u64>,
     ) -> std::result::Result<(), RedisKeyError> {
-        if !self.vector_mutation_is_replicable(key, &value) {
+        if !self.vector_mutation_is_accepted(key, &value) {
             return Err(RedisKeyError::ReplicationLimit);
         }
         let now_ms = now_millis();
@@ -109,7 +109,7 @@ impl RedisKeyStore for EmbeddedStore {
             _ => None,
         };
         if let Some(value) = self.clone_vector_key_value(source) {
-            if !self.vector_mutation_is_replicable(dest, &value) {
+            if !self.vector_mutation_is_accepted(dest, &value) {
                 return Err(RedisKeyError::ReplicationLimit);
             }
             self.delete(dest);

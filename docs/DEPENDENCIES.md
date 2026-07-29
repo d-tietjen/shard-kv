@@ -22,11 +22,10 @@ declared compatible version ranges.
 | --- | --- | --- |
 | `object_store` | `object-overflow-s3` | S3/RustFS-compatible object transport. |
 | `redis` | `kv-overflow-redis` | Redis/Valkey overflow transport with Rustls-backed TLS URLs. |
-| `rustls`, `tokio-rustls`, `rustls-pemfile`, `ring` | `scnp-tls`, `active-sync-tls` | TLS 1.3, mTLS, certificate parsing, and cryptography for SCNP overflow and active-active peer sync. |
+| `rustls`, `tokio-rustls`, `rustls-pemfile`, `ring` | `scnp-tls` | TLS 1.3, mTLS, certificate parsing, and cryptography for SCNP overflow. |
 | `shardcache-client-rs` | `kv-overflow` | SCNP framing and direct replica communication. |
 | `lz4_flex`, `zstd` | Overflow features | Optional value and object compression. |
-| `crc32fast`, `sha2` | Overflow and active-sync integrity, TLS identity, `active-sync-consensus-ordered-eventual` | Envelope and sync-block integrity, certificate fingerprints, and content-addressed conflict claims. |
-| `deterministic-test-env` | Test builds only | Non-published harness vendored from pinned Blossom revision `46750a97a70fd301e3e6f3255316c1d7e837a9dd` for replayable active-sync fault schedules. |
+| `crc32fast`, `sha2` | Overflow integrity and TLS identity | Envelope integrity and certificate fingerprints. |
 | `tokio`, `flume` | Server and asynchronous overflow paths | Event loops, sockets, timers, bounded asynchronous lanes, and shutdown. |
 | `bytes-handoff`, `monoio` | Optional server transport | Buffer handoff and Linux transport experiments. |
 | `fast-telemetry` | `telemetry` | Metrics integration. |
@@ -39,39 +38,18 @@ TLS dependency policy is enforced by
 the all-feature production graph must not contain OpenSSL, native-tls, or an
 OpenSSL-backed Rustls provider.
 
-The publishable `shardmap` `active-sync-consensus-ordered-eventual` graph deliberately has no
-Blossom runtime dependency. It exposes a bounded `BlossomConflictConsensus`
-service boundary. The standalone source-only `shardmap-blossom-bridge` package
-is excluded from the public workspace so normal builds need no private Git
-credentials. It pins the Blossom runtime and implements quorum finality
-verification behind a loopback or identity-bound mTLS proxy. The bridge
-transmits conflict claims only; active-sync WAL blocks and values never cross
-this boundary.
-
-## Standalone Source Integration
-
-`crates/shardmap-blossom-bridge` is a non-published standalone crate. Its
-manifest pins `blossom` `2.0.0-pre-release` to Git revision
-`46750a97a70fd301e3e6f3255316c1d7e837a9dd`; it also directly depends on
-`parking_lot`, `serde`, `serde_json`, `sha2`, `shardmap`, and `tokio`, with
-`tempfile` for tests. Its adjacent `Cargo.lock` records the complete exact
-standalone graph. Run its tests separately in an authenticated source checkout.
-Because it is outside the public workspace, those packages are not included in
-the generated tables below.
-
-## Workspace Packages (9)
+## Workspace Packages (8)
 
 | Package | Version | License | Manifest |
 | --- | --- | --- | --- |
-| `deterministic-test-env` | `2.0.0-pre-release` | MIT | `crates/deterministic-test-env/Cargo.toml` |
-| `shardcache-benchmarks` | `0.8.1` | Apache-2.0 | `benchmarks/Cargo.toml` |
-| `shardcache-c` | `0.8.1` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
-| `shardcache-client-rs` | `0.8.1` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
-| `shardcache-formal` | `0.8.1` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
-| `shardcache-py` | `0.8.1` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
-| `shardcache-runtime` | `0.8.1` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
-| `shardcache` | `0.8.1` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
-| `shardmap` | `0.8.1` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
+| `shardcache-benchmarks` | `0.9.0` | Apache-2.0 | `benchmarks/Cargo.toml` |
+| `shardcache-c` | `0.9.0` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
+| `shardcache-client-rs` | `0.9.0` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
+| `shardcache-formal` | `0.9.0` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
+| `shardcache-py` | `0.9.0` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
+| `shardcache-runtime` | `0.9.0` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
+| `shardcache` | `0.9.0` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
+| `shardmap` | `0.9.0` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
 
 ## Third-Party Packages (377)
 
@@ -151,8 +129,8 @@ the generated tables below.
 | `either` | `1.16.0` | MIT OR Apache-2.0 | crates.io |
 | `equivalent` | `1.0.2` | Apache-2.0 OR MIT | crates.io |
 | `errno` | `0.3.14` | MIT OR Apache-2.0 | crates.io |
-| `fast-telemetry-macros` | `0.7.1` | Apache-2.0 | crates.io |
-| `fast-telemetry` | `0.7.1` | Apache-2.0 | crates.io |
+| `fast-telemetry-macros` | `0.9.0` | Apache-2.0 | crates.io |
+| `fast-telemetry` | `0.9.0` | Apache-2.0 | crates.io |
 | `fastrand` | `2.4.1` | Apache-2.0 OR MIT | crates.io |
 | `find-msvc-tools` | `0.1.9` | MIT OR Apache-2.0 | crates.io |
 | `find_cuda_helper` | `0.2.0` | MIT OR Apache-2.0 | crates.io |

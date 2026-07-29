@@ -19,17 +19,16 @@ use crate::storage::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PointMutationKind {
+pub enum PointMutationKind {
     Set,
     Delete,
     Expire,
 }
 
-pub(crate) type PointMutationFn = dyn Fn(PointMutationKind, &[u8], Option<bytes::Bytes>, Option<u64>, Option<bytes::Bytes>)
+pub type PointMutationFn = dyn Fn(PointMutationKind, &[u8], Option<bytes::Bytes>, Option<u64>, Option<bytes::Bytes>)
     + Send
     + Sync;
-pub(crate) type PointMutationValidatorFn =
-    dyn Fn(&[u8], usize, Option<usize>) -> bool + Send + Sync;
+pub type PointMutationValidatorFn = dyn Fn(&[u8], usize, Option<usize>) -> bool + Send + Sync;
 
 #[derive(Clone)]
 struct PointMutationObserver(Arc<PointMutationFn>);
@@ -78,17 +77,17 @@ use crate::storage::{
 
 #[cfg(feature = "redis")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum VectorMutationKind {
+pub enum VectorMutationKind {
     Set,
     Delete,
     Expire,
 }
 
 #[cfg(feature = "redis")]
-pub(crate) type VectorMutationFn =
+pub type VectorMutationFn =
     dyn Fn(VectorMutationKind, &[u8], Option<bytes::Bytes>, Option<u64>) + Send + Sync;
 #[cfg(feature = "redis")]
-pub(crate) type VectorMutationValidatorFn = dyn Fn(&[u8], &[u8]) -> bool + Send + Sync;
+pub type VectorMutationValidatorFn = dyn Fn(&[u8], &[u8]) -> bool + Send + Sync;
 
 #[cfg(feature = "redis")]
 #[derive(Clone)]
@@ -472,7 +471,7 @@ pub struct EmbeddedStore {
     metrics: Option<Arc<CacheTelemetry>>,
 }
 
-pub(crate) struct EmbeddedSnapshotIterator<'a> {
+pub struct EmbeddedSnapshotIterator<'a> {
     store: &'a EmbeddedStore,
     shard_id: usize,
     keys: Vec<Bytes>,

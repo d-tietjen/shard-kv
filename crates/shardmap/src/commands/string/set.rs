@@ -105,10 +105,8 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedSet<'a> {
 
     #[cfg(feature = "server")]
     fn execute_borrowed_frame(&self, store: &EmbeddedStore, _now_ms: u64) -> Frame {
-        if !store.point_mutation_is_replicable(self.key, self.value.len(), None) {
-            return Frame::Error(
-                "ERR mutation exceeds the configured replication frame limit".into(),
-            );
+        if !store.point_mutation_is_accepted(self.key, self.value.len(), None) {
+            return Frame::Error("ERR mutation rejected by an installed storage extension".into());
         }
         store.set(self.key.to_vec(), self.value.to_vec(), self.ttl_ms);
         Frame::SimpleString("OK".into())
@@ -118,11 +116,11 @@ impl<'a> super::BorrowedCommandData<'a> for BorrowedSet<'a> {
     fn execute_borrowed(&self, ctx: BorrowedCommandContext<'_, '_, '_>) {
         if !ctx
             .store
-            .point_mutation_is_replicable(self.key, self.value.len(), None)
+            .point_mutation_is_accepted(self.key, self.value.len(), None)
         {
             ServerWire::write_resp_error(
                 ctx.out,
-                "ERR mutation exceeds the configured replication frame limit",
+                "ERR mutation rejected by an installed storage extension",
             );
             return;
         }

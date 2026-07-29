@@ -12,6 +12,8 @@ Use this checklist before publishing the repository or the crates.io crates.
   not unreviewed raw host captures.
 - Public documentation lives in rustdoc, `README.md`, and crate READMEs;
   private reports and integration experiments stay outside the public tree.
+- `./scripts/check-oss-boundary.sh` confirms that no private availability
+  implementation, feature, dependency, or package is present.
 - `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `LICENSE` are present.
 
 ## Validation
@@ -28,17 +30,13 @@ For the 0.6.0 overflow feature catalog and upgrade notes, see
 known limits, security requirements, and benchmark commands are in
 `docs/KV_OVERFLOW.md`.
 
-The feature-gated 0.7 active-active API, consistency semantics, security
-contract, benchmark results, and production boundaries are documented in
-`docs/ACTIVE_ACTIVE_REPLICATION.md` and
-`benchmarks/ACTIVE_ACTIVE_0_7_BASELINE.md`.
-
 The release gate also includes:
 
 ```bash
 cargo fmt --check
 cargo test --workspace --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+./scripts/check-oss-boundary.sh
 ./scripts/check-feature-matrix.sh
 ./scripts/check-publish-artifacts.sh
 ./scripts/generate-dependency-docs.sh --check

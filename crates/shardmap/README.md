@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.8.1"
+shardmap = "0.9.0"
 ```
 
 ## Quick Start
@@ -51,41 +51,13 @@ guard is enough.
 | Semantic cache | Store embeddings with cached values and search by cosine similarity. | [`semantic_cache.rs`](examples/semantic_cache.rs) |
 | Semantic TTL | Combine semantic reuse with freshness windows. | [`semantic_ttl.rs`](examples/semantic_ttl.rs) |
 | Governance metadata | Enforce application-owned authorization context on semantic and exact point hits. | [`semantic_cache.rs`](examples/semantic_cache.rs), [`EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) |
-| Causal eventual active-active values | Exchange bounded causal blocks, converge SET/DEL/expiry conflicts with deterministic HLC ordering, and evict local payloads independently. | Enable `active-sync-causal-eventual`; add `active-sync-tls` for networking; see [`active_sync.rs`](examples/active_sync.rs) |
-| Consensus-ordered eventual active-active values | Finalize only ambiguous active-active conflict winners without sending values or WAL blocks to the ordering plane. | Enable `active-sync-consensus-ordered-eventual`; add `active-sync-tls` for networking; see [`ACTIVE_ACTIVE_REPLICATION.md`](../../docs/ACTIVE_ACTIVE_REPLICATION.md) |
-| Revision-ordered active-active values | Order one key by an application-owned source-of-truth revision so delayed stale writes cannot recreate newer deleted state. | Use `ActiveShardMap::set_versioned` and `delete_versioned` with either active-sync mode. |
 | Mini app | A small feature-flag cache combining TTL, prepared keys, and locks. | [`mini_feature_flags.rs`](examples/mini_feature_flags.rs) |
 
 Run any example with:
 
 ```bash
 cargo run -p shardmap --example basic_map
-cargo run -p shardmap --example active_sync --features active-sync-causal-eventual
 ```
-
-For active-active exact values, choose the guarantee explicitly:
-
-| Constructor | Conflict guarantee | Remote visibility |
-| --- | --- | --- |
-| `ActiveShardMap::new_causal_eventual` | Causal dominance with deterministic HLC ordering | Only after explicit or scheduled sync |
-| `ActiveShardMap::new_consensus_ordered_eventual` | External finality for ambiguous concurrent mutations | Only after explicit or scheduled sync |
-
-Both modes are eventually consistent. Neither provides linearizable reads or
-cross-node serializable transactions. `consistency_mode()` and the active-sync
-health snapshot report the selected guarantee.
-
-For database-backed cache state, `set_versioned` and `delete_versioned` compare
-opaque revisions lexicographically before applying causal rules. Encode a wide,
-monotonic source revision in order-preserving bytes, such as a big-endian `u64`
-or database timestamp-plus-sequence tuple. Do not use a wrapping `u8`: after 256
-changes an old and new revision are indistinguishable, and modular ordering is
-only safe while every replica stays within 127 changes.
-
-Active sync is disabled by default and is intended for read-heavy durable-cache
-deployments. On Adam, three-run 99% GET / 1% SET medians retained 77.5% of
-baseline throughput in synchronized causal mode and 75.1% in synchronized
-consensus mode, while both measured 2.3us p99 versus 2.1us at baseline. See the
-[`0.8 feature guide`](../../docs/RELEASE_0_8.md) before enabling it.
 
 ## Typed Map Operations
 
@@ -473,81 +445,6 @@ The thread-local server is still a fanout endpoint shape; the difference is
 storage ownership. It serves the local store already installed on the owner
 thread instead of introducing a shared `Arc<ShardedEngine>` handle.
 
-For read replicas or service subscribers, wrap the embedded source in
-`ReplicatedEmbeddedStore` and start its native replication listener.
-
-```rust,ignore
-use std::sync::Arc;
-
-use shardmap::config::{ReplicationConfig, ReplicationRole};
-use shardmap::embedded::{ReplicatedEmbeddedStore, ReplicationReplicaClient};
-
-let mut primary_config = ReplicationConfig {
-    enabled: true,
-    role: ReplicationRole::Primary,
-    bind_addr: "127.0.0.1:7631".into(),
-    ..ReplicationConfig::default()
-};
-
-let primary = Arc::new(ReplicatedEmbeddedStore::new(4, primary_config.clone())?);
-let _listener = primary.serve_replicas(primary_config)?;
-
-let replica = ReplicationReplicaClient::start(ReplicationConfig {
-    enabled: true,
-    role: ReplicationRole::Replica,
-    replica_of: Some("127.0.0.1:7631".into()),
-    ..ReplicationConfig::default()
-})?;
-# Ok::<(), shardmap::ShardCacheError>(())
-```
-
-Native replication v3 streams byte-string cache mutations and consistent
-snapshots. It is intended for read replicas, sidecar cache mirrors, and service
-subscribers that consume shardcache's FCRP frames. Canonically serialized vector
-sets are included: `VADD`, `VREM`, `VSETATTR`, vector-key deletion, and TTL
-changes use the key's canonical source-shard sequence stream while live apply
-and snapshot restore preserve pinned shard-0 storage. Keeping the sequence
-stream tied to the key prevents ordering changes during vector-to-string
-transitions. Other Redis object families remain outside this embedded
-replication surface.
-
-Replica topology is negotiated from the primary before mutation processing.
-FCRP rejects source-shard IDs outside that topology, sequence gaps, mismatched
-key hashes/tags, duplicate snapshot keys, and topology changes. Peers advertise
-`receive_max_frame_bytes` during the handshake; a replica whose limit is below
-the primary's configured outbound ceiling is rejected before bootstrap.
-Configure `read_timeout_ms` and `write_timeout_ms` to bound each complete frame
-transfer; a timed-out partial frame closes the connection before retry. Each
-individual key/value/governance mutation must fit `receive_max_frame_bytes`.
-Changing the primary shard count requires a new compatible bootstrap.
-
-`ReplicatedEmbeddedStore` write methods return `Result` and reject mutations
-that cannot fit one configured FCRP frame before changing local state.
-`SnapshotProvider::snapshot_watermarks` and `snapshot_shard` are fallible. A
-cold-value materialization failure aborts bootstrap and preserves the replica's
-last valid state. The primary streams one source shard at a time and permits one
-bootstrap at a time. Each shard retains a key index plus one bounded
-materialization page and one wire chunk; object-store reads run after releasing
-the shard lock. `snapshot_bootstrap_timeout_ms` covers gate wait, key capture,
-materialization, delivery, and buffered catch-up; backlog-only catch-up remains
-concurrent.
-
-`ReplicationConfig::vector_state_flush_ms` defaults to 10 ms. Within that
-window, repeated writes to one vector set replace its pending canonical state
-instead of retaining every intermediate HNSW payload. The pending key count is
-bounded by the existing per-shard replication queue capacity and retained state
-is independently bounded by `vector_state_pending_max_bytes` (16 MiB by
-default). A state larger than that byte limit bypasses coalescing. Deletes,
-vector-to-string transitions, explicit snapshot capture, and shutdown flush
-the required state in canonical key-shard sequence order.
-
-Use `ReplicatedEmbeddedStore::shared_inner()` when an SCNP/RESP endpoint must
-serve the same writable primary memory. Keep the `ReplicatedEmbeddedStore`
-alive for the lifetime of the server so its bounded replication exporters and
-point/vector observers remain active. Replica promotion and client endpoint selection
-remain orchestration responsibilities; wait for replica catch-up before
-redirecting vector reads or promoting a node.
-
 For capacity scaling without full replica copies, enable `kv-overflow` and use
 `KvOverflowStore`. It mirrors each fixed logical key slot to one shardcache
 server through bounded ordered workers, evicts only acknowledged cold values
@@ -590,7 +487,8 @@ Exact byte-key values can also carry opaque governance metadata. Protected
 entries fail closed through ordinary GET, mutable, visitor, removal-return, and
 Redis paths; use `EmbeddedStore::get_value_bytes_with_governance_filter` to
 authorize borrowed metadata before the value handle is cloned. Governance is
-preserved through persistence, replication, object overflow, and KV overflow.
+preserved through persistence, object overflow, KV overflow, and the
+runtime-neutral mutation/snapshot contracts used by external extensions.
 See [`docs/EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) for the full
 security and compatibility contract.
 
@@ -642,9 +540,9 @@ candidate may release its cached value.
 ## Optional Server, Protocol, And Persistence Internals
 
 The crate also contains the storage internals used by the `shardcache` server:
-command parsing, RESP/SCNP protocol code, persistence, replication, and server
-transport modules. Those surfaces are feature-gated so embedded users do not
-compile server code by default.
+command parsing, RESP/SCNP protocol code, persistence, runtime-neutral
+extension contracts, and server transport modules. Those surfaces are
+feature-gated so embedded users do not compile server code by default.
 
 Most applications should start with `ShardMap<K, V>`. Use `ShardCache` when you
 need raw byte cache operations, semantic-cache APIs, lock helpers, or prepared

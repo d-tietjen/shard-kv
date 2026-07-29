@@ -48,15 +48,12 @@ pub(crate) use embedded_store::OverflowReplicaAuthRuntime;
 pub(crate) use embedded_store::OverflowReplicaTlsRuntime;
 #[cfg(feature = "sharded")]
 pub use embedded_store::OwnedEmbeddedSessionPackedView as LocalEmbeddedSessionPackedView;
-pub(crate) use embedded_store::PointMutationKind;
 #[doc(hidden)]
 pub use embedded_store::ShardArcEmbeddedStore;
 #[cfg(feature = "redis-module-timeseries")]
 pub(crate) use embedded_store::TimeSeriesMultiRangeWriter;
 #[cfg(feature = "redis-module-topk")]
 pub(crate) use embedded_store::TopKError;
-#[cfg(feature = "redis")]
-pub(crate) use embedded_store::VectorMutationKind;
 pub(crate) use embedded_store::overflow_slot_shard;
 #[cfg(feature = "redis")]
 pub(crate) use embedded_store::{
@@ -71,8 +68,15 @@ pub use embedded_store::{
     OwnedEmbeddedShard, OwnedEmbeddedWorkerReadSession, OwnedEmbeddedWorkerShards,
     PackedSessionWrite, shift_for, stripe_index,
 };
+#[doc(hidden)]
+pub use embedded_store::{
+    EmbeddedSnapshotIterator, PointMutationFn, PointMutationKind, PointMutationValidatorFn,
+};
 #[cfg(feature = "redis-modules")]
 pub use embedded_store::{RedisModuleApi, RedisModuleApiResult, RedisModuleFamily};
+#[cfg(feature = "redis")]
+#[doc(hidden)]
+pub use embedded_store::{VectorMutationFn, VectorMutationKind, VectorMutationValidatorFn};
 #[cfg(feature = "sharded")]
 pub use embedded_store_sharded::{
     LocalRouteError, LocalStoreAccessError, LocalStoreInstallError,
@@ -161,7 +165,8 @@ pub use telemetry::{
 /// Owned byte buffer used for cache keys and values.
 pub type Bytes = Vec<u8>;
 #[cfg(feature = "redis")]
-pub(crate) const VECTOR_SET_PREFIX: &[u8] = b"FC:VSET:v1\0";
+#[doc(hidden)]
+pub const VECTOR_SET_PREFIX: &[u8] = b"FC:VSET:v1\0";
 /// Randomly keyed high-throughput hash builder for process-local tables.
 ///
 /// Routing remains on stable XXH3. Local tables use per-instance random keys so
@@ -265,7 +270,7 @@ pub(crate) fn local_table_hash(route_hash: u64) -> u64 {
 }
 
 /// Returns the process-local builder used by raw maps that re-key route hashes.
-#[cfg(any(feature = "active-sync-causal-eventual", feature = "kv-overflow"))]
+#[cfg(feature = "kv-overflow")]
 pub(crate) fn local_table_hasher() -> FastHashBuilder {
     local_table_hasher_ref().clone()
 }
@@ -304,7 +309,8 @@ pub fn now_millis() -> u64 {
 /// millisecond from an atomic. If the updater cannot start, callers fall back
 /// to the exact clock.
 #[inline(always)]
-pub(crate) fn ttl_now_millis() -> u64 {
+#[doc(hidden)]
+pub fn ttl_now_millis() -> u64 {
     TTL_CLOCK_START.call_once(start_ttl_clock);
     if TTL_CLOCK_RUNNING.load(Ordering::Relaxed) {
         TTL_CLOCK_MS.load(Ordering::Relaxed)

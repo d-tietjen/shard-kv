@@ -124,7 +124,7 @@ impl EmbeddedRefMut<'_> {
             tracing::warn!(
                 key_len = self.key.len(),
                 value_len = value.len(),
-                "mutable point replacement rejected before commit because it exceeds replication limits"
+                "mutable point replacement rejected before commit because it is rejected by an installed storage extension"
             );
             return;
         }

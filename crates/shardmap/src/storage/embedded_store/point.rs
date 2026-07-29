@@ -12,10 +12,12 @@ impl EmbeddedStore {
         self.get_with_route(route, key, now_ms)
     }
 
-    /// Crate-internal owned read for callers that already computed placement.
-    #[cfg(feature = "active-sync-causal-eventual")]
+    /// Returns an owned value using a route computed by [`Self::route_key`].
+    ///
+    /// This advanced extension API avoids recomputing placement when a caller
+    /// already carries the route alongside a storage operation.
     #[inline(always)]
-    pub(crate) fn get_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Option<Bytes> {
+    pub fn get_routed(&self, route: EmbeddedKeyRoute, key: &[u8]) -> Option<Bytes> {
         self.get_with_route(route, key, now_millis())
     }
 
@@ -153,7 +155,7 @@ impl EmbeddedStore {
         value: &[u8],
         ttl_ms: Option<u64>,
     ) {
-        if !self.point_mutation_is_replicable(key, value.len(), None) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
             return;
         }
         #[cfg(not(feature = "unsafe"))]
@@ -229,7 +231,7 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) {
-        if !self.point_mutation_is_replicable(key, value.len(), None) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
             return;
         }
         #[cfg(not(feature = "unsafe"))]
@@ -355,7 +357,7 @@ impl EmbeddedStore {
         value: &[u8],
         ttl_ms: Option<u64>,
     ) {
-        if !self.point_mutation_is_replicable(key, value.len(), None) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
             return;
         }
         if !can_route_with_key_hash(self.route_mode, self.shards.len(), key) {
@@ -1196,7 +1198,7 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
-        if !self.point_mutation_is_replicable(key, value.len(), None) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
             return false;
         }
         if shard_id >= self.shards.len() {
@@ -1238,7 +1240,7 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
-        if !self.point_mutation_is_replicable(key, value.len(), None) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
             return false;
         }
         #[cfg(not(feature = "unsafe"))]
@@ -1288,7 +1290,7 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
-        if !self.point_mutation_is_replicable(key, value.len(), None) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
             return false;
         }
         if shard_id >= self.shards.len() {
@@ -1355,7 +1357,7 @@ impl EmbeddedStore {
         key: &[u8],
         value: &[u8],
     ) -> bool {
-        if !self.point_mutation_is_replicable(key, value.len(), None) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
             return false;
         }
         #[cfg(not(feature = "unsafe"))]

@@ -90,13 +90,10 @@ impl Set {
         let key_end = key_start + key_len;
         let key = &ctx.frame.buf[key_start..key_end];
         let value = &ctx.frame.buf[key_end..key_end + value_len];
-        if !ctx
-            .store
-            .point_mutation_is_replicable(key, value.len(), None)
-        {
+        if !ctx.store.point_mutation_is_accepted(key, value.len(), None) {
             ServerWire::write_fast_error(
                 ctx.out,
-                "ERR mutation exceeds the configured replication frame limit",
+                "ERR mutation rejected by an installed storage extension",
             );
             return ScnpDispatch::Complete(ctx.frame.frame_len);
         }
@@ -155,13 +152,10 @@ impl Set {
         let key_end = key_start + key_len;
         let key = &ctx.frame.buf[key_start..key_end];
         let value = &ctx.frame.buf[key_end..key_end + value_len];
-        if !ctx
-            .store
-            .point_mutation_is_replicable(key, value.len(), None)
-        {
+        if !ctx.store.point_mutation_is_accepted(key, value.len(), None) {
             ServerWire::write_fast_error(
                 ctx.out,
-                "ERR mutation exceeds the configured replication frame limit",
+                "ERR mutation rejected by an installed storage extension",
             );
             return ScnpDispatch::Complete(ctx.frame.frame_len);
         }
@@ -278,13 +272,10 @@ impl Set {
         let key_end = key_start + key_len;
         let key = &ctx.frame.buf[key_start..key_end];
         let value = &ctx.frame.buf[key_end..key_end + value_len];
-        if !ctx
-            .store
-            .point_mutation_is_replicable(key, value.len(), None)
-        {
+        if !ctx.store.point_mutation_is_accepted(key, value.len(), None) {
             ServerWire::write_fast_error(
                 ctx.out,
-                "ERR mutation exceeds the configured replication frame limit",
+                "ERR mutation rejected by an installed storage extension",
             );
             return ScnpDispatch::Complete(ctx.frame.frame_len);
         }
@@ -336,7 +327,7 @@ impl Set {
         ) {
             ServerWire::write_fast_error(
                 ctx.out,
-                "ERR mutation exceeds the configured replication frame limit",
+                "ERR mutation rejected by an installed storage extension",
             );
         } else {
             ServerWire::write_fast_ok(ctx.out);

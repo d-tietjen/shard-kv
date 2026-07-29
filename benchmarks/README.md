@@ -16,100 +16,10 @@ Two modes, parallel and independent:
 | `run-memcache-comparison.sh` | Docker-isolated cache workload | Head-to-head GET/SET/mixed throughput for shardcache server modes vs Memcached |
 | `semantic_cache_matrix` | Pairwise embedding sweep plus lookup latency | Semantic cache F1/FPR across thresholds and unique/cycling lookup latency |
 | `scnp_vector_client_cost` | Typed Rust Object RAG client against SCNP | End-to-end `VSIM COUNT ... WITHSCORES WITHATTRIBS` throughput and latency over fanout or direct-shard transport |
-| `active_sync_cost` | Embedded active-active A/B | Baseline, local causal metadata, installed conflict orderer, and background convergence cost with a final convergence assertion |
-| `active_sync_conflict_cost` | Embedded concurrent-conflict A/B | Admission, convergence throughput, sync latency, conflict counts, and external-orderer calls under guaranteed same-key conflicts |
-| `active_sync_tls_latency` | Cross-host active-sync mTLS | End-to-end write-batch synchronization latency and throughput over the production direct-shard TLS transport |
 
 The throughput drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `shardcache-lmcache`
 emit rows in the same schema.
-
-## Active-Active Cost
-
-Build and run the feature-gated active-sync comparison with:
-
-```bash
-cargo build --release -p shardcache-benchmarks \
-  --features active-sync-consensus-ordered-eventual --bin active_sync_cost
-
-target/release/active_sync_cost \
-  --modes baseline,causal-local,consensus-local,causal-sync,consensus-sync \
-  --shards 8 --clients 8 --key-count 100000 --value-size 1024 \
-  --read-percent 80 --warmup 2 --duration 10 \
-  --sync-interval-ms 100 --latency-sample-rate 10000
-```
-
-`causal-local` and `consensus-local` disable peer synchronization and differ
-only in conflict ordering. `causal-sync` and `consensus-sync` run the same
-background peer exchange with their respective conflict guarantees. Consensus
-modes install an orderer that fails if this no-conflict workload invokes it.
-Synchronized modes propagate background errors, drain bounded final sync rounds
-until quiet, and verify every key on both maps before reporting success. Legacy
-`active-local`, `active-orderer`, and `active-sync` arguments remain accepted as
-aliases. Run modes in separate processes for release comparisons. Curated Adam
-results and known write-path limits are in
-[`ACTIVE_ACTIVE_0_7_BASELINE.md`](ACTIVE_ACTIVE_0_7_BASELINE.md).
-
-For the intended read-heavy deployment, run isolated `--read-percent 99` and
-`--read-percent 95` processes for every mode. The three-run Adam release
-medians, including p99/p999 and exact commands, are preserved in
-[`evidence/adam-active-sync-read-heavy-20260716`](evidence/adam-active-sync-read-heavy-20260716/README.md).
-
-Use the conflict driver to measure the path that `active_sync_cost` deliberately
-does not exercise:
-
-```bash
-cargo build --release -p shardcache-benchmarks \
-  --features active-sync-consensus-ordered-eventual \
-  --bin active_sync_conflict_cost
-
-target/release/active_sync_conflict_cost \
-  --modes causal,consensus --shards 8 --conflict-keys 1024 \
-  --value-size 1024 --warmup-rounds 5 --rounds 50 \
-  --batch-items 256 --orderer-delay-micros 0
-```
-
-Every round writes different values to the same keys on two previously
-synchronized maps. The driver times local mutation admission separately from
-bidirectional convergence, requires sync to report the conflicts, and compares
-every key after each round. Consensus mode shares one deterministic orderer
-between the peers and can inject latency once per batch operation. The delay is
-synthetic; use it to measure sensitivity, not as a claim about a particular
-consensus deployment. Set `--batch-items 1` for the per-claim control. Run each
-mode in a separate process for release comparisons.
-
-## Cross-Host Active-Sync TLS Latency
-
-Build the two-process driver with the production active-sync TLS feature:
-
-```bash
-cargo build --release -p shardcache-benchmarks \
-  --features active-sync-tls --bin active_sync_tls_latency
-```
-
-Start `sink` on the receiving host with its certificate, private key, CA, and
-the source leaf certificate used for node-ID authorization. Then run `source`
-on the sending host with its own credentials and one `--peer` address per
-remote shard. The number of listener and peer addresses must be a nonzero power
-of two and must match on both sides.
-
-```bash
-target/release/active_sync_tls_latency sink \
-  --cert adam.crt --key adam.key --ca ca.crt \
-  --authorized-cert laptop.crt \
-  --listen 0.0.0.0:18443
-
-target/release/active_sync_tls_latency source \
-  --cert laptop.crt --key laptop.key --ca ca.crt \
-  --peer adam.example.com:18443 --server-name adam.example.com \
-  --batch-sizes 1,64 --rounds 200 --warmup-rounds 20 --value-size 1024
-```
-
-The source reports p50, p95, p99, and p99.9 wall-clock latency from local batch
-admission through remote acknowledgement, plus effective writes per second.
-The sink verifies the exact number of applied values before exiting. Use an
-SSH tunnel only when intentionally measuring the tunnel path; direct addresses
-measure the production mTLS transport without tunnel overhead.
 
 ## Docker Server Suite
 
@@ -276,7 +186,6 @@ artifact or still needs a fresh run.
 | shardcache embedded vs Rust cache baselines | [`EMBEDDED_HEAD_TO_HEAD_BENCHMARKS.md`](EMBEDDED_HEAD_TO_HEAD_BENCHMARKS.md), [`EMBEDDED_TYPED_CODEC_BENCHMARKS.md`](EMBEDDED_TYPED_CODEC_BENCHMARKS.md), [`EMBEDDED_BENCHMARKS.md`](EMBEDDED_BENCHMARKS.md) | Server 16-vCPU embedded-core passes comparing `fc-embed`, `fc-shared`, native typed `ShardMap<K, V>`, and codec facades against DashMap, Moka, LRU, and `RwLock<HashMap>` across 64 B through 256 KiB pure GET and pure SET rows | Publishable for the saved 16-vCPU embedded value-size passes; reference GET rows are borrowed-access claims, so use `embedded-copy` before making copy-out read claims. |
 | shardmap embedded vs Moka | [`SHARDMAP_VS_MOKA_EMBEDDED.md`](SHARDMAP_VS_MOKA_EMBEDDED.md) | Embedded owner-local shardmap against `moka::sync::Cache` | Publishable for this embedded comparison. |
 | Embedded release matrix | [`SHARDMAP_EMBEDDED_RELEASE.md`](SHARDMAP_EMBEDDED_RELEASE.md) | Direct, shared, TTL, LRU, and selected Rust-cache baselines | Publishable as a release proof, not a single competitor-only report. |
-| 0.7 active-active performance | [`ACTIVE_ACTIVE_0_7_BASELINE.md`](ACTIVE_ACTIVE_0_7_BASELINE.md) | Initial `ActiveShardMap` local/sync cost, Adam raw-cache baseline, replication proxy, LRU cost, and remaining 0.7 matrix | The implementation is measured, but write-heavy release gates are not yet met. |
 | LMCache plugin vs Redis TCP | [`LMCACHE_VS_REDIS.md`](LMCACHE_VS_REDIS.md) | shardcache LMCache embedded and SCNP/TCP against Redis TCP | Publishable for the recorded Linux run; rerun before making new M5 or 5MiB LMCache claims. |
 | Local hardware memory ceiling | [`SHARDMAP_MEMORY_WRITE_COST.md`](SHARDMAP_MEMORY_WRITE_COST.md) | Pure read, pure write, and copy/materialization probes | Use as the denominator for hardware-scaled bandwidth claims. |
 | Semantic cache head-to-head plan | [`SEMANTIC_CACHE_HEAD_TO_HEAD.md`](SEMANTIC_CACHE_HEAD_TO_HEAD.md) | ShardCache vs BetterDB, RedisVL, Redis LangCache, LangChain, GPTCache, and vector-backed cache equivalents | Benchmark design for publishable semantic-cache claims; execute before making broad "fastest semantic cache" claims. |
@@ -650,36 +559,6 @@ The aliases add `-C target-cpu=native`, which lets LLVM use host-specific CPU
 instructions. Use these for same-machine benchmark investigations only; keep
 ordinary release builds for portable artifacts and cross-host comparisons.
 
-## Replication Cost
-
-`replication_cost` measures the primary write-path overhead of native
-replication and compares immediate one-record sends with batched sends:
-
-```bash
-cargo run --release -p shardcache-benchmarks --bin replication_cost -- \
-  --value-sizes 64,512,4096,16384 \
-  --mixes set,80-20 \
-  --value-pattern semi-random \
-  --clients 16 --shards 16 --duration 10
-```
-
-The output reports ops/sec regression inputs alongside emitted mutations,
-batch count, raw MiB/s, wire MiB/s, compression ratio, and replica apply rate.
-`queue hi` is the highest observed shard export lane depth, not a single global
-queue depth.
-`semi-random` is the default value pattern and builds a bounded pool of
-deterministic, mostly-random values so zstd results are not dominated by the
-same repeated payload in every SET. Use `--value-pattern repeat` only as a
-compression best-case control. The pool size is bounded by
-`--value-pool-count` and `--value-pool-max-bytes`. The default mode list follows
-the production default and benchmarks uncompressed replication. Add
-`--modes baseline,batch-none,batch-zstd` when you specifically want to measure
-the compression tradeoff.
-
-The current pinned Linux matrix comparing primary throughput with and
-without native replication is published in
-[shardcache Native Replication Cost](SHARDCACHE_REPLICATION_COST.md).
-
 ## Embedded Release Matrix
 
 The crates.io release embedded matrix is orchestrated by
@@ -704,18 +583,6 @@ Use environment variables such as `REPEATS`, `DURATION`, `VALUE_SIZES`, and
 `LRU_CPU_CLIENT_PAIRS` for smoke runs. The release run should keep the defaults:
 three repeats, `10s` duration, no latency sampling for throughput rows, and
 `TTL_MS=60000` for active-TTL rows.
-
-`replication_tcp_cost` exercises the native FCRP TCP transport specifically.
-Build with `--features monoio`, run once normally, then run again with
-`SHARDCACHE_REPLICATION_USE_MONOIO=1`:
-
-```bash
-cargo run --release -p shardcache-benchmarks --features monoio \
-  --bin replication_tcp_cost -- \
-  --value-sizes 64,4096 --mixes set,80-20 \
-  --modes immediate-none,batch-none \
-  --clients 16 --shards 16 --duration 10
-```
 
 `wal_tcp_export_cost` measures the production persistence runtime with disk WAL
 append plus live TCP export. Build with `--features monoio`, run once normally,
@@ -1056,12 +923,10 @@ multi-worker runs use monoio's legacy socket driver. Server profiling showed the
 legacy driver avoids enough per-request `io_uring_enter` cost to improve the
 16-worker RESP hot mix, while io_uring remains faster for the one-worker shape.
 
-The non-command streaming paths are opt-in separately on Linux. Use
-`SHARDCACHE_WAL_TCP_USE_MONOIO=1` to run the TCP WAL exporter on monoio, and
-`SHARDCACHE_REPLICATION_USE_MONOIO=1` to run the native FCRP replication
-transport on monoio. These switches are intentionally independent of
-`SHARDCACHE_USE_MONOIO=1` so direct server runtime benchmarks, WAL export
-benchmarks, and replication-cost benchmarks can be isolated.
+The non-command WAL streaming path is opt-in separately on Linux. Use
+`SHARDCACHE_WAL_TCP_USE_MONOIO=1` to run the TCP WAL exporter on monoio. This
+switch is intentionally independent of `SHARDCACHE_USE_MONOIO=1` so direct
+server runtime and WAL export benchmarks can be isolated.
 
 Then run the bench:
 
