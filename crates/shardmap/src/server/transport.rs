@@ -98,6 +98,7 @@ pub(super) struct RoutedWorkerResponse {
 pub(super) struct TokioHybridWorkerConfig {
     pub(super) worker_id: usize,
     pub(super) direct_bind_addr: SocketAddr,
+    pub(super) direct_listener: std::net::TcpListener,
     pub(super) core_id: Option<core_affinity::CoreId>,
     pub(super) single_threaded: bool,
     pub(super) owned_shard_id: usize,
@@ -194,6 +195,7 @@ impl MultiDirectWorker {
         let TokioHybridWorkerConfig {
             worker_id,
             direct_bind_addr,
+            direct_listener,
             core_id,
             single_threaded,
             owned_shard_id,
@@ -220,10 +222,12 @@ impl MultiDirectWorker {
 
         let local = LocalSet::new();
         runtime.block_on(local.run_until(async move {
-            let direct_listener = match TcpListener::bind(direct_bind_addr).await {
+            let direct_listener = match TcpListener::from_std(direct_listener) {
                 Ok(listener) => listener,
                 Err(error) => {
-                    tracing::error!("worker {worker_id} bind {direct_bind_addr} failed: {error}");
+                    tracing::error!(
+                        "worker {worker_id} could not register prebound listener {direct_bind_addr}: {error}"
+                    );
                     return;
                 }
             };

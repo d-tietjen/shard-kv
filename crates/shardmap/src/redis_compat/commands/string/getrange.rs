@@ -48,6 +48,9 @@ impl crate::commands::redis::RedisCommand for GetRange {
                         RedisStringLookup::Hit => {}
                         RedisStringLookup::Miss => ServerWire::write_resp_blob_string(out, b""),
                         RedisStringLookup::WrongType => write_frame(out, &wrongtype()),
+                        RedisStringLookup::BackendError => {
+                            ServerWire::write_resp_error(out, "ERR object overflow read failed")
+                        }
                     }
                     return;
                 }
@@ -77,6 +80,9 @@ impl crate::commands::redis::RedisCommand for GetRange {
                     RedisStringLookup::Hit => {}
                     RedisStringLookup::Miss => ServerWire::write_resp_blob_string(out, b""),
                     RedisStringLookup::WrongType => write_frame(out, &wrongtype()),
+                    RedisStringLookup::BackendError => {
+                        ServerWire::write_resp_error(out, "ERR object overflow read failed")
+                    }
                 }
             }
             _ => write_frame(out, &wrong_arity("GETRANGE")),

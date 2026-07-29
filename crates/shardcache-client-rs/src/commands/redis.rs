@@ -1,6 +1,7 @@
 use std::io::Write;
 
 use crate::commands::ScnpCommand;
+use crate::commands::compact::{arg_list_len, write_arg_list};
 use crate::connection::ScnpConnection;
 use crate::error::{Result, ShardCacheClientError};
 use crate::protocol::{FAST_FLAG_REDIS_COMMAND_ARGS, ROUTED_FLAGS};
@@ -85,6 +86,10 @@ macro_rules! define_redis_command_kind {
 
             pub fn all() -> &'static [Self] {
                 REDIS_COMMAND_KINDS
+            }
+
+            pub(crate) fn uses_vector_shard(self) -> bool {
+                matches!(self, Self::VAdd | Self::VRem | Self::VSim)
             }
         }
 
@@ -254,6 +259,9 @@ define_redis_command_kind! {
     ZScore => ("ZSCORE", 52),
     ZUnion => ("ZUNION", 229),
     ZUnionStore => ("ZUNIONSTORE", 230),
+    VAdd => ("VADD", 231),
+    VRem => ("VREM", 241),
+    VSim => ("VSIM", 243),
 }
 
 impl RedisCommandKind {
@@ -373,14 +381,14 @@ impl ScnpCommand for RedisCommand<'_> {
     }
 
     fn body_len(&self) -> usize {
-        self.route.map_or(0, |_| 20) + compact_arg_list_len(self.args)
+        self.route.map_or(0, |_| 20) + arg_list_len(self.args)
     }
 
     fn write_body<W: Write>(&self, w: &mut W) -> Result<()> {
         if let Some(route) = self.route {
             route.write_to(w)?;
         }
-        write_compact_arg_list(w, self.args)
+        write_arg_list(w, self.args)
     }
 
     fn read_response(self, conn: &mut ScnpConnection) -> Result<Self::Output> {
@@ -416,12 +424,12 @@ pub(crate) fn write_request(
     conn.write_header(
         kind.opcode(),
         FAST_FLAG_REDIS_COMMAND_ARGS | route.map_or(0, |_| ROUTED_FLAGS),
-        (route.map_or(0, |_| 20) + compact_arg_list_len(args)) as u32,
+        (route.map_or(0, |_| 20) + arg_list_len(args)) as u32,
     )?;
     if let Some(route) = route {
         route.write_to(&mut conn.w)?;
     }
-    write_compact_arg_list(&mut conn.w, args)
+    write_arg_list(&mut conn.w, args)
 }
 
 pub(crate) fn write_resp_request(
@@ -533,41 +541,6 @@ fn zaggregate_store_route_keys<'a>(args: &[&'a [u8]]) -> RedisCommandRouteKeys<'
     keys.push(args[0]);
     keys.extend(args.iter().skip(2).take(numkeys).copied());
     RedisCommandRouteKeys::Keys(keys)
-}
-
-fn compact_arg_list_len(args: &[&[u8]]) -> usize {
-    var_u32_len(args.len() as u32)
-        + args
-            .iter()
-            .map(|arg| var_u32_len(arg.len() as u32) + arg.len())
-            .sum::<usize>()
-}
-
-fn var_u32_len(mut value: u32) -> usize {
-    let mut len = 1;
-    while value >= 0x80 {
-        value >>= 7;
-        len += 1;
-    }
-    len
-}
-
-fn write_compact_arg_list<W: Write>(w: &mut W, args: &[&[u8]]) -> Result<()> {
-    write_var_u32(w, args.len() as u32)?;
-    for arg in args {
-        write_var_u32(w, arg.len() as u32)?;
-        w.write_all(arg)?;
-    }
-    Ok(())
-}
-
-fn write_var_u32<W: Write>(w: &mut W, mut value: u32) -> Result<()> {
-    while value >= 0x80 {
-        w.write_all(&[((value as u8) & 0x7f) | 0x80])?;
-        value >>= 7;
-    }
-    w.write_all(&[value as u8])?;
-    Ok(())
 }
 
 fn parse_resp_value(buf: &[u8], cursor: &mut usize, depth: usize) -> Result<RedisResponse> {
@@ -788,6 +761,8 @@ fn parse_resp_i64(raw: &[u8], label: &str) -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -807,12 +782,21 @@ mod tests {
     }
 
     #[test]
-    fn compact_arg_list_len_matches_wire_encoding() {
-        let args = [b"alpha".as_slice(), b"beta-beta".as_slice(), b"".as_slice()];
-        let mut encoded = Vec::new();
-        write_compact_arg_list(&mut encoded, &args).unwrap();
-        assert_eq!(encoded.len(), compact_arg_list_len(&args));
-        assert_eq!(encoded, b"\x03\x05alpha\x09beta-beta\x00");
+    fn command_names_and_opcodes_are_unique() {
+        let mut names = HashSet::new();
+        let mut opcodes = HashSet::new();
+        for kind in RedisCommandKind::all() {
+            assert!(
+                names.insert(kind.name()),
+                "duplicate command name: {}",
+                kind.name()
+            );
+            assert!(
+                opcodes.insert(kind.opcode()),
+                "duplicate command opcode: {}",
+                kind.opcode()
+            );
+        }
     }
 
     #[test]

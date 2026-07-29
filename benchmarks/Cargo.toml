@@ -46,6 +46,7 @@ redis-embedded-commands = [
     "shardmap/redis-functions",
     "shardmap/redis-modules-all",
 ]
+typed-vector-client = ["shardcache-client-rs/vector"]
 
 [dependencies]
 shardmap = { workspace = true, features = ["sharded", "codec"] }
@@ -61,8 +62,11 @@ lru = "0.12"
 moka = { version = "0.12", default-features = false, features = ["sync"] }
 parking_lot = { workspace = true }
 rand = { version = "0.8", features = ["small_rng"] }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 tokio = { workspace = true }
 xxhash-rust = { workspace = true }
 
@@ -73,14 +77,6 @@ path = "src/bin/saturation.rs"
 [[bin]]
 name = "curve"
 path = "src/bin/curve.rs"
-
-[[bin]]
-name = "replication_cost"
-path = "src/bin/replication_cost.rs"
-
-[[bin]]
-name = "replication_tcp_cost"
-path = "src/bin/replication_tcp_cost.rs"
 
 [[bin]]
 name = "wal_tcp_export_cost"
@@ -128,6 +124,11 @@ path = "src/bin/semantic_cache_matrix.rs"
 [[bin]]
 name = "semantic_server_load"
 path = "src/bin/semantic_server_load.rs"
+
+[[bin]]
+name = "scnp_vector_client_cost"
+path = "src/bin/scnp_vector_client_cost.rs"
+required-features = ["typed-vector-client"]
 
 [[bin]]
 name = "embedded_server_harness"

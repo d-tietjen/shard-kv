@@ -3502,6 +3502,7 @@ fn raw_resp_expanded_redis_surface_round_trip() {
             Frame::Array(Vec::new())
         ])]
     );
+    #[cfg(feature = "redis-modules")]
     assert_module_list_frame_matches_features(
         decode_resp_stream(&RespTestHarness::exec_resp(&store, &[b"MODULE", b"LIST"]))
             .into_iter()
@@ -6057,7 +6058,9 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
             b"a",
             b"NOQUANT",
             b"SETATTR",
-            b"{\"kind\":\"seed\",\"score\":3}"
+            b"{\"kind\":\"seed\",\"score\":3}",
+            b"GOVERNANCE",
+            b"tenant=acme"
         ]),
         Frame::Integer(1)
     );
@@ -6087,13 +6090,25 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
     );
     assert_eq!(run(&[b"VCARD", b"points"]), Frame::Integer(2));
     assert_eq!(run(&[b"VDIM", b"points"]), Frame::Integer(2));
-    assert_eq!(run(&[b"VISMEMBER", b"points", b"a"]), Frame::Integer(1));
+    assert_eq!(run(&[b"VISMEMBER", b"points", b"a"]), Frame::Integer(0));
     assert_eq!(
-        run(&[b"VGETATTR", b"points", b"a"]),
+        run(&[b"VISMEMBER", b"points", b"a", b"GOVERNANCE", b"tenant=acme",]),
+        Frame::Integer(1)
+    );
+    assert_eq!(run(&[b"VGETATTR", b"points", b"a"]), Frame::Null);
+    assert_eq!(
+        run(&[b"VGETATTR", b"points", b"a", b"GOVERNANCE", b"tenant=acme",]),
         Frame::BlobString(b"{\"kind\":\"seed\",\"score\":3}".to_vec())
     );
 
-    match run(&[b"VEMB", b"points", b"a", b"RAW"]) {
+    match run(&[
+        b"VEMB",
+        b"points",
+        b"a",
+        b"RAW",
+        b"GOVERNANCE",
+        b"tenant=acme",
+    ]) {
         Frame::Array(items) => {
             assert_eq!(items[0], Frame::SimpleString("fp32".to_string()));
             assert!(matches!(&items[1], Frame::BlobString(bytes) if bytes.len() == 8));
@@ -6120,7 +6135,15 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
     }
 
     assert_eq!(
-        run(&[b"VRANGE", b"points", b"[a", b"[z", b"1"]),
+        run(&[
+            b"VRANGE",
+            b"points",
+            b"[a",
+            b"[z",
+            b"1",
+            b"GOVERNANCE",
+            b"tenant=acme",
+        ]),
         Frame::Array(vec![Frame::BlobString(b"a".to_vec())])
     );
     assert_eq!(
@@ -6144,13 +6167,16 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
         b"4",
         b"WITHSCORES",
         b"WITHATTRIBS",
+        b"WITHGOVERNANCE",
+        b"GOVERNANCE",
+        b"tenant=acme",
         b"COUNT",
         b"2",
         b"FILTER",
         b".kind == \"seed\" && .score >= 3",
     ]) {
         Frame::Array(items) => {
-            assert_eq!(items.len(), 3);
+            assert_eq!(items.len(), 4);
             assert_eq!(items[0], Frame::BlobString(b"a".to_vec()));
             match &items[1] {
                 Frame::BlobString(score) => {
@@ -6163,18 +6189,267 @@ fn redis8_vector_set_semantics_cover_type_filter_raw_and_ranges() {
                 items[2],
                 Frame::BlobString(b"{\"kind\":\"seed\",\"score\":3}".to_vec())
             );
+            assert_eq!(items[3], Frame::BlobString(b"tenant=acme".to_vec()));
         }
         other => panic!("unexpected VSIM reply: {other:?}"),
     }
 
-    assert_eq!(run(&[b"VSETATTR", b"points", b"a", b""]), Frame::Integer(1));
+    assert_eq!(run(&[b"VSETATTR", b"points", b"a", b""]), Frame::Integer(0));
+    assert_eq!(
+        run(&[
+            b"VSETATTR",
+            b"points",
+            b"a",
+            b"",
+            b"GOVERNANCE",
+            b"tenant=acme",
+        ]),
+        Frame::Integer(1)
+    );
     assert_eq!(run(&[b"VGETATTR", b"points", b"a"]), Frame::Null);
+    assert_eq!(
+        run(&[
+            b"VSIM",
+            b"points",
+            b"ELE",
+            b"a",
+            b"COUNT",
+            b"1",
+            b"WITHGOVERNANCE",
+            b"GOVERNANCE",
+            b"tenant=acme",
+            b"TRUTH",
+        ]),
+        Frame::Array(vec![
+            Frame::BlobString(b"a".to_vec()),
+            Frame::BlobString(b"tenant=acme".to_vec()),
+        ])
+    );
     assert!(matches!(
-        run(&[b"VSETATTR", b"points", b"a", b"not-json"]),
+        run(&[
+            b"VSETATTR",
+            b"points",
+            b"a",
+            b"not-json",
+            b"GOVERNANCE",
+            b"tenant=acme",
+        ]),
         Frame::Error(_)
     ));
     assert_eq!(run(&[b"VREM", b"points", b"b"]), Frame::Integer(1));
     assert_eq!(run(&[b"VCARD", b"points"]), Frame::Integer(1));
+
+    let oversized_governance = vec![b'x'; 64 * 1024 + 1];
+    assert!(matches!(
+        run(&[
+            b"VADD",
+            b"points",
+            b"VALUES",
+            b"2",
+            b"1",
+            b"0",
+            b"oversized",
+            b"GOVERNANCE",
+            oversized_governance.as_slice(),
+        ]),
+        Frame::Error(message) if message.contains("governance metadata is too large")
+    ));
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn vector_mutations_preserve_ttl_on_pinned_and_natural_routes() {
+    let store = EmbeddedStore::new(4);
+    let keys = [key_for_shard(&store, 0), key_for_shard(&store, 2)];
+    let run = |parts: &[&[u8]]| -> Frame {
+        let raw =
+            RespTestHarness::exec_resp_sequence_raw(&store, &[parts], TransactionMode::Disabled);
+        decode_resp_stream(&raw)
+            .into_iter()
+            .next()
+            .expect("one frame")
+    };
+
+    for key in &keys {
+        assert_eq!(
+            run(&[b"VADD", key, b"VALUES", b"2", b"1", b"0", b"a"]),
+            Frame::Integer(1)
+        );
+        assert_eq!(
+            run(&[b"VADD", key, b"VALUES", b"2", b"0", b"1", b"b"]),
+            Frame::Integer(1)
+        );
+        assert_eq!(run(&[b"PEXPIRE", key, b"60000"]), Frame::Integer(1));
+
+        assert_eq!(
+            run(&[b"VADD", key, b"VALUES", b"2", b"1", b"1", b"c"]),
+            Frame::Integer(1)
+        );
+        assert!(matches!(run(&[b"PTTL", key]), Frame::Integer(ttl) if ttl > 0));
+
+        assert_eq!(
+            run(&[b"VSETATTR", key, b"a", b"{\"kind\":\"seed\"}"]),
+            Frame::Integer(1)
+        );
+        assert!(matches!(run(&[b"PTTL", key]), Frame::Integer(ttl) if ttl > 0));
+
+        assert_eq!(run(&[b"VREM", key, b"b"]), Frame::Integer(1));
+        assert!(matches!(run(&[b"PTTL", key]), Frame::Integer(ttl) if ttl > 0));
+    }
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn vector_dump_restore_round_trips_across_route_classes() {
+    let store = EmbeddedStore::new(4);
+    let sources = [key_for_shard(&store, 0), key_for_shard(&store, 2)];
+    let destinations = [key_for_shard(&store, 1), key_for_shard(&store, 3)];
+    let run = |parts: &[&[u8]]| -> Frame {
+        let raw =
+            RespTestHarness::exec_resp_sequence_raw(&store, &[parts], TransactionMode::Disabled);
+        decode_resp_stream(&raw)
+            .into_iter()
+            .next()
+            .expect("one frame")
+    };
+
+    for (source, destination) in sources.iter().zip(&destinations) {
+        assert_eq!(
+            run(&[b"VADD", source, b"VALUES", b"2", b"1", b"0", b"document",]),
+            Frame::Integer(1)
+        );
+        let payload = match run(&[b"DUMP", source]) {
+            Frame::BlobString(payload) => payload,
+            frame => panic!("unexpected vector DUMP response: {frame:?}"),
+        };
+        assert_eq!(
+            run(&[b"RESTORE", destination, b"60000", &payload]),
+            Frame::SimpleString("OK".to_string())
+        );
+        assert_eq!(run(&[b"VCARD", destination]), Frame::Integer(1));
+        assert_eq!(
+            run(&[b"TYPE", destination]),
+            Frame::SimpleString("vectorset".to_string())
+        );
+        assert!(matches!(run(&[b"PTTL", destination]), Frame::Integer(ttl) if ttl > 0));
+        assert_eq!(
+            run(&[
+                b"VSIM",
+                destination,
+                b"VALUES",
+                b"2",
+                b"1",
+                b"0",
+                b"COUNT",
+                b"1",
+                b"TRUTH",
+            ]),
+            Frame::Array(vec![Frame::BlobString(b"document".to_vec())])
+        );
+    }
+
+    let governed = b"governed-vectors";
+    assert_eq!(
+        run(&[
+            b"VADD",
+            governed,
+            b"VALUES",
+            b"2",
+            b"1",
+            b"0",
+            b"document",
+            b"GOVERNANCE",
+            b"tenant=acme",
+        ]),
+        Frame::Integer(1)
+    );
+    assert!(matches!(
+        run(&[b"DUMP", governed]),
+        Frame::Error(message) if message.contains("NOPERM")
+    ));
+}
+
+#[cfg(feature = "redis")]
+#[test]
+fn typed_scnp_vector_commands_return_native_responses() {
+    let store = EmbeddedStore::new(1);
+    let run = |kind: FastCommandKind, args: Vec<&[u8]>| {
+        let mut out = BytesMut::new();
+        DirectProtocol::shared_execute_fast_into(
+            &store,
+            FastRequest {
+                key_hash: None,
+                route_shard: None,
+                key_tag: None,
+                command: FastCommand::RedisCommand { kind, args },
+            },
+            &mut out,
+            None,
+            false,
+            Instant::now(),
+        );
+        FastCodec::decode_response(&out).unwrap().unwrap().0
+    };
+
+    assert_eq!(
+        run(FastCommandKind::Ping, vec![]),
+        FastResponse::Value(b"PONG".to_vec())
+    );
+    assert_eq!(
+        run(
+            FastCommandKind::VAdd,
+            vec![
+                b"points",
+                b"VALUES",
+                b"2",
+                b"1",
+                b"0",
+                b"doc-a",
+                b"SETATTR",
+                br#"{"kind":"a"}"#,
+                b"GOVERNANCE",
+                b"tenant=acme",
+            ]
+        ),
+        FastResponse::Integer(1)
+    );
+    let response = run(
+        FastCommandKind::VSim,
+        vec![
+            b"points",
+            b"VALUES",
+            b"2",
+            b"1",
+            b"0",
+            b"COUNT",
+            b"1",
+            b"WITHSCORES",
+            b"WITHATTRIBS",
+            b"WITHGOVERNANCE",
+            b"GOVERNANCE",
+            b"tenant=acme",
+            b"TRUTH",
+        ],
+    );
+    let FastResponse::Array(values) = response else {
+        panic!("typed VSIM should return a native SCNP array, got {response:?}");
+    };
+    assert_eq!(values.len(), 4);
+    assert_eq!(values[0].as_deref(), Some(b"doc-a".as_slice()));
+    assert_eq!(values[2].as_deref(), Some(br#"{"kind":"a"}"#.as_slice()));
+    assert_eq!(values[3].as_deref(), Some(b"tenant=acme".as_slice()));
+    let score = std::str::from_utf8(values[1].as_deref().unwrap())
+        .unwrap()
+        .parse::<f64>()
+        .unwrap();
+    assert!((score - 1.0).abs() < 1e-6);
+    assert_eq!(
+        run(
+            FastCommandKind::VRem,
+            vec![b"points", b"doc-a", b"GOVERNANCE", b"tenant=acme"],
+        ),
+        FastResponse::Integer(1)
+    );
 }
 
 #[cfg(feature = "redis")]
@@ -6591,14 +6866,11 @@ fn module_commands_are_accepted_with_empty_registry_semantics() {
     ));
 }
 
-#[cfg(feature = "redis")]
+#[cfg(feature = "redis-modules")]
 fn assert_module_list_frame_matches_features(frame: Frame) {
     match frame {
         Frame::Array(modules) => {
-            #[cfg(feature = "redis-modules")]
             let expected = crate::commands::redis_modules::enabled_modules().len();
-            #[cfg(not(feature = "redis-modules"))]
-            let expected = 0;
             assert_eq!(
                 modules.len(),
                 expected,

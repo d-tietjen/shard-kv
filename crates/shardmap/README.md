@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.6.0"
+shardmap = "0.9.0"
 ```
 
 ## Quick Start
@@ -445,39 +445,6 @@ The thread-local server is still a fanout endpoint shape; the difference is
 storage ownership. It serves the local store already installed on the owner
 thread instead of introducing a shared `Arc<ShardedEngine>` handle.
 
-For read replicas or service subscribers, wrap the embedded source in
-`ReplicatedEmbeddedStore` and start its native replication listener.
-
-```rust,ignore
-use std::sync::Arc;
-
-use shardmap::config::{ReplicationConfig, ReplicationRole};
-use shardmap::embedded::{ReplicatedEmbeddedStore, ReplicationReplicaClient};
-
-let mut primary_config = ReplicationConfig {
-    enabled: true,
-    role: ReplicationRole::Primary,
-    bind_addr: "127.0.0.1:7631".into(),
-    ..ReplicationConfig::default()
-};
-
-let primary = Arc::new(ReplicatedEmbeddedStore::new(4, primary_config.clone())?);
-let _listener = primary.serve_replicas(primary_config)?;
-
-let replica = ReplicationReplicaClient::start(ReplicationConfig {
-    enabled: true,
-    role: ReplicationRole::Replica,
-    replica_of: Some("127.0.0.1:7631".into()),
-    ..ReplicationConfig::default()
-})?;
-# Ok::<(), shardmap::ShardCacheError>(())
-```
-
-Native replication v1 streams byte-string cache mutations and consistent
-snapshots. It is intended for read replicas, sidecar cache mirrors, and service
-subscribers that consume shardcache's FCRP frames; Redis object-family
-replication is outside this embedded replication surface.
-
 For capacity scaling without full replica copies, enable `kv-overflow` and use
 `KvOverflowStore`. It mirrors each fixed logical key slot to one shardcache
 server through bounded ordered workers, evicts only acknowledged cold values
@@ -520,7 +487,8 @@ Exact byte-key values can also carry opaque governance metadata. Protected
 entries fail closed through ordinary GET, mutable, visitor, removal-return, and
 Redis paths; use `EmbeddedStore::get_value_bytes_with_governance_filter` to
 authorize borrowed metadata before the value handle is cloned. Governance is
-preserved through persistence, replication, object overflow, and KV overflow.
+preserved through persistence, object overflow, KV overflow, and the
+runtime-neutral mutation/snapshot contracts used by external extensions.
 See [`docs/EXACT_GOVERNANCE.md`](../../docs/EXACT_GOVERNANCE.md) for the full
 security and compatibility contract.
 
@@ -572,9 +540,9 @@ candidate may release its cached value.
 ## Optional Server, Protocol, And Persistence Internals
 
 The crate also contains the storage internals used by the `shardcache` server:
-command parsing, RESP/SCNP protocol code, persistence, replication, and server
-transport modules. Those surfaces are feature-gated so embedded users do not
-compile server code by default.
+command parsing, RESP/SCNP protocol code, persistence, runtime-neutral
+extension contracts, and server transport modules. Those surfaces are
+feature-gated so embedded users do not compile server code by default.
 
 Most applications should start with `ShardMap<K, V>`. Use `ShardCache` when you
 need raw byte cache operations, semantic-cache APIs, lock helpers, or prepared

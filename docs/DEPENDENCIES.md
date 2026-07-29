@@ -1,10 +1,10 @@
 # Dependency Inventory
 
-This is the complete locked dependency inventory for the Shardcache workspace.
-It includes publishable and source-only workspace packages plus normal, build,
-development, optional, platform-specific, and transitive packages reachable by
-the all-feature workspace graph. A deployed binary includes only the subset
-selected by its package, Cargo features, and target.
+This is the complete locked dependency inventory for the public Shardcache
+workspace. It includes publishable and vendored test-support workspace packages
+plus normal, build, development, optional, platform-specific, and transitive
+packages reachable by the all-feature workspace graph. A deployed binary
+includes only the subset selected by its package, Cargo features, and target.
 
 The inventory is generated from `Cargo.lock` with:
 
@@ -31,7 +31,7 @@ declared compatible version ranges.
 | `fast-telemetry` | `telemetry` | Metrics integration. |
 | `serde`, `serde_json`, `toml` | Configuration and persistence metadata | Structured configuration and metadata encoding. |
 | `crossbeam-channel`, `crossbeam-utils`, `parking_lot`, `rblock` | Core concurrency | Bounded channels and shard-local synchronization. |
-| `hashbrown`, `indextreemap`, `smallvec`, `xxhash-rust` | Core storage and routing | Tables, ordered indexes, inline collections, and stable fast hashing. |
+| `ahash`, `hashbrown`, `indextreemap`, `smallvec`, `xxhash-rust` | Core storage and routing | Randomly keyed local tables, ordered indexes, inline collections, and stable XXH3 routing. |
 
 TLS dependency policy is enforced by
 [`scripts/check-tls-dependency-policy.sh`](../scripts/check-tls-dependency-policy.sh):
@@ -42,16 +42,16 @@ OpenSSL-backed Rustls provider.
 
 | Package | Version | License | Manifest |
 | --- | --- | --- | --- |
-| `shardcache-benchmarks` | `0.6.0` | Apache-2.0 | `benchmarks/Cargo.toml` |
-| `shardcache-c` | `0.6.0` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
-| `shardcache-client-rs` | `0.6.0` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
-| `shardcache-formal` | `0.6.0` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
-| `shardcache-py` | `0.6.0` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
-| `shardcache-runtime` | `0.6.0` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
-| `shardcache` | `0.6.0` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
-| `shardmap` | `0.6.0` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
+| `shardcache-benchmarks` | `0.9.0` | Apache-2.0 | `benchmarks/Cargo.toml` |
+| `shardcache-c` | `0.9.0` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
+| `shardcache-client-rs` | `0.9.0` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
+| `shardcache-formal` | `0.9.0` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
+| `shardcache-py` | `0.9.0` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
+| `shardcache-runtime` | `0.9.0` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
+| `shardcache` | `0.9.0` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
+| `shardmap` | `0.9.0` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
 
-## Third-Party Packages (380)
+## Third-Party Packages (377)
 
 | Package | Version | License | Source |
 | --- | --- | --- | --- |
@@ -110,7 +110,7 @@ OpenSSL-backed Rustls provider.
 | `creusot-std-proc` | `0.11.0` | LGPL-2.1-or-later | crates.io |
 | `creusot-std` | `0.11.0` | LGPL-2.1-or-later | crates.io |
 | `crossbeam-channel` | `0.5.15` | MIT OR Apache-2.0 | crates.io |
-| `crossbeam-epoch` | `0.9.18` | MIT OR Apache-2.0 | crates.io |
+| `crossbeam-epoch` | `0.9.20` | MIT OR Apache-2.0 | crates.io |
 | `crossbeam-utils` | `0.8.21` | MIT OR Apache-2.0 | crates.io |
 | `crypto-common` | `0.1.7` | MIT OR Apache-2.0 | crates.io |
 | `crypto-common` | `0.2.2` | MIT OR Apache-2.0 | crates.io |
@@ -129,8 +129,8 @@ OpenSSL-backed Rustls provider.
 | `either` | `1.16.0` | MIT OR Apache-2.0 | crates.io |
 | `equivalent` | `1.0.2` | Apache-2.0 OR MIT | crates.io |
 | `errno` | `0.3.14` | MIT OR Apache-2.0 | crates.io |
-| `fast-telemetry-macros` | `0.7.1` | Apache-2.0 | crates.io |
-| `fast-telemetry` | `0.7.1` | Apache-2.0 | crates.io |
+| `fast-telemetry-macros` | `0.9.0` | Apache-2.0 | crates.io |
+| `fast-telemetry` | `0.9.0` | Apache-2.0 | crates.io |
 | `fastrand` | `2.4.1` | Apache-2.0 OR MIT | crates.io |
 | `find-msvc-tools` | `0.1.9` | MIT OR Apache-2.0 | crates.io |
 | `find_cuda_helper` | `0.2.0` | MIT OR Apache-2.0 | crates.io |
@@ -184,7 +184,6 @@ OpenSSL-backed Rustls provider.
 | `idna` | `1.1.0` | MIT OR Apache-2.0 | crates.io |
 | `indexmap` | `2.14.0` | Apache-2.0 OR MIT | crates.io |
 | `indextreemap` | `0.2.0` | MIT | crates.io |
-| `indoc` | `2.0.7` | MIT OR Apache-2.0 | crates.io |
 | `io-uring` | `0.6.4` | MIT OR Apache-2.0 | crates.io |
 | `ipnet` | `2.12.0` | MIT OR Apache-2.0 | crates.io |
 | `is_terminal_polyfill` | `1.70.2` | MIT OR Apache-2.0 | crates.io |
@@ -211,7 +210,6 @@ OpenSSL-backed Rustls provider.
 | `md-5` | `0.11.0` | MIT OR Apache-2.0 | crates.io |
 | `memchr` | `2.8.0` | Unlicense OR MIT | crates.io |
 | `memoffset` | `0.7.1` | MIT | crates.io |
-| `memoffset` | `0.9.1` | MIT | crates.io |
 | `minimal-lexical` | `0.2.1` | MIT/Apache-2.0 | crates.io |
 | `miniz_oxide` | `0.8.9` | MIT OR Zlib OR Apache-2.0 | crates.io |
 | `mint` | `0.5.9` | MIT | crates.io |
@@ -229,7 +227,7 @@ OpenSSL-backed Rustls provider.
 | `num-rational` | `0.4.2` | MIT OR Apache-2.0 | crates.io |
 | `num-traits` | `0.2.19` | MIT OR Apache-2.0 | crates.io |
 | `num_cpus` | `1.17.0` | MIT OR Apache-2.0 | crates.io |
-| `object_store` | `0.14.0` | MIT/Apache-2.0 | crates.io |
+| `object_store` | `0.14.1` | MIT/Apache-2.0 | crates.io |
 | `oid-registry` | `0.8.1` | MIT OR Apache-2.0 | crates.io |
 | `once_cell_polyfill` | `1.70.2` | MIT OR Apache-2.0 | crates.io |
 | `once_cell` | `1.21.4` | MIT OR Apache-2.0 | crates.io |
@@ -247,12 +245,12 @@ OpenSSL-backed Rustls provider.
 | `ppv-lite86` | `0.2.21` | MIT OR Apache-2.0 | crates.io |
 | `prettyplease` | `0.2.37` | MIT OR Apache-2.0 | crates.io |
 | `proc-macro2` | `1.0.106` | MIT OR Apache-2.0 | crates.io |
-| `pyo3-build-config` | `0.23.5` | MIT OR Apache-2.0 | crates.io |
-| `pyo3-ffi` | `0.23.5` | MIT OR Apache-2.0 | crates.io |
-| `pyo3-macros-backend` | `0.23.5` | MIT OR Apache-2.0 | crates.io |
-| `pyo3-macros` | `0.23.5` | MIT OR Apache-2.0 | crates.io |
-| `pyo3` | `0.23.5` | MIT OR Apache-2.0 | crates.io |
-| `quick-xml` | `0.40.1` | MIT | crates.io |
+| `pyo3-build-config` | `0.29.0` | MIT OR Apache-2.0 | crates.io |
+| `pyo3-ffi` | `0.29.0` | MIT OR Apache-2.0 | crates.io |
+| `pyo3-macros-backend` | `0.29.0` | MIT OR Apache-2.0 | crates.io |
+| `pyo3-macros` | `0.29.0` | MIT OR Apache-2.0 | crates.io |
+| `pyo3` | `0.29.0` | MIT OR Apache-2.0 | crates.io |
+| `quick-xml` | `0.41.0` | MIT | crates.io |
 | `quinn-proto` | `0.11.16` | MIT OR Apache-2.0 | crates.io |
 | `quinn-udp` | `0.5.15` | MIT OR Apache-2.0 | crates.io |
 | `quinn` | `0.11.11` | MIT OR Apache-2.0 | crates.io |
@@ -319,7 +317,7 @@ OpenSSL-backed Rustls provider.
 | `sync_wrapper` | `1.0.2` | Apache-2.0 | crates.io |
 | `synstructure` | `0.13.2` | MIT | crates.io |
 | `tagptr` | `0.2.0` | MIT/Apache-2.0 | crates.io |
-| `target-lexicon` | `0.12.16` | Apache-2.0 WITH LLVM-exception | crates.io |
+| `target-lexicon` | `0.13.5` | Apache-2.0 WITH LLVM-exception | crates.io |
 | `tempfile` | `3.27.0` | MIT OR Apache-2.0 | crates.io |
 | `thiserror-impl` | `2.0.18` | MIT OR Apache-2.0 | crates.io |
 | `thiserror` | `2.0.18` | MIT OR Apache-2.0 | crates.io |
@@ -352,7 +350,6 @@ OpenSSL-backed Rustls provider.
 | `typenum` | `1.20.1` | MIT OR Apache-2.0 | crates.io |
 | `unicode-ident` | `1.0.24` | (MIT OR Apache-2.0) AND Unicode-3.0 | crates.io |
 | `unicode-xid` | `0.2.6` | MIT OR Apache-2.0 | crates.io |
-| `unindent` | `0.2.4` | MIT OR Apache-2.0 | crates.io |
 | `untrusted` | `0.9.0` | ISC | crates.io |
 | `url` | `2.5.8` | MIT OR Apache-2.0 | crates.io |
 | `utf8_iter` | `1.0.4` | Apache-2.0 OR MIT | crates.io |

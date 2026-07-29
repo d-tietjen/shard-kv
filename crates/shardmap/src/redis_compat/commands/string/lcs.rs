@@ -147,6 +147,9 @@ fn string_bytes_or_empty(store: &EmbeddedStore, key: &[u8]) -> Result<Bytes, Fra
         RedisStringLookup::Hit => Ok(value.unwrap_or_default()),
         RedisStringLookup::Miss => Ok(Bytes::new()),
         RedisStringLookup::WrongType => Err(wrongtype()),
+        RedisStringLookup::BackendError => Err(crate::commands::redis::error(
+            "ERR object overflow read failed",
+        )),
     }
 }
 

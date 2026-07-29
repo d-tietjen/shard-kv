@@ -12,7 +12,7 @@ cargo run -p shardcache-benchmarks --bin redis_command_manifest -- --output docs
 | --- | ---: |
 | Supported commands | 268 |
 | Missing commands | 0 |
-| Live benchmark cases | 345 |
+| Live benchmark cases | 346 |
 | Expected-error benchmark cases | 12 |
 | Large-profile cases | 35 |
 | Destructive-profile cases | 2 |
@@ -273,7 +273,7 @@ Explicit Redis 5.0.14 exclusions: none.
 | vector | `VRANGE` | supported | 1 | small | no | no | Benchmark cases: VRANGE lex count |
 | vector | `VREM` | supported | 1 | small | no | no | Benchmark cases: VREM miss |
 | vector | `VSETATTR` | supported | 1 | small | no | no | Benchmark cases: VSETATTR update json |
-| vector | `VSIM` | supported | 4 | small | no | no | Benchmark cases: VSIM ele hnsw, VSIM filter exact, VSIM truth exact, VSIM values hnsw |
+| vector | `VSIM` | supported | 5 | small | no | no | Benchmark cases: VSIM ele hnsw, VSIM filter exact, VSIM truth exact, VSIM typed object rag, VSIM values hnsw |
 | server | `WAIT` | supported | 1 | small | no | no | Benchmark cases: WAIT |
 | server | `WAITAOF` | supported | 1 | small | no | no | Benchmark cases: WAITAOF no aof |
 | transaction | `WATCH` | supported | 1 | small | no | no | Benchmark cases: WATCH simple |

@@ -1,11 +1,16 @@
-#[cfg(feature = "object-overflow")]
-use super::ObjectOverflowBackend;
 use super::{
-    EvictionPolicy, KvOverflowConfig, ObjectOverflowConfig, PersistenceConfig, ReplicationConfig,
-    ReplicationRole, ServerEndpointMode, ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
+    EvictionPolicy, KvOverflowConfig, ObjectOverflowConfig, PersistenceConfig, ServerEndpointMode,
+    ShardCacheConfig, WalTcpExportConfig, WalTcpExportMode,
 };
 #[cfg(feature = "kv-overflow")]
 use super::{KvOverflowBackend, KvOverflowCompression, MAX_KV_OVERFLOW_SLOT_COUNT};
+#[cfg(feature = "object-overflow")]
+use super::{
+    MAX_OBJECT_OVERFLOW_CLEANUP_SECONDS, MAX_OBJECT_OVERFLOW_COOLDOWN_MS,
+    MAX_OBJECT_OVERFLOW_DEGRADED_THRESHOLD, MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS,
+    MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY, MAX_OBJECT_OVERFLOW_RETRIES,
+    MAX_OBJECT_OVERFLOW_RETRY_BACKOFF_MS, MAX_OBJECT_OVERFLOW_WORKERS, ObjectOverflowBackend,
+};
 use crate::{Result, ShardCacheError};
 
 #[cfg(feature = "kv-overflow")]
@@ -41,7 +46,6 @@ enum ConfigValidationRule {
     ObjectOverflow,
     KvOverflow,
     KvOverflowReplica,
-    Replication,
     Cuda,
 }
 
@@ -57,10 +61,6 @@ struct ObjectOverflowValidation<'a> {
     config: &'a ObjectOverflowConfig,
     #[cfg(feature = "object-overflow")]
     root: &'a ShardCacheConfig,
-}
-
-struct ReplicationValidation<'a> {
-    config: &'a ReplicationConfig,
 }
 
 struct KvOverflowValidation<'a> {
@@ -95,7 +95,6 @@ impl ConfigValidationRule {
             Self::ObjectOverflow,
             Self::KvOverflow,
             Self::KvOverflowReplica,
-            Self::Replication,
             Self::Cuda,
         ]
     }
@@ -223,7 +222,6 @@ impl ConfigValidationRule {
                     "kv overflow replica eviction requires object_overflow or allow_lossy_eviction = true",
                 )
             }
-            Self::Replication => ReplicationValidation::new(&config.replication).validate(),
             Self::Cuda => Self::validate_cuda(config),
         }
     }
@@ -716,32 +714,50 @@ impl<'a> ObjectOverflowValidation<'a> {
                         "object_overflow.zstd_level must be between -7 and 22",
                     )?;
                     ConfigCheck::require(
-                        self.config.retry_backoff_ms > 0,
-                        "object_overflow.retry_backoff_ms must be > 0",
+                        self.config.retry_backoff_ms > 0
+                            && self.config.retry_backoff_ms <= MAX_OBJECT_OVERFLOW_RETRY_BACKOFF_MS,
+                        "object_overflow.retry_backoff_ms is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.operation_timeout_ms > 0,
-                        "object_overflow.operation_timeout_ms must be > 0",
+                        self.config.operation_timeout_ms > 0
+                            && self.config.operation_timeout_ms
+                                <= MAX_OBJECT_OVERFLOW_OPERATION_TIMEOUT_MS,
+                        "object_overflow.operation_timeout_ms is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.worker_threads > 0,
-                        "object_overflow.worker_threads must be > 0",
+                        self.config.worker_threads > 0
+                            && self.config.worker_threads <= MAX_OBJECT_OVERFLOW_WORKERS,
+                        "object_overflow.worker_threads is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.queue_capacity > 0,
-                        "object_overflow.queue_capacity must be > 0",
+                        self.config.queue_capacity > 0
+                            && self.config.queue_capacity <= MAX_OBJECT_OVERFLOW_QUEUE_CAPACITY,
+                        "object_overflow.queue_capacity is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.degraded_failure_threshold > 0,
-                        "object_overflow.degraded_failure_threshold must be > 0",
+                        self.config.max_retries <= MAX_OBJECT_OVERFLOW_RETRIES,
+                        "object_overflow.max_retries exceeds the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.degraded_cooldown_ms > 0,
-                        "object_overflow.degraded_cooldown_ms must be > 0",
+                        self.config.degraded_failure_threshold > 0
+                            && self.config.degraded_failure_threshold
+                                <= MAX_OBJECT_OVERFLOW_DEGRADED_THRESHOLD,
+                        "object_overflow.degraded_failure_threshold is outside the production bound",
                     )?;
                     ConfigCheck::require(
-                        self.config.cleanup_grace_seconds > 0,
-                        "object_overflow.cleanup_grace_seconds must be > 0",
+                        self.config.degraded_cooldown_ms > 0
+                            && self.config.degraded_cooldown_ms <= MAX_OBJECT_OVERFLOW_COOLDOWN_MS,
+                        "object_overflow.degraded_cooldown_ms is outside the production bound",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.cleanup_grace_seconds > 0
+                            && self.config.cleanup_grace_seconds
+                                <= MAX_OBJECT_OVERFLOW_CLEANUP_SECONDS,
+                        "object_overflow.cleanup_grace_seconds is outside the production bound",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.cleanup_interval_seconds <= MAX_OBJECT_OVERFLOW_CLEANUP_SECONDS,
+                        "object_overflow.cleanup_interval_seconds exceeds the production bound",
                     )?;
                     if self.config.cleanup_on_start || self.config.cleanup_interval_seconds > 0 {
                         ConfigCheck::optional_token(
@@ -757,6 +773,17 @@ impl<'a> ObjectOverflowValidation<'a> {
                         Some(self.config.region.as_str()),
                         "object_overflow.region must not be empty",
                     )?;
+                    ConfigCheck::require(
+                        self.config
+                            .tls_ca_path
+                            .as_ref()
+                            .is_none_or(|path| !path.as_os_str().is_empty()),
+                        "object_overflow.tls_ca_path must not be empty",
+                    )?;
+                    ConfigCheck::require(
+                        self.config.tls_ca_path.is_none() || self.config.tls_verify,
+                        "object_overflow.tls_ca_path requires tls_verify = true",
+                    )?;
                     ConfigCheck::optional_token(
                         self.config.server_side_encryption.as_deref(),
                         "object_overflow.server_side_encryption must not be empty",
@@ -768,6 +795,12 @@ impl<'a> ObjectOverflowValidation<'a> {
                             return Err(ShardCacheError::Config(
                                 "object_overflow.backend = \"s3\" requires the object-overflow-s3 feature".into(),
                             ));
+                            #[cfg(feature = "object-overflow-s3")]
+                            ConfigCheck::require(
+                                self.config.access_key_env.is_some()
+                                    && self.config.secret_key_env.is_some(),
+                                "S3 object overflow requires access_key_env and secret_key_env",
+                            )?;
                         }
                     }
                     ConfigCheck::optional_token(
@@ -796,6 +829,22 @@ impl<'a> PersistenceValidation<'a> {
                 ConfigCheck::require(
                     self.config.segment_size_bytes >= 4 * 1024,
                     "persistence.segment_size_bytes must be at least 4096",
+                )?;
+                ConfigCheck::require(
+                    self.config.fsync_interval_ms > 0,
+                    "persistence.fsync_interval_ms must be > 0",
+                )?;
+                ConfigCheck::require(
+                    self.config.wal_channel_capacity > 0,
+                    "persistence.wal_channel_capacity must be > 0",
+                )?;
+                ConfigCheck::require(
+                    self.config.wal_block_max_records > 0,
+                    "persistence.wal_block_max_records must be > 0",
+                )?;
+                ConfigCheck::require(
+                    self.config.wal_block_max_bytes > 0,
+                    "persistence.wal_block_max_bytes must be > 0",
                 )?;
                 WalTcpExportValidation::new(&self.config.tcp_export).validate()
             }
@@ -854,85 +903,6 @@ impl<'a> WalTcpExportValidation<'a> {
             .into_iter()
             .all(|timeout| timeout > 0),
             "persistence.tcp_export timeouts must be > 0",
-        )
-    }
-}
-
-impl<'a> ReplicationValidation<'a> {
-    fn new(config: &'a ReplicationConfig) -> Self {
-        Self { config }
-    }
-
-    fn validate(&self) -> Result<()> {
-        match self.config.enabled {
-            false => Ok(()),
-            true => {
-                ConfigCheck::require(
-                    !self.config.bind_addr.trim().is_empty(),
-                    "replication.bind_addr must be set when replication is enabled",
-                )?;
-                self.validate_role()?;
-                ConfigCheck::optional_token(
-                    self.config.auth_token.as_deref(),
-                    "replication.auth_token must not be empty",
-                )?;
-                self.validate_batch_limits()?;
-                self.validate_export_limits()?;
-                self.validate_timeouts()
-            }
-        }
-    }
-
-    fn validate_role(&self) -> Result<()> {
-        match self.config.role {
-            ReplicationRole::Primary => Ok(()),
-            ReplicationRole::Replica => ConfigCheck::require(
-                self.config
-                    .replica_of
-                    .as_deref()
-                    .is_some_and(|addr| !addr.is_empty()),
-                "replication.replica_of must be set for replica role",
-            ),
-        }
-    }
-
-    fn validate_batch_limits(&self) -> Result<()> {
-        ConfigCheck::require(
-            [
-                self.config.batch_max_records,
-                self.config.batch_max_bytes,
-                self.config.backlog_bytes,
-                self.config.snapshot_chunk_bytes,
-            ]
-            .into_iter()
-            .all(|limit| limit > 0),
-            "replication batch, backlog, and snapshot limits must be > 0",
-        )
-    }
-
-    fn validate_export_limits(&self) -> Result<()> {
-        ConfigCheck::require(
-            [
-                self.config.queue_capacity,
-                self.config.max_replicas,
-                self.config.subscriber_channel_capacity,
-            ]
-            .into_iter()
-            .all(|limit| limit > 0),
-            "replication queue and subscriber limits must be > 0",
-        )
-    }
-
-    fn validate_timeouts(&self) -> Result<()> {
-        ConfigCheck::require(
-            [
-                self.config.connect_timeout_ms,
-                self.config.write_timeout_ms,
-                self.config.reconnect_backoff_ms,
-            ]
-            .into_iter()
-            .all(|timeout| timeout > 0),
-            "replication timeouts must be > 0",
         )
     }
 }

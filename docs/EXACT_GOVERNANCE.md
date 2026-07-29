@@ -46,7 +46,7 @@ protected values and metadata. Treat snapshot and WAL access as privileged.
 ## Storage Tiers
 
 Governance metadata follows the value through resident storage, TTL changes,
-snapshot and WAL recovery, native replication, object overflow, and KV
+snapshot and WAL recovery, object overflow, and KV
 overflow. Object-overflow references retain metadata locally and authorize
 before fetching the object. KV-overflow envelopes store metadata with the
 value, include it in the CRC32 integrity check, and preserve it through retry,

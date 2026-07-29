@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
@@ -43,19 +44,30 @@ pub struct RecoveryState {
     pub snapshot_timestamp_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WalAppender {
-    sender: Sender<MutationRecord>,
+    sender: Sender<WalBlock>,
+    pending: Vec<MutationRecord>,
+    pending_bytes: usize,
+    max_records: usize,
+    max_bytes: usize,
+    flush_interval: Duration,
+    last_publish: Instant,
+}
+
+#[derive(Debug)]
+struct WalBlock {
+    records: Vec<MutationRecord>,
 }
 
 pub struct PersistenceRuntime {
     config: PersistenceConfig,
-    appenders: Vec<WalAppender>,
+    appenders: Vec<Mutex<Option<WalAppender>>>,
     stats: Arc<WalStats>,
     #[cfg(feature = "telemetry")]
     _metrics_owner: Option<Arc<CacheTelemetry>>,
     stop_tx: Option<Sender<()>>,
-    join_handle: Mutex<Option<JoinHandle<()>>>,
+    join_handle: Mutex<Option<JoinHandle<Result<()>>>>,
     tcp_export_stop_tx: Option<Sender<()>>,
     tcp_export_join_handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -152,7 +164,11 @@ impl PersistenceRuntime {
         let runtime = Self::start_enabled_parts(shard_count, &config, writer_metrics)?;
         Ok(Self {
             config,
-            appenders: runtime.appenders,
+            appenders: runtime
+                .appenders
+                .into_iter()
+                .map(|appender| Mutex::new(Some(appender)))
+                .collect(),
             stats: runtime.stats,
             _metrics_owner: metrics,
             stop_tx: Some(runtime.stop_tx),
@@ -167,7 +183,11 @@ impl PersistenceRuntime {
         let runtime = Self::start_enabled_parts(shard_count, &config)?;
         Ok(Self {
             config,
-            appenders: runtime.appenders,
+            appenders: runtime
+                .appenders
+                .into_iter()
+                .map(|appender| Mutex::new(Some(appender)))
+                .collect(),
             stats: runtime.stats,
             stop_tx: Some(runtime.stop_tx),
             join_handle: Mutex::new(Some(runtime.join_handle)),
@@ -193,8 +213,15 @@ impl PersistenceRuntime {
         PersistenceStartup::new(shard_count, config)?.start_writer(config.clone())
     }
 
+    /// Takes exclusive ownership of one shard's WAL block appender.
+    ///
+    /// A shard appender can be taken only once. This preserves mutation order
+    /// without a shared producer lock. The owner must flush or drop it before
+    /// shutting down the persistence runtime.
     pub fn appender(&self, shard_id: usize) -> Option<WalAppender> {
-        self.appenders.get(shard_id).cloned()
+        self.appenders
+            .get(shard_id)
+            .and_then(|appender| appender.lock().take())
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -252,11 +279,12 @@ impl PersistenceRuntime {
     pub fn shutdown(&self) -> Result<()> {
         Self::signal_stop(&self.stop_tx);
         Self::signal_stop(&self.tcp_export_stop_tx);
-        Self::join_thread(&self.join_handle, "WAL thread panicked")?;
-        Self::join_thread(
+        let wal_result = Self::join_wal_thread(&self.join_handle);
+        let tcp_result = Self::join_thread(
             &self.tcp_export_join_handle,
             "TCP WAL exporter thread panicked",
-        )
+        );
+        wal_result.and(tcp_result)
     }
 
     fn signal_stop(stop_tx: &Option<Sender<()>>) {
@@ -276,14 +304,78 @@ impl PersistenceRuntime {
             None => Ok(()),
         }
     }
+
+    fn join_wal_thread(handle: &Mutex<Option<JoinHandle<Result<()>>>>) -> Result<()> {
+        match handle.lock().take() {
+            Some(join_handle) => join_handle
+                .join()
+                .map_err(|_| ShardCacheError::TaskJoin("WAL thread panicked".into()))?,
+            None => Ok(()),
+        }
+    }
 }
 
 impl WalAppender {
-    pub fn append(&self, record: MutationRecord) -> Result<()> {
-        self.sender
-            .send(record)
-            .map_err(|_| ShardCacheError::ChannelClosed("wal appender"))
+    pub fn append(&mut self, record: MutationRecord) -> Result<()> {
+        self.pending_bytes = self
+            .pending_bytes
+            .saturating_add(estimated_record_bytes(&record));
+        self.pending.push(record);
+        if self.pending.len() >= self.max_records || self.pending_bytes >= self.max_bytes {
+            self.flush()?;
+        }
+        Ok(())
     }
+
+    /// Publishes the current shard-local block to the background WAL merger.
+    pub fn flush(&mut self) -> Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let next_capacity = self.pending.len().min(self.max_records);
+        let pending_bytes = self.pending_bytes;
+        let records = std::mem::replace(&mut self.pending, Vec::with_capacity(next_capacity));
+        match self.sender.send(WalBlock { records }) {
+            Ok(()) => {
+                self.pending_bytes = 0;
+                self.last_publish = Instant::now();
+                Ok(())
+            }
+            Err(error) => {
+                self.pending = error.0.records;
+                self.pending_bytes = pending_bytes;
+                Err(ShardCacheError::ChannelClosed("wal appender"))
+            }
+        }
+    }
+
+    pub(crate) fn flush_due(&mut self) -> Result<()> {
+        if !self.pending.is_empty() && self.last_publish.elapsed() >= self.flush_interval {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn next_flush_timeout(&self) -> Option<Duration> {
+        (!self.pending.is_empty()).then(|| {
+            self.flush_interval
+                .checked_sub(self.last_publish.elapsed())
+                .unwrap_or_default()
+        })
+    }
+}
+
+impl Drop for WalAppender {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+fn estimated_record_bytes(record: &MutationRecord) -> usize {
+    64usize
+        .saturating_add(record.key.len())
+        .saturating_add(record.value.len())
+        .saturating_add(record.governance.as_ref().map_or(0, MutationBytes::len))
 }
 
 impl Drop for PersistenceRuntime {
@@ -350,6 +442,136 @@ mod tests {
         assert_eq!(loaded.entries[0].value, b"value");
         assert_eq!(runtime.stats_snapshot().snapshots_written, 1);
         runtime.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn shard_local_wal_buffer_publishes_full_blocks() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let config = PersistenceConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            compress_wal: false,
+            fsync_interval_ms: 1_000,
+            wal_block_max_records: 3,
+            wal_block_max_bytes: usize::MAX,
+            ..PersistenceConfig::default()
+        };
+        let runtime = PersistenceRuntime::start(1, config).expect("persistence runtime");
+        let mut appender = runtime.appender(0).expect("appender");
+        appender.append(wal_record(0, 1)).expect("append one");
+        appender.append(wal_record(0, 2)).expect("append two");
+        assert_eq!(runtime.stats_snapshot().entries_written, 0);
+
+        appender.append(wal_record(0, 3)).expect("append three");
+        wait_for_wal_entries(&runtime, 3);
+        assert_eq!(runtime.stats_snapshot().blocks_merged, 1);
+        drop(appender);
+        runtime.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn each_shard_wal_appender_has_one_exclusive_owner() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let config = PersistenceConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            ..PersistenceConfig::default()
+        };
+        let runtime = PersistenceRuntime::start(1, config).expect("persistence runtime");
+        let appender = runtime.appender(0).expect("first owner");
+        assert!(runtime.appender(0).is_none());
+        drop(appender);
+        runtime.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn persistence_runtime_rejects_invalid_block_limits() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let config = PersistenceConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            wal_block_max_records: 0,
+            ..PersistenceConfig::default()
+        };
+        let error = PersistenceRuntime::start(1, config)
+            .err()
+            .expect("invalid block limit");
+        assert!(error.to_string().contains("limits must be > 0"));
+    }
+
+    #[test]
+    fn failed_block_publish_retains_shard_records() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let config = PersistenceConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            wal_block_max_records: 64,
+            ..PersistenceConfig::default()
+        };
+        let runtime = PersistenceRuntime::start(1, config).expect("persistence runtime");
+        let mut appender = runtime.appender(0).expect("appender");
+        appender.append(wal_record(0, 1)).expect("buffer record");
+        runtime.shutdown().expect("shutdown");
+
+        assert!(appender.flush().is_err());
+        assert_eq!(appender.pending.len(), 1);
+        assert!(appender.pending_bytes > 0);
+    }
+
+    #[test]
+    fn shard_local_wal_buffer_publishes_on_deadline() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let config = PersistenceConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            compress_wal: false,
+            fsync_interval_ms: 1,
+            wal_block_max_records: 64,
+            ..PersistenceConfig::default()
+        };
+        let runtime = PersistenceRuntime::start(1, config).expect("persistence runtime");
+        let mut appender = runtime.appender(0).expect("appender");
+        appender.append(wal_record(0, 1)).expect("append");
+        thread::sleep(Duration::from_millis(2));
+        appender.flush_due().expect("deadline flush");
+        wait_for_wal_entries(&runtime, 1);
+        drop(appender);
+        runtime.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn wal_merger_preserves_order_within_each_shard() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let config = PersistenceConfig {
+            data_dir: temp_dir.path().to_path_buf(),
+            compress_wal: false,
+            wal_block_max_records: 2,
+            ..PersistenceConfig::default()
+        };
+        let runtime = PersistenceRuntime::start(2, config).expect("persistence runtime");
+        let mut left = runtime.appender(0).expect("left appender");
+        let mut right = runtime.appender(1).expect("right appender");
+        for sequence in 1..=4 {
+            left.append(wal_record(0, sequence)).expect("append left");
+            right.append(wal_record(1, sequence)).expect("append right");
+        }
+        left.flush().expect("flush left");
+        right.flush().expect("flush right");
+        drop((left, right));
+        runtime.shutdown().expect("shutdown");
+
+        let records = super::wal::SegmentStore::new(temp_dir.path())
+            .read_all()
+            .expect("read WAL");
+        for shard_id in 0..=1 {
+            let keys = records
+                .iter()
+                .map(|record| String::from_utf8_lossy(&record.key))
+                .filter(|key| key.starts_with(&format!("key-{shard_id}-")))
+                .map(|key| key.into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                keys,
+                (1..=4)
+                    .map(|sequence| format!("key-{shard_id}-{sequence}"))
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -500,5 +722,32 @@ mod tests {
         let mut frame = header.to_vec();
         frame.extend_from_slice(&tail);
         frame
+    }
+
+    fn wal_record(shard_id: usize, sequence: u64) -> MutationRecord {
+        MutationRecord {
+            shard_id,
+            sequence,
+            timestamp_ms: sequence,
+            op: MutationOp::Set,
+            key: SharedBytes::from(format!("key-{shard_id}-{sequence}")),
+            value: SharedBytes::from_static(b"value"),
+            expire_at_ms: None,
+            governance: None,
+        }
+    }
+
+    fn wait_for_wal_entries(runtime: &PersistenceRuntime, expected: u64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if runtime.stats_snapshot().entries_written >= expected {
+                return;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        panic!(
+            "WAL writer did not reach {expected} entries; observed {}",
+            runtime.stats_snapshot().entries_written
+        );
     }
 }

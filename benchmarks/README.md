@@ -15,6 +15,7 @@ Two modes, parallel and independent:
 | `redis_embedded_command_matrix` | Prepared embedded Redis commands, per command | In-process command throughput for the full shardcache Redis command surface |
 | `run-memcache-comparison.sh` | Docker-isolated cache workload | Head-to-head GET/SET/mixed throughput for shardcache server modes vs Memcached |
 | `semantic_cache_matrix` | Pairwise embedding sweep plus lookup latency | Semantic cache F1/FPR across thresholds and unique/cycling lookup latency |
+| `scnp_vector_client_cost` | Typed Rust Object RAG client against SCNP | End-to-end `VSIM COUNT ... WITHSCORES WITHATTRIBS` throughput and latency over fanout or direct-shard transport |
 
 The throughput drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `shardcache-lmcache`
@@ -558,36 +559,6 @@ The aliases add `-C target-cpu=native`, which lets LLVM use host-specific CPU
 instructions. Use these for same-machine benchmark investigations only; keep
 ordinary release builds for portable artifacts and cross-host comparisons.
 
-## Replication Cost
-
-`replication_cost` measures the primary write-path overhead of native
-replication and compares immediate one-record sends with batched sends:
-
-```bash
-cargo run --release -p shardcache-benchmarks --bin replication_cost -- \
-  --value-sizes 64,512,4096,16384 \
-  --mixes set,80-20 \
-  --value-pattern semi-random \
-  --clients 16 --shards 16 --duration 10
-```
-
-The output reports ops/sec regression inputs alongside emitted mutations,
-batch count, raw MiB/s, wire MiB/s, compression ratio, and replica apply rate.
-`queue hi` is the highest observed shard export lane depth, not a single global
-queue depth.
-`semi-random` is the default value pattern and builds a bounded pool of
-deterministic, mostly-random values so zstd results are not dominated by the
-same repeated payload in every SET. Use `--value-pattern repeat` only as a
-compression best-case control. The pool size is bounded by
-`--value-pool-count` and `--value-pool-max-bytes`. The default mode list follows
-the production default and benchmarks uncompressed replication. Add
-`--modes baseline,batch-none,batch-zstd` when you specifically want to measure
-the compression tradeoff.
-
-The current pinned Linux matrix comparing primary throughput with and
-without native replication is published in
-[shardcache Native Replication Cost](SHARDCACHE_REPLICATION_COST.md).
-
 ## Embedded Release Matrix
 
 The crates.io release embedded matrix is orchestrated by
@@ -613,18 +584,6 @@ Use environment variables such as `REPEATS`, `DURATION`, `VALUE_SIZES`, and
 three repeats, `10s` duration, no latency sampling for throughput rows, and
 `TTL_MS=60000` for active-TTL rows.
 
-`replication_tcp_cost` exercises the native FCRP TCP transport specifically.
-Build with `--features monoio`, run once normally, then run again with
-`SHARDCACHE_REPLICATION_USE_MONOIO=1`:
-
-```bash
-cargo run --release -p shardcache-benchmarks --features monoio \
-  --bin replication_tcp_cost -- \
-  --value-sizes 64,4096 --mixes set,80-20 \
-  --modes immediate-none,batch-none \
-  --clients 16 --shards 16 --duration 10
-```
-
 `wal_tcp_export_cost` measures the production persistence runtime with disk WAL
 append plus live TCP export. Build with `--features monoio`, run once normally,
 then run again with `SHARDCACHE_WAL_TCP_USE_MONOIO=1`:
@@ -635,6 +594,12 @@ cargo run --release -p shardcache-benchmarks --features monoio \
   --value-sizes 64,4096 \
   --clients 16 --shards 16 --duration 10
 ```
+
+The benchmark requires at most one client per shard because production WAL
+appenders have exclusive shard ownership. Use `--wal-block-max-records 1` for a
+per-record handoff baseline and `--wal-block-max-records 64` for the default
+shard-local batching path. `--wal-block-max-bytes` independently bounds large
+values.
 
 ## Memory Bandwidth Ceiling
 
@@ -958,12 +923,10 @@ multi-worker runs use monoio's legacy socket driver. Server profiling showed the
 legacy driver avoids enough per-request `io_uring_enter` cost to improve the
 16-worker RESP hot mix, while io_uring remains faster for the one-worker shape.
 
-The non-command streaming paths are opt-in separately on Linux. Use
-`SHARDCACHE_WAL_TCP_USE_MONOIO=1` to run the TCP WAL exporter on monoio, and
-`SHARDCACHE_REPLICATION_USE_MONOIO=1` to run the native FCRP replication
-transport on monoio. These switches are intentionally independent of
-`SHARDCACHE_USE_MONOIO=1` so direct server runtime benchmarks, WAL export
-benchmarks, and replication-cost benchmarks can be isolated.
+The non-command WAL streaming path is opt-in separately on Linux. Use
+`SHARDCACHE_WAL_TCP_USE_MONOIO=1` to run the TCP WAL exporter on monoio. This
+switch is intentionally independent of `SHARDCACHE_USE_MONOIO=1` so direct
+server runtime and WAL export benchmarks can be isolated.
 
 Then run the bench:
 

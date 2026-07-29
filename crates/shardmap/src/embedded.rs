@@ -10,8 +10,6 @@
 //! - [`LocalEmbeddedStore`]: owner-local stores for pinned workers.
 //! - [`ShardCacheServer`]: an optional TCP protocol server over a caller-owned
 //!   [`ShardedEngine`].
-//! - [`ReplicatedEmbeddedStore`]: an embedded primary that can serve native
-//!   read replicas and FCRP subscribers.
 
 pub use crate::cache::{
     CacheEntry, CacheOptions, CacheRef, CacheRefMut, CacheSemanticError, CacheSemanticMatch,
@@ -60,7 +58,3 @@ pub use crate::storage::{
 pub use crate::server::{ServerMode, ServerRuntime, ShardCacheServer};
 #[cfg(all(feature = "embedded", feature = "server"))]
 pub use crate::storage::EngineHandle as ServerEngineHandle;
-
-pub use crate::replication::{
-    ReplicatedEmbeddedStore, ReplicationPrimaryServer, ReplicationReplica, ReplicationReplicaClient,
-};

@@ -265,6 +265,17 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
         let Some((&first_key, remaining_keys)) = route_keys.split_first() else {
             return true;
         };
+        #[cfg(feature = "redis")]
+        if kind.uses_vector_shard() {
+            return owned_shard_id == store.vector_shard_id()
+                && request_route_shard
+                    .and_then(|shard| usize::try_from(shard).ok())
+                    .is_none_or(|shard| shard == owned_shard_id)
+                && request_key_hash.is_none_or(|key_hash| key_hash == hash_key(first_key))
+                && request_key_tag
+                    .is_none_or(|key_tag| key_tag == hash_key_tag_from_hash(hash_key(first_key)))
+                && remaining_keys.is_empty();
+        }
         if !Self::redis_opcode_first_key_matches_owned_route(
             store,
             first_key,

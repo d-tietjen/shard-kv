@@ -1422,20 +1422,21 @@ impl RawCommandDispatcher {
         if let Some(command) = find_primary_raw_command(command) {
             return Some(command);
         }
-        RAW_DIRECT_CATALOG
+        if let Some(command) = RAW_DIRECT_CATALOG
             .iter()
             .copied()
             .find(|candidate| candidate.matches(command))
-            .or_else(|| {
-                #[cfg(feature = "redis-modules")]
-                {
-                    crate::commands::redis_modules::find_raw_direct_command(command)
-                }
-                #[cfg(not(feature = "redis-modules"))]
-                {
-                    None
-                }
-            })
+        {
+            return Some(command);
+        }
+        #[cfg(feature = "redis-modules")]
+        {
+            crate::commands::redis_modules::find_raw_direct_command(command)
+        }
+        #[cfg(not(feature = "redis-modules"))]
+        {
+            None
+        }
     }
 
     #[inline(always)]
@@ -1455,6 +1456,8 @@ impl RawCommandDispatcher {
             crate::protocol::FastCommandKind::GetEx => Some(&crate::commands::getex::COMMAND),
             crate::protocol::FastCommandKind::SetEx => Some(&crate::commands::setex::COMMAND),
             crate::protocol::FastCommandKind::PSetEx => Some(&crate::commands::psetex::COMMAND),
+            #[cfg(feature = "redis")]
+            crate::protocol::FastCommandKind::Ping => Some(&crate::commands::ping::COMMAND),
             #[cfg(feature = "redis")]
             crate::protocol::FastCommandKind::ExpireAt => Some(&crate::commands::expireat::COMMAND),
             #[cfg(feature = "redis")]

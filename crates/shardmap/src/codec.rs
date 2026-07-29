@@ -508,15 +508,14 @@ impl<K, V, const SHARDS: usize> CodecShardMap<K, V, SHARDS> {
 
     /// Visits entries visible to this typed facade.
     ///
-    /// Values are decoded while the shard read lock is held. Keep callbacks
-    /// lightweight.
+    /// Cold values are materialized outside shard locks before decoding.
     pub fn visit_entries(&self, mut visitor: impl FnMut(K, V) -> bool) -> Result<(), CodecError>
     where
         K: CodecKeyDecode,
         V: CodecValue,
     {
         let mut result = Ok(());
-        self.raw.visit_entries(|raw_key, raw_value, _expire_at_ms| {
+        let visit_result = self.raw.visit_entries(|raw_key, raw_value, _expire_at_ms| {
             let Some(key) = self.strip_namespace(raw_key) else {
                 return true;
             };
@@ -530,6 +529,11 @@ impl<K, V, const SHARDS: usize> CodecShardMap<K, V, SHARDS> {
                 }
             }
         });
+        if result.is_ok()
+            && let Err(error) = visit_result
+        {
+            result = Err(CodecError::custom(error.to_string()));
+        }
         result
     }
 

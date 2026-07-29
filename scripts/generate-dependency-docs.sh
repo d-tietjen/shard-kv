@@ -31,11 +31,11 @@ third_party_count="$(jq '[.packages[] | select(.source != null)] | length' "$met
   cat <<'EOF'
 # Dependency Inventory
 
-This is the complete locked dependency inventory for the Shardcache workspace.
-It includes publishable and source-only workspace packages plus normal, build,
-development, optional, platform-specific, and transitive packages reachable by
-the all-feature workspace graph. A deployed binary includes only the subset
-selected by its package, Cargo features, and target.
+This is the complete locked dependency inventory for the public Shardcache
+workspace. It includes publishable and vendored test-support workspace packages
+plus normal, build, development, optional, platform-specific, and transitive
+packages reachable by the all-feature workspace graph. A deployed binary
+includes only the subset selected by its package, Cargo features, and target.
 
 The inventory is generated from `Cargo.lock` with:
 
@@ -62,7 +62,7 @@ declared compatible version ranges.
 | `fast-telemetry` | `telemetry` | Metrics integration. |
 | `serde`, `serde_json`, `toml` | Configuration and persistence metadata | Structured configuration and metadata encoding. |
 | `crossbeam-channel`, `crossbeam-utils`, `parking_lot`, `rblock` | Core concurrency | Bounded channels and shard-local synchronization. |
-| `hashbrown`, `indextreemap`, `smallvec`, `xxhash-rust` | Core storage and routing | Tables, ordered indexes, inline collections, and stable fast hashing. |
+| `ahash`, `hashbrown`, `indextreemap`, `smallvec`, `xxhash-rust` | Core storage and routing | Randomly keyed local tables, ordered indexes, inline collections, and stable XXH3 routing. |
 
 TLS dependency policy is enforced by
 [`scripts/check-tls-dependency-policy.sh`](../scripts/check-tls-dependency-policy.sh):

@@ -9,7 +9,7 @@ benchmark outputs, and local verification caches outside version control.
 
 | Path | Purpose |
 | --- | --- |
-| `crates/shardmap` | Published embedded cache crate. Core embedded cache, storage, protocol, persistence, replication, and opt-in server internals. Start here for base-cache behavior. |
+| `crates/shardmap` | Published embedded cache crate. Core embedded cache, storage, protocol, persistence, runtime-neutral extension contracts, and opt-in server internals. Start here for base-cache behavior. |
 | `crates/shardcache` | Published server package and optional `shardcache` binary. |
 | `crates/shardcache-client-rs` | Published blocking Rust client for the native SCNP protocol and direct shard routing. |
 | `crates/shardcache-runtime` | Source-only Rust-native CPU/GPU transfer runtime used by model-serving integrations. |
@@ -36,7 +36,6 @@ Most production code lives under `crates/shardmap/src`:
 | `protocol/` | RESP and native fast protocol codecs. |
 | `server/` | TCP listeners, direct shard routing, connection lifecycle, and request execution. |
 | `persistence/` | WAL, snapshots, recovery, and TCP WAL export. |
-| `replication/` | Native replication protocol, backlog, transport, and batching. |
 | `config/` | TOML configuration, geometry, and validation. |
 | `crates/shardcache/src/main.rs` | Server entry point for the `shardcache` package. |
 | `tests/` | Integration tests for storage, protocol, persistence, server, and compatibility behavior. |
@@ -50,7 +49,7 @@ Most production code lives under `crates/shardmap/src`:
 | Redis/Valkey command | `crates/shardmap/src/redis_compat/commands/<family>/` | `crates/shardmap/src/commands/README.md`, compatibility tests, server dispatch |
 | RESP or SCNP behavior | `crates/shardmap/src/protocol/`, `server/`, `crates/shardcache-client-rs` | Protocol tests and client README |
 | Server configuration | `crates/shardmap/src/config/`, `shardcache.toml.example` | Root README Docker/config sections |
-| Persistence or replication | `crates/shardmap/src/persistence/`, `replication/` | Recovery tests, benchmark caveats, config docs |
+| Persistence or runtime extension | `crates/shardmap/src/persistence/`, `storage/engine.rs` | Recovery tests, extension-contract tests, benchmark caveats, config docs |
 | Benchmark harness | `benchmarks/src`, `benchmarks/scripts` | `benchmarks/README.md` and curated benchmark writeups |
 | Python integration | `integrations/<package>` and `crates/shardcache-py` | Package README and integration tests |
 

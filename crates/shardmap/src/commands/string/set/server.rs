@@ -23,6 +23,13 @@ impl RawDirectCommand for Set {
         } = ctx;
         match SetRawArgs::from_args(store, args.as_slice()) {
             SetRawArgs::Ready { key, value, ttl_ms } => {
+                if !store.point_mutation_is_accepted(key, value.len(), None) {
+                    ServerWire::write_resp_error(
+                        out,
+                        "ERR mutation rejected by an installed storage extension",
+                    );
+                    return;
+                }
                 store.set_slice_prehashed(hash_key(key), key, value, ttl_ms);
                 out.extend_from_slice(b"+OK\r\n");
             }
@@ -115,15 +122,21 @@ impl FastDirectCommand for Set {
     fn execute_fast(&self, ctx: FastCommandContext<'_, '_>, command: FastCommand<'_>) {
         match command {
             FastCommand::Set { key, value } => {
-                <Self as EmbeddedStringWrite>::set_decoded(
+                if !<Self as EmbeddedStringWrite>::set_decoded(
                     ctx.store,
                     ctx.key_hash,
                     key,
                     value,
                     None,
                     ctx.single_threaded,
-                );
-                ServerWire::write_fast_ok(ctx.out);
+                ) {
+                    ServerWire::write_fast_error(
+                        ctx.out,
+                        "ERR mutation rejected by an installed storage extension",
+                    );
+                } else {
+                    ServerWire::write_fast_ok(ctx.out);
+                }
             }
             _ => ServerWire::write_fast_error(ctx.out, "ERR unsupported command"),
         }

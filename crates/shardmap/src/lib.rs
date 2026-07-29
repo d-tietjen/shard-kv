@@ -26,8 +26,6 @@ pub mod persistence;
 pub mod protocol;
 #[cfg(feature = "redis")]
 pub mod redis_embedded;
-#[cfg(feature = "embedded")]
-pub mod replication;
 #[cfg(all(feature = "embedded", feature = "server"))]
 pub mod server;
 #[cfg(feature = "embedded")]

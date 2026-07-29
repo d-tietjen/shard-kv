@@ -926,6 +926,26 @@ pub const FAST_REDIS_COMMAND_OPCODES: &[FastRedisCommandOpcode] = &[
 ];
 
 impl FastCommandKind {
+    /// Returns whether this Redis opcode uses the dedicated vector shard.
+    pub const fn uses_vector_shard(self) -> bool {
+        matches!(
+            self,
+            Self::VAdd
+                | Self::VCard
+                | Self::VDim
+                | Self::VEmb
+                | Self::VGetAttr
+                | Self::VInfo
+                | Self::VIsMember
+                | Self::VLinks
+                | Self::VRandMember
+                | Self::VRange
+                | Self::VRem
+                | Self::VSetAttr
+                | Self::VSim
+        )
+    }
+
     fn from_u8(value: u8) -> Result<Self> {
         Self::from_opcode(value).ok_or_else(|| {
             ShardCacheError::Protocol(format!("unsupported fast command id: {value}"))

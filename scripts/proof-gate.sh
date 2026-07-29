@@ -14,6 +14,7 @@ cd "$root"
 tier="${1:-quick}"
 
 quick() {
+  ./scripts/check-oss-boundary.sh
   ./scripts/check-tls-dependency-policy.sh
   ./scripts/generate-dependency-docs.sh --check
   cargo fmt --all -- --check

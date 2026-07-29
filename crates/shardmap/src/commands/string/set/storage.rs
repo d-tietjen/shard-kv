@@ -14,7 +14,10 @@ pub(crate) trait EmbeddedStringWrite {
         value: &[u8],
         ttl_ms: Option<u64>,
         single_threaded: bool,
-    ) {
+    ) -> bool {
+        if !store.point_mutation_is_accepted(key, value.len(), None) {
+            return false;
+        }
         let routed_key_hash = key_hash.filter(|_| Self::route_hash_is_key_hash(store, key));
         EmbeddedStringWriteTarget::decoded(
             store.has_redis_objects(),
@@ -22,6 +25,7 @@ pub(crate) trait EmbeddedStringWrite {
             single_threaded,
         )
         .write(store, key, value, ttl_ms);
+        true
     }
 
     #[inline(always)]
@@ -32,7 +36,10 @@ pub(crate) trait EmbeddedStringWrite {
         value: &[u8],
         ttl_ms: Option<u64>,
         single_threaded: bool,
-    ) {
+    ) -> bool {
+        if !store.point_mutation_is_accepted(key, value.len(), None) {
+            return false;
+        }
         EmbeddedStringWriteTarget::prehashed(
             store.has_redis_objects(),
             Self::route_hash_is_key_hash(store, key),
@@ -40,6 +47,7 @@ pub(crate) trait EmbeddedStringWrite {
             single_threaded,
         )
         .write(store, key, value, ttl_ms);
+        true
     }
 
     #[inline(always)]

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::hash::{Hash, Hasher};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -23,7 +23,7 @@ use shardcache_client_rs::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as AsyncTcpStream;
 use tokio::sync::{mpsc, oneshot};
-use xxhash_rust::xxh3::{Xxh3, xxh3_64};
+use xxhash_rust::xxh3::xxh3_64;
 
 use crate::config::{
     EvictionPolicy, KvOverflowBackend, KvOverflowCompression, KvOverflowConfig, KvOverflowReplica,
@@ -31,7 +31,8 @@ use crate::config::{
 };
 use crate::persistence::{PersistenceRuntime, SnapshotCompression, SnapshotStore};
 use crate::storage::{
-    Bytes, EmbeddedStore, GovernedRead, StoredEntry, now_millis, shift_for, stripe_index,
+    Bytes, EmbeddedStore, FastHashBuilder, GovernedRead, StoredEntry, local_table_hash,
+    local_table_hasher, now_millis, shift_for, stripe_index,
 };
 use crate::{Result, ShardCacheError};
 
@@ -3203,7 +3204,7 @@ impl KvOverflowMetadataBudget {
 }
 
 struct MetadataMap<V> {
-    entries: HashBrownMap<MetadataKey, V, BuildHasherDefault<Xxh3>>,
+    entries: HashBrownMap<MetadataKey, V, FastHashBuilder>,
 }
 
 #[derive(Eq, PartialEq)]
@@ -3211,14 +3212,14 @@ struct MetadataKey(SharedBytes);
 
 impl Hash for MetadataKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write(&self.0);
+        state.write_u64(xxh3_64(&self.0));
     }
 }
 
 impl<V> Default for MetadataMap<V> {
     fn default() -> Self {
         Self {
-            entries: HashBrownMap::default(),
+            entries: HashBrownMap::with_hasher(local_table_hasher()),
         }
     }
 }
@@ -3233,7 +3234,9 @@ impl<V> MetadataMap<V> {
     fn get_hashed(&self, hash: u64, key: &[u8]) -> Option<&V> {
         self.entries
             .raw_entry()
-            .from_hash(hash, |entry_key| entry_key.0.as_ref() == key)
+            .from_hash(local_table_hash(hash), |entry_key| {
+                entry_key.0.as_ref() == key
+            })
             .map(|(_, value)| value)
     }
 
@@ -3247,8 +3250,9 @@ impl<V> MetadataMap<V> {
         match self
             .entries
             .raw_entry_mut()
-            .from_hash(hash, |entry_key| entry_key.0.as_ref() == key)
-        {
+            .from_hash(local_table_hash(hash), |entry_key| {
+                entry_key.0.as_ref() == key
+            }) {
             hashbrown::hash_map::RawEntryMut::Occupied(occupied) => Some(occupied.into_mut()),
             hashbrown::hash_map::RawEntryMut::Vacant(_) => None,
         }
@@ -3270,13 +3274,13 @@ impl<V> MetadataMap<V> {
         match self
             .entries
             .raw_entry_mut()
-            .from_hash(hash, |entry_key| entry_key.0 == key)
+            .from_hash(local_table_hash(hash), |entry_key| entry_key.0 == key)
         {
             hashbrown::hash_map::RawEntryMut::Occupied(mut occupied) => {
                 Some(std::mem::replace(occupied.get_mut(), value))
             }
             hashbrown::hash_map::RawEntryMut::Vacant(vacant) => {
-                vacant.insert_hashed_nocheck(hash, MetadataKey(key), value);
+                vacant.insert_hashed_nocheck(local_table_hash(hash), MetadataKey(key), value);
                 None
             }
         }
@@ -3287,8 +3291,9 @@ impl<V> MetadataMap<V> {
         match self
             .entries
             .raw_entry_mut()
-            .from_hash(hash, |entry_key| entry_key.0.as_ref() == key)
-        {
+            .from_hash(local_table_hash(hash), |entry_key| {
+                entry_key.0.as_ref() == key
+            }) {
             hashbrown::hash_map::RawEntryMut::Occupied(occupied) => Some(occupied.remove_entry().1),
             hashbrown::hash_map::RawEntryMut::Vacant(_) => None,
         }
@@ -4188,16 +4193,20 @@ impl KvOverflowStore {
         let key_hash = xxh3_64(key);
         let route = self.inner.route_key_prehashed(key_hash, key);
         let mut authorize = Some(authorize);
-        match self.inner.get_value_bytes_routed_with_governance_filter(
-            route,
-            key,
-            now_millis(),
-            |metadata| {
-                authorize
-                    .take()
-                    .expect("authorization filter is called at most once")(metadata)
-            },
-        ) {
+        match self
+            .inner
+            .try_get_value_bytes_routed_with_governance_filter(
+                route,
+                key,
+                now_millis(),
+                |metadata| {
+                    authorize
+                        .take()
+                        .expect("authorization filter is called at most once")(
+                        metadata
+                    )
+                },
+            )? {
             GovernedRead::Authorized(value) => return Ok(Some(value.to_vec())),
             GovernedRead::Denied => return Ok(None),
             GovernedRead::Missing => {}
@@ -4258,20 +4267,21 @@ impl KvOverflowStore {
     {
         let route = self.inner.route_key_prehashed(key_hash, key);
         let check_resident = |authorize: &mut Option<F>| {
-            self.inner.get_value_bytes_routed_with_governance_filter(
-                route,
-                key,
-                now_millis(),
-                |metadata| {
-                    authorize
-                        .take()
-                        .expect("authorization filter is called at most once")(
-                        metadata
-                    )
-                },
-            )
+            self.inner
+                .try_get_value_bytes_routed_with_governance_filter(
+                    route,
+                    key,
+                    now_millis(),
+                    |metadata| {
+                        authorize
+                            .take()
+                            .expect("authorization filter is called at most once")(
+                            metadata
+                        )
+                    },
+                )
         };
-        match check_resident(authorize) {
+        match check_resident(authorize)? {
             GovernedRead::Authorized(value) => {
                 return Ok(FaultInOutcome::Return(Some(value.to_vec())));
             }
@@ -4290,7 +4300,7 @@ impl KvOverflowStore {
             .cluster
             .get_on_shard(expected.primary_shard, key_hash, key)?;
         let _key_gate = self.key_gate_for_hash(key_hash);
-        match check_resident(authorize) {
+        match check_resident(authorize)? {
             GovernedRead::Authorized(value) => {
                 return Ok(FaultInOutcome::Return(Some(value.to_vec())));
             }

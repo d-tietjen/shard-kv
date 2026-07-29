@@ -8,7 +8,7 @@ server ports. This crate is intentionally small and synchronous: one client owns
 one or more TCP connections and is meant to be used directly from worker
 threads.
 
-This is one of the three publishable crates in the 0.5.x release line alongside
+This is one of the three publishable crates in the 0.8.x release line alongside
 `shardmap` and `shardcache`.
 
 ## Install
@@ -17,7 +17,7 @@ Use the published crate from crates.io:
 
 ```toml
 [dependencies]
-shardcache-client-rs = "0.6.0"
+shardcache-client-rs = "0.9.0"
 ```
 
 From a workspace checkout, use a path dependency:
@@ -193,6 +193,85 @@ fn main() -> shardcache_client_rs::Result<()> {
 }
 ```
 
+## Typed Vector Commands
+
+Enable `vector` for Object RAG clients that need native SCNP vector operations
+without enabling the complete optional Redis command API:
+
+```toml
+[dependencies]
+shardcache-client-rs = { version = "0.9.0", features = ["vector"] }
+```
+
+`VSIM` always requests `WITHSCORES WITHATTRIBS`, giving every successful query
+one stable typed result shape. Add `.with_governance(true)` on 0.8.0 servers to
+include opaque governance metadata as a fourth field. FP32 vectors are encoded
+directly as little-endian binary values. Response bodies and result counts are
+checked before allocation.
+
+```rust,no_run
+use std::time::Duration;
+use shardcache_client_rs::{ShardCacheClient, VAddOptions, VSimOptions};
+
+fn main() -> shardcache_client_rs::Result<()> {
+    let timeout = Duration::from_secs(2);
+    let mut client = ShardCacheClient::connect_with_timeouts_and_auth(
+        "127.0.0.1:6380",
+        timeout,
+        timeout,
+        std::env::var("SHARDCACHE_TOKEN").ok().as_deref().map(str::as_bytes),
+    )?;
+
+    client.ping()?;
+    client.vadd(
+        b"objects",
+        b"doc:42",
+        &[0.25, 0.5, 0.75],
+        VAddOptions::new()
+            .attributes(br#"{"source":"catalog"}"#)
+            .governance_metadata(b"tenant=acme;classification=private"),
+    )?;
+    let matches = client.vsim(
+        b"objects",
+        &[0.25, 0.5, 0.75],
+        VSimOptions::new()
+            .count(10)
+            .ef_search(64)
+            .with_governance(true),
+    )?;
+    assert_eq!(matches[0].element, b"doc:42");
+    assert_eq!(
+        matches[0].governance.as_deref(),
+        Some(b"tenant=acme;classification=private".as_slice())
+    );
+    assert!(client.vrem(b"objects", b"doc:42")?);
+    Ok(())
+}
+```
+
+The same methods are available on `ShardCacheDirectClient` and
+`ShardCacheDirectShardClient`. Vector sets are pinned to direct shard 0; the
+automatic direct client selects that connection regardless of the ordinary key
+hash, and an individual shard client rejects vector calls unless it is attached
+to shard 0.
+
+Governance metadata is opaque and limited to 64 KiB per embedding. It is
+distinct from filterable JSON attributes and is preserved by vector updates,
+TTL changes, snapshots, key lifecycle commands, and native read-replica
+replication. Shardcache returns the label with each typed match but does not
+interpret authorization policy; applications must authorize the label before
+releasing the corresponding document or generated context.
+
+Leave `with_governance` disabled while a client can reach a 0.7.1 server; the
+0.7.1 vector parser does not recognize the new option. Governed `VADD` requests
+likewise require a 0.8.0 server.
+
+Add the `tls` feature and use `connect_with_timeouts_auth_and_tls` on a fanout
+client or router when the connection crosses a trust boundary. Token auth and
+operation deadlines apply before any typed vector request is sent. The 0.8.0
+client accepts native 0.8.0 responses and the RESP-enveloped vector responses
+returned by 0.7.1 servers for rolling upgrades.
+
 ## Native Redis Commands
 
 Enable the optional `redis` feature to use native SCNP Redis commands. Commands
@@ -203,7 +282,7 @@ building RESP request frames in user code.
 
 ```toml
 [dependencies]
-shardcache-client-rs = { version = "0.6.0", features = ["redis"] }
+shardcache-client-rs = { version = "0.9.0", features = ["redis"] }
 ```
 
 The primary API is the first-party Redis namespace on the client. Common
@@ -313,6 +392,7 @@ This release supports the native hot-path commands currently implemented by
 - `EXISTS`
 - `TTL`, returning Redis-compatible seconds
 - `EXPIRE` with millisecond TTLs
+- typed `PING`, `VADD`, `VSIM`, and `VREM` with the `vector` feature
 
 With the `redis` feature enabled, it also supports the Redis-compatible command
 surface through `client.redis()` on the fanout client. The low-level

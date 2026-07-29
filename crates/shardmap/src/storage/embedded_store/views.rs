@@ -4,7 +4,8 @@ use std::ops::Deref;
 use bytes::Bytes as SharedBytes;
 
 use super::{
-    EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedShard, OwnedEmbeddedWorkerShards, RwLockReadGuard,
+    EmbeddedKeyRoute, EmbeddedRouteMode, EmbeddedShard, OwnedEmbeddedWorkerShards,
+    PointMutationKind, PointMutationObserver, PointMutationValidator, RwLockReadGuard,
     RwLockWriteGuard, now_millis,
 };
 
@@ -64,6 +65,9 @@ pub struct EmbeddedRefMut<'a> {
     pub(super) key: SharedBytes,
     pub(super) key_hash: u64,
     pub(super) expire_at_ms: Option<u64>,
+    pub(super) point_mutation_observer: Option<PointMutationObserver>,
+    pub(super) point_mutation_validator: Option<PointMutationValidator>,
+    pub(super) notify_on_drop: bool,
     pub(super) _not_send: PhantomData<*const ()>,
 }
 
@@ -99,17 +103,33 @@ impl EmbeddedRefMut<'_> {
     #[cfg(feature = "mutable-value-slices")]
     #[inline(always)]
     pub fn value_mut_no_ttl(&mut self) -> Option<&mut [u8]> {
-        match self.live_expire_at()? {
+        let value = match self.live_expire_at()? {
             None => self
                 .guard
                 .value_mut_hashed_no_ttl(self.key_hash, self.key.as_ref()),
             Some(_) => None,
-        }
+        }?;
+        self.notify_on_drop = true;
+        Some(value)
     }
 
     /// Replaces the value while preserving the entry's existing TTL.
     #[inline(always)]
     pub fn set(&mut self, value: SharedBytes) {
+        if self
+            .point_mutation_validator
+            .as_ref()
+            .is_some_and(|validator| !validator.allows(&self.key, value.len(), None))
+        {
+            tracing::warn!(
+                key_len = self.key.len(),
+                value_len = value.len(),
+                "mutable point replacement rejected before commit because it is rejected by an installed storage extension"
+            );
+            return;
+        }
+        self.notify_on_drop = false;
+        let observed = self.point_mutation_observer.as_ref().map(|_| value.clone());
         match self.live_expire_at() {
             Some(None) => self.guard.set_value_bytes_hashed_no_ttl(
                 self.route_mode,
@@ -129,10 +149,25 @@ impl EmbeddedRefMut<'_> {
                 );
             }
             None => {
-                let _ =
+                let removed =
                     self.guard
                         .remove_value_hashed(self.key_hash, self.key.as_ref(), now_millis());
+                if removed.is_some()
+                    && let Some(observer) = &self.point_mutation_observer
+                {
+                    observer.notify(PointMutationKind::Delete, &self.key, None, None, None);
+                }
+                return;
             }
+        }
+        if let (Some(observer), Some(value)) = (&self.point_mutation_observer, observed) {
+            observer.notify(
+                PointMutationKind::Set,
+                &self.key,
+                Some(value),
+                self.expire_at_ms,
+                None,
+            );
         }
     }
 
@@ -145,8 +180,35 @@ impl EmbeddedRefMut<'_> {
     /// Removes the entry and returns the stored bytes when present and live.
     #[inline(always)]
     pub fn remove(mut self) -> Option<SharedBytes> {
-        self.guard
-            .remove_value_hashed(self.key_hash, self.key.as_ref(), now_millis())
+        self.notify_on_drop = false;
+        let removed =
+            self.guard
+                .remove_value_hashed(self.key_hash, self.key.as_ref(), now_millis());
+        if removed.is_some()
+            && let Some(observer) = &self.point_mutation_observer
+        {
+            observer.notify(PointMutationKind::Delete, &self.key, None, None, None);
+        }
+        removed
+    }
+}
+
+impl Drop for EmbeddedRefMut<'_> {
+    fn drop(&mut self) {
+        if !self.notify_on_drop {
+            return;
+        }
+        let Some(observer) = &self.point_mutation_observer else {
+            return;
+        };
+        let Some(value) = self
+            .guard
+            .get_shared_value_bytes_hashed_no_ttl(self.key_hash, self.key.as_ref())
+            .cloned()
+        else {
+            return;
+        };
+        observer.notify(PointMutationKind::Set, &self.key, Some(value), None, None);
     }
 }
 

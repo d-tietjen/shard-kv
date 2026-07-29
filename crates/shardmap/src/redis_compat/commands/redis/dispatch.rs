@@ -1,5 +1,6 @@
 use super::frame::*;
 use super::parse::{eq_ignore_ascii_case, parse_u64};
+use super::value_digest_hex;
 #[cfg(feature = "redis-modules")]
 use crate::commands::admin::Module;
 #[cfg(feature = "redis-functions")]
@@ -587,11 +588,11 @@ impl NativeSetCondition<'_> {
             Self::IfEq(expected) => current.is_some_and(|value| value == expected),
             Self::IfNe(expected) => current.is_none_or(|value| value != expected),
             Self::IfDigestEq(expected) => current
-                .map(native_value_digest_hex)
-                .is_some_and(|digest| digest.as_bytes().eq_ignore_ascii_case(expected)),
+                .map(value_digest_hex)
+                .is_some_and(|digest| digest.as_slice().eq_ignore_ascii_case(expected)),
             Self::IfDigestNe(expected) => current
-                .map(native_value_digest_hex)
-                .is_none_or(|digest| !digest.as_bytes().eq_ignore_ascii_case(expected)),
+                .map(value_digest_hex)
+                .is_none_or(|digest| !digest.as_slice().eq_ignore_ascii_case(expected)),
         }
     }
 }
@@ -689,10 +690,6 @@ fn parse_native_set_options<'a>(
         return Err(error("ERR syntax error"));
     }
     Ok(options)
-}
-
-fn native_value_digest_hex(value: &[u8]) -> String {
-    format!("{:016x}", xxhash_rust::xxh3::xxh3_64(value))
 }
 
 fn native_setex(store: &EmbeddedStore, args: &[&[u8]], multiplier: u64, command: &str) -> Frame {

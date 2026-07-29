@@ -33,6 +33,7 @@ impl crate::commands::redis::RedisCommand for MGet {
             write_resp_wrong_arity(out, "MGET");
             return;
         }
+        let response_start = out.len();
         write_resp_array_header(out, args.len());
         for key in args {
             match store.get_string_value_into(key, |bytes| {
@@ -40,6 +41,11 @@ impl crate::commands::redis::RedisCommand for MGet {
             }) {
                 RedisStringLookup::Hit => {}
                 RedisStringLookup::Miss | RedisStringLookup::WrongType => write_resp_null(out),
+                RedisStringLookup::BackendError => {
+                    out.truncate(response_start);
+                    ServerWire::write_resp_error(out, "ERR object overflow read failed");
+                    return;
+                }
             }
         }
     }
@@ -50,7 +56,8 @@ impl crate::commands::redis::RedisCommand for MGet {
             ServerWire::write_fast_error(out, "ERR wrong number of arguments for 'mget' command");
             return;
         }
-        let start = ServerWire::begin_fast_array(out, args.len());
+        let response_start = out.len();
+        let array_start = ServerWire::begin_fast_array(out, args.len());
         for key in args {
             match store.get_string_value_into(key, |bytes| {
                 ServerWire::write_fast_array_item(out, Some(bytes));
@@ -59,8 +66,13 @@ impl crate::commands::redis::RedisCommand for MGet {
                 RedisStringLookup::Miss | RedisStringLookup::WrongType => {
                     ServerWire::write_fast_array_item(out, None)
                 }
+                RedisStringLookup::BackendError => {
+                    out.truncate(response_start);
+                    ServerWire::write_fast_error(out, "ERR object overflow read failed");
+                    return;
+                }
             }
         }
-        ServerWire::finish_fast_array(out, start);
+        ServerWire::finish_fast_array(out, array_start);
     }
 }

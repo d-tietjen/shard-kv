@@ -34,7 +34,12 @@ fsync_interval_ms = 100
 snapshot_every_seconds = 300
 snapshot_min_writes = 1000
 compress_snapshots = true
+compress_wal = true
+# Each shard seals its own WAL block without a shared producer lock. A single
+# background merger writes and syncs those blocks into the canonical log.
 wal_channel_capacity = 16384
+wal_block_max_records = 64
+wal_block_max_bytes = 262144
 
 # Dedicated SCNP overflow replicas advertise stable topology and expose one
 # direct listener per local shard. Do not enable this role and kv_overflow on

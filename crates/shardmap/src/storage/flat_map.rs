@@ -9,9 +9,10 @@ use crate::ShardCacheError;
 use crate::config::{EvictionPolicy, ObjectOverflowFailurePolicy};
 use crate::storage::stats::{ObjectOverflowStatsSnapshot, TierStatsSnapshot};
 use crate::storage::{
-    Bytes, FastHashMap, ObjectOverflowRuntime, ObjectValueRef, SemanticCacheError,
-    SemanticEmbedding, SemanticIndex, SemanticIndexCandidate, SemanticIndexToken, SemanticMatch,
-    StoredEntry, hash_key, hash_key_tag_from_hash,
+    Bytes, FastHashMap, ObjectOverflowRuntime, ObjectOverflowTicket, ObjectValueRef,
+    SemanticCacheError, SemanticEmbedding, SemanticIndex, SemanticIndexCandidate,
+    SemanticIndexToken, SemanticMatch, StoredEntry, hash_key, hash_key_tag_from_hash,
+    local_table_hash,
 };
 #[cfg(feature = "telemetry")]
 use crate::storage::{CacheTelemetryHandle, LatencySampleStart};
@@ -44,6 +45,61 @@ struct RemoteEntry {
     object: ObjectValueRef,
     expire_at_ms: Option<u64>,
     governance: Option<SharedBytes>,
+}
+
+#[derive(Debug)]
+struct PendingObjectOffload {
+    hash: u64,
+    key: Box<[u8]>,
+    source_value: SharedBytes,
+    ticket: ObjectOverflowTicket<ObjectValueRef>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ObjectFaultPlan {
+    hash: u64,
+    key: Box<[u8]>,
+    object: ObjectValueRef,
+    runtime: ObjectOverflowRuntime,
+    reserved_bytes: usize,
+}
+
+impl ObjectFaultPlan {
+    pub(crate) fn fetch(&self) -> crate::Result<SharedBytes> {
+        self.runtime.get_value(&self.object)
+    }
+}
+
+pub(crate) enum SnapshotEntrySource {
+    Resident(StoredEntry),
+    Remote {
+        key: Bytes,
+        object: ObjectValueRef,
+        expire_at_ms: Option<u64>,
+        governance: Option<SharedBytes>,
+        runtime: Box<ObjectOverflowRuntime>,
+    },
+}
+
+impl SnapshotEntrySource {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Resident(entry) => std::mem::size_of::<StoredEntry>()
+                .saturating_add(entry.key.len())
+                .saturating_add(entry.value.len())
+                .saturating_add(entry.governance.as_ref().map_or(0, Bytes::len)),
+            Self::Remote {
+                key,
+                object,
+                governance,
+                ..
+            } => std::mem::size_of::<Self>()
+                .saturating_add(std::mem::size_of::<ObjectOverflowRuntime>())
+                .saturating_add(key.len())
+                .saturating_add(object.object_key.len())
+                .saturating_add(governance.as_ref().map_or(0, SharedBytes::len)),
+        }
+    }
 }
 
 impl RemoteEntry {
@@ -147,6 +203,13 @@ pub(crate) enum GovernedRead<T> {
     Missing,
     Denied,
     Authorized(T),
+}
+
+pub(crate) enum GovernedObjectFault {
+    Missing,
+    Denied,
+    Resident(SharedBytes),
+    Remote(Box<ObjectFaultPlan>),
 }
 
 #[cfg(feature = "unsafe")]
@@ -387,11 +450,15 @@ fn prefix_eviction_lmcache_session_prefix(key: &[u8]) -> Option<&[u8]> {
 const REUSABLE_VALUE_MIN_BYTES: usize = 4096;
 const MAX_REUSABLE_VALUE_BUFFERS: usize = 128;
 const MAX_REUSABLE_VALUE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_UNBOUNDED_PENDING_FAULT_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 pub struct FlatMap {
     entries: HashTable<FlatEntry>,
     remote_entries: FastHashMap<Bytes, RemoteEntry>,
+    pending_object_offloads: FastHashMap<Bytes, PendingObjectOffload>,
+    pending_object_faults: usize,
+    pending_object_fault_bytes: usize,
     semantic_index: SemanticIndex,
     #[cfg(feature = "experimental-no-ttl-point-hot-path")]
     fast_points: FastPointMap,
@@ -428,7 +495,13 @@ pub struct ObjectOverflowStats {
     pub queue_depth: usize,
     pub pending_jobs: usize,
     pub active_workers: usize,
+    pub live_workers: usize,
     pub worker_threads: usize,
+    pub max_worker_threads: usize,
+    pub worker_capacity_exhausted: bool,
+    pub pending_offloads: usize,
+    pub pending_faults: usize,
+    pub pending_fault_bytes: usize,
     pub remote_entries: usize,
     pub remote_value_bytes: usize,
     pub remote_stored_bytes: usize,
@@ -476,7 +549,13 @@ impl From<ObjectOverflowStats> for ObjectOverflowStatsSnapshot {
             queue_depth: value.queue_depth,
             pending_jobs: value.pending_jobs,
             active_workers: value.active_workers,
+            live_workers: value.live_workers,
             worker_threads: value.worker_threads,
+            max_worker_threads: value.max_worker_threads,
+            worker_capacity_exhausted: value.worker_capacity_exhausted,
+            pending_offloads: value.pending_offloads,
+            pending_faults: value.pending_faults,
+            pending_fault_bytes: value.pending_fault_bytes,
             remote_entries: value.remote_entries,
             remote_value_bytes: value.remote_value_bytes,
             remote_stored_bytes: value.remote_stored_bytes,
@@ -553,7 +632,7 @@ enum DeleteReason {
 }
 
 enum ObjectOffloadAttempt {
-    Offloaded,
+    Pending,
     NotEligible,
     HotRetainResident,
     FailedRetainResident,
@@ -579,13 +658,19 @@ mod tests {
     #[cfg(feature = "embedded")]
     use super::hash_key_tag_from_hash;
     use super::{REUSABLE_VALUE_MIN_BYTES, hash_key};
+    use crate::ShardCacheError;
     use crate::config::{
         EvictionPolicy, ObjectOverflowBackend, ObjectOverflowCompression,
         ObjectOverflowFailurePolicy,
     };
     use crate::storage::object_overflow::tests::InMemoryObjectOverflowStore;
-    use crate::storage::{ObjectOverflowRuntime, ObjectOverflowRuntimeOptions};
+    use crate::storage::{
+        ObjectOverflowRuntime, ObjectOverflowRuntimeOptions, ObjectOverflowStore,
+    };
+    use bytes::Bytes as SharedBytes;
+    use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     fn in_memory_overflow(min_value_bytes: usize) -> ObjectOverflowRuntime {
         in_memory_overflow_with_store(min_value_bytes).0
@@ -641,8 +726,56 @@ mod tests {
                 offload_min_idle_ticks,
                 offload_max_frequency,
             },
-        );
+        )
+        .expect("object overflow runtime");
         (runtime, store)
+    }
+
+    fn wait_for_remote(map: &mut FlatMap, key: &[u8], now_ms: u64) {
+        for _ in 0..200 {
+            map.process_maintenance(now_ms);
+            if map.remote_entries.contains_key(key) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("object offload did not complete");
+    }
+
+    #[derive(Debug)]
+    struct BlockingPutStore {
+        values: Mutex<HashMap<String, SharedBytes>>,
+        put_started: crossbeam_channel::Sender<()>,
+        release_put: crossbeam_channel::Receiver<()>,
+    }
+
+    impl ObjectOverflowStore for BlockingPutStore {
+        fn put_value(&self, object_key: &str, value: &[u8]) -> crate::Result<()> {
+            self.put_started.send(()).expect("signal object PUT");
+            self.release_put.recv().expect("release object PUT");
+            self.values
+                .lock()
+                .expect("object values")
+                .insert(object_key.to_string(), SharedBytes::copy_from_slice(value));
+            Ok(())
+        }
+
+        fn get_value(&self, object_key: &str) -> crate::Result<SharedBytes> {
+            self.values
+                .lock()
+                .expect("object values")
+                .get(object_key)
+                .cloned()
+                .ok_or_else(|| ShardCacheError::Persistence("object value missing".into()))
+        }
+
+        fn delete_value(&self, object_key: &str) -> crate::Result<()> {
+            self.values
+                .lock()
+                .expect("object values")
+                .remove(object_key);
+            Ok(())
+        }
     }
 
     #[test]
@@ -851,27 +984,92 @@ mod tests {
     fn object_overflow_offloads_and_faults_owned_get() {
         let mut map = FlatMap::new();
         map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
-        map.configure_object_overflow(Some(in_memory_overflow(4)), 2, 0);
+        map.configure_object_overflow(Some(in_memory_overflow(4)), 2, 0)
+            .unwrap();
 
         map.set(b"alpha".to_vec(), b"0123456789".to_vec(), None, 0);
+        wait_for_remote(&mut map, b"alpha", 0);
 
         assert_eq!(map.get_ref(b"alpha", 0), None);
         assert!(map.exists(b"alpha", 0));
         assert_eq!(map.remote_value_bytes(), 10);
 
         assert_eq!(map.get(b"alpha", 0), Some(b"0123456789".to_vec()));
+        wait_for_remote(&mut map, b"alpha", 0);
         let stats = map.object_overflow_stats();
         assert_eq!(stats.offload_successes, 2);
         assert_eq!(stats.fault_successes, 1);
     }
 
     #[test]
+    fn object_offload_never_waits_for_backend_io_under_the_map_owner() {
+        let (put_started_tx, put_started_rx) = crossbeam_channel::bounded(1);
+        let (release_put_tx, release_put_rx) = crossbeam_channel::bounded(1);
+        let runtime = ObjectOverflowRuntime::new(
+            Arc::new(BlockingPutStore {
+                values: Mutex::new(HashMap::new()),
+                put_started: put_started_tx,
+                release_put: release_put_rx,
+            }),
+            ObjectOverflowRuntimeOptions {
+                backend: ObjectOverflowBackend::File,
+                min_value_bytes: 4,
+                offload_min_idle_ticks: 0,
+                offload_max_frequency: u32::MAX,
+                compression: ObjectOverflowCompression::None,
+                zstd_level: 0,
+                failure_policy: ObjectOverflowFailurePolicy::RetainResident,
+                max_retries: 0,
+                retry_backoff: std::time::Duration::from_millis(1),
+                operation_timeout: std::time::Duration::from_secs(2),
+                worker_threads: 1,
+                queue_capacity: 4,
+                degraded_failure_threshold: 8,
+                degraded_cooldown: std::time::Duration::from_secs(1),
+                fetch_on_get: true,
+                delete_on_overwrite: true,
+                prefix: "test".into(),
+                node_id: "node".into(),
+                generation_id: "generation".into(),
+                cleanup_on_start: false,
+                cleanup_grace: std::time::Duration::from_secs(60),
+            },
+        )
+        .expect("object overflow runtime");
+        let mut map = FlatMap::new();
+        map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+        map.configure_object_overflow(Some(runtime), 0, 0).unwrap();
+
+        let started = std::time::Instant::now();
+        map.set(b"alpha".to_vec(), b"0123456789".to_vec(), None, 0);
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert_eq!(map.get_ref(b"alpha", 0), Some(b"0123456789".as_slice()));
+        put_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("backend PUT started");
+        release_put_tx.send(()).expect("release backend PUT");
+        wait_for_remote(&mut map, b"alpha", 0);
+    }
+
+    #[test]
+    fn object_fault_admission_bounds_unaccounted_decoded_bytes() {
+        let mut map = FlatMap::new();
+        map.memory_limit_bytes = Some(8);
+        assert!(map.can_start_object_fault(1024));
+
+        map.pending_object_fault_bytes = 8;
+        assert!(!map.can_start_object_fault(1));
+    }
+
+    #[test]
     fn object_overflow_snapshot_materializes_remote_entries() {
         let mut map = FlatMap::new();
         map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
-        map.configure_object_overflow(Some(in_memory_overflow(4)), 7, 0);
+        map.configure_object_overflow(Some(in_memory_overflow(4)), 7, 0)
+            .unwrap();
 
         map.set(b"alpha".to_vec(), b"remote-value".to_vec(), None, 0);
+        wait_for_remote(&mut map, b"alpha", 0);
 
         let snapshot = map.snapshot_entries(0);
         assert_eq!(snapshot.len(), 1);
@@ -887,7 +1085,8 @@ mod tests {
             Some(in_memory_overflow_with_cold_gate(4, 1_024, u32::MAX)),
             2,
             0,
-        );
+        )
+        .unwrap();
 
         map.set(b"alpha".to_vec(), b"0123456789".to_vec(), None, 0);
 
@@ -907,7 +1106,8 @@ mod tests {
             Some(in_memory_overflow_with_cold_gate(4, 2, u32::MAX)),
             2,
             0,
-        );
+        )
+        .unwrap();
 
         map.set(b"cold".to_vec(), b"cold-value".to_vec(), None, 0);
         map.set(b"middle".to_vec(), b"middle-value".to_vec(), None, 0);
@@ -915,6 +1115,7 @@ mod tests {
         assert_eq!(map.get(b"hot", 0), Some(b"hot-value".to_vec()));
 
         map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+        wait_for_remote(&mut map, b"cold", 0);
 
         assert_eq!(map.get_ref(b"cold", 0), None);
         assert_eq!(map.get_ref(b"hot", 0), Some(b"hot-value".as_slice()));
@@ -932,13 +1133,34 @@ mod tests {
     }
 
     #[test]
+    fn object_overflow_reconfiguration_rejects_stranding_remote_values() {
+        let mut map = FlatMap::new();
+        let runtime = in_memory_overflow(4);
+        map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
+        map.configure_object_overflow(Some(runtime.clone()), 0, 0)
+            .unwrap();
+        map.set(b"alpha".to_vec(), b"remote-value".to_vec(), None, 0);
+        wait_for_remote(&mut map, b"alpha", 0);
+
+        map.configure_object_overflow(Some(runtime), 0, 0)
+            .expect("the same runtime remains valid");
+        assert!(
+            map.configure_object_overflow(Some(in_memory_overflow(4)), 0, 0)
+                .is_err()
+        );
+        assert!(map.configure_object_overflow(None, 0, 0).is_err());
+        assert_eq!(map.get(b"alpha", 0), Some(b"remote-value".to_vec()));
+    }
+
+    #[test]
     fn object_overflow_try_snapshot_errors_on_remote_fetch_failure() {
         let mut map = FlatMap::new();
         let (overflow, store) = in_memory_overflow_with_store(4);
         map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
-        map.configure_object_overflow(Some(overflow), 7, 0);
+        map.configure_object_overflow(Some(overflow), 7, 0).unwrap();
 
         map.set(b"alpha".to_vec(), b"remote-value".to_vec(), None, 0);
+        wait_for_remote(&mut map, b"alpha", 0);
         let object_key = map
             .remote_entries
             .get(b"alpha".as_slice())
@@ -956,9 +1178,11 @@ mod tests {
     fn object_overflow_maintenance_removes_expired_remote_entries() {
         let mut map = FlatMap::new();
         map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
-        map.configure_object_overflow(Some(in_memory_overflow(4)), 3, 0);
+        map.configure_object_overflow(Some(in_memory_overflow(4)), 3, 0)
+            .unwrap();
 
         map.set(b"alpha".to_vec(), b"0123456789".to_vec(), Some(10), 0);
+        wait_for_remote(&mut map, b"alpha", 0);
         assert_eq!(map.len(), 1);
 
         assert_eq!(map.process_maintenance(11), 1);
@@ -973,9 +1197,10 @@ mod tests {
         let mut map = FlatMap::new();
         let (overflow, store) = in_memory_overflow_with_store(4);
         map.configure_memory_policy(Some(8), EvictionPolicy::Lru, 0);
-        map.configure_object_overflow(Some(overflow), 5, 0);
+        map.configure_object_overflow(Some(overflow), 5, 0).unwrap();
 
         map.set(b"alpha".to_vec(), b"0123456789".to_vec(), None, 0);
+        wait_for_remote(&mut map, b"alpha", 0);
         let object_key = map
             .remote_entries
             .get(b"alpha".as_slice())
@@ -986,6 +1211,13 @@ mod tests {
         store.overwrite(&object_key, b"not-a-valid-payload");
 
         assert_eq!(map.get(b"alpha", 0), None);
+        for _ in 0..200 {
+            map.process_maintenance(0);
+            if map.object_overflow_stats().fault_failures == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         let stats = map.object_overflow_stats();
         assert_eq!(stats.fault_failures, 1);
         assert_eq!(stats.checksum_failures, 1);

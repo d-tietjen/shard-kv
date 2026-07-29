@@ -21,9 +21,6 @@ pub(crate) use crate::commands::zset_shared::{
 pub(crate) use adapter::RedisCommand;
 pub(crate) use define_redis_command;
 pub(crate) use dispatch::dispatch as dispatch_redis_command;
-#[cfg(feature = "server")]
-#[allow(unused_imports)]
-pub(crate) use frame::with_resp_protocol;
 pub(crate) use frame::{
     array_bulk, bulk, error, frame_from_result, int, object_result, optional_string_value,
     reserve_resp_bulk_array_hint, scan_array, scan_array_with_cursor, scan_from_result, simple,
@@ -31,6 +28,9 @@ pub(crate) use frame::{
     write_resp_wrong_arity, write_resp_wrongtype, write_result_resp, wrong_arity, wrongtype,
     zentries_flat, zentries_frame,
 };
+#[cfg(feature = "server")]
+#[allow(unused_imports)]
+pub(crate) use frame::{with_resp_protocol, write_fast_frame};
 #[cfg(feature = "server")]
 pub(crate) use key::FastObjectArrayWriter;
 pub(crate) use key::{
@@ -44,3 +44,26 @@ pub(crate) use parse::{
     eq_ignore_ascii_case, parse_f64, parse_i64, parse_lex_bound, parse_score_bound, parse_u64,
     parse_usize,
 };
+
+/// Returns the Redis-compatible XXH3 digest of a value as lowercase hex.
+#[inline]
+pub(crate) fn value_digest_hex(value: &[u8]) -> [u8; 16] {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = xxhash_rust::xxh3::xxh3_64(value).to_be_bytes();
+    let mut encoded = [0u8; 16];
+    for (index, byte) in digest.iter().copied().enumerate() {
+        encoded[index * 2] = HEX[(byte >> 4) as usize];
+        encoded[index * 2 + 1] = HEX[(byte & 0x0f) as usize];
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::value_digest_hex;
+
+    #[test]
+    fn value_digest_is_redis_xxh3_hex() {
+        assert_eq!(value_digest_hex(b"abc").as_slice(), b"78af5f94892f3950");
+    }
+}

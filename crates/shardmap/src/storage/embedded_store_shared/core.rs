@@ -222,13 +222,17 @@ impl<const SHARDS: usize> SharedEmbeddedStore<SHARDS> {
     /// The visitor receives `(key, value, expire_at_ms)` while each shard read
     /// lock is held. Keep callbacks lightweight, and return `false` to stop
     /// early.
-    pub fn visit_string_entries(&self, mut visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool) {
+    pub fn visit_string_entries(
+        &self,
+        mut visitor: impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
+    ) -> crate::Result<()> {
         let now_ms = ttl_now_millis();
         for shard in &self.inner.shards {
             let shard = shard.read();
-            if !shard.visit_string_entries(now_ms, &mut visitor) {
-                return;
+            if !shard.visit_string_entries(now_ms, &mut visitor)? {
+                return Ok(());
             }
         }
+        Ok(())
     }
 }

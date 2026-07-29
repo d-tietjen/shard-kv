@@ -1,0 +1,3 @@
+transport,workers,entries,dims,query_pool,count,ef_search,duration_s,operations,hits,ops_per_sec,p50_us,p95_us,p99_us,client_cpu_s,client_vcpu
+typed-scnp-fanout,1,1024,16,64,10,64,10.000306,146289,146289,14628.451720,67.007000,74.751000,80.255000,3.256459,0.325636
+typed-scnp-fanout,1,1024,16,64,10,64,10.000294,147076,147076,14707.168181,66.623000,74.495000,81.023000,3.234417,0.323432

@@ -37,7 +37,13 @@ pub struct ObjectOverflowStatsSnapshot {
     pub queue_depth: usize,
     pub pending_jobs: usize,
     pub active_workers: usize,
+    pub live_workers: usize,
     pub worker_threads: usize,
+    pub max_worker_threads: usize,
+    pub worker_capacity_exhausted: bool,
+    pub pending_offloads: usize,
+    pub pending_faults: usize,
+    pub pending_fault_bytes: usize,
     pub remote_entries: usize,
     pub remote_value_bytes: usize,
     pub remote_stored_bytes: usize,
@@ -78,6 +84,7 @@ pub struct ObjectOverflowStatsSnapshot {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct WalStatsSnapshot {
     pub enabled: bool,
+    pub blocks_merged: u64,
     pub entries_written: u64,
     pub segments_rotated: u64,
     pub bytes_written: u64,

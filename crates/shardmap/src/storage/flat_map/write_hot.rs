@@ -104,9 +104,9 @@ impl FlatMap {
         }
 
         match self.entries.entry(
-            hash,
+            local_table_hash(hash),
             |entry| entry.matches_prepared(hash, key, key_tag),
-            |entry| entry.hash,
+            |entry| local_table_hash(entry.hash),
         ) {
             hashbrown::hash_table::Entry::Occupied(mut occupied) => {
                 let entry = occupied.get_mut();

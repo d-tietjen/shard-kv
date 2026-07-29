@@ -1,17 +1,23 @@
 use super::super::*;
+use crate::storage::RedisKeyError;
 
 #[allow(dead_code)]
 pub(crate) trait RedisKeyStore {
     fn clone_object_value(&self, key: &[u8]) -> Option<RedisObjectValue>;
-    fn clone_pinned_vector_value(&self, key: &[u8]) -> Option<bytes::Bytes>;
+    fn clone_vector_key_value(&self, key: &[u8]) -> Option<bytes::Bytes>;
     fn set_object_value(&self, key: &[u8], value: RedisObjectValue, ttl_ms: Option<u64>);
-    fn set_pinned_vector_value(&self, key: &[u8], value: bytes::Bytes, ttl_ms: Option<u64>);
+    fn set_pinned_vector_value(
+        &self,
+        key: &[u8],
+        value: bytes::Bytes,
+        ttl_ms: Option<u64>,
+    ) -> std::result::Result<(), RedisKeyError>;
     fn rename_key(
         &self,
         source: &[u8],
         dest: &[u8],
         nx: bool,
-    ) -> std::result::Result<bool, RedisObjectError>;
+    ) -> std::result::Result<bool, RedisKeyError>;
 }
 
 impl RedisKeyStore for EmbeddedStore {
@@ -32,19 +38,8 @@ impl RedisKeyStore for EmbeddedStore {
         bucket.clone_value(key, now_millis())
     }
 
-    fn clone_pinned_vector_value(&self, key: &[u8]) -> Option<bytes::Bytes> {
-        let primary_route = self.route_key(key);
-        let vector_route = self.route_vector_key(key);
-        if primary_route.shard_id == vector_route.shard_id {
-            return None;
-        }
-        let mut value = None;
-        self.with_shared_value_bytes_routed(vector_route, key, &mut |bytes| {
-            if bytes.starts_with(crate::storage::VECTOR_SET_PREFIX) {
-                value = Some(bytes.clone());
-            }
-        });
-        value
+    fn clone_vector_key_value(&self, key: &[u8]) -> Option<bytes::Bytes> {
+        self.clone_vector_value(key)
     }
 
     fn set_object_value(&self, key: &[u8], value: RedisObjectValue, ttl_ms: Option<u64>) {
@@ -62,7 +57,15 @@ impl RedisKeyStore for EmbeddedStore {
         );
     }
 
-    fn set_pinned_vector_value(&self, key: &[u8], value: bytes::Bytes, ttl_ms: Option<u64>) {
+    fn set_pinned_vector_value(
+        &self,
+        key: &[u8],
+        value: bytes::Bytes,
+        ttl_ms: Option<u64>,
+    ) -> std::result::Result<(), RedisKeyError> {
+        if !self.vector_mutation_is_accepted(key, &value) {
+            return Err(RedisKeyError::ReplicationLimit);
+        }
         let now_ms = now_millis();
         let primary_route = self.route_key(key);
         let vector_route = self.route_vector_key(key);
@@ -70,7 +73,20 @@ impl RedisKeyStore for EmbeddedStore {
             self.delete_routed_then(primary_route, key, now_ms, || {});
         }
         let expire_at_ms = ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
-        self.set_value_bytes_routed_expire_at(vector_route, key, value, expire_at_ms, now_ms);
+        self.set_value_bytes_routed_expire_at(
+            vector_route,
+            key,
+            value.clone(),
+            expire_at_ms,
+            now_ms,
+        );
+        self.notify_vector_mutation(
+            crate::storage::VectorMutationKind::Set,
+            key,
+            Some(value),
+            expire_at_ms,
+        );
+        Ok(())
     }
 
     fn rename_key(
@@ -78,10 +94,10 @@ impl RedisKeyStore for EmbeddedStore {
         source: &[u8],
         dest: &[u8],
         nx: bool,
-    ) -> std::result::Result<bool, RedisObjectError> {
+    ) -> std::result::Result<bool, RedisKeyError> {
         if source == dest {
             if !self.exists(source) {
-                return Err(RedisObjectError::MissingKey);
+                return Err(RedisKeyError::MissingKey);
             }
             return Ok(!nx);
         }
@@ -92,14 +108,17 @@ impl RedisKeyStore for EmbeddedStore {
             ttl if ttl >= 0 => Some(ttl as u64),
             _ => None,
         };
-        if let Some(value) = self.get_value_bytes(source) {
-            self.set_value_bytes(dest, value, ttl_ms);
+        if let Some(value) = self.clone_vector_key_value(source) {
+            if !self.vector_mutation_is_accepted(dest, &value) {
+                return Err(RedisKeyError::ReplicationLimit);
+            }
+            self.delete(dest);
+            self.set_pinned_vector_value(dest, value, ttl_ms)?;
             self.delete(source);
             return Ok(true);
         }
-        if let Some(value) = self.clone_pinned_vector_value(source) {
-            self.delete(dest);
-            self.set_pinned_vector_value(dest, value, ttl_ms);
+        if let Some(value) = self.get_value_bytes(source) {
+            self.set_value_bytes(dest, value, ttl_ms);
             self.delete(source);
             return Ok(true);
         }
@@ -109,7 +128,7 @@ impl RedisKeyStore for EmbeddedStore {
             self.delete(source);
             return Ok(true);
         }
-        Err(RedisObjectError::MissingKey)
+        Err(RedisKeyError::MissingKey)
     }
 }
 
@@ -147,5 +166,36 @@ fn set_object_value_expire_at(
     drop(bucket);
     if should_notify {
         store.notify_redis_object_shard(route.shard_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::storage::VECTOR_SET_PREFIX;
+
+    use super::*;
+
+    #[test]
+    fn rejected_vector_rename_preserves_source_and_destination() {
+        let store = EmbeddedStore::new(4);
+        let mut vector = VECTOR_SET_PREFIX.to_vec();
+        vector.extend_from_slice(b"state");
+        store
+            .set_pinned_vector_value(b"source", vector.into(), None)
+            .unwrap();
+        store.set(b"destination".to_vec(), b"original".to_vec(), None);
+        store.configure_vector_mutation_validator(Some(Arc::new(|key, _| key != b"destination")));
+
+        assert_eq!(
+            store.rename_key(b"source", b"destination", false),
+            Err(RedisKeyError::ReplicationLimit)
+        );
+        assert!(store.clone_vector_key_value(b"source").is_some());
+        assert_eq!(
+            store.get_value_bytes(b"destination").as_deref(),
+            Some(b"original".as_slice())
+        );
     }
 }

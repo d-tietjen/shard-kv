@@ -430,6 +430,5 @@ impl FastPointMap {
 
 #[inline(always)]
 fn fast_point_bucket(hash: u64, mask: usize) -> usize {
-    let mixed = hash ^ (hash >> 32);
-    mixed as usize & mask
+    local_table_hash(hash) as usize & mask
 }

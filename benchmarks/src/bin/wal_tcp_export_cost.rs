@@ -48,6 +48,12 @@ struct Args {
     #[arg(long, default_value_t = 65_536)]
     wal_channel_capacity: usize,
 
+    #[arg(long, default_value_t = 64)]
+    wal_block_max_records: usize,
+
+    #[arg(long, default_value_t = 256 * 1024)]
+    wal_block_max_bytes: usize,
+
     #[arg(long, default_value_t = 65_536)]
     tcp_channel_capacity: usize,
 
@@ -62,18 +68,20 @@ fn main() -> Result<(), BoxError> {
     let args = Args::parse();
     let value_sizes = parse_usize_list(&args.value_sizes)?;
     println!(
-        "wal_export={} shards={} clients={} duration={} warmup={}",
+        "wal_export={} shards={} clients={} duration={} warmup={} wal_block_records={} wal_block_bytes={}",
         runtime_label(),
         args.shards,
         args.clients,
         args.duration,
-        args.warmup
+        args.warmup,
+        args.wal_block_max_records,
+        args.wal_block_max_bytes,
     );
     println!(
-        "| value | pool | append/s | vCPU | ns/op | WAL MiB/s | TCP MiB/s | collector MiB/s | queued | sent | dropped | failures | collector frames |"
+        "| value | pool | append/s | vCPU | ns/op | WAL blocks | WAL MiB/s | TCP MiB/s | collector MiB/s | queued | sent | dropped | failures | collector frames |"
     );
     println!(
-        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
     );
 
     for value_size in value_sizes {
@@ -92,12 +100,13 @@ fn main() -> Result<(), BoxError> {
         }));
         let result = run_once(&args, Arc::clone(&workload), Arc::clone(&values))?;
         println!(
-            "| {} | {} | {:.2} | {:.3} | {:.1} | {:.2} | {:.2} | {:.2} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {:.2} | {:.3} | {:.1} | {} | {:.2} | {:.2} | {:.2} | {} | {} | {} | {} | {} |",
             value_size,
             values.len(),
             result.ops_per_sec,
             result.vcpu,
             result.ns_per_op,
+            result.wal_blocks,
             result.wal_mib_per_sec,
             result.tcp_mib_per_sec,
             result.collector_mib_per_sec,
@@ -149,6 +158,7 @@ struct RunResult {
     ops_per_sec: f64,
     vcpu: f64,
     ns_per_op: f64,
+    wal_blocks: u64,
     wal_mib_per_sec: f64,
     tcp_mib_per_sec: f64,
     collector_mib_per_sec: f64,
@@ -174,6 +184,8 @@ fn run_once(
         segment_size_bytes: 1024 * 1024 * 1024,
         fsync_interval_ms: 10_000,
         wal_channel_capacity: args.wal_channel_capacity,
+        wal_block_max_records: args.wal_block_max_records,
+        wal_block_max_bytes: args.wal_block_max_bytes,
         ..PersistenceConfig::default()
     };
     config.tcp_export.enabled = true;
@@ -201,6 +213,7 @@ fn run_once(
         ops_per_sec: ops.ops_per_sec,
         vcpu: ops.vcpu,
         ns_per_op: ops.ns_per_op,
+        wal_blocks: stats.blocks_merged,
         wal_mib_per_sec: stats.bytes_written as f64 / 1024.0 / 1024.0 / ops.duration,
         tcp_mib_per_sec: stats.tcp_export_bytes_sent as f64 / 1024.0 / 1024.0 / ops.duration,
         collector_mib_per_sec: collector_stats.bytes as f64 / 1024.0 / 1024.0 / ops.duration,
@@ -225,13 +238,21 @@ fn run_appenders(
     workload: Arc<Workload>,
     values: Arc<ValueCorpus>,
 ) -> Result<OpsResult, BoxError> {
+    let shard_count = args.shards.next_power_of_two();
+    if args.clients > shard_count {
+        return Err(format!(
+            "clients ({}) must not exceed dedicated WAL shard owners ({shard_count})",
+            args.clients
+        )
+        .into());
+    }
     let stop = Arc::new(AtomicBool::new(false));
     let measured = Arc::new(AtomicBool::new(false));
     let ops = Arc::new(AtomicU64::new(0));
     let mut handles = Vec::with_capacity(args.clients);
     for worker in 0..args.clients {
-        let shard_id = worker % args.shards.next_power_of_two();
-        let appender = runtime.appender(shard_id).ok_or("missing WAL appender")?;
+        let shard_id = worker;
+        let mut appender = runtime.appender(shard_id).ok_or("missing WAL appender")?;
         let workload = Arc::clone(&workload);
         let values = Arc::clone(&values);
         let stop = Arc::clone(&stop);
