@@ -3,6 +3,8 @@ use super::commands::RawCommandDispatcher;
 #[cfg(feature = "embedded")]
 use super::commands::{RAW_DIRECT_CATALOG, find_primary_raw_command};
 use super::direct_protocol::*;
+#[cfg(feature = "experimental-compact-point-storage")]
+use super::fast_write::FastWriteQueue;
 use super::transactions::{TransactionCoordinator, TransactionState};
 use super::wire::*;
 use super::*;
@@ -13,6 +15,8 @@ use crate::storage::RedisObjectResult;
 use crate::storage::{hash_key, hash_key_tag, shift_for, stripe_index};
 #[cfg(feature = "redis")]
 use std::collections::BTreeSet;
+#[cfg(feature = "experimental-compact-point-storage")]
+use tokio::io::AsyncReadExt;
 
 #[cfg(feature = "redis-modules-all")]
 #[path = "tests/redis_module_semantics.rs"]
