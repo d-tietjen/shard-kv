@@ -11,6 +11,9 @@ impl FlatMap {
     pub(crate) fn value_mut_hashed_no_ttl(&mut self, hash: u64, key: &[u8]) -> Option<&mut [u8]> {
         #[cfg(feature = "experimental-compact-point-storage")]
         if self.compact_points.get(hash, key).is_some() {
+            if !self.compact_points.value_is_unique(hash, key) {
+                return None;
+            }
             let active = self.has_active_readers();
             let tick = if self.eviction_policy != EvictionPolicy::None {
                 self.next_access_tick()

@@ -7136,6 +7136,36 @@ fn resp_get_small_compact_values_does_not_materialize_shared_owners() {
 
 #[cfg(all(feature = "redis", feature = "experimental-compact-point-storage"))]
 #[test]
+fn resp_set_borrowed_small_values_selects_compact_storage() {
+    let store = EmbeddedStore::new(1);
+    for size in [16, 64, 256] {
+        let key = format!("small:{size}");
+        let value = vec![7; size];
+        assert_eq!(
+            RespTestHarness::exec_resp_sequence_raw(
+                &store,
+                &[&[b"SET", key.as_bytes(), &value]],
+                TransactionMode::Disabled,
+            ),
+            b"+OK\r\n"
+        );
+        assert_eq!(store.compact_shared_owner_count(), 0);
+        assert_eq!(
+            store.get_value_bytes(key.as_bytes()).unwrap().as_ref(),
+            value
+        );
+        // Explicit Bytes reads materialize one owner only for compact entries.
+        assert_eq!(store.compact_shared_owner_count(), 1);
+        assert_eq!(
+            RespTestHarness::exec_resp(&store, &[b"SET", key.as_bytes(), &value]),
+            b"+OK\r\n"
+        );
+        assert_eq!(store.compact_shared_owner_count(), 0);
+    }
+}
+
+#[cfg(all(feature = "redis", feature = "experimental-compact-point-storage"))]
+#[test]
 fn resp_get_compact_values_preserves_object_wrongtype_and_missing_semantics() {
     let store = EmbeddedStore::new(1);
     store.set(b"small".to_vec(), b"value".to_vec(), None);

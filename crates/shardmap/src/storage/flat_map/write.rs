@@ -171,9 +171,12 @@ impl FlatMap {
         expire_at_ms: Option<u64>,
         now_ms: u64,
     ) {
+        // Keep caller-owned aliases attached to the stored Bytes buffer.
+        // Copying them into the arena would bypass raw-mutation rejection.
         #[cfg(feature = "experimental-compact-point-storage")]
         if governance.is_none()
             && expire_at_ms.is_none()
+            && value.is_unique()
             && self.try_set_compact_point(hash, key, value.as_ref())
         {
             return;

@@ -49,8 +49,13 @@ storage. Counts, scans, snapshot/recovery, and runtime eviction/overflow policie
 include both layouts. Runtime policy access samples use sparse per-record
 metadata which is removed or transferred when the record changes. Small RESP
 GET responses borrow slices and materialize an owner only when response lifetime
-requires it. The feature remains opt-in pending independent review and Adam
-memory and latency qualification.
+requires it. Supplied `Bytes` buffers without unique ownership remain in general
+storage so caller-owned aliases retain the existing mutation contract. Raw
+`value_mut_no_ttl` access rejects compact values with outstanding owned read
+aliases before changing records or owners. Once those aliases drop, an active
+read epoch still retains the old record and materialized owner during mutation.
+Redis updates retain their bounded copy-on-write behavior. The feature remains
+opt-in pending independent review and Adam memory and latency qualification.
 
 ## Anneal
 

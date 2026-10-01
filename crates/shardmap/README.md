@@ -590,7 +590,9 @@ The internal `experimental-compact-point-storage` flag opts into an
 unqualified layout for plain byte keys up to 64 bytes and values up to 256
 bytes. Borrowed reads use fixed 4 KiB payload chunks. Small RESP GET responses
 encode those slices directly; explicit shared/owned `Bytes` reads lazily copy
-one owner per value version. Deletes and length changes reuse records, and
+one owner per value version. Supplied `Bytes` buffers without unique ownership
+use general storage; raw `value_mut_no_ttl` access rejects outstanding owned
+aliases in either layout. Deletes and length changes reuse records, and
 TTL/governance/semantic/overflow metadata migrates only the affected key into
 general storage. Both layouts remain visible to counts, scans, snapshots,
 recovery, and runtime memory policies. Payload allocations never relocate;

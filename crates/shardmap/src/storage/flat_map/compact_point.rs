@@ -347,6 +347,15 @@ impl CompactPointMap {
         Some(value_len)
     }
 
+    #[cfg(feature = "mutable-value-slices")]
+    pub(super) fn value_is_unique(&self, hash: u64, key: &[u8]) -> bool {
+        self.entries
+            .find(local_table_hash(hash), |entry| {
+                Self::matches(&self.chunks, entry, hash, key)
+            })
+            .is_some_and(|entry| entry.shared.get().is_none_or(|value| value.is_unique()))
+    }
+
     #[cfg(any(feature = "mutable-value-slices", feature = "redis"))]
     pub(super) fn value_mut(
         &mut self,
@@ -642,6 +651,128 @@ mod tests {
         assert_eq!(second.as_ref(), b"two");
         assert_eq!(map.get(b"key", 0), Some(b"longer".to_vec()));
         assert_eq!(map.compact_points.len(), 1);
+    }
+
+    #[test]
+    fn compact_points_shared_bytes_setter_preserves_supplied_aliases() {
+        for replacing_compact in [false, true] {
+            for active_readers in [false, true] {
+                let mut map = FlatMap::new();
+                let hash = hash_key(b"key");
+                map.set_slice(b"anchor", b"untouched", None, 0);
+                let old = if replacing_compact {
+                    map.set_slice(b"key", b"seed", None, 0);
+                    map.get_value_bytes_hashed(hash, b"key", 0)
+                } else {
+                    None
+                };
+                if active_readers {
+                    map.begin_read_epoch();
+                }
+
+                let shared = SharedBytes::copy_from_slice(b"one");
+                map.set_bytes_hashed(hash, b"key", shared.clone(), None, 0);
+                #[cfg(feature = "mutable-value-slices")]
+                assert!(map.value_mut_hashed_no_ttl(hash, b"key").is_none());
+                assert_eq!(
+                    map.get_shared_value_bytes_hashed_no_ttl(hash, b"key")
+                        .unwrap()
+                        .as_ptr(),
+                    shared.as_ptr()
+                );
+                assert_eq!(shared.as_ref(), b"one");
+                assert_eq!(map.get(b"key", 0), Some(b"one".to_vec()));
+                if let Some(old) = old {
+                    assert_eq!(old.as_ref(), b"seed");
+                }
+                assert_eq!(map.compact_points.len(), 1);
+                assert_eq!(map.entries.len(), 1);
+                assert_eq!(map.len(), 2);
+                assert_eq!(map.stored_bytes(), 6 + 9 + 3 + 3);
+
+                drop(shared);
+                assert!(
+                    map.get_shared_value_bytes_hashed_no_ttl(hash, b"key")
+                        .unwrap()
+                        .is_unique()
+                );
+                #[cfg(feature = "mutable-value-slices")]
+                {
+                    map.value_mut_hashed_no_ttl(hash, b"key")
+                        .expect("supplied buffer is unique after its alias drops")
+                        .copy_from_slice(b"two");
+                    assert_eq!(map.get(b"key", 0), Some(b"two".to_vec()));
+                }
+                assert_eq!(map.get(b"anchor", 0), Some(b"untouched".to_vec()));
+                if active_readers {
+                    map.end_read_epoch();
+                }
+                map.process_maintenance(0);
+                assert!(map.compact_points.retired.is_empty());
+            }
+        }
+    }
+
+    #[cfg(feature = "mutable-value-slices")]
+    #[test]
+    fn compact_points_raw_mutation_rejects_owned_aliases_without_changing_layout() {
+        for active_readers in [false, true] {
+            let mut map = FlatMap::new();
+            let key = [b'k'; CompactPointMap::MAX_KEY_BYTES];
+            let hash = hash_key(&key);
+            let original = [1; CompactPointMap::MAX_VALUE_BYTES];
+            map.set_slice(b"anchor", b"untouched", None, 0);
+            map.set_slice(&key, &original, None, 0);
+            let arena_ptr = map.get_ref(&key, 0).unwrap().as_ptr();
+            let alias = map.get_value_bytes_hashed(hash, &key, 0).unwrap();
+            let shared_ptr = alias.as_ptr();
+            let chunks = allocated_chunks(&map.compact_points);
+            let stored_bytes = map.stored_bytes();
+            if active_readers {
+                map.begin_read_epoch();
+            }
+
+            for _ in 0..64 {
+                assert!(map.value_mut_hashed_no_ttl(hash, &key).is_none());
+            }
+            assert_eq!(alias.as_ref(), original);
+            assert_eq!(map.get_ref(&key, 0).unwrap().as_ptr(), arena_ptr);
+            assert_eq!(map.compact_points.shared_owner_count(), 1);
+            assert!(map.compact_points.retired.is_empty());
+            assert_eq!(allocated_chunks(&map.compact_points), chunks);
+            assert_eq!(map.stored_bytes(), stored_bytes);
+            assert_eq!(map.compact_points.len(), 2);
+            assert!(map.entries.is_empty());
+
+            drop(alias);
+            map.value_mut_hashed_no_ttl(hash, &key)
+                .expect("materialized owner is unique after its alias drops")
+                .fill(2);
+            assert_eq!(map.get(&key, 0), Some(vec![2; original.len()]));
+            assert_eq!(map.get(b"anchor", 0), Some(b"untouched".to_vec()));
+            assert_eq!(map.compact_points.shared_owner_count(), 0);
+            if active_readers {
+                assert_eq!(map.compact_points.retired.len(), 1);
+                assert!(map.compact_points.retired[0]._shared.is_some());
+                // SAFETY: the open epoch retains both the old arena record and
+                // its materialized shared owner after the successful mutation.
+                unsafe {
+                    assert_eq!(
+                        std::slice::from_raw_parts(arena_ptr, original.len()),
+                        original
+                    );
+                    assert_eq!(
+                        std::slice::from_raw_parts(shared_ptr, original.len()),
+                        original
+                    );
+                }
+                map.end_read_epoch();
+            }
+            map.process_maintenance(0);
+            assert!(map.compact_points.retired.is_empty());
+            assert_eq!(map.len(), 2);
+            assert_eq!(map.stored_bytes(), stored_bytes);
+        }
     }
 
     #[test]
