@@ -7207,12 +7207,15 @@ fn resp_flushdb_clears_compact_general_and_object_keys_together() {
     store.set(b"small".to_vec(), b"value".to_vec(), None);
     store.set(b"large".to_vec(), vec![1; 1024], None);
     store.hset(b"object", b"field", b"value");
-    assert_eq!(RespTestHarness::exec_resp(&store, &[b"DBSIZE"]), b":3\r\n");
+    // DBSIZE uses the borrowed-command fallback, so exercise the full RESP dispatcher.
     assert_eq!(
-        RespTestHarness::exec_resp(&store, &[b"FLUSHDB"]),
-        b"+OK\r\n"
+        RespTestHarness::exec_resp_sequence_raw(
+            &store,
+            &[&[b"DBSIZE"], &[b"FLUSHDB"], &[b"DBSIZE"]],
+            TransactionMode::Disabled,
+        ),
+        b":3\r\n+OK\r\n:0\r\n"
     );
-    assert_eq!(RespTestHarness::exec_resp(&store, &[b"DBSIZE"]), b":0\r\n");
     assert_eq!(store.stored_bytes(), 0);
     assert!(store.key_snapshot().is_empty());
 }
