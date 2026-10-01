@@ -579,6 +579,31 @@ impl FlatMap {
         deadline: Option<std::time::Instant>,
         max_retained_bytes: usize,
     ) -> crate::Result<Vec<Bytes>> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            let mut keys = Vec::new();
+            let mut retained_bytes = 0usize;
+            for (index, key) in self.compact_points.keys().enumerate() {
+                if index % 256 == 0 && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                    return Err(ShardCacheError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "snapshot key capture deadline exceeded",
+                    )));
+                }
+                retained_bytes = retained_bytes
+                    .checked_add(std::mem::size_of::<Bytes>())
+                    .and_then(|n| n.checked_add(key.len()))
+                    .filter(|n| *n <= max_retained_bytes)
+                    .ok_or_else(|| {
+                        ShardCacheError::Persistence(format!(
+                            "snapshot key index exceeds retained-byte limit {max_retained_bytes}"
+                        ))
+                    })?;
+                keys.push(key.to_vec());
+            }
+            return Ok(keys);
+        }
+
         let mut keys = Vec::new();
         let mut retained_bytes = 0usize;
         for (index, entry) in self.entries.iter().enumerate() {
@@ -640,7 +665,20 @@ impl FlatMap {
         let mut consumed = 0usize;
         for key in &keys[start..] {
             let hash = hash_key(key);
-            let source = if let Some(entry) = self.entries.find(local_table_hash(hash), |entry| {
+            #[cfg(feature = "experimental-compact-point-storage")]
+            let compact_source = self.compact_points.get(hash, key).map(|value| {
+                SnapshotEntrySource::Resident(StoredEntry {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    expire_at_ms: None,
+                    governance: None,
+                })
+            });
+            #[cfg(not(feature = "experimental-compact-point-storage"))]
+            let compact_source: Option<SnapshotEntrySource> = None;
+            let source = if compact_source.is_some() {
+                compact_source
+            } else if let Some(entry) = self.entries.find(local_table_hash(hash), |entry| {
                 entry.matches(hash, key) && !entry.is_expired(now_ms)
             }) {
                 Some(SnapshotEntrySource::Resident(StoredEntry {
@@ -690,6 +728,11 @@ impl FlatMap {
     }
 
     pub fn try_snapshot_entries(&self, now_ms: u64) -> crate::Result<Vec<StoredEntry>> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return Ok(self.compact_points.snapshot_entries());
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return Ok(self.fast_points.snapshot_entries());
@@ -727,6 +770,11 @@ impl FlatMap {
     }
 
     pub fn snapshot_keys(&self, now_ms: u64) -> Vec<Bytes> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.keys().map(<[u8]>::to_vec).collect();
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.snapshot_keys();
@@ -754,6 +802,13 @@ impl FlatMap {
         emitted: &mut usize,
         visit: &mut impl FnMut(&[u8]) -> bool,
     ) -> Option<usize> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self
+                .compact_points
+                .scan_keys_visit(offset, limit, visited, emitted, visit);
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self
@@ -778,6 +833,11 @@ impl FlatMap {
     }
 
     pub(crate) fn visit_keys(&self, now_ms: u64, visit: &mut impl FnMut(&[u8]) -> bool) -> bool {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.keys().all(visit);
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.visit_keys(visit);
@@ -809,6 +869,11 @@ impl FlatMap {
         now_ms: u64,
         visit: &mut impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
     ) -> crate::Result<bool> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return Ok(self.compact_points.visit_entries(visit));
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return Ok(self.fast_points.visit_entries(visit));

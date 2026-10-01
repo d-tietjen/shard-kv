@@ -55,6 +55,18 @@ For Redis module command benchmarks, use the `redis-stack` target. It runs the
 Redis Stack server image with the common module set loaded so module rows can
 be measured instead of only recorded as unsupported-command compatibility rows.
 
+For server memory density alongside GET/SET performance, use the dedicated
+Linux runner in [`REDIS_MEMORY_DENSITY.md`](REDIS_MEMORY_DENSITY.md). It loads
+the same string keyspace into fresh Redis and ShardCache containers, samples
+process and cgroup memory, and records throughput and tail latency for each
+point.
+
+Both `saturation` and `curve` accept `--value-pattern repeating` (the default
+0..255 baseline), `compressible` (repeated `x`), or `high-entropy`
+(deterministic SplitMix64). Combine that flag with the existing
+`--key-distribution 'hot:1000:90'` or `zipf:1.1` profiles. Payload changes
+preserve the same resident keyspace and access distribution.
+
 ## Memcached Comparison
 
 For key/value cache comparisons against Memcached, use the Docker-isolated

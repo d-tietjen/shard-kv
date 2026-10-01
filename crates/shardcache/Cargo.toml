@@ -18,6 +18,7 @@ autobenches = false
 
 [features]
 default = ["redis-server"]
+experimental-compact-point-storage = ["shardmap/experimental-compact-point-storage"]
 server = ["shardmap/server"]
 redis = ["shardmap/redis"]
 redis-functions = ["redis", "shardmap/redis-functions"]

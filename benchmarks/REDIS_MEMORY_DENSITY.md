@@ -1,0 +1,183 @@
+# Redis Memory Density Benchmark
+
+This suite compares ShardCache and Redis on resident memory for the same Redis
+string keyspace, then measures GET/SET performance against that loaded data. It
+reports process PSS and RSS, cgroup memory, and Redis allocator statistics when
+the target exposes them. Incremental process PSS is the primary density metric;
+cgroup anonymous memory is the cross-server cross-check, and allocator-specific
+numbers are supporting data. Process maps are read under the server's in-container
+user so Linux permits access to its `smaps_rollup` data.
+
+## Run
+
+Run on Adam or another Linux host with Docker Engine and cgroup v2:
+
+```bash
+python3 benchmarks/scripts/run-memory-density-benchmark.py \
+  --targets redis,shardcache-resp \
+  --keys 100000 \
+  --value-sizes 16,64,256,1024,4096 \
+  --repeats 3 \
+  --vcpus 1 \
+  --clients 16 \
+  --pipeline 1 \
+  --duration 10
+```
+
+The default starts each target in a fresh container for every data point. It
+uses Redis 7.4 and builds ShardCache inside the repository's Rust 1.93
+Bookworm builder stage with a bounded Cargo job count, then uses the same Debian
+Bookworm runtime stage as the production Dockerfile. Both server containers
+receive the same Docker CPU quota and memory/swap cap. CPU affinity is not
+pinned; the client and server share the host scheduler. Redis persistence and
+eviction are disabled.
+The ShardCache container uses one shard to match Redis's single-threaded server
+shape. The runner uses unique container names and removes only containers it
+created.
+
+By default, ShardCache is built with `redis-server`. To A/B the existing
+experimental adaptive no-TTL point map for this no-TTL point-key workload, add
+`--shardcache-features` with the value
+`redis-server,shardmap/unsafe,shardmap/experimental-no-ttl-point-hot-path`.
+The manifest and per-row CSV record the enabled feature set. The fast map
+returns eligible string points from its compact table and promotes entries to
+the general map when an operation needs unsupported metadata.
+
+For a faster diagnostic pass, use `--repeats 1 --duration 5`. A run without an
+authoritative resource reservation is classified as a diagnostic; performance
+may be affected by concurrent host workloads. The runner writes
+`memory-density.csv`, one raw saturation CSV per point, container logs and
+inspection records, the ShardCache runtime image context, a manifest, and a
+Markdown summary under `benchmarks/results/`.
+
+## Measurements
+
+The standard point workload creates fixed 18-byte keys and the selected value
+size. Logical payload is `key_count * (18 + value_size)`. The runner defaults to both compressible (`x` repeated) and deterministic
+high-entropy (SplitMix64) value patterns. `--value-patterns repeating` reproduces
+the original deterministic 0..255 pattern. Every key has the same payload within
+a profile; the payload SHA-256 is recorded and exact GETs of three sample keys
+are checked after load. This is a per-value representation profile and does not
+qualify inter-key deduplication. The suite records
+idle and loaded memory, then computes incremental bytes per key and memory
+amplification (`incremental PSS / logical key+value bytes`). It also retains
+ops/sec, server CPU, and p50/p99/p99.9 latency from the existing saturation
+driver against the selected key distribution. `--distributions
+'uniform;hot:1000:90'` adds a hot/cold access profile; it leaves the resident
+keyspace and payload unchanged. Reports group by pattern, distribution, and
+value size instead of mixing distinct shapes.
+
+The loaded sample is taken after the saturation phase and a settling interval;
+all keys remain resident because SET operations overwrite keys from the same
+keyspace. `DBSIZE` must match the requested key count and the performance run
+must report zero errors. Each repeat uses a fresh server to avoid allocator
+fragmentation from earlier points.
+
+The density ratio in the report is ShardCache's incremental PSS bytes per key
+divided by Redis's for the matching shape. A ratio below `1.0x` means
+ShardCache used less incremental resident memory for that workload. The result
+must be read together with throughput and tail latency: a density win that
+causes a material performance regression is not an acceptable optimization.
+
+## Initial Adam diagnostic results
+
+Two unreserved diagnostic runs completed on Adam on 2026-10-01. Each used
+100,000 keys, 18-byte keys, one server vCPU, 16 clients, an 80/20 GET/SET mix,
+and three fresh-server repeats at each value size. Neither run pinned CPU
+affinity, so throughput and latency are indicative rather than publishable.
+
+The second run enabled the existing
+`redis-server,shardmap/unsafe,shardmap/experimental-no-ttl-point-hot-path`
+features. It changed ShardCache's median incremental PSS by less than 0.4% at
+every size. It therefore does not close the small-value density gap in this
+profile.
+
+| Value bytes | Redis PSS B/key | ShardCache default B/key | Default / Redis | ShardCache fast-map B/key | Fast-map / Redis | Fast-map PSS change |
+|---:|---:|---:|---:|---:|---:|---:|
+| 16 | 101.01 | 278.98 | 2.762x | 277.98 | 2.743x | -0.4% |
+| 64 | 158.21 | 326.92 | 2.066x | 326.29 | 2.064x | -0.2% |
+| 256 | 400.06 | 519.37 | 1.298x | 517.43 | 1.294x | -0.4% |
+| 1024 | 1368.08 | 1286.78 | 0.941x | 1286.14 | 0.940x | -0.05% |
+| 4096 | 5241.10 | 4360.21 | 0.832x | 4359.33 | 0.832x | -0.02% |
+
+ShardCache's memory crossover is between 256-byte and 1-KiB values in both
+runs. The fast-map build showed similar throughput and tail latency to the
+default build, but these unreserved runs do not qualify a performance claim.
+The current measurements point to per-entry representation and allocation
+overhead as the next area to profile; a useful follow-up should first test a
+packed small-key/value layout, then add high-entropy values and hot/cold access
+before making any online compaction or compression claim.
+
+Full reports and raw evidence are in the ignored local results bundles:
+
+- [Default build diagnostic](results/adam-memory-density-4ca506c/memory-density-20261001-4ca506c/report.md)
+- [Adaptive fast-map diagnostic](results/adam-memory-density-19b47cb-fastmap/report.md)
+
+## Limits and next profiles
+
+This first profile isolates string key/value density. It does not claim
+coverage of Redis hashes, lists, sets, sorted sets, or streams, whose compact
+encodings and per-type metadata differ. It also does not enable object/KV
+overflow, because moving values to another tier changes the storage path and
+latency.
+
+The repeating value pattern is a baseline for representation overhead, not a
+compression claim. An online compaction/compression experiment should add both
+high-entropy and compressible values, a changing hot/cold access distribution,
+and samples while optimization runs. Its acceptance gate should compare p99 and
+throughput at the same offered load, with background work bounded so storage
+maintenance cannot consume the request path's full CPU budget.
+
+## EDEN-2266 compact candidate (unqualified)
+
+Build with `redis-server,experimental-compact-point-storage`. Selection is
+automatic for plain string SETs with keys up to 64 bytes and values up to 256
+bytes, including ordinary RESP/preload writes, provided the shard has no TTL,
+governance, semantic metadata, eviction/memory policy, or object overflow.
+The opt-in feature uses raw, uncompressed key/value bytes in an arena, 4-byte
+probe indexes, and 32-byte descriptors on 64-bit hosts. Descriptor size includes
+a lazy boxed `Bytes` owner for existing shared-value APIs. Probe load stays below
+70%; arena growth leaves a minimum 64-KiB quantum, then at most 25% spare payload
+space capped at 4 MiB. Descriptor growth leaves at most 8192 spare entries.
+
+Borrowed RESP GETs read the arena directly. A shared/owned `Bytes` GET materializes
+one independent owner on the first read of each value version and reuses it for
+later reads. This preserves owned-clone semantics, but a mixed shared-owner
+workload can add allocation cost and duplicate payload memory; qualify that path
+separately before enabling the feature in a deployment that uses it.
+
+Equal-length SET reuses the existing arena record. A length-changing SET, DEL,
+TTL/governance/semantic operation, unsupported key/value size, memory policy,
+object overflow, or write during a read epoch permanently promotes the shard to
+general storage. Promotion frees compact indexes/descriptors and retains the old
+arena only while a read epoch needs it. This bounds churn without background work
+or request-triggered arena compaction. Promotion itself is linear in shard size
+and has a temporary memory/latency cost: the first unsupported mutation copies
+and allocates every live entry synchronously on the request thread, with no
+fixed request-time bound. The fixed-size point profile does not qualify churn
+or establish that the no-unbounded-request-path-copying criterion is met.
+Independent review must assess that limitation before any acceptance claim.
+Values of 1 KiB and 4 KiB use
+the existing general layout from the first SET.
+
+Run both the baseline (`redis-server`) and candidate at the exact same source SHA
+on Adam, with the same reserved resources. For each build:
+
+```bash
+python3 benchmarks/scripts/run-memory-density-benchmark.py \
+  --targets redis,shardcache-resp --keys 100000 \
+  --value-sizes 16,64,256,1024,4096 \
+  --value-patterns repeating,compressible,high-entropy \
+  --distributions 'uniform;hot:1000:90' \
+  --repeats 3 --vcpus 1 --clients 16 --pipeline 1 \
+  --duration 10 --warmup 2 \
+  --shardcache-features redis-server,experimental-compact-point-storage
+```
+
+Qualification is pending. At each matched pattern/distribution/size, candidate
+incremental PSS must be at most Redis's for 16, 64, and 256 bytes, with cgroup
+ANON corroboration. Candidate throughput must be at least 95% of the current
+ShardCache baseline and p99 at most 105%. Retain the PSS advantage over Redis at
+1 KiB and 4 KiB. The runner reports closed-loop saturation; use the existing
+open-loop `curve` driver for any additional matched offered-load qualification.
+An unreserved diagnostic remains diagnostic even if all numeric gates pass.

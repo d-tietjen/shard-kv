@@ -24,7 +24,7 @@ use shardcache_benchmarks::cpu::{external_cpu_time, process_cpu_time, vcpu};
 use shardcache_benchmarks::csv::CsvWriter;
 use shardcache_benchmarks::histogram::{LatencyHistogram, format_ns};
 use shardcache_benchmarks::workload::{
-    KeyDistribution, KeyPattern, Mix, OpStream, Workload, WorkloadSpec,
+    KeyDistribution, KeyPattern, Mix, OpStream, ValuePattern, Workload, WorkloadSpec,
 };
 use shardmap::config::EvictionPolicy;
 
@@ -67,6 +67,10 @@ struct Args {
     /// Value size in bytes.
     #[arg(long, default_value_t = 512)]
     value_size: usize,
+
+    /// Payload pattern: repeating, compressible, or high-entropy.
+    #[arg(long, default_value = "repeating")]
+    value_pattern: String,
 
     /// Mix: "get", "set", "80-20", or "<get_pct>-<set_pct>".
     #[arg(long, default_value = "80-20")]
@@ -167,11 +171,14 @@ fn main() -> Result<(), BoxError> {
         key_pattern,
         key_distribution,
     };
-    let workload = Arc::new(Workload::build(&spec));
+    let value_pattern =
+        ValuePattern::parse(&args.value_pattern).map_err(|e| -> BoxError { e.into() })?;
+    let workload = Arc::new(Workload::build(&spec).with_value_pattern(value_pattern));
 
     println!(
-        "saturation: value_size={}B mix={} key_pattern={} key_distribution={} vcpu_budget={} clients={} pipeline_depth={} keys={} duration={}s ttl={} eviction={} capacity_keys={} memory_bytes={} read_mode={}",
+        "saturation: value_size={}B value_pattern={} mix={} key_pattern={} key_distribution={} vcpu_budget={} clients={} pipeline_depth={} keys={} duration={}s ttl={} eviction={} capacity_keys={} memory_bytes={} read_mode={}",
         args.value_size,
+        args.value_pattern,
         mix.label(),
         key_pattern.label(),
         key_distribution.label(),
@@ -226,6 +233,7 @@ fn main() -> Result<(), BoxError> {
         "ttl_ms",
         "key_pattern",
         "key_distribution",
+        "value_pattern",
     ];
     let mut csv = CsvWriter::new(args.csv.as_ref(), csv_header);
     let cache_config = BenchmarkCacheConfig {
@@ -349,6 +357,7 @@ impl RunResult {
                 .map_or_else(String::new, |ttl_ms| ttl_ms.to_string()),
             args.key_pattern.clone(),
             args.key_distribution.clone(),
+            args.value_pattern.clone(),
         ]
     }
 }

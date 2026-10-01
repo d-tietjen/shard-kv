@@ -142,7 +142,53 @@ pub struct Workload {
     key_distribution: KeyDistribution,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ValuePattern {
+    Repeating,
+    Compressible,
+    HighEntropy,
+}
+
+impl ValuePattern {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "repeating" => Ok(Self::Repeating),
+            "compressible" => Ok(Self::Compressible),
+            "high-entropy" => Ok(Self::HighEntropy),
+            other => Err(format!(
+                "unknown value pattern `{other}`; use repeating, compressible, or high-entropy"
+            )),
+        }
+    }
+}
+
 impl Workload {
+    /// All keys use the same payload, as in the original saturation workload.
+    /// HighEntropy uses deterministic SplitMix64 bytes without a short period;
+    /// this profile measures per-value encoding, not inter-key deduplication.
+    pub fn with_value_pattern(mut self, pattern: ValuePattern) -> Self {
+        match pattern {
+            ValuePattern::Repeating => {
+                for (index, byte) in self.value.iter_mut().enumerate() {
+                    *byte = (index & 0xff) as u8;
+                }
+            }
+            ValuePattern::Compressible => self.value.fill(b'x'),
+            ValuePattern::HighEntropy => {
+                let mut state = 0x4544_454e_2266_0001u64;
+                for chunk in self.value.chunks_mut(8) {
+                    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                    let mut word = state;
+                    word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                    word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                    word ^= word >> 31;
+                    chunk.copy_from_slice(&word.to_le_bytes()[..chunk.len()]);
+                }
+            }
+        }
+        self
+    }
+
     pub fn build(spec: &WorkloadSpec) -> Self {
         let mut keys = Vec::with_capacity(spec.key_count);
         for i in 0..spec.key_count {
@@ -296,4 +342,66 @@ fn build_zipf_cdf(key_count: usize, theta: f64) -> Vec<f64> {
         *last = 1.0;
     }
     cdf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workload(size: usize) -> Workload {
+        Workload::build(&WorkloadSpec {
+            key_count: 4,
+            value_size: size,
+            mix: Mix::read_heavy(),
+            key_pattern: KeyPattern::Point,
+            key_distribution: KeyDistribution::HotSet {
+                hot_keys: 2,
+                hot_pct: 90,
+            },
+        })
+    }
+
+    #[test]
+    fn value_patterns_preserve_keyspace_and_access_distribution() {
+        let default = workload(513);
+        let keys = default.keys().to_vec();
+        let compressible = default.with_value_pattern(ValuePattern::Compressible);
+        assert_eq!(compressible.value(), vec![b'x'; 513]);
+        assert_eq!(compressible.keys(), keys);
+        assert!(matches!(
+            compressible.key_distribution(),
+            KeyDistribution::HotSet {
+                hot_keys: 2,
+                hot_pct: 90
+            }
+        ));
+        let repeating = compressible.with_value_pattern(ValuePattern::Repeating);
+        assert_eq!(repeating.value(), workload(513).value());
+        assert_eq!(repeating.value()[0], repeating.value()[256]);
+    }
+
+    #[test]
+    fn high_entropy_values_are_deterministic_and_handle_partial_words() {
+        let full = workload(4096).with_value_pattern(ValuePattern::HighEntropy);
+        assert_eq!(
+            full.value(),
+            workload(4096)
+                .with_value_pattern(ValuePattern::HighEntropy)
+                .value()
+        );
+        assert_ne!(&full.value()[..256], &full.value()[256..512]);
+        assert_ne!(full.value(), workload(4096).value());
+        for size in [0, 1, 7, 8, 9, 16, 64, 256, 1024] {
+            let partial = workload(size).with_value_pattern(ValuePattern::HighEntropy);
+            assert_eq!(partial.value(), &full.value()[..size]);
+        }
+    }
+
+    #[test]
+    fn value_pattern_parser_rejects_unknown_profiles() {
+        for valid in ["repeating", "compressible", "high-entropy"] {
+            assert!(ValuePattern::parse(valid).is_ok());
+        }
+        assert!(ValuePattern::parse("random").is_err());
+    }
 }

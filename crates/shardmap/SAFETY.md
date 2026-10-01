@@ -21,6 +21,28 @@ cargo clippy -p shardmap --features unsafe,experimental-no-ttl-point-hot-path,te
 | `FlatValueMap` hot lookup/update | Uses unchecked vector indexing, unaligned short-key comparison, and in-place value replacement when `unsafe` is enabled. | Control slots contain valid entry indexes; compared slices are valid for their length; in-place replacement only happens with equal lengths and no active readers. | Default build uses checked indexing, normal slice equality, and allocates replacement values instead of mutating `Bytes` in place. |
 | `WorkerLocalReadSlice` | Reconstructs a slice from a pointer for worker-local reads when `unsafe` is enabled. | The pointer comes from a slice tied to the caller's exclusive `&mut WorkerLocalEmbeddedStore` borrow or from owned `Bytes`; the `Rc` phantom keeps the type thread-local. | Default build copies local read slices into owned `Bytes`, so `as_slice()` does not call `from_raw_parts`. |
 
+## Experimental compact point storage
+
+`experimental-compact-point-storage` adds a safe, checked arena implementation
+for small strings without TTL or other entry metadata. It does not enable the
+`unsafe` feature. Ordinary borrows hold the map/shard borrow or lock. A mutation
+during an open read epoch permanently promotes the compact map and moves the
+original arena `Vec` into an owning `Bytes` in the retired-value list. That
+conversion preserves the payload address; the existing epoch reclamation keeps
+raw worker-local slices valid until the last reader leaves. Shared `Bytes`
+owners are copied lazily per value version and retained by normal reference
+counting, so compact overwrite never mutates an owned clone.
+
+Equal-length overwrite uses checked slice copying. Length changes and deletion
+promote before mutation, so compact storage has no unreachable arena records.
+Promotion can take time proportional to the shard's entries and temporarily
+hold both representations. The first delete, size-changing overwrite, or
+unsupported operation allocates and copies every live compact entry on that
+request's thread. There is no fixed request-time bound, so the fixed-size
+GET/SET profile does not establish a latency bound for churn or promotion.
+The feature remains opt-in pending independent review and Adam memory and
+latency qualification.
+
 ## Anneal
 
 [Anneal](https://github.com/google/zerocopy/tree/main/anneal) can provide a

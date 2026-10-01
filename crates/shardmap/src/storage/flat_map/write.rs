@@ -165,6 +165,13 @@ impl FlatMap {
         expire_at_ms: Option<u64>,
         now_ms: u64,
     ) {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if governance.is_none()
+            && expire_at_ms.is_none()
+            && self.try_set_compact_point(hash, key, value.as_ref())
+        {
+            return;
+        }
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
@@ -277,6 +284,11 @@ impl FlatMap {
                     .map(RemoteEntry::stored_bytes)
             })
             .unwrap_or(0);
+        #[cfg(feature = "experimental-compact-point-storage")]
+        let previous_bytes = self
+            .compact_points
+            .get(hash, key)
+            .map_or(previous_bytes, |value| key.len() + value.len());
         let projected_bytes = self
             .stored_bytes
             .saturating_sub(previous_bytes)
@@ -298,6 +310,7 @@ impl FlatMap {
         now_ms: u64,
         generation: u64,
     ) {
+        self.disable_fast_point_map();
         self.set_bytes_hashed_with_governance_option(
             hash,
             key,
@@ -341,13 +354,18 @@ impl FlatMap {
         K: Into<Bytes>,
         V: Into<Bytes>,
     {
+        let key = key.into();
+        let value = value.into();
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if expire_at_ms.is_none() && self.try_set_compact_point(hash, &key, &value) {
+            return;
+        }
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
         let start = self.start_telemetry_latency_sample();
 
-        let key = key.into();
-        let mut replacement = Some(SharedBytes::from(value.into()));
+        let mut replacement = Some(SharedBytes::from(value));
         let _ = self.has_active_readers();
         let access_tick = if self.eviction_policy == EvictionPolicy::None {
             0
@@ -431,6 +449,10 @@ impl FlatMap {
 
     #[inline(always)]
     pub fn set_slice_hashed_no_ttl(&mut self, hash: u64, key: &[u8], value: &[u8]) {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.try_set_compact_point(hash, key, value) {
+            return;
+        }
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
@@ -604,6 +626,10 @@ impl FlatMap {
         expire_at_ms: Option<u64>,
         now_ms: u64,
     ) {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if expire_at_ms.is_none() && self.try_set_compact_point(hash, key, value) {
+            return;
+        }
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]

@@ -460,6 +460,8 @@ pub struct FlatMap {
     pending_object_faults: usize,
     pending_object_fault_bytes: usize,
     semantic_index: SemanticIndex,
+    #[cfg(feature = "experimental-compact-point-storage")]
+    compact_points: compact_point::CompactPointMap,
     #[cfg(feature = "experimental-no-ttl-point-hot-path")]
     fast_points: FastPointMap,
     ttl_entries: usize,
@@ -641,6 +643,8 @@ enum ObjectOffloadAttempt {
 #[cfg(feature = "experimental-no-ttl-point-hot-path")]
 mod fast_point;
 
+#[cfg(feature = "experimental-compact-point-storage")]
+mod compact_point;
 mod core;
 mod lifecycle;
 mod read;

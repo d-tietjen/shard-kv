@@ -9,6 +9,8 @@ impl FlatMap {
             pending_object_faults: 0,
             pending_object_fault_bytes: 0,
             semantic_index: SemanticIndex::default(),
+            #[cfg(feature = "experimental-compact-point-storage")]
+            compact_points: compact_point::CompactPointMap::default(),
             #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             fast_points: FastPointMap::default(),
             ttl_entries: 0,
@@ -35,7 +37,9 @@ impl FlatMap {
 
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         let mut map = Self::new();
-        if capacity > 0 {
+        // Compact entries grow their own bounded vectors. Reserve the general
+        // table only after promotion instead of holding both layouts up front.
+        if capacity > 0 && !cfg!(feature = "experimental-compact-point-storage") {
             map.entries = HashTable::with_capacity(capacity);
         }
         map
@@ -65,6 +69,10 @@ impl FlatMap {
 
     #[inline(always)]
     pub fn len(&self) -> usize {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.len();
+        }
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.len();
@@ -161,6 +169,10 @@ impl FlatMap {
 
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.len() == 0;
+        }
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.is_empty();
@@ -175,6 +187,9 @@ impl FlatMap {
         now_ms: u64,
     ) -> crate::Result<()> {
         self.validate_object_overflow_reconfiguration(object_overflow.as_ref())?;
+        if object_overflow.is_some() {
+            self.disable_fast_point_map();
+        }
         self.object_overflow = object_overflow;
         self.object_overflow_shard_id = shard_id;
         self.enforce_memory_limit(now_ms);
@@ -247,6 +262,10 @@ impl FlatMap {
 
     #[inline(always)]
     pub(super) fn lookup_ref_hashed_lazy(&mut self, hash: u64, key: &[u8]) -> Option<&[u8]> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get(hash, key);
+        }
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.get(hash, key).map(|value| value.as_ref());
@@ -277,6 +296,10 @@ impl FlatMap {
         key: &[u8],
         key_tag: u64,
     ) -> Option<&[u8]> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get(hash, key);
+        }
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.get(hash, key).map(|value| value.as_ref());
@@ -316,9 +339,15 @@ impl FlatMap {
 
     #[inline(always)]
     pub(super) fn disable_fast_point_map(&mut self) {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            debug_assert!(self.entries.is_empty());
+            let arena = self.compact_points.promote_into(&mut self.entries);
+            self.retire_value(arena);
+        }
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
-            debug_assert!(self.entries.is_empty());
+            debug_assert!(self.entries.is_empty() || self.fast_points.is_empty());
             for fast_entry in self.fast_points.take_entries_and_disable() {
                 let entry = fast_entry.into_flat_entry();
                 self.entries

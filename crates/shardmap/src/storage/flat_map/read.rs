@@ -114,6 +114,11 @@ impl FlatMap {
     /// shared-store hot path under `RwLock::read`.
     #[inline(always)]
     pub fn get_ref_hashed_shared(&self, hash: u64, key: &[u8], now_ms: u64) -> Option<&[u8]> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get(hash, key);
+        }
+
         // Skip the expiration filter entirely when no TTL entries exist — the
         // common case for caches that don't use SET ... EX. Saves a branch
         // and removes the `now_ms` dependency from the hot path.
@@ -151,6 +156,11 @@ impl FlatMap {
         key: &[u8],
         now_ms: u64,
     ) -> Option<Option<u64>> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get(hash, key).map(|_| None);
+        }
+
         if self.ttl_entries == 0 {
             #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             if self.fast_points.get(hash, key).is_some() {
@@ -179,6 +189,11 @@ impl FlatMap {
         hash: u64,
         key: &[u8],
     ) -> Option<Option<u64>> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get(hash, key).map(|_| None);
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.get(hash, key).is_some() {
             return Some(None);
@@ -192,6 +207,11 @@ impl FlatMap {
 
     #[inline(always)]
     pub fn get_ref_hashed_shared_no_ttl(&self, hash: u64, key: &[u8]) -> Option<&[u8]> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get(hash, key);
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value.as_ref());
@@ -210,6 +230,11 @@ impl FlatMap {
         key: &[u8],
         key_tag: u64,
     ) -> Option<&[u8]> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get(hash, key);
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value.as_ref());
@@ -231,6 +256,15 @@ impl FlatMap {
     where
         F: FnMut(&SharedBytes),
     {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            if let Some(value) = self.compact_points.get_shared(hash, key) {
+                write(value);
+                return true;
+            }
+            return false;
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             write(value);
@@ -252,6 +286,11 @@ impl FlatMap {
         hash: u64,
         key: &[u8],
     ) -> Option<&SharedBytes> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get_shared(hash, key);
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value);
@@ -270,6 +309,11 @@ impl FlatMap {
         key: &[u8],
         key_tag: u64,
     ) -> Option<&SharedBytes> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get_shared(hash, key);
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value);
@@ -288,6 +332,13 @@ impl FlatMap {
         key_tag: u64,
         key_len: usize,
     ) -> Option<&SharedBytes> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self
+                .compact_points
+                .get_shared_tagged(hash, key_tag, key_len);
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get_tagged(hash, key_tag, key_len) {
             return Some(value);
@@ -310,6 +361,15 @@ impl FlatMap {
     where
         F: FnMut(&SharedBytes),
     {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            if let Some(value) = self.compact_points.get_shared(hash, key) {
+                write(value);
+                return true;
+            }
+            return false;
+        }
+
         if let Some(entry) = self
             .entries
             .find(local_table_hash(hash), |entry| {
@@ -331,6 +391,11 @@ impl FlatMap {
         key: &[u8],
         now_ms: u64,
     ) -> Option<&SharedBytes> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get_shared(hash, key);
+        }
+
         self.entries
             .find(local_table_hash(hash), |entry| {
                 entry.matches_readable(hash, key)
@@ -349,6 +414,11 @@ impl FlatMap {
         key: &[u8],
         now_ms: u64,
     ) -> Option<SharedBytes> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get_shared(hash, key).cloned();
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value.clone());
@@ -399,6 +469,20 @@ impl FlatMap {
     where
         F: FnOnce(Option<&[u8]>) -> bool,
     {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return match self.compact_points.get(hash, key) {
+                None => GovernedObjectFault::Missing,
+                Some(_) if !authorize(None) => GovernedObjectFault::Denied,
+                Some(_) => GovernedObjectFault::Resident(
+                    self.compact_points
+                        .get_shared(hash, key)
+                        .expect("entry found above")
+                        .clone(),
+                ),
+            };
+        }
+
         self.process_object_overflow_completions(now_ms);
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
@@ -461,6 +545,11 @@ impl FlatMap {
         key_tag: u64,
         now_ms: u64,
     ) -> Option<SharedBytes> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get_shared(hash, key).cloned();
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if let Some(value) = self.fast_points.get(hash, key) {
             return Some(value.clone());
@@ -637,6 +726,10 @@ impl FlatMap {
     }
 
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.is_active() {
+            return self.compact_points.get(hash_key(key), key).is_some();
+        }
         self.disable_fast_point_map();
         let hash = hash_key(key);
         if self.ttl_entries != 0 && self.entry_is_expired_hashed(hash, key, now_ms) {
