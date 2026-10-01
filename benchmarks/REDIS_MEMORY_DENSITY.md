@@ -132,33 +132,41 @@ maintenance cannot consume the request path's full CPU budget.
 
 Build with `redis-server,experimental-compact-point-storage`. Selection is
 automatic for plain string SETs with keys up to 64 bytes and values up to 256
-bytes, including ordinary RESP/preload writes, provided the shard has no TTL,
-governance, semantic metadata, eviction/memory policy, or object overflow.
-The opt-in feature uses raw, uncompressed key/value bytes in an arena, 4-byte
-probe indexes, and 32-byte descriptors on 64-bit hosts. Descriptor size includes
-a lazy boxed `Bytes` owner for existing shared-value APIs. Probe load stays below
-70%; arena growth leaves a minimum 64-KiB quantum, then at most 25% spare payload
-space capped at 4 MiB. Descriptor growth leaves at most 8192 spare entries.
+bytes, including ordinary RESP/preload writes, while memory policy and object
+overflow are disabled. Other keys and metadata use the general layout in the
+same shard. The opt-in feature stores raw, uncompressed key/value bytes in
+fixed 4 KiB chunks, rounds record lengths to eight-byte size classes, and uses
+an ordinary descriptor hash table. Chunks never relocate their existing
+payloads. Deleted records are reused; empty chunks release their payload
+allocation and recycle the chunk descriptor. The allocator retains descriptor
+capacity bounded by peak chunk count and caps compact payload allocations at
+64 MiB per shard; exhausted compact allocation falls back to general storage.
 
-Borrowed RESP GETs read the arena directly. A shared/owned `Bytes` GET materializes
-one independent owner on the first read of each value version and reuses it for
-later reads. This preserves owned-clone semantics, but a mixed shared-owner
-workload can add allocation cost and duplicate payload memory; qualify that path
-separately before enabling the feature in a deployment that uses it.
+Small RESP GETs encode a borrowed chunk slice under the storage borrow, including
+queued responses below the 2048-byte response ownership threshold. A shared/owned
+`Bytes` API materializes one independent owner on the first read of each value
+version and reuses it for later reads. This preserves owned-clone semantics,
+but a mixed shared-owner workload can add allocation cost and duplicate payload
+memory; qualify that path separately before enabling the feature in a deployment
+that uses it.
 
-Equal-length SET reuses the existing arena record. A length-changing SET, DEL,
-TTL/governance/semantic operation, unsupported key/value size, memory policy,
-object overflow, or write during a read epoch permanently promotes the shard to
-general storage. Promotion frees compact indexes/descriptors and retains the old
-arena only while a read epoch needs it. This bounds churn without background work
-or request-triggered arena compaction. Promotion itself is linear in shard size
-and has a temporary memory/latency cost: the first unsupported mutation copies
-and allocates every live entry synchronously on the request thread, with no
-fixed request-time bound. The fixed-size point profile does not qualify churn
-or establish that the no-unbounded-request-path-copying criterion is met.
-Independent review must assess that limitation before any acceptance claim.
-Values of 1 KiB and 4 KiB use
-the existing general layout from the first SET.
+Equal-length SET reuses its record when there are no read epochs. Length changes
+allocate one replacement record; deletes release or retire one record. A mutation
+during an epoch retains only its old record and any materialized shared owner,
+then uses a new record. The allocator reclaims at most 32 retired records per
+call after readers leave (64 across a compact allocation attempt and general
+fallback; maintenance reclaims 32). Each compact write copies at most 64
+key bytes and 256 value bytes and initializes at most one 4 KiB chunk. Normal
+hash-table descriptor resizing does not copy payloads. TTL/governance/semantic
+metadata and overflow generation migrate only the touched key, preserving
+one representation per key and keeping untouched keys compact. Runtime policy
+configuration retains both layouts and accounts for them in eviction selection;
+sampled access metadata for compact keys lives in a sparse side map. Values
+of 1 KiB and 4 KiB use the existing general layout from the first SET.
+
+The feature remains unqualified until correctness, bounded allocation/reclaim,
+churn, shared/borrowed epoch lifetime, mixed storage, and protocol regressions
+pass on Adam and the unchanged density/performance gates below are met.
 
 Run both the baseline (`redis-server`) and candidate at the exact same source SHA
 on Adam, with the same reserved resources. For each build:

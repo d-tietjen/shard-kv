@@ -47,7 +47,13 @@ impl FlatMap {
         clear_ttl: bool,
         transform: impl FnOnce(Option<&[u8]>) -> std::result::Result<(R, Bytes), E>,
     ) -> std::result::Result<R, E> {
-        self.disable_fast_point_map();
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if let Some(existing) = self.compact_points.get(hash, key) {
+            let (result, value) = transform(Some(existing))?;
+            self.set_slice_hashed(hash, key, &value, None, now_ms);
+            return Ok(result);
+        }
+        self.prepare_general_key(hash, key.as_ref());
         self.reclaim_retired_if_quiescent();
         if self.ttl_entries != 0 && self.entry_is_expired_hashed(hash, key, now_ms) {
             self.delete_hashed_internal(hash, key, now_ms, DeleteReason::Expired);
@@ -172,7 +178,7 @@ impl FlatMap {
         {
             return;
         }
-        self.disable_fast_point_map();
+        self.prepare_general_key(hash, key.as_ref());
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
         let start = self.start_telemetry_latency_sample();
@@ -310,7 +316,7 @@ impl FlatMap {
         now_ms: u64,
         generation: u64,
     ) {
-        self.disable_fast_point_map();
+        self.prepare_general_key(hash, key.as_ref());
         self.set_bytes_hashed_with_governance_option(
             hash,
             key,
@@ -319,6 +325,7 @@ impl FlatMap {
             expire_at_ms,
             now_ms,
         );
+        self.prepare_general_key(hash, key);
         let entry = self
             .entries
             .find_mut(local_table_hash(hash), |entry| {
@@ -360,7 +367,7 @@ impl FlatMap {
         if expire_at_ms.is_none() && self.try_set_compact_point(hash, &key, &value) {
             return;
         }
-        self.disable_fast_point_map();
+        self.prepare_general_key(hash, key.as_ref());
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
         let start = self.start_telemetry_latency_sample();
@@ -453,7 +460,7 @@ impl FlatMap {
         if self.try_set_compact_point(hash, key, value) {
             return;
         }
-        self.disable_fast_point_map();
+        self.prepare_general_key(hash, key.as_ref());
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
         let start = self.start_telemetry_latency_sample();
@@ -630,7 +637,7 @@ impl FlatMap {
         if expire_at_ms.is_none() && self.try_set_compact_point(hash, key, value) {
             return;
         }
-        self.disable_fast_point_map();
+        self.prepare_general_key(hash, key.as_ref());
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
         let start = self.start_telemetry_latency_sample();

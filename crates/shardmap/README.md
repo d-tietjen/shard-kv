@@ -587,13 +587,17 @@ embedding the protocol layer, or wiring storage into a specialized runtime.
 | `scnp-tls` | No | Rustls TLS 1.3 and mTLS for shard-owned SCNP overflow connections. |
 
 The internal `experimental-compact-point-storage` flag opts into an
-unqualified arena layout for plain byte keys up to 64 bytes and values up to
-256 bytes. Borrowed reads use arena slices; owned `Bytes` reads lazily copy one
-owner per value version. Equal-length overwrites reuse their arena record.
-Deletion, length changes, TTL/metadata, memory policy, overflow, and writes
-during a read epoch permanently promote the entire shard to general storage.
-Promotion copies every live entry synchronously and has no fixed request-time
-bound. See [SAFETY.md](SAFETY.md) and the
+unqualified layout for plain byte keys up to 64 bytes and values up to 256
+bytes. Borrowed reads use fixed 4 KiB payload chunks. Small RESP GET responses
+encode those slices directly; explicit shared/owned `Bytes` reads lazily copy
+one owner per value version. Deletes and length changes reuse records, and
+TTL/governance/semantic/overflow metadata migrates only the affected key into
+general storage. Both layouts remain visible to counts, scans, snapshots,
+recovery, and runtime memory policies. Payload allocations never relocate;
+compact payload capacity is capped at 64 MiB per shard, after which new records
+use general storage. Open read epochs retain replaced records and materialized
+owners, with at most 32 compact records reclaimed per allocator call once readers
+leave (at most 64 in a point mutation that falls back, and 32 in maintenance). See [SAFETY.md](SAFETY.md) and the
 [memory-density qualification plan](../../benchmarks/REDIS_MEMORY_DENSITY.md)
 before evaluating this feature for a workload.
 

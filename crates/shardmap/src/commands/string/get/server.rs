@@ -12,6 +12,7 @@ use crate::storage::{RedisStringLookup, VECTOR_SET_PREFIX, WRONGTYPE_MESSAGE};
 use bytes::BytesMut;
 
 use super::Get;
+use crate::server::RESP_ZERO_COPY_VALUE_THRESHOLD;
 
 #[cfg(feature = "server")]
 impl RawDirectCommand for Get {
@@ -148,6 +149,14 @@ impl<'a> GetRawArgs<'a> {
 
 #[cfg(feature = "server")]
 impl Get {
+    fn response_owner_min_len(queued: bool) -> usize {
+        if queued {
+            RESP_ZERO_COPY_VALUE_THRESHOLD
+        } else {
+            usize::MAX
+        }
+    }
+
     #[cfg(feature = "unsafe")]
     #[inline(always)]
     pub(super) fn execute_borrowed_single_threaded(
@@ -164,17 +173,22 @@ impl Get {
         // SAFETY: forwarded from caller's single-worker contract.
         let result = unsafe {
             ctx.store
-                .try_with_shared_value_bytes_route_hashed_single_threaded(key_hash, key, |value| {
-                    #[cfg(feature = "redis")]
-                    if Self::write_resp_wrongtype_for_typed_point_value(value, out) {
-                        return;
-                    }
-                    if let Some(queue) = ctx.fast_write_queue.as_mut() {
-                        queue.push_resp_value(out, value);
-                    } else {
-                        ServerWire::write_resp_blob_string(out, value.as_ref());
-                    }
-                })
+                .try_with_response_value_bytes_route_hashed_single_threaded(
+                    key_hash,
+                    key,
+                    Self::response_owner_min_len(ctx.fast_write_queue.is_some()),
+                    |value, owner| {
+                        #[cfg(feature = "redis")]
+                        if Self::write_resp_wrongtype_for_typed_point_value(value, out) {
+                            return;
+                        }
+                        if let (Some(queue), Some(owner)) = (ctx.fast_write_queue.as_mut(), owner) {
+                            queue.push_resp_value(out, owner);
+                        } else {
+                            ServerWire::write_resp_blob_string(out, value);
+                        }
+                    },
+                )
         };
         match result {
             Ok(true) => {}
@@ -195,19 +209,22 @@ impl Get {
         }
         let key_hash = hash_key(key);
         let out = &mut *ctx.out;
-        let result = ctx
-            .store
-            .try_with_shared_value_bytes_route_hashed(key_hash, key, |value| {
+        let result = ctx.store.try_with_response_value_bytes_route_hashed(
+            key_hash,
+            key,
+            Self::response_owner_min_len(ctx.fast_write_queue.is_some()),
+            |value, owner| {
                 #[cfg(feature = "redis")]
                 if Self::write_resp_wrongtype_for_typed_point_value(value, out) {
                     return;
                 }
-                if let Some(queue) = ctx.fast_write_queue.as_mut() {
-                    queue.push_resp_value(out, value);
+                if let (Some(queue), Some(owner)) = (ctx.fast_write_queue.as_mut(), owner) {
+                    queue.push_resp_value(out, owner);
                 } else {
-                    ServerWire::write_resp_blob_string(out, value.as_ref());
+                    ServerWire::write_resp_blob_string(out, value);
                 }
-            });
+            },
+        );
         match result {
             Ok(true) => {}
             Ok(false) => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),
@@ -218,16 +235,16 @@ impl Get {
     #[cfg(feature = "redis")]
     #[inline(always)]
     fn write_resp_string_lookup(ctx: &mut BorrowedCommandContext<'_, '_, '_>, key: &[u8]) {
-        let lookup = if let Some(queue) = ctx.fast_write_queue.as_mut() {
-            let out = &mut *ctx.out;
-            ctx.store.get_string_value_into(key, |value| {
-                queue.push_resp_value(out, value);
-            })
-        } else {
-            ctx.store.get_string_value_into(key, |value| {
-                ServerWire::write_resp_blob_string(ctx.out, value.as_ref());
-            })
-        };
+        let owner_min_len = Self::response_owner_min_len(ctx.fast_write_queue.is_some());
+        let lookup =
+            ctx.store
+                .get_string_value_for_response_into(key, owner_min_len, |value, owner| {
+                    if let (Some(queue), Some(owner)) = (ctx.fast_write_queue.as_mut(), owner) {
+                        queue.push_resp_value(ctx.out, owner);
+                    } else {
+                        ServerWire::write_resp_blob_string(ctx.out, value);
+                    }
+                });
         match lookup {
             RedisStringLookup::Hit => {}
             RedisStringLookup::Miss => ServerWire::write_resp_null(ctx.out, ctx.resp_protocol),

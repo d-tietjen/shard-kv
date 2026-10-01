@@ -16,6 +16,16 @@ pub(crate) trait RedisStringStore {
     where
         F: FnMut(&bytes::Bytes);
 
+    #[cfg(feature = "server")]
+    fn get_string_value_for_response_into<F>(
+        &self,
+        key: &[u8],
+        owner_min_len: usize,
+        write: F,
+    ) -> RedisStringLookup
+    where
+        F: FnMut(&[u8], Option<&bytes::Bytes>);
+
     fn mutate_string_value_no_ttl_in_place<F>(&self, key: &[u8], mutate: F) -> RedisStringLookup
     where
         F: FnMut(&mut [u8]);
@@ -77,6 +87,45 @@ impl RedisStringStore for EmbeddedStore {
                 write(bytes);
             }
         });
+        match (lookup, vector_set) {
+            (RedisStringLookup::Hit, true) => RedisStringLookup::WrongType,
+            (RedisStringLookup::Miss, _) if pinned_vector_value_exists(self, key) => {
+                RedisStringLookup::WrongType
+            }
+            (lookup, _) => lookup,
+        }
+    }
+
+    #[cfg(feature = "server")]
+    fn get_string_value_for_response_into<F>(
+        &self,
+        key: &[u8],
+        owner_min_len: usize,
+        mut write: F,
+    ) -> RedisStringLookup
+    where
+        F: FnMut(&[u8], Option<&bytes::Bytes>),
+    {
+        let route = self.route_key(key);
+        let mut vector_set = false;
+        let lookup = match self.try_with_response_value_bytes_routed(
+            route,
+            key,
+            owner_min_len,
+            &mut |value, owner| {
+                if value.starts_with(VECTOR_SET_PREFIX) {
+                    vector_set = true;
+                } else {
+                    write(value, owner);
+                }
+            },
+        ) {
+            Ok(true) => RedisStringLookup::Hit,
+            Ok(false) => {
+                object_lookup_for_string_route(self, route, key).unwrap_or(RedisStringLookup::Miss)
+            }
+            Err(_) => RedisStringLookup::BackendError,
+        };
         match (lookup, vector_set) {
             (RedisStringLookup::Hit, true) => RedisStringLookup::WrongType,
             (RedisStringLookup::Miss, _) if pinned_vector_value_exists(self, key) => {

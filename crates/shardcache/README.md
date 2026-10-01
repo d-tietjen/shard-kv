@@ -105,7 +105,7 @@ the Docker/server runbook.
 | `redis-modules` | Via `redis-server` | Redis `MODULE` compatibility stubs with an empty module registry and disabled loading. |
 | `redis-modules-all` | No | Aggregate Redis Modules compatibility facades, concrete command discovery metadata, and embedded APIs; individual `redis-module-*` flags can enable one module family at a time. |
 | `monoio` | No | Linux-only transport option for server experiments. |
-| `experimental-compact-point-storage` | No | Unqualified arena layout for plain small string points; see the limitations below. |
+| `experimental-compact-point-storage` | No | Unqualified chunk layout for plain small string points; see the limitations below. |
 | `object-overflow` | No | Filesystem-backed cold-value overflow for server storage. |
 | `object-overflow-s3` | No | S3/RustFS-compatible object overflow adapter. |
 | `kv-overflow` | No | Shardcache SCNP overflow-replica role and embedded primary support. |
@@ -121,13 +121,15 @@ cargo run -p shardcache --no-default-features --features server -- \
 ```
 
 `experimental-compact-point-storage` stores plain string keys up to 64 bytes
-and values up to 256 bytes together in an uncompressed arena. Equal-length
-overwrites reuse that space. Deletes, value length changes, TTL/metadata,
-memory policies, and overflow permanently promote the shard to general
-storage. That first promotion synchronously copies every live entry and has
-no fixed request-time bound. Shared `Bytes` reads also materialize a separate
-owner per value version. Keep this feature experimental until the correctness,
-memory, and latency gates in
+and values up to 256 bytes in fixed 4 KiB chunks. Records can be reused after
+deletes and length changes; metadata migrates only the affected key to general
+storage. Runtime policies account for both layouts. Small RESP GET responses
+borrow the payload, while shared `Bytes` APIs materialize an independent owner
+per value version. Compact payload capacity is capped at 64 MiB per shard;
+new records fall back to general storage when that cap is reached. Read epochs
+retain old records and copied owners until readers leave, followed by bounded
+reclamation. Keep this feature experimental until the correctness, memory,
+and latency gates in
 [`../../benchmarks/REDIS_MEMORY_DENSITY.md`](../../benchmarks/REDIS_MEMORY_DENSITY.md)
 pass for the intended workload.
 

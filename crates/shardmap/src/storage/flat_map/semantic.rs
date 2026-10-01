@@ -59,6 +59,7 @@ impl FlatMap {
         let embedding = SemanticEmbedding::from_slice(embedding)?;
         self.disable_fast_point_map();
         self.set_slice_hashed(hash, key, value, expire_at_ms, now_ms);
+        self.prepare_general_key(hash, key);
         let token = self.semantic_index.insert(hash, key, &embedding);
         let governance = governance_metadata.map(shared_bytes_from_slice);
 

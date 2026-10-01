@@ -37,7 +37,7 @@ impl FlatMap {
             if self.try_set_compact_point(hash, key, value) {
                 return;
             }
-            self.disable_fast_point_map();
+            self.prepare_general_key(hash, key);
         }
         debug_assert_eq!(self.memory_limit_bytes, None);
         debug_assert_eq!(self.eviction_policy, EvictionPolicy::None);

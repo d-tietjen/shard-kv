@@ -23,25 +23,34 @@ cargo clippy -p shardmap --features unsafe,experimental-no-ttl-point-hot-path,te
 
 ## Experimental compact point storage
 
-`experimental-compact-point-storage` adds a safe, checked arena implementation
-for small strings without TTL or other entry metadata. It does not enable the
-`unsafe` feature. Ordinary borrows hold the map/shard borrow or lock. A mutation
-during an open read epoch permanently promotes the compact map and moves the
-original arena `Vec` into an owning `Bytes` in the retired-value list. That
-conversion preserves the payload address; the existing epoch reclamation keeps
-raw worker-local slices valid until the last reader leaves. Shared `Bytes`
-owners are copied lazily per value version and retained by normal reference
-counting, so compact overwrite never mutates an owned clone.
+`experimental-compact-point-storage` adds a safe, checked implementation for
+small strings without TTL or other entry metadata. It does not enable the
+`unsafe` feature. Payloads occupy fixed 4 KiB chunks with reusable records in
+eight-byte size classes. Growing the chunk descriptor or hash tables never
+moves a chunk's payload. Empty chunks release their allocation and reuse their
+descriptor; compact payload capacity is capped at 64 MiB per shard. A record
+write copies at most 64 key bytes and 256 value bytes and can initialize one
+4 KiB chunk. Normal descriptor hash-table resizing remains proportional to
+its descriptor count and does not copy stored key/value payloads.
 
-Equal-length overwrite uses checked slice copying. Length changes and deletion
-promote before mutation, so compact storage has no unreachable arena records.
-Promotion can take time proportional to the shard's entries and temporarily
-hold both representations. The first delete, size-changing overwrite, or
-unsupported operation allocates and copies every live compact entry on that
-request's thread. There is no fixed request-time bound, so the fixed-size
-GET/SET profile does not establish a latency bound for churn or promotion.
-The feature remains opt-in pending independent review and Adam memory and
-latency qualification.
+Ordinary reads hold the map/shard borrow or lock. Equal-length overwrite reuses
+its record only when no read epoch is active. During an epoch, overwrite or
+delete retires the affected record together with any lazily materialized shared
+owner; neither its arena slice nor a borrowed `Bytes` buffer is overwritten,
+freed, or reused until all readers leave. The allocator reclaims at most 32 retired compact records per call after
+quiescence. A point mutation can attempt compact allocation and then fall back
+to the general path, for a combined maximum of 64; maintenance reclaims 32. Owned `Bytes` clones
+retain their independent old versions through normal reference counting.
+
+Compact and general entries coexist with one representation per key. Changed
+lengths allocate only a replacement record. Unsupported sizes, metadata, or
+allocation-cap fallback migrate at most one compact key/value to general
+storage. Counts, scans, snapshot/recovery, and runtime eviction/overflow policies
+include both layouts. Runtime policy access samples use sparse per-record
+metadata which is removed or transferred when the record changes. Small RESP
+GET responses borrow slices and materialize an owner only when response lifetime
+requires it. The feature remains opt-in pending independent review and Adam
+memory and latency qualification.
 
 ## Anneal
 

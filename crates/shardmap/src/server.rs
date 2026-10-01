@@ -86,6 +86,6 @@ const FAST_STATUS_FLOAT: u8 = 7;
 // - 2 KiB+ values use header+payload writev so the stored Bytes payload is not
 //   copied into the response buffer.
 const SCNP_ZERO_COPY_VALUE_THRESHOLD: usize = 1024;
-const RESP_ZERO_COPY_VALUE_THRESHOLD: usize = 2048;
+pub(crate) const RESP_ZERO_COPY_VALUE_THRESHOLD: usize = 2048;
 const RESP_HEADER_MAX_LEN: usize = 32;
 static RESP_CRLF: &[u8; 2] = b"\r\n";

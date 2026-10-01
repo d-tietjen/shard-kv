@@ -462,6 +462,8 @@ pub struct FlatMap {
     semantic_index: SemanticIndex,
     #[cfg(feature = "experimental-compact-point-storage")]
     compact_points: compact_point::CompactPointMap,
+    #[cfg(feature = "experimental-compact-point-storage")]
+    general_capacity_hint: usize,
     #[cfg(feature = "experimental-no-ttl-point-hot-path")]
     fast_points: FastPointMap,
     ttl_entries: usize,

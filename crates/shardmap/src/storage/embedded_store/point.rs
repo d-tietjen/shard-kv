@@ -522,6 +522,109 @@ impl EmbeddedStore {
         }
     }
 
+    #[cfg(all(
+        test,
+        feature = "experimental-compact-point-storage",
+        feature = "server"
+    ))]
+    pub(crate) fn compact_shared_owner_count(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.read().map.compact_shared_owner_count())
+            .sum()
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn try_with_response_value_bytes_route_hashed<F>(
+        &self,
+        route_hash: u64,
+        key: &[u8],
+        owner_min_len: usize,
+        mut write: F,
+    ) -> crate::Result<bool>
+    where
+        F: FnMut(&[u8], Option<&bytes::Bytes>),
+    {
+        let route = if can_use_route_hash_as_key_hash(self.route_mode, key) {
+            EmbeddedKeyRoute {
+                shard_id: self.route_hash(route_hash),
+                key_hash: route_hash,
+            }
+        } else {
+            self.route_key(key)
+        };
+        self.try_with_response_value_bytes_routed(route, key, owner_min_len, &mut write)
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn try_with_response_value_bytes_routed<F>(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        owner_min_len: usize,
+        write: &mut F,
+    ) -> crate::Result<bool>
+    where
+        F: FnMut(&[u8], Option<&bytes::Bytes>),
+    {
+        if uses_flat_key_storage(self.route_mode, key) {
+            let shard = self.shards[route.shard_id].read();
+            if shard.map.with_response_value_bytes_hashed(
+                route.key_hash,
+                key,
+                now_millis(),
+                owner_min_len,
+                write,
+            ) {
+                return Ok(true);
+            }
+        }
+        if let Some(value) = self.try_get_value_bytes_routed(route, key, now_millis())? {
+            write(
+                value.as_ref(),
+                (value.len() >= owner_min_len).then_some(&value),
+            );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// # Safety
+    /// The caller guarantees that no other thread accesses this store.
+    #[cfg(all(feature = "unsafe", feature = "server"))]
+    pub(crate) unsafe fn try_with_response_value_bytes_route_hashed_single_threaded<F>(
+        &self,
+        route_hash: u64,
+        key: &[u8],
+        owner_min_len: usize,
+        mut write: F,
+    ) -> crate::Result<bool>
+    where
+        F: FnMut(&[u8], Option<&bytes::Bytes>),
+    {
+        if can_use_route_hash_as_key_hash(self.route_mode, key) {
+            let route = EmbeddedKeyRoute {
+                shard_id: self.route_hash(route_hash),
+                key_hash: route_hash,
+            };
+            // SAFETY: the caller's single-worker contract owns this shard.
+            let shard = unsafe { &*self.shards[route.shard_id].data_ptr() };
+            if uses_flat_key_storage(self.route_mode, key)
+                && shard.map.with_response_value_bytes_hashed(
+                    route.key_hash,
+                    key,
+                    now_millis(),
+                    owner_min_len,
+                    &mut write,
+                )
+            {
+                return Ok(true);
+            }
+        }
+        self.try_with_response_value_bytes_route_hashed(route_hash, key, owner_min_len, write)
+    }
+
     /// Route-hashed GET path that exposes the stored `Bytes` object while the
     /// shard lock is held. Callers can clone the `Bytes` handle for large
     /// zero-copy writes, while small responses can still copy from the borrowed

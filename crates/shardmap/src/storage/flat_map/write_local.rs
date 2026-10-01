@@ -20,7 +20,7 @@ impl FlatMap {
         if expire_at_ms.is_none() && self.try_set_compact_point(hash, &key, &value) {
             return;
         }
-        self.disable_fast_point_map();
+        self.prepare_general_key(hash, key.as_ref());
         #[cfg(feature = "telemetry")]
         let start = self.start_telemetry_latency_sample();
 
@@ -129,7 +129,7 @@ impl FlatMap {
         if self.try_set_compact_point(hash, key, value) {
             return;
         }
-        self.disable_fast_point_map();
+        self.prepare_general_key(hash, key.as_ref());
         if !self.retired_values.is_empty() {
             self.reclaim_retired_if_quiescent();
         }
@@ -324,7 +324,7 @@ impl FlatMap {
         if expire_at_ms.is_none() && self.try_set_compact_point(hash, key, value) {
             return;
         }
-        self.disable_fast_point_map();
+        self.prepare_general_key(hash, key.as_ref());
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
         let start = self.start_telemetry_latency_sample();
