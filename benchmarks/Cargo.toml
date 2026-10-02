@@ -146,3 +146,7 @@ required-features = ["embedded-server"]
 name = "compact_shared_read_cost"
 path = "src/bin/compact_shared_read_cost.rs"
 required-features = ["compact-point-storage"]
+
+[[bin]]
+name = "compact_resp_scenarios"
+path = "src/bin/compact_resp_scenarios.rs"
