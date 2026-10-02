@@ -350,9 +350,13 @@ shapes and adds mixed lengths, overwrite/delete-reinsert, scale/eligibility and
 read/write hot/cold profiles: **378 final rows and 7,605 memory sample gates**.
 New native builds, API tests, Python campaign regressions, Redis differential
 tests, image builds, and memory/performance measurements have not run.
-Validation awaits explicit source/tooling upload approval after automatic review
-rejected the transfers. These plans establish no new measured result or formal
-qualification; the existing MD05 findings and diagnostic limits still apply.
+Scoped source/tooling uploads now have explicit user approval; the earlier
+transfer block from automatic review is resolved. Separately, all 18 inert
+Redis reference parser cases passed, with complete execution and owned cleanup
+independently accepted. This covers the parser, without Redis executable,
+differential or measurement coverage. Redis material preparation and the early
+API fixtures remain pending. These plans establish no new measured result or
+formal qualification; the existing MD05 findings and diagnostic limits still apply.
 
 ## Remaining qualification
 
