@@ -648,10 +648,10 @@ mod tests {
             assert_eq!(mem::size_of::<CompactPointEntry>(), 24);
             assert_eq!(mem::size_of::<OnceBox<SharedBytes>>(), 8);
             assert_eq!(mem::size_of::<RetiredRecord>(), 16);
-            assert!(mem::size_of::<PayloadChunk>() <= 24);
-            assert!(mem::size_of::<Option<PayloadChunk>>() <= 24);
+            assert_eq!(mem::size_of::<PayloadChunk>(), 24);
+            assert_eq!(mem::size_of::<Option<PayloadChunk>>(), 24);
             assert_eq!(mem::size_of::<[u32; CompactPointMap::SIZE_CLASSES]>(), 640);
-            assert!(mem::size_of::<CompactPointMap>() <= 1024);
+            assert_eq!(mem::size_of::<CompactPointMap>(), 816);
         }
         for (value_len, records_per_chunk) in [(16, 120), (64, 49), (256, 14)] {
             let mut map = CompactPointMap::default();
