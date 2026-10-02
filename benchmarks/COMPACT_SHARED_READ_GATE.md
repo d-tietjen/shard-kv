@@ -104,6 +104,13 @@ There is no CPU affinity or reserved capacity. Actual child terminal status is
 obtained by `os.waitpid` with the default SIGCHLD disposition; the raw status,
 PID, reaping receipt and exact executable identity are retained. The outer
 systemd wrapper result is distinct from the native child status.
+Termination signals are blocked across each actual wait and its recorded status
+transition. Cleanup first establishes an unreaped child and matches its recorded
+fork PID, parent PID and start ticks before signalling its process or group.
+An already observed terminal child receives no cleanup signal. ECHILD records
+lost wait ownership with unknown raw status and authorizes no signal; it never
+becomes an exit-zero receipt. Failure receipts retain the primary error, any
+genuine terminal status, and separate cleanup errors and signals.
 
 ## Prespecified diagnostic screens
 

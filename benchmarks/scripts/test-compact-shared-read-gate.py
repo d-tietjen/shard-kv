@@ -10,6 +10,7 @@ import os
 import pathlib
 import signal
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -159,6 +160,59 @@ class GateRegressionTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): gate.terminal_wait(71, signal.SIGTERM)
         finally: signal.signal(signal.SIGCHLD, old)
 
+    def test_reaped_child_lost_ownership_never_signals_a_reused_group(self):
+        pid = os.fork()
+        if pid == 0: os._exit(7)
+        waiter = gate.NativeChildWait(pid); waiter.bind()
+        os.waitpid(pid, 0)  # Release the actual child PID before exercising cleanup.
+        with mock.patch.object(gate.os, "killpg") as groups, mock.patch.object(gate.os, "kill") as processes:
+            receipt = gate.stop_child(waiter)
+        groups.assert_not_called(); processes.assert_not_called()
+        self.assertTrue(receipt["ownership_lost"])
+        self.assertFalse(receipt["wait_observed"]); self.assertFalse(receipt["child_reaped"])
+        self.assertIsNone(receipt["waited_pid"]); self.assertIsNone(receipt["raw_wait_status"])
+
+    def test_wait_bookkeeping_keeps_genuine_status_when_sigterm_is_pending(self):
+        pid = os.fork()
+        if pid == 0: os._exit(7)
+        waiter = gate.NativeChildWait(pid); waiter.bind()
+        real_wait = os.waitpid
+        previous = signal.signal(signal.SIGTERM, gate.interrupted)
+        def interrupted_wait(actual_pid, flags):
+            self.assertEqual(actual_pid, pid); self.assertEqual(flags, os.WNOHANG)
+            result = real_wait(actual_pid, 0)
+            os.kill(os.getpid(), signal.SIGTERM)  # Pending until observation is saved.
+            return result
+        try:
+            with mock.patch.object(gate.os, "waitpid", side_effect=interrupted_wait):
+                with self.assertRaisesRegex(RuntimeError, "termination signal"):
+                    waiter.poll()
+            self.assertEqual(waiter.wait["waited_pid"], pid)
+            self.assertEqual(os.WEXITSTATUS(waiter.wait["raw_wait_status"]), 7)
+            with mock.patch.object(gate.os, "killpg") as groups, mock.patch.object(gate.os, "kill") as processes:
+                receipt = gate.stop_child(waiter)
+            groups.assert_not_called(); processes.assert_not_called()
+            self.assertTrue(receipt["wait_observed"]); self.assertTrue(receipt["child_reaped"])
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+            try: real_wait(pid, 0)
+            except ChildProcessError: pass
+
+    def test_changed_recorded_child_identity_refuses_cleanup_signals(self):
+        reader, writer = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            os.close(writer); os.read(reader, 1); os._exit(0)
+        os.close(reader)
+        waiter = gate.NativeChildWait(pid); waiter.bind(); waiter.identity["start_ticks"] += 1
+        try:
+            with mock.patch.object(gate.os, "killpg") as groups, mock.patch.object(gate.os, "kill") as processes:
+                with self.assertRaisesRegex(RuntimeError, "identity differs"):
+                    gate.stop_child(waiter)
+            groups.assert_not_called(); processes.assert_not_called()
+        finally:
+            os.write(writer, b"x"); os.close(writer); os.waitpid(pid, 0)
+
     def compiler_fixture(self, root):
         work = root / "work"; target = work / "target/release"; target.mkdir(parents=True)
         native = target / "compact_shared_read_cost"; native.write_bytes(b"\x7fELFinert-only"); native.chmod(0o700)
@@ -208,7 +262,8 @@ class GateRegressionTests(unittest.TestCase):
         for batch in range(1, 5):
             for phase in gate.PHASES:
                 item = event(member, phase); item["batch"] = batch; messages.append(item)
-        source = "#!/usr/bin/python3\nimport json,os,sys\n"
+        source = "#!/usr/bin/python3\nimport json,os,sys,time\n"
+        if variant == "timeout": source += "time.sleep(3600)\n"
         source += "messages=" + repr(messages) + "\n"
         source += "for i,item in enumerate(messages):\n"
         source += " item['pid']=os.getpid()" + ("+1" if variant == "wrong-pid" else "") + "\n"
@@ -216,6 +271,7 @@ class GateRegressionTests(unittest.TestCase):
         if variant == "truncated": source += " if i==0: sys.exit(0)\n"
         source += " if sys.stdin.buffer.read(9)!=b'continue\\n': sys.exit(8)\n"
         source += "print(json.dumps({'schema_version':1,'status':'complete','cohort':'empty-value-sparse','batches':4,'phases_per_batch':13}),flush=True)\n"
+        if variant == "interrupted-live": source += "time.sleep(3600)\n"
         source += "sys.exit(" + ("7" if variant == "nonzero" else "0") + ")\n"
         native = root / "inert-native"; native.write_text(source); native.chmod(0o700)
         stop = root / "STOP"
@@ -223,16 +279,40 @@ class GateRegressionTests(unittest.TestCase):
         plan = {"builds": {"baseline": {"binary_sha256": gate.sha(native)}},
                 "scope_prefix": "eden2266-compact-shared-fixture", "stop_path": str(stop)}
         def identity(pid, _binary):
-            return {"pid": pid, "start_ticks": 1, "boot_id": "inert-fixture"}
+            return {"pid": pid, "start_ticks": gate.child_wait_identity(pid)["start_ticks"], "boot_id": "inert-fixture"}
         def sampled(pid, _binary, who, unit, cpus):
             return {"pid": pid, "start_ticks": who["start_ticks"], "scope": {"path": "/inert-only", "chain": []},
                     "metrics": {"pss_bytes": 1024, "rss_bytes": 2048}}
-        with mock.patch.object(gate, "check_build", return_value=native), \
+        real_wait = os.waitpid; real_clock = time.monotonic; real_stop = gate.stop_child
+        injected = False; clock_calls = 0
+        def observed_wait(pid, flags):
+            nonlocal injected
+            actual = real_wait(pid, flags)
+            if variant == "lost-wait" and actual[0] == pid:
+                raise ChildProcessError("fixture external waiter already reaped actual child")
+            if not injected and ((variant == "interrupted-reap" and actual[0] == pid) or
+                                 (variant == "interrupted-live" and actual[0] == 0)):
+                injected = True; os.kill(os.getpid(), signal.SIGTERM)
+            return actual
+        def clock():
+            nonlocal clock_calls
+            clock_calls += 1
+            return real_clock() + (200 if variant == "timeout" and clock_calls >= 3 else 0)
+        def cleanup(waiter):
+            return real_stop(waiter)
+        previous = signal.signal(signal.SIGTERM, gate.interrupted)
+        try:
+            with mock.patch.object(gate, "check_build", return_value=native), \
              mock.patch.object(gate, "verify_scope", return_value={}), \
              mock.patch.object(gate, "proc_identity", side_effect=identity), \
              mock.patch.object(gate, "sample", side_effect=sampled), \
-             mock.patch.object(gate, "budget_check"), mock.patch.object(gate.time, "sleep"):
-            gate.run_one(plan, member, root / "output")
+             mock.patch.object(gate, "budget_check"), mock.patch.object(gate.time, "sleep"), \
+             mock.patch.object(gate.os, "waitpid", side_effect=observed_wait), \
+             mock.patch.object(gate.time, "monotonic", side_effect=clock), \
+             mock.patch.object(gate, "stop_child", side_effect=cleanup):
+                gate.run_one(plan, member, root / "output")
+        finally:
+            signal.signal(signal.SIGTERM, previous)
         return root / "output"
 
     def test_inert_full_protocol_records_fifty_two_phases_and_genuine_exit_zero(self):
@@ -251,6 +331,7 @@ class GateRegressionTests(unittest.TestCase):
             self.assertFalse(receipt["success"])
             self.assertEqual(os.WEXITSTATUS(receipt["wait"]["raw_wait_status"]), 7)
             self.assertTrue(receipt["wait"]["child_reaped"])
+            self.assertEqual(receipt["cleanup"]["signals_sent"], [])
             self.assertFalse((root / "output/native-result.json").exists())
 
     def test_inert_wrong_reported_pid_stops_and_reaps_child(self):
@@ -265,7 +346,72 @@ class GateRegressionTests(unittest.TestCase):
             root = pathlib.Path(tmp)
             with self.assertRaises(RuntimeError): self.run_inert_protocol(root, "truncated")
             receipt = gate.read_json(root / "output/native-failure.json")
-            self.assertTrue(receipt["cleanup"]["terminated"]); self.assertLess(receipt["completed_phases"], 52)
+            self.assertTrue(receipt["cleanup"]["wait_observed"]); self.assertTrue(receipt["cleanup"]["child_reaped"])
+            self.assertEqual(receipt["cleanup"]["waited_pid"], receipt["cleanup"]["identity"]["pid"])
+            self.assertLess(receipt["completed_phases"], 52)
+
+    def test_inert_interrupted_terminal_wait_retains_primary_and_genuine_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaisesRegex(RuntimeError, "termination signal"):
+                self.run_inert_protocol(root, "interrupted-reap")
+            receipt = gate.read_json(root / "output/native-failure.json")
+            self.assertIn("termination signal", receipt["error"])
+            self.assertTrue(receipt["wait"]["wait_observed"]); self.assertEqual(receipt["wait"]["raw_wait_status"], 0)
+            self.assertEqual(receipt["cleanup"]["signals_sent"], []); self.assertEqual(receipt["cleanup_errors"], [])
+            self.assertFalse((root / "output/native-result.json").exists())
+
+    def test_inert_interrupted_live_wait_stops_and_reaps_same_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaisesRegex(RuntimeError, "termination signal"):
+                self.run_inert_protocol(root, "interrupted-live")
+            receipt = gate.read_json(root / "output/native-failure.json")
+            pid = gate.read_json(root / "output/native-child.json")["identity"]["pid"]
+            self.assertEqual(receipt["wait"]["waited_pid"], pid); self.assertTrue(receipt["wait"]["child_reaped"])
+            self.assertTrue(receipt["cleanup"]["signals_sent"])
+            self.assertTrue(all(action["pid"] == pid for action in receipt["cleanup"]["signals_sent"]))
+            self.assertIn("termination signal", receipt["error"]); self.assertEqual(receipt["cleanup_errors"], [])
+
+    def test_inert_lost_wait_ownership_preserves_unknown_failure_without_signals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaisesRegex(RuntimeError, "ECHILD"):
+                self.run_inert_protocol(root, "lost-wait")
+            receipt = gate.read_json(root / "output/native-failure.json")
+            self.assertIsNone(receipt["wait"]); self.assertTrue(receipt["cleanup"]["ownership_lost"])
+            self.assertIsNone(receipt["cleanup"]["raw_wait_status"])
+            self.assertFalse(receipt["cleanup"]["wait_observed"])
+            self.assertEqual(receipt["cleanup"]["signals_sent"], [])
+            self.assertIn("ECHILD", receipt["error"]); self.assertTrue(receipt["cleanup_errors"])
+            self.assertFalse((root / "output/native-result.json").exists())
+
+    def test_inert_timeout_retains_failure_and_reaps_same_owned_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaisesRegex(RuntimeError, "deadline"):
+                self.run_inert_protocol(root, "timeout")
+            receipt = gate.read_json(root / "output/native-failure.json")
+            pid = gate.read_json(root / "output/native-child.json")["identity"]["pid"]
+            self.assertEqual(receipt["wait"]["waited_pid"], pid); self.assertTrue(receipt["wait"]["child_reaped"])
+            self.assertTrue(receipt["cleanup"]["signals_sent"])
+            self.assertTrue(all(action["pid"] == pid for action in receipt["cleanup"]["signals_sent"]))
+            self.assertIn("deadline", receipt["error"]); self.assertEqual(receipt["cleanup_errors"], [])
+
+    def test_inert_primary_interruption_survives_cleanup_error_and_failure_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            real_stop = gate.stop_child
+            def failed_cleanup(waiter):
+                real_stop(waiter)
+                raise RuntimeError("fixture cleanup failure after actual reaping")
+            with mock.patch.object(gate, "stop_child", side_effect=failed_cleanup):
+                with self.assertRaisesRegex(RuntimeError, "termination signal"):
+                    self.run_inert_protocol(root, "interrupted-live")
+            receipt = gate.read_json(root / "output/native-failure.json")
+            self.assertIn("termination signal", receipt["error"])
+            self.assertEqual(receipt["cleanup_errors"], ["RuntimeError: fixture cleanup failure after actual reaping"])
+            self.assertTrue(receipt["wait"]["child_reaped"])
 
     def test_inert_stop_prevents_first_snapshot_and_reaps_child(self):
         with tempfile.TemporaryDirectory() as tmp:

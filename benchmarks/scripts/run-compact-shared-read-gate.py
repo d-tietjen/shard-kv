@@ -5,6 +5,7 @@ An unfinished contract cannot run. Final source/build/evidence constants are
 supplied only after independent acceptance; this controller never approves them.
 """
 import argparse
+import contextlib
 import fcntl
 import hashlib
 import datetime
@@ -297,14 +298,99 @@ def write(path, obj):
         stream.write(data); stream.flush(); os.fsync(stream.fileno())
 
 
-def stop_child(pid):
+@contextlib.contextmanager
+def block_termination():
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
+    try:
+        yield previous
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+@contextlib.contextmanager
+def defer_cleanup_termination():
+    received = []
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    for sig in previous:
+        signal.signal(sig, lambda number, _frame: received.append(number))
+    try:
+        yield received
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def child_wait_identity(pid):
+    raw = pathlib.Path(f"/proc/{pid}/stat").read_text()
+    fields = raw[raw.rfind(")") + 2:].split()
+    require(int(raw.split(" ", 1)[0]) == pid and int(fields[1]) == os.getpid(), "native wait child parent/PID differs")
+    return {"pid": pid, "parent_pid": os.getpid(), "start_ticks": start_ticks(raw)}
+
+
+class NativeChildWait:
+    """One owner of genuine wait status; an unreaped child keeps its PID pinned."""
+    def __init__(self, pid):
+        self.pid = pid
+        self.identity = None
+        self.wait = None
+        self.ownership_lost = False
+
+    def bind(self):
+        self.identity = child_wait_identity(self.pid)
+
+    def poll(self):
+        if self.wait is not None:
+            return self.wait
+        require(not self.ownership_lost, "actual native child wait ownership lost (ECHILD)")
+        # A pending TERM/INT may raise on unmasking, after the raw status is saved.
+        with block_termination():
+            try:
+                waited, raw = os.waitpid(self.pid, os.WNOHANG)
+            except ChildProcessError as exc:
+                self.ownership_lost = True
+                raise RuntimeError("actual native child wait ownership lost (ECHILD)") from exc
+            require(waited in (0, self.pid), "wait returned an unrelated child")
+            if waited == self.pid:
+                require(os.WIFEXITED(raw) or os.WIFSIGNALED(raw), "native wait status is not terminal")
+                self.wait = {"waited_pid": waited, "raw_wait_status": raw, "wait_observed": True, "child_reaped": True}
+        return self.wait
+
+    def cleanup_receipt(self, signals):
+        actual = self.wait or {"waited_pid": None, "raw_wait_status": None, "wait_observed": False, "child_reaped": False}
+        return dict(actual, ownership_lost=self.ownership_lost, identity=self.identity,
+                    terminated=bool(signals), signals_sent=signals)
+
+
+def stop_child(waiter):
+    signals = []
+    if waiter.ownership_lost:
+        return waiter.cleanup_receipt(signals)
     for sig, seconds in ((signal.SIGTERM, 10), (signal.SIGKILL, 10)):
-        try: os.killpg(pid, sig)
-        except ProcessLookupError: pass
+        with block_termination():
+            try:
+                observed = waiter.poll()
+            except RuntimeError:
+                if not waiter.ownership_lost: raise
+                return waiter.cleanup_receipt(signals)
+            if observed is not None:
+                return waiter.cleanup_receipt(signals)
+            require(waiter.identity is not None and child_wait_identity(waiter.pid) == waiter.identity,
+                    "native cleanup child identity differs")
+            try:
+                # Before setsid completes, signal the owned child PID, never our group.
+                grouped = os.getpgid(waiter.pid) == waiter.pid and os.getsid(waiter.pid) == waiter.pid
+                if grouped: os.killpg(waiter.pid, sig)
+                else: os.kill(waiter.pid, sig)
+                signals.append({"signal": int(sig), "target": "process-group" if grouped else "process", "pid": waiter.pid})
+            except ProcessLookupError:
+                pass
         until = time.monotonic() + seconds
         while time.monotonic() < until:
-            waited, raw = os.waitpid(pid, os.WNOHANG)
-            if waited == pid: return {"waited_pid": waited, "raw_wait_status": raw, "terminated": True}
+            try:
+                if waiter.poll() is not None: return waiter.cleanup_receipt(signals)
+            except RuntimeError:
+                if not waiter.ownership_lost: raise
+                return waiter.cleanup_receipt(signals)
             time.sleep(0.1)
     raise RuntimeError("native cleanup/reaping deadline reached")
 
@@ -319,18 +405,24 @@ def run_one(plan, member, output):
     output.mkdir(mode=0o700)
     read_fd, child_stdout = os.pipe(); child_stdin, write_fd = os.pipe()
     argv = [str(binary), "--cohort", member["cohort"], "--batches", "4", "--warm-seconds", "5"]
-    pid = os.fork()
-    if pid == 0:
-        os.setsid(); os.dup2(child_stdin, 0); os.dup2(child_stdout, 1)
-        stderr = os.open(output / "native-stderr.log", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.dup2(stderr, 2)
-        for fd in (read_fd, child_stdout, child_stdin, write_fd, stderr): os.close(fd)
-        os.execv(str(binary), argv)
-    os.close(child_stdout); os.close(child_stdin)
-    started = time.monotonic(); identity = None; reaped = False; buffer = b""; events = []
+    started = time.monotonic(); identity = None; buffer = b""; events = []
+    pid = None; waiter = None
     wait = None
     sequence = [(b, p) for b in range(1, 5) for p in PHASES]
     try:
+        with block_termination() as previous_mask:
+            pid = os.fork()
+            if pid == 0:
+                os.setsid(); os.dup2(child_stdin, 0); os.dup2(child_stdout, 1)
+                stderr = os.open(output / "native-stderr.log", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.dup2(stderr, 2)
+                for fd in (read_fd, child_stdout, child_stdin, write_fd, stderr): os.close(fd)
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                os.execv(str(binary), argv)
+            waiter = NativeChildWait(pid); waiter.bind()
+            write(output / "native-child.json", {"identity": waiter.identity, "argv": argv, "SIGCHLD": "SIG_DFL"})
+        os.close(child_stdout); child_stdout = -1
+        os.close(child_stdin); child_stdin = -1
         for batch, phase in sequence + [(None, "complete")]:
             phase_started = time.monotonic()
             while b"\n" not in buffer:
@@ -348,6 +440,7 @@ def run_one(plan, member, output):
             require(event.get("pid") == pid, "native reported wrong child PID")
             if identity is None:
                 identity = proc_identity(pid, binary)
+                require(identity["start_ticks"] == waiter.identity["start_ticks"], "native differs from forked wait child")
                 write(output / "native-start.json", {"argv": argv, "identity": identity, "member": member,
                       "parent_pid": os.getpid(), "build_binding": plan["builds"][member["arm"]], "SIGCHLD": "SIG_DFL", "exec": "fork/setsid/execv exact native; no shell"})
             samples = []
@@ -361,11 +454,9 @@ def run_one(plan, member, output):
             os.write(write_fd, b"continue\n")
         os.close(write_fd); write_fd = -1
         while time.monotonic() - started < 180:
-            waited, raw = os.waitpid(pid, os.WNOHANG)
-            if waited == pid:
-                reaped = True
-                wait = {"waited_pid": waited, "raw_wait_status": raw, "wait_observed": True, "child_reaped": True}
-                checked = terminal_wait(waited, raw)
+            wait = waiter.poll()
+            if wait is not None:
+                checked = terminal_wait(wait["waited_pid"], wait["raw_wait_status"])
                 wait = checked; break
             time.sleep(0.1)
         require(wait is not None, "native terminal wait deadline")
@@ -375,13 +466,24 @@ def run_one(plan, member, output):
               "identity": identity, "phase_count": len(events), "sample_count": sum(len(e["samples"]) for e in events),
               "argv": argv, "build_binding": plan["builds"][member["arm"]], "elapsed_seconds": time.monotonic() - started})
     except BaseException as exc:
-        cleanup = None if reaped else stop_child(pid)
-        write(output / "native-failure.json", {"success": False, "error": str(exc), "wait": wait, "cleanup": cleanup,
-              "member": member, "completed_phases": len(events)})
+        if pid == 0: os._exit(127)
+        with defer_cleanup_termination() as cleanup_signals:
+            cleanup = None; cleanup_errors = []
+            try:
+                if waiter is not None: cleanup = stop_child(waiter)
+                if cleanup and cleanup["ownership_lost"]: cleanup_errors.append("actual native child wait ownership lost (ECHILD); no cleanup signals authorized")
+            except BaseException as cleanup_exc:
+                cleanup_errors.append(f"{type(cleanup_exc).__name__}: {cleanup_exc}")
+            wait = waiter.wait if waiter is not None and waiter.wait is not None else wait
+            write(output / "native-failure.json", {"success": False, "error": str(exc), "error_type": type(exc).__name__,
+                  "wait": wait, "cleanup": cleanup, "cleanup_errors": cleanup_errors, "cleanup_signals": cleanup_signals,
+                  "member": member, "completed_phases": len(events)})
         raise
     finally:
-        os.close(read_fd)
-        if write_fd >= 0: os.close(write_fd)
+        for fd in (read_fd, write_fd, child_stdout, child_stdin):
+            if fd >= 0:
+                # A handler may raise after close completed but before fd bookkeeping.
+                with contextlib.suppress(OSError): os.close(fd)
 
 
 def summarize(root, plan):
