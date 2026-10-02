@@ -1,6 +1,6 @@
 //! Experimental, uncompressed storage for small no-TTL point strings.
 //!
-//! Payload records live in fixed 4 KiB chunks and never move. Eight-byte size
+//! Payload records live in fixed 4 KiB chunks and never move. Two-byte size
 //! classes reuse deleted records; empty chunks release their allocation and
 //! reuse their descriptor. An open read epoch retires only the replaced record,
 //! with at most 32 records reclaimed per mutation/maintenance call afterwards.
@@ -20,12 +20,13 @@ struct CompactPointEntry {
 
 #[derive(Debug)]
 struct PayloadChunk {
-    bytes: Vec<u8>,
-    class: usize,
+    bytes: Box<[u8; CompactPointMap::CHUNK_BYTES]>,
+    class: u16,
     next: u16,
     free_head: u16,
     occupied: u16,
-    available_index: Option<usize>,
+    available_prev: u32,
+    available_next: u32,
 }
 
 #[derive(Debug)]
@@ -39,7 +40,7 @@ pub(super) struct CompactPointMap {
     entries: HashTable<CompactPointEntry>,
     chunks: Vec<Option<PayloadChunk>>,
     free_chunks: Vec<u32>,
-    available: [Vec<u32>; 40],
+    available: [u32; CompactPointMap::SIZE_CLASSES],
     retired: VecDeque<RetiredRecord>,
     // Access metadata is needed only after a runtime policy starts sampling.
     access: FastHashMap<u32, EntryAccessMeta>,
@@ -51,7 +52,7 @@ impl Default for CompactPointMap {
             entries: HashTable::new(),
             chunks: Vec::new(),
             free_chunks: Vec::new(),
-            available: std::array::from_fn(|_| Vec::new()),
+            available: [Self::NO_CHUNK; Self::SIZE_CLASSES],
             retired: VecDeque::new(),
             access: FastHashMap::default(),
         }
@@ -63,8 +64,14 @@ impl CompactPointMap {
     const MAX_CHUNKS: usize = 64 * 1024 * 1024 / Self::CHUNK_BYTES;
     const RECLAIM_BUDGET: usize = 32;
     const EMPTY: u16 = u16::MAX;
+    const NO_CHUNK: u32 = u32::MAX;
     const MAX_KEY_BYTES: usize = 64;
     const MAX_VALUE_BYTES: usize = 256;
+    // Released records store a u16 free-list link in their first two bytes.
+    // Byte-slice payload access needs no larger alignment or size rounding.
+    const CLASS_BYTES: usize = mem::size_of::<u16>();
+    const SIZE_CLASSES: usize =
+        (Self::MAX_KEY_BYTES + Self::MAX_VALUE_BYTES).div_ceil(Self::CLASS_BYTES);
 
     pub(super) fn len(&self) -> usize {
         self.entries.len()
@@ -156,24 +163,57 @@ impl CompactPointMap {
         let chunk = self.chunks[id as usize]
             .as_mut()
             .expect("allocated compact chunk");
-        let Some(index) = chunk.available_index.take() else {
+        let class = usize::from(chunk.class);
+        let prev = chunk.available_prev;
+        let next = chunk.available_next;
+        // A linked non-head always has a predecessor. Both links are cleared
+        // when a full chunk leaves the list; a singleton is also its head.
+        if prev == Self::NO_CHUNK && self.available[class] != id {
             return;
-        };
-        let class = chunk.class;
-        self.available[class].swap_remove(index);
-        if let Some(swapped) = self.available[class].get(index).copied() {
-            self.chunks[swapped as usize]
+        }
+        chunk.available_prev = Self::NO_CHUNK;
+        chunk.available_next = Self::NO_CHUNK;
+        if prev == Self::NO_CHUNK {
+            self.available[class] = next;
+        } else {
+            self.chunks[prev as usize]
                 .as_mut()
                 .expect("available compact chunk")
-                .available_index = Some(index);
+                .available_next = next;
+        }
+        if next != Self::NO_CHUNK {
+            self.chunks[next as usize]
+                .as_mut()
+                .expect("available compact chunk")
+                .available_prev = prev;
+        }
+    }
+
+    fn add_available(&mut self, id: u32) {
+        let chunk = self.chunks[id as usize]
+            .as_mut()
+            .expect("allocated compact chunk");
+        let class = usize::from(chunk.class);
+        let head = self.available[class];
+        debug_assert_eq!(chunk.available_prev, Self::NO_CHUNK);
+        debug_assert_eq!(chunk.available_next, Self::NO_CHUNK);
+        debug_assert_ne!(head, id);
+        chunk.available_next = head;
+        self.available[class] = id;
+        if head != Self::NO_CHUNK {
+            self.chunks[head as usize]
+                .as_mut()
+                .expect("available compact chunk")
+                .available_prev = id;
         }
     }
 
     fn allocate(&mut self, size: usize) -> Result<u32, ()> {
-        let class = size.max(1).div_ceil(8) - 1;
-        let stride = (class + 1) * 8;
-        let id = if let Some(id) = self.available[class].last().copied() {
-            id
+        let class = size.max(1).div_ceil(Self::CLASS_BYTES) - 1;
+        let stored_class = u16::try_from(class).map_err(|_| ())?;
+        let stride = (class + 1) * Self::CLASS_BYTES;
+        let id = if self.available[class] != Self::NO_CHUNK {
+            self.available[class]
         } else {
             let id = if let Some(id) = self.free_chunks.pop() {
                 id
@@ -185,14 +225,15 @@ impl CompactPointMap {
                 (self.chunks.len() - 1) as u32
             };
             self.chunks[id as usize] = Some(PayloadChunk {
-                bytes: vec![0; Self::CHUNK_BYTES],
-                class,
+                bytes: Box::new([0; Self::CHUNK_BYTES]),
+                class: stored_class,
                 next: 0,
                 free_head: Self::EMPTY,
                 occupied: 0,
-                available_index: Some(self.available[class].len()),
+                available_prev: Self::NO_CHUNK,
+                available_next: Self::NO_CHUNK,
             });
-            self.available[class].push(id);
+            self.add_available(id);
             id
         };
         let chunk = self.chunks[id as usize]
@@ -228,9 +269,10 @@ impl CompactPointMap {
         } else {
             chunk.bytes[start..start + 2].copy_from_slice(&chunk.free_head.to_le_bytes());
             chunk.free_head = start as u16;
-            if chunk.available_index.is_none() {
-                chunk.available_index = Some(self.available[chunk.class].len());
-                self.available[chunk.class].push(id as u32);
+            if chunk.available_prev == Self::NO_CHUNK
+                && self.available[usize::from(chunk.class)] != id as u32
+            {
+                self.add_available(id as u32);
             }
         }
     }
@@ -559,6 +601,254 @@ mod tests {
         map.chunks.iter().filter(|chunk| chunk.is_some()).count()
     }
 
+    fn assert_available_chain(map: &CompactPointMap, class: usize, expected: &[u32]) {
+        let mut id = map.available[class];
+        let mut prev = CompactPointMap::NO_CHUNK;
+        for expected_id in expected {
+            assert_eq!(id, *expected_id);
+            let chunk = map.chunks[id as usize].as_ref().unwrap();
+            assert_eq!(usize::from(chunk.class), class);
+            assert_eq!(chunk.available_prev, prev);
+            let stride = (class + 1) * CompactPointMap::CLASS_BYTES;
+            assert!(
+                chunk.free_head != CompactPointMap::EMPTY
+                    || (chunk.next as usize + 1) * stride <= CompactPointMap::CHUNK_BYTES
+            );
+            prev = id;
+            id = chunk.available_next;
+        }
+        assert_eq!(id, CompactPointMap::NO_CHUNK);
+    }
+
+    #[test]
+    fn compact_points_pack_small_records_with_fixed_descriptor_bounds() {
+        println!(
+            "compact layout bytes: entry={} chunk={} optional_chunk={} map={} class_heads={}",
+            mem::size_of::<CompactPointEntry>(),
+            mem::size_of::<PayloadChunk>(),
+            mem::size_of::<Option<PayloadChunk>>(),
+            mem::size_of::<CompactPointMap>(),
+            mem::size_of::<[u32; CompactPointMap::SIZE_CLASSES]>()
+        );
+        #[cfg(target_pointer_width = "64")]
+        {
+            assert_eq!(mem::size_of::<CompactPointEntry>(), 32);
+            assert!(mem::size_of::<PayloadChunk>() <= 24);
+            assert!(mem::size_of::<Option<PayloadChunk>>() <= 24);
+            assert_eq!(mem::size_of::<[u32; CompactPointMap::SIZE_CLASSES]>(), 640);
+            assert!(mem::size_of::<CompactPointMap>() <= 1024);
+        }
+        for (value_len, records_per_chunk) in [(16, 120), (64, 49), (256, 14)] {
+            let mut map = CompactPointMap::default();
+            let value = vec![value_len as u8; value_len];
+            let anchor = b"k:0000000000000000";
+            for i in 0..records_per_chunk {
+                let key = format!("k:{i:016x}");
+                map.upsert(hash_key(key.as_bytes()), key.as_bytes(), &value, false)
+                    .unwrap();
+            }
+            assert_eq!(allocated_chunks(&map), 1);
+            let anchor_ptr = map.get(hash_key(anchor), anchor).unwrap().as_ptr();
+            let key = format!("k:{records_per_chunk:016x}");
+            map.upsert(hash_key(key.as_bytes()), key.as_bytes(), &value, false)
+                .unwrap();
+            assert_eq!(allocated_chunks(&map), 2);
+            assert_eq!(map.get(hash_key(anchor), anchor), Some(value.as_slice()));
+            assert_eq!(
+                map.get(hash_key(anchor), anchor).unwrap().as_ptr(),
+                anchor_ptr
+            );
+        }
+    }
+
+    #[test]
+    fn compact_points_all_size_classes_reuse_free_links_and_chunk_descriptors() {
+        let mut map = CompactPointMap::default();
+        // Empty records still need space for the two-byte free-list link.
+        let empty = map.allocate(0).unwrap();
+        map.release(empty);
+        assert_eq!(CompactPointMap::SIZE_CLASSES, 160);
+        for stride in (2..=320).step_by(2) {
+            let count = CompactPointMap::CHUNK_BYTES / stride;
+            let mut offsets = Vec::new();
+            for i in 0..count {
+                let offset = map.allocate(stride - 1).unwrap();
+                let chunk = map.chunks[offset as usize / CompactPointMap::CHUNK_BYTES]
+                    .as_mut()
+                    .unwrap();
+                let start = offset as usize % CompactPointMap::CHUNK_BYTES;
+                chunk.bytes[start..start + stride].fill((i % 251) as u8);
+                offsets.push(offset);
+            }
+            assert_eq!(allocated_chunks(&map), 1, "stride {stride}");
+            let overflow = map.allocate(stride).unwrap();
+            assert_eq!(allocated_chunks(&map), 2, "stride {stride}");
+            let anchor = *offsets.last().unwrap();
+            let anchor_ptr = map.chunks[anchor as usize / CompactPointMap::CHUNK_BYTES]
+                .as_ref()
+                .unwrap()
+                .bytes
+                .as_ptr();
+            // A full chunk becomes available again. Release two records so
+            // allocating the adjacent odd/even lengths follows both links.
+            map.release(offsets[0]);
+            map.release(offsets[1]);
+            assert_eq!(map.allocate(stride - 1), Ok(offsets[1]));
+            assert_eq!(map.allocate(stride), Ok(offsets[0]));
+            for (i, offset) in offsets.iter().copied().enumerate().skip(2) {
+                let chunk = map.chunks[offset as usize / CompactPointMap::CHUNK_BYTES]
+                    .as_ref()
+                    .unwrap();
+                let start = offset as usize % CompactPointMap::CHUNK_BYTES;
+                assert!(
+                    chunk.bytes[start..start + stride]
+                        .iter()
+                        .all(|byte| *byte == (i % 251) as u8),
+                    "stride {stride}, record {i}"
+                );
+            }
+            assert_eq!(
+                map.chunks[anchor as usize / CompactPointMap::CHUNK_BYTES]
+                    .as_ref()
+                    .unwrap()
+                    .bytes
+                    .as_ptr(),
+                anchor_ptr
+            );
+            for offset in offsets {
+                map.release(offset);
+            }
+            map.release(overflow);
+            assert_eq!(allocated_chunks(&map), 0);
+            assert!(
+                map.available
+                    .iter()
+                    .all(|id| *id == CompactPointMap::NO_CHUNK)
+            );
+            assert!(map.chunks.len() <= 2);
+        }
+    }
+
+    #[test]
+    fn compact_points_availability_unlinks_every_position_and_reuses_empty_chunks() {
+        let mut map = CompactPointMap::default();
+        let stride = 320;
+        let class = CompactPointMap::SIZE_CLASSES - 1;
+        let count = CompactPointMap::CHUNK_BYTES / stride;
+        let mut offsets = Vec::new();
+        for _ in 0..4 {
+            offsets.push(
+                (0..count)
+                    .map(|_| map.allocate(stride).unwrap())
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_available_chain(&map, class, &[]);
+        for (id, records) in offsets.iter().enumerate() {
+            map.release(records[0]);
+            let expected = (0..=id as u32).rev().collect::<Vec<_>>();
+            assert_available_chain(&map, class, &expected);
+        }
+        // Refill the head's free slot: the full head must leave the list.
+        assert_eq!(map.allocate(stride), Ok(offsets[3][0]));
+        assert_available_chain(&map, class, &[2, 1, 0]);
+        let full = map.chunks[3].as_ref().unwrap();
+        assert_eq!(full.available_prev, CompactPointMap::NO_CHUNK);
+        assert_eq!(full.available_next, CompactPointMap::NO_CHUNK);
+        map.release(offsets[3][0]);
+        assert_available_chain(&map, class, &[3, 2, 1, 0]);
+        // Empty chunks exercise middle, tail, head, then singleton removal.
+        for (id, expected) in [
+            (1, &[3, 2, 0][..]),
+            (0, &[3, 2][..]),
+            (3, &[2][..]),
+            (2, &[][..]),
+        ] {
+            for offset in offsets[id].iter().copied().skip(1) {
+                map.release(offset);
+            }
+            assert!(map.chunks[id].is_none());
+            assert_available_chain(&map, class, expected);
+        }
+        assert_eq!(allocated_chunks(&map), 0);
+        let reused = map.allocate(stride).unwrap();
+        assert_eq!(reused, offsets[2][0]);
+        assert_eq!(map.chunks.len(), 4);
+        assert_available_chain(&map, class, &[2]);
+        assert!(
+            map.chunks[2]
+                .as_ref()
+                .unwrap()
+                .bytes
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        map.release(reused);
+        assert_available_chain(&map, class, &[]);
+    }
+
+    #[test]
+    fn compact_points_adjacent_lengths_retire_owners_and_reuse_after_quiescence() {
+        let mut map = CompactPointMap::default();
+        let mut previous = Vec::new();
+        for i in 0..32 {
+            let key = format!("k:{i:016x}");
+            let hash = hash_key(key.as_bytes());
+            let value = vec![i as u8; 16 + i % 4];
+            map.upsert(hash, key.as_bytes(), &value, false).unwrap();
+            let offset = map
+                .entries
+                .find(local_table_hash(hash), |entry| {
+                    CompactPointMap::matches(&map.chunks, entry, hash, key.as_bytes())
+                })
+                .unwrap()
+                .offset;
+            let owner = map.get_shared(hash, key.as_bytes()).unwrap().clone();
+            previous.push((key, offset, value, owner));
+        }
+        for (i, (key, _, _, _)) in previous.iter().enumerate() {
+            let hash = hash_key(key.as_bytes());
+            let value = vec![100 + i as u8; 16 + (i + 1) % 4];
+            map.upsert(hash, key.as_bytes(), &value, true).unwrap();
+            assert_eq!(map.get(hash, key.as_bytes()), Some(value.as_slice()));
+        }
+        // Retired odd and even lengths must remain readable in place, including
+        // their materialized owners, while later adjacent classes are used.
+        for (key, offset, value, owner) in &previous {
+            let chunk = map.chunks[*offset as usize / CompactPointMap::CHUNK_BYTES]
+                .as_ref()
+                .unwrap();
+            let start = *offset as usize % CompactPointMap::CHUNK_BYTES + key.len();
+            assert_eq!(&chunk.bytes[start..start + value.len()], value.as_slice());
+            assert_eq!(owner.as_ref(), value.as_slice());
+            assert!(
+                map.remove(hash_key(key.as_bytes()), key.as_bytes(), true)
+                    .is_some()
+            );
+        }
+        assert_eq!(map.retired.len(), 64);
+        map.reclaim(true);
+        assert_eq!(map.retired.len(), 64);
+        map.reclaim(false);
+        assert_eq!(map.retired.len(), 32);
+        map.reclaim(false);
+        assert!(map.retired.is_empty());
+        assert_eq!(allocated_chunks(&map), 0);
+        let peak_chunks = map.chunks.len();
+        for (key, _, value, owner) in previous {
+            map.upsert(hash_key(key.as_bytes()), key.as_bytes(), &value, false)
+                .unwrap();
+            assert_eq!(owner.as_ref(), value.as_slice());
+            assert_eq!(
+                map.get(hash_key(key.as_bytes()), key.as_bytes()),
+                Some(value.as_slice())
+            );
+        }
+        assert_eq!(map.len(), 32);
+        assert_eq!(map.chunks.len(), peak_chunks);
+        assert!(map.retired.is_empty());
+    }
+
     #[test]
     fn compact_points_resolve_collisions_and_never_move_existing_payloads() {
         let mut map = CompactPointMap::default();
@@ -582,8 +872,7 @@ mod tests {
             map.chunks
                 .iter()
                 .flatten()
-                .all(|chunk| chunk.bytes.len() == CompactPointMap::CHUNK_BYTES
-                    && chunk.bytes.capacity() == CompactPointMap::CHUNK_BYTES)
+                .all(|chunk| chunk.bytes.len() == CompactPointMap::CHUNK_BYTES)
         );
     }
 

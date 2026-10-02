@@ -135,12 +135,40 @@ automatic for plain string SETs with keys up to 64 bytes and values up to 256
 bytes, including ordinary RESP/preload writes, while memory policy and object
 overflow are disabled. Other keys and metadata use the general layout in the
 same shard. The opt-in feature stores raw, uncompressed key/value bytes in
-fixed 4 KiB chunks, rounds record lengths to eight-byte size classes, and uses
+fixed 4 KiB boxed chunks, rounds record lengths to two-byte size classes, and uses
 an ordinary descriptor hash table. Chunks never relocate their existing
 payloads. Deleted records are reused; empty chunks release their payload
 allocation and recycle the chunk descriptor. The allocator retains descriptor
 capacity bounded by peak chunk count and caps compact payload allocations at
 64 MiB per shard; exhausted compact allocation falls back to general storage.
+
+The next allocator candidate keeps the 32-byte per-key descriptor and, on
+64-bit targets, is expected to reduce each chunk descriptor from 56 to 24
+bytes by replacing the growable byte vector with `Box<[u8; 4096]>` and vector indexes with
+per-chunk availability links and a bounded `u16` class index. Regression checks
+enforce the descriptor size limits. Fixed list heads use 640 inline bytes per
+shard instead of the earlier 960 bytes of vector headers, saving 320 bytes and
+avoiding their separate backing allocations. Availability insertion, removal,
+and lookup remain constant-time. The finer classes retain the
+two-byte minimum needed for a deleted record's free-list link. They increase
+the number of classes from 40 to 160.
+For 18-byte keys, 16-byte values now use 34-byte records (120 per chunk) instead
+of 40-byte records (102 per chunk); 64-byte values use 82-byte records (49 per
+chunk) instead of 88-byte records (46 per chunk). At 100,000 keys in one shard,
+these layouts need 147 and 133 fewer payload chunks respectively, saving
+602,112 and 544,768 payload bytes before descriptor and metadata changes.
+The 256-byte profile still fits 14 records per chunk, so its payload chunk
+count does not improve. More distinct record lengths can leave more partly
+filled chunks; these source-level byte counts are not measured PSS results.
+
+Fresh Adam diagnostics must compare this candidate with the earlier compact
+layout at the same key count, all five value sizes, and both compressible and
+high-entropy patterns. Acceptance requires improved incremental PSS for the
+16/64-byte profiles, no worsening at 256/1024/4096 bytes, and throughput at
+least 95% with p99 at most 105% of the earlier compact candidate under matched
+settings. Total loaded PSS at 16 bytes must also be compared with Redis, with
+the target of using no more memory. These checks remain pending until evidence
+is collected; an unreserved run cannot qualify matched offered-load performance.
 
 Small RESP GETs encode a borrowed chunk slice under the storage borrow, including
 queued responses below the 2048-byte response ownership threshold. A shared/owned

@@ -26,12 +26,31 @@ cargo clippy -p shardmap --features unsafe,experimental-no-ttl-point-hot-path,te
 `experimental-compact-point-storage` adds a safe, checked implementation for
 small strings without TTL or other entry metadata. It does not enable the
 `unsafe` feature. Payloads occupy fixed 4 KiB chunks with reusable records in
-eight-byte size classes. Growing the chunk descriptor or hash tables never
+two-byte size classes. Two bytes are sufficient for the free-list link stored
+in a released record; payload access uses checked byte slices and has no larger
+alignment requirement. Each buffer is a zero-initialized `Box<[u8; 4096]>`,
+which fixes its allocation length and owns the payload until the chunk is
+released. Growing the chunk descriptor or hash tables never
 moves a chunk's payload. Empty chunks release their allocation and reuse their
 descriptor; compact payload capacity is capped at 64 MiB per shard. A record
 write copies at most 64 key bytes and 256 value bytes and can initialize one
 4 KiB chunk. Normal descriptor hash-table resizing remains proportional to
 its descriptor count and does not copy stored key/value payloads.
+
+On 64-bit targets the per-key descriptor remains 32 bytes. The fixed buffer
+and per-chunk availability links, with a bounded `u16` class index, are expected
+to reduce the chunk descriptor from 56 to 24 bytes; regression checks enforce
+those size limits. The 160 size-class list heads occupy 640 inline bytes per
+shard, 320 fewer than the earlier 40 vector headers, and need no separate
+allocations.
+Availability membership, insertion, and removal use a head comparison and at
+most two neighboring chunk links; they never scan or relocate payloads.
+Future allocation preference is internal and carries no API order guarantee.
+Availability updates preserve the payload addresses of untouched records.
+Finer rounding reduces padding within records but can create more partially
+filled chunks when a workload uses many distinct lengths. The allocation cap,
+record retirement, and reclaim budget still bound those costs; memory and
+latency require fresh workload measurements.
 
 Ordinary reads hold the map/shard borrow or lock. Equal-length overwrite reuses
 its record only when no read epoch is active. During an epoch, overwrite or
