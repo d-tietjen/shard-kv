@@ -323,6 +323,37 @@ qualify mixed-length fragmentation, shared-owner API costs, startup/allocation
 peaks, or mutation-heavy online maintenance. Those paths and formal performance
 qualification require separate evidence.
 
+## 2026-10-02 follow-up candidate, validation pending
+
+The follow-up product at `23bf7cc0f955d1307634d500738b834f7076460b`
+passed 28 focused storage/layout regressions on Adam. Its measured per-key
+descriptor is 24 bytes, versus 32 bytes in MD05 source `78c83ad`: **25% fewer
+descriptor bytes only**. No process-memory or performance improvement has been
+measured for this follow-up. It remains opt-in and experimental.
+
+At source `23bf7cc`, the targeted borrowed RESP SET check passed one test and
+the default suite passed 182 tests. Nine ignored documentation examples remain
+excluded from coverage. Minimal embedded/no-default and feature-forwarding
+compile checks also passed; their scoped correctness and cleanup evidence was
+independently accepted. A limited comparison of the inputs for those commands
+permits reuse for composed source `3e22db7f6b629f177fe921c46a458d6ccc957f07`.
+The receipts retain their actual `23bf7cc` execution identity; no fresh
+`3e22db7` build or test is claimed. Full Redis feature suites and reference
+differential checks remain pending.
+
+The composed candidate includes new benchmark coverage and cleanup changes.
+The planned [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) has
+30 process cohorts covering cold/concurrent initialization, warm reads, sparse
+memory, drop and reclamation costs. The planned
+[expanded Redis comparison](COMPACT_RESP_SCENARIOS.md) retains the ten MD05
+shapes and adds mixed lengths, overwrite/delete-reinsert, scale/eligibility and
+read/write hot/cold profiles: **378 final rows and 7,605 memory sample gates**.
+New native builds, API tests, Python campaign regressions, Redis differential
+tests, image builds, and memory/performance measurements have not run.
+Validation awaits explicit source/tooling upload approval after automatic review
+rejected the transfers. These plans establish no new measured result or formal
+qualification; the existing MD05 findings and diagnostic limits still apply.
+
 ## Remaining qualification
 
 Run both the baseline (`redis-server`) and candidate at the exact same source SHA
