@@ -352,12 +352,14 @@ class Runner:
 
     def spawn(self, argv, folder, interactive=False):
         require(len(self.children) < 2, 'too many simultaneously owned children')
-        read, stdout = os.pipe()
-        stdin, writefd = os.pipe()
+        fds = [-1, -1, -1, -1]
         pid = None
         waiter = None
         try:
             with self.h1.block_termination() as mask:
+                fds[0], fds[1] = os.pipe()
+                fds[2], fds[3] = os.pipe()
+                read, stdout, stdin, writefd = fds
                 pid = os.fork()
                 if pid == 0:
                     try:
@@ -373,25 +375,27 @@ class Runner:
                     except BaseException:
                         os._exit(127)
                 waiter = self.h1.NativeChildWait(pid)
-                waiter.bind()
                 self.children[pid] = waiter
-            os.close(stdin)
-            stdin = -1
-            os.close(stdout)
-            stdout = -1
+                waiter.bind()
+            self.close_owned_fd(fds, 2)
+            self.close_owned_fd(fds, 1)
             if not interactive:
-                os.close(writefd)
-                writefd = -1
+                self.close_owned_fd(fds, 3)
             write(folder / 'child.json', {'argv': argv, 'identity': waiter.identity})
-            return (waiter, read, writefd)
+            return (waiter, fds[0], fds[3])
         except BaseException:
-            if waiter:
-                self.h1.stop_child(waiter)
-            for fd in (read, stdout, stdin, writefd):
-                if fd >= 0:
-                    os.close(fd)
-            self.children.pop(pid, None)
+            self.cleanup_preserving(waiter, folder, fds)
             raise
+
+    def close_owned_fd(self, fds, index):
+        with self.h1.block_termination():
+            fd = fds[index]
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                finally:
+                    # Never retry a possibly completed close after interruption.
+                    fds[index] = -1
 
     def wait(self, waiter, until):
         while time.monotonic() < until:
@@ -417,18 +421,34 @@ class Runner:
         require(not errors, '; '.join(errors))
         return receipts
 
-    def cleanup_preserving(self, waiter, folder):
-        if waiter.pid not in self.children:
-            return
+    def cleanup_preserving(self, waiter, folder, fds=()):
         original_error = sys.exc_info()[0] is not None
-        try:
-            self.cleanup_child(waiter)
-        except BaseException as exc:
-            message = f'{type(exc).__name__}: {exc}'
-            self.cleanup_errors.append(message)
-            write(folder / 'cleanup-failure.json', {'cleanup_error': message, 'original_exception_in_flight': original_error, 'identity': waiter.identity, 'wait': waiter.wait})
+        errors = []
+        cleanup = None
+        with self.h1.defer_cleanup_termination() as received:
+            for index in range(len(fds)):
+                try:
+                    self.close_owned_fd(fds, index)
+                except BaseException as exc:
+                    errors.append(f'fd cleanup: {type(exc).__name__}: {exc}')
+            if waiter is not None and waiter.pid in self.children:
+                try:
+                    cleanup = self.cleanup_child(waiter)
+                except BaseException as exc:
+                    errors.append(f'child cleanup: {type(exc).__name__}: {exc}')
+            if received:
+                errors.append(f'deferred cleanup signals: {received}')
+            if errors or original_error:
+                self.cleanup_errors.extend(errors)
+                message = '; '.join(errors)
+                try:
+                    write(folder / ('cleanup-failure.json' if errors else 'cleanup.json'), {'cleanup_error': message, 'cleanup': cleanup, 'cleanup_errors': errors, 'cleanup_signals': received, 'original_exception_in_flight': original_error, 'identity': waiter.identity if waiter is not None else None, 'wait': waiter.wait if waiter is not None else None})
+                except BaseException as exc:
+                    self.cleanup_errors.append(f'cleanup receipt: {type(exc).__name__}: {exc}')
+                    if not original_error:
+                        raise
             if not original_error:
-                raise
+                require(not errors, '; '.join(errors))
 
     def command(self, argv, timeout=30):
         require(argv[0] in ('docker', 'git'), 'unapproved helper command')
@@ -436,6 +456,7 @@ class Runner:
         folder = self.root / 'commands' / f"{len(list((self.root / 'commands').iterdir())):06d}"
         folder.mkdir()
         waiter, fd, _ = self.spawn(argv, folder)
+        fds = [fd]
         data = bytearray()
         until = min(time.monotonic() + timeout, self.row_deadline or float('inf'))
         try:
@@ -454,8 +475,7 @@ class Runner:
             self.children.pop(waiter.pid, None)
             return data.decode().strip()
         finally:
-            os.close(fd)
-            self.cleanup_preserving(waiter, folder)
+            self.cleanup_preserving(waiter, folder, fds)
 
     def run(self, argv, check=True, text=True, capture_output=True, **kw):
         """Route only the unchanged sampler's exact smaps observation through an owned wait."""
@@ -479,12 +499,12 @@ class Runner:
             receipt = read_json(p[kind])
             require(receipt['status'] == 'independently accepted' and receipt['source_sha'] == p['source']['sha'] and (receipt['source_tree'] == p['source']['tree']), 'missing exact-source independent admission')
         regression = read_json(p['regression_acceptance'])
-        require(regression['native_unit_tests'] == 21 and regression['python_tests'] == 30 and (regression['exit_codes'] == [0, 0]) and (regression['child_reaped'] is True), 'focused native/Python regression admission differs')
+        require(regression['native_unit_tests'] == 21 and regression['python_tests'] == 37 and type(regression.get('exit_codes')) is list and len(regression['exit_codes']) == 2 and all(type(code) is int and code == 0 for code in regression['exit_codes']) and (regression.get('child_reaped') is True), 'focused native/Python regression admission differs')
         early = read_json(p['early_gate_acceptance'])
         require(early['functional_success'] is True and early['screen_success'] is True and (early['processes'] == 30), 'early API gate did not pass')
         receipt = read_json(p['native_build_acceptance'])
-        require(receipt['argv'] == BUILD_ARGV and receipt['exit_code'] == 0 and receipt['child_reaped'] and (receipt['artifact_sha256'] == {k: v['sha256'] for k, v in p['binaries'].items()}), 'native build/compiler/exit receipt differs')
-        require(receipt['compiler_sha256'] == p['native_build']['compiler']['sha256'] and receipt['artifact_paths'] == {k: v['path'] for k, v in p['binaries'].items()} and (receipt['rustflags'] == []) and (receipt['wait_observed'] is True) and (receipt['raw_wait_status'] == 0), 'native compiler/actual artifact/flags/wait closure differs')
+        require(receipt['argv'] == BUILD_ARGV and type(receipt.get('exit_code')) is int and receipt['exit_code'] == 0 and (receipt.get('child_reaped') is True) and (receipt['artifact_sha256'] == {k: v['sha256'] for k, v in p['binaries'].items()}), 'native build/compiler/exit receipt differs')
+        require(receipt['compiler_sha256'] == p['native_build']['compiler']['sha256'] and receipt['artifact_paths'] == {k: v['path'] for k, v in p['binaries'].items()} and (receipt['rustflags'] == []) and (receipt.get('wait_observed') is True) and type(receipt.get('raw_wait_status')) is int and receipt['raw_wait_status'] == 0, 'native compiler/actual artifact/flags/wait closure differs')
         pinned(p['native_build']['compiler'], executable=True)
         for arm, b in p['images'].items():
             inspected = json.loads(self.command(['docker', 'image', 'inspect', b['engine_image_id']]))
@@ -532,6 +552,7 @@ class Runner:
             argv.append('--verify-saturation')
         folder.mkdir()
         waiter, fd, ack = self.spawn(argv, folder, True)
+        fds = [fd, ack]
         buffer = b''
         events = []
         until = min(time.monotonic() + 900, self.row_deadline or float('inf'))
@@ -564,18 +585,14 @@ class Runner:
                     write(folder / (phase['id'] + '.json'), receipt)
                     events.append(receipt)
                 os.write(ack, b'continue\n')
-            os.close(ack)
-            ack = -1
+            self.close_owned_fd(fds, 1)
             wait = self.wait(waiter, until)
             require(wait['exit_code'] == 0 and (not buffer) and (not os.read(fd, 1)), 'native nonzero/extra terminal output')
             write(folder / 'wait.json', wait)
             self.children.pop(waiter.pid, None)
             return events
         finally:
-            for n in (fd, ack):
-                if n >= 0:
-                    os.close(n)
-            self.cleanup_preserving(waiter, folder)
+            self.cleanup_preserving(waiter, folder, fds)
 
     def row(self, m, witnesses):
         self.budget()

@@ -146,7 +146,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 benchmarks/scripts/test-compact-storage-scenar
 cargo build --locked --release --jobs 4 -p shardcache-benchmarks --bin compact_resp_scenarios --bin saturation
 ```
 
-The prospective source counts are21 Rust methods and30 Python methods with
+The prospective source counts are21 Rust methods and37 Python methods with
 subcases. These are unexecuted expectations, not pass evidence. Product/default/
 feature-off validation, H1 ownership regressions, native build receipts and the
 early shared-API acceptance gate remain distinct prerequisites.

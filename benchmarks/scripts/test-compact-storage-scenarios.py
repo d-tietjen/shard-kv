@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Offline contract regressions. Execute only through the reviewed Adam helper."""
 import copy
+import contextlib
+import errno
 import hashlib
 import importlib.util
+import json
+import os
 import pathlib
+import signal
+import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -32,6 +39,228 @@ def event(s, p):
     return (e, witness)
 
 class RespContractTests(unittest.TestCase):
+
+    def _cleanup_runner(self):
+        h1 = gate.import_file('resp_cleanup_h1', pathlib.Path(gate.__file__).with_name('run-compact-shared-read-gate.py'))
+        waiters = []
+        def actual_waiter(pid):
+            waiter = h1.NativeChildWait(pid)
+            waiters.append(waiter)
+            return waiter
+        r = gate.Runner.__new__(gate.Runner)
+        r.h1 = types.SimpleNamespace(NativeChildWait=actual_waiter, block_termination=h1.block_termination, defer_cleanup_termination=h1.defer_cleanup_termination, stop_child=h1.stop_child, proc_identity=h1.proc_identity)
+        r.children = {}
+        r.cleanup_errors = []
+        r.row_deadline = None
+        return r, waiters
+
+    @contextlib.contextmanager
+    def _close_signal_probe(self, target_index, delivery):
+        parent = os.getpid()
+        actual_pipe, actual_close = os.pipe, os.close
+        probe = {'pipes': [], 'closed': [], 'triggered': False}
+        def pipe():
+            pair = actual_pipe()
+            probe['pipes'].extend(pair)
+            return pair
+        def close(fd):
+            if os.getpid() == parent:
+                probe['closed'].append(fd)
+            actual_close(fd)
+            if os.getpid() == parent and fd == probe['pipes'][target_index] and not probe['triggered']:
+                probe['triggered'] = True
+                if delivery == 'pending-on-unmask':
+                    os.kill(parent, signal.SIGTERM)
+                else:
+                    signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        previous = signal.signal(signal.SIGTERM, gate.interrupted)
+        try:
+            with mock.patch.object(gate.os, 'pipe', side_effect=pipe), mock.patch.object(gate.os, 'close', side_effect=close):
+                yield probe
+        finally:
+            signal.signal(signal.SIGTERM, previous)
+
+    def _assert_closed_once(self, probe):
+        self.assertTrue(probe['triggered'])
+        for fd in probe['pipes']:
+            self.assertEqual(probe['closed'].count(fd), 1)
+            with self.assertRaises(OSError) as error:
+                os.fstat(fd)
+            self.assertEqual(error.exception.errno, errno.EBADF)
+
+    def _assert_genuinely_reaped(self, waiter):
+        self.assertIs(waiter.wait['wait_observed'], True)
+        self.assertIs(waiter.wait['child_reaped'], True)
+        self.assertIs(type(waiter.wait['raw_wait_status']), int)
+        self.assertEqual(waiter.wait['waited_pid'], waiter.pid)
+        self.assertTrue(os.WIFEXITED(waiter.wait['raw_wait_status']) or os.WIFSIGNALED(waiter.wait['raw_wait_status']))
+        self.assertIs(waiter.poll(), waiter.wait)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(waiter.pid, os.WNOHANG)
+
+    def test_actual_spawn_close_completed_term_preserves_primary_and_reaps(self):
+        for delivery in ('pending-on-unmask', 'handler-after-close'):
+            with self.subTest(delivery=delivery), tempfile.TemporaryDirectory() as tmp:
+                r, waiters = self._cleanup_runner()
+                folder = pathlib.Path(tmp)
+                try:
+                    with self._close_signal_probe(2, delivery) as probe:
+                        with self.assertRaisesRegex(RuntimeError, '^controller interrupted by signal 15$'):
+                            r.spawn([sys.executable, '-c', 'import time; time.sleep(60)'], folder)
+                    self._assert_closed_once(probe)
+                    self.assertEqual(len(waiters), 1)
+                    self._assert_genuinely_reaped(waiters[0])
+                    self.assertFalse(r.children)
+                    self.assertFalse(r.cleanup_errors)
+                    receipt = json.loads((folder / 'cleanup.json').read_text())
+                    self.assertTrue(receipt['original_exception_in_flight'])
+                    self.assertEqual(receipt['wait'], waiters[0].wait)
+                finally:
+                    with r.h1.defer_cleanup_termination():
+                        for waiter in waiters:
+                            r.h1.stop_child(waiter)
+
+    def test_actual_run_native_ack_close_completed_term_preserves_primary_and_reaps(self):
+        protocol = "import json, os, sys, time\npid = os.getpid()\nprint(json.dumps({'schema': 1, 'event': 'ready', 'pid': pid}), flush=True)\nsys.stdin.readline()\nprint(json.dumps({'phase': 'load', 'live_keys': 0}), flush=True)\nsys.stdin.readline()\nprint(json.dumps({'schema': 1, 'event': 'complete', 'pid': pid, 'scenario': 'value17', 'phases': 1, 'errors': 0}), flush=True)\nsys.stdin.read()\ntime.sleep(60)\n"
+        for delivery in ('pending-on-unmask', 'handler-after-close'):
+            with self.subTest(delivery=delivery), tempfile.TemporaryDirectory() as tmp:
+                r, waiters = self._cleanup_runner()
+                r.plan = contract()
+                r.budget = mock.Mock()
+                r.snapshots = mock.Mock(return_value={})
+                r.density = types.SimpleNamespace(redis_command=lambda *args: b'0')
+                actual_spawn = r.spawn
+                r.spawn = lambda argv, folder, interactive: actual_spawn([argv[0], '-c', protocol], folder, interactive)
+                folder = pathlib.Path(tmp) / 'native'
+                try:
+                    with self._close_signal_probe(3, delivery) as probe, mock.patch.object(gate, 'pinned', return_value=pathlib.Path(sys.executable).resolve()), mock.patch.object(gate, 'validate_ready'), mock.patch.object(gate, 'validate_phase'):
+                        with self.assertRaisesRegex(RuntimeError, '^controller interrupted by signal 15$'):
+                            r.run_native({'scenario': 'value17'}, folder, 'owned', 123, 'user', pathlib.Path('/owned/cgroup'), 1234, {'load': {}})
+                    self._assert_closed_once(probe)
+                    self.assertEqual(len(waiters), 1)
+                    self._assert_genuinely_reaped(waiters[0])
+                    self.assertFalse(r.children)
+                    self.assertFalse(r.cleanup_errors)
+                    receipt = json.loads((folder / 'cleanup.json').read_text())
+                    self.assertEqual(receipt['identity'], waiters[0].identity)
+                    self.assertEqual(receipt['wait'], waiters[0].wait)
+                finally:
+                    with r.h1.defer_cleanup_termination():
+                        for waiter in waiters:
+                            r.h1.stop_child(waiter)
+
+    def test_actual_spawn_secondary_stop_failure_keeps_primary_receipt_and_wait_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r, waiters = self._cleanup_runner()
+            folder = pathlib.Path(tmp)
+            def secondary_stop(waiter):
+                os.kill(os.getpid(), signal.SIGINT)
+                raise RuntimeError('secondary stop exact')
+            try:
+                with self._close_signal_probe(2, 'pending-on-unmask') as probe, mock.patch.object(r.h1, 'stop_child', side_effect=secondary_stop):
+                    with self.assertRaisesRegex(RuntimeError, '^controller interrupted by signal 15$'):
+                        r.spawn([sys.executable, '-c', 'import time; time.sleep(60)'], folder)
+                self._assert_closed_once(probe)
+                self.assertEqual(len(waiters), 1)
+                self.assertIs(r.children[waiters[0].pid], waiters[0])
+                self.assertIsNone(waiters[0].wait)
+                receipt = json.loads((folder / 'cleanup-failure.json').read_text())
+                self.assertTrue(receipt['original_exception_in_flight'])
+                self.assertIn('secondary stop exact', receipt['cleanup_error'])
+                self.assertEqual(receipt['cleanup_signals'], [signal.SIGINT])
+                self.assertIn('deferred cleanup signals', receipt['cleanup_error'])
+                self.assertEqual(receipt['identity'], waiters[0].identity)
+                self.assertIsNone(receipt['wait'])
+                r.cleanup_child(waiters[0])
+                self._assert_genuinely_reaped(waiters[0])
+                self.assertFalse(r.children)
+            finally:
+                with r.h1.defer_cleanup_termination():
+                    for waiter in waiters:
+                        r.h1.stop_child(waiter)
+
+    def _verify_inputs_with_receipts(self, mutate=None):
+        p = contract()
+        script = pathlib.Path(gate.__file__).resolve()
+        p['source']['worktree'] = str(script.parents[2])
+        p['source']['file_sha256'] = dict.fromkeys(('benchmarks/scripts/run-compact-storage-scenarios.py', 'benchmarks/src/bin/compact_resp_scenarios.rs', 'benchmarks/Cargo.toml', 'Cargo.lock', 'benchmarks/scripts/run-memory-density-benchmark.py'), '1' * 64)
+        p['controller_scope'] = '/owned/controller.scope'
+        p['docker_receipt'] = '/owned/docker-receipt.json'
+        p['native_build']['compiler'] = {'path': '/owned/rustc', 'sha256': '2' * 64}
+        for name in ('density', 'child_wait'):
+            p['helpers'][name] = {'path': str(script.parent / (name + '.py')), 'sha256': '3' * 64}
+        base = {'status': 'independently accepted', 'source_sha': p['source']['sha'], 'source_tree': p['source']['tree']}
+        receipts = {}
+        for kind in ('early_gate_acceptance', 'regression_acceptance', 'native_build_acceptance', 'operating_acceptance'):
+            p[kind] = {'path': '/owned/' + kind, 'sha256': '4' * 64}
+            receipts[p[kind]['path']] = dict(base)
+        receipts[p['early_gate_acceptance']['path']].update(functional_success=True, screen_success=True, processes=30)
+        receipts[p['regression_acceptance']['path']].update(native_unit_tests=21, python_tests=37, exit_codes=[0, 0], child_reaped=True)
+        receipts[p['native_build_acceptance']['path']].update(argv=list(gate.BUILD_ARGV), exit_code=0, raw_wait_status=0, child_reaped=True, wait_observed=True, artifact_sha256={k: v['sha256'] for k, v in p['binaries'].items()}, artifact_paths={k: v['path'] for k, v in p['binaries'].items()}, compiler_sha256=p['native_build']['compiler']['sha256'], rustflags=[])
+        commands = {('git', '-C', p['source']['worktree'], 'rev-parse', 'HEAD'): p['source']['sha'], ('git', '-C', p['source']['worktree'], 'rev-parse', 'HEAD^{tree}'): p['source']['tree'], ('git', '-C', p['source']['worktree'], 'status', '--porcelain'): ''}
+        for arm, b in p['images'].items():
+            commands[('docker', 'image', 'inspect', b['engine_image_id'])] = json.dumps([{'Id': b['engine_image_id'], 'RepoDigests': []}])
+            if arm == 'redis':
+                continue
+            b['provenance'] = {}
+            for kind in ('metadata', 'dockerfile', 'export_log', 'source_context_acceptance'):
+                b['provenance'][kind] = {'path': '/owned/' + arm + '-' + kind, 'sha256': '5' * 64}
+            receipts[b['provenance']['metadata']['path']] = {}
+            receipts[b['provenance']['source_context_acceptance']['path']] = dict(base, source_sha=b['source_sha'], source_tree=b['source_tree'])
+        if mutate is not None:
+            mutate({kind: receipts[p[kind]['path']] for kind in ('early_gate_acceptance', 'regression_acceptance', 'native_build_acceptance', 'operating_acceptance')})
+        r = gate.Runner.__new__(gate.Runner)
+        r.plan = p
+        r.h1 = types.SimpleNamespace(verify_scope=mock.Mock())
+        r.density = types.SimpleNamespace(resolve_shardcache_build=mock.Mock(return_value={}))
+        r.command = mock.Mock(side_effect=lambda argv: commands[tuple(argv)])
+        inert_file = types.SimpleNamespace(read_bytes=lambda: b'', read_text=lambda: '')
+        environment = {'EDEN_DENSITY_OWNER': p['owners']['candidate'], 'EDEN_DENSITY_DOCKER_RECEIPT': p['docker_receipt']}
+        with mock.patch.object(gate, 'sha', return_value='1' * 64), mock.patch.object(gate, 'pinned', return_value=inert_file), mock.patch.object(gate, 'read_json', side_effect=lambda binding, *args: json.loads(json.dumps(receipts[binding['path']]))), mock.patch.dict(gate.os.environ, environment, clear=True):
+            r.verify_inputs()
+        r.h1.verify_scope.assert_called_once_with(gate.os.getpid(), p['controller_scope'], 2147483648, 4)
+        self.assertEqual(r.density.resolve_shardcache_build.call_count, 2)
+        self.assertEqual(r.command.call_count, 6)
+
+    def test_verify_inputs_genuine_numeric_zero_and_true_flags_admitted(self):
+        self._verify_inputs_with_receipts()
+
+    def test_verify_inputs_regression_exit_codes_reject_noninteger_and_missing(self):
+        for index in (0, 1):
+            for value in (False, True, 0.0, '0', None, 1):
+                with self.subTest(index=index, value=value, value_type=type(value).__name__):
+                    def mutate(receipts):
+                        receipts['regression_acceptance']['exit_codes'][index] = value
+                    with self.assertRaisesRegex(RuntimeError, 'focused native/Python regression admission differs'):
+                        self._verify_inputs_with_receipts(mutate)
+        for value in (False, True, 0.0, '0', None, [], [0], [0, 0, 0]):
+            with self.subTest(exit_codes=value):
+                with self.assertRaisesRegex(RuntimeError, 'focused native/Python regression admission differs'):
+                    self._verify_inputs_with_receipts(lambda receipts: receipts['regression_acceptance'].update(exit_codes=value))
+        with self.subTest(missing='exit_codes'):
+            with self.assertRaisesRegex(RuntimeError, 'focused native/Python regression admission differs'):
+                self._verify_inputs_with_receipts(lambda receipts: receipts['regression_acceptance'].pop('exit_codes'))
+
+    def test_verify_inputs_native_exit_and_raw_status_reject_noninteger_and_missing(self):
+        for field in ('exit_code', 'raw_wait_status'):
+            message = 'native build/compiler/exit receipt differs' if field == 'exit_code' else 'native compiler/actual artifact/flags/wait closure differs'
+            for value in (False, True, 0.0, '0', None, 1):
+                with self.subTest(field=field, value=value, value_type=type(value).__name__):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        self._verify_inputs_with_receipts(lambda receipts: receipts['native_build_acceptance'].update({field: value}))
+            with self.subTest(missing=field):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._verify_inputs_with_receipts(lambda receipts: receipts['native_build_acceptance'].pop(field))
+
+    def test_verify_inputs_reap_and_wait_flags_require_exact_true(self):
+        for kind, field, message in (('regression_acceptance', 'child_reaped', 'focused native/Python regression admission differs'), ('native_build_acceptance', 'child_reaped', 'native build/compiler/exit receipt differs'), ('native_build_acceptance', 'wait_observed', 'native compiler/actual artifact/flags/wait closure differs')):
+            for value in (False, 0, 1, 1.0, 'true', None):
+                with self.subTest(kind=kind, field=field, value=value, value_type=type(value).__name__):
+                    with self.assertRaisesRegex(RuntimeError, message):
+                        self._verify_inputs_with_receipts(lambda receipts: receipts[kind].update({field: value}))
+            with self.subTest(kind=kind, missing=field):
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._verify_inputs_with_receipts(lambda receipts: receipts[kind].pop(field))
 
     def test_exact_four72row_packages_and378_total(self):
         self.assertEqual(sum((len(gate.members(p)) for p in ('stateful-a', 'stateful-b', 'stateful-c', 'access'))), 288)
@@ -270,6 +499,7 @@ class RespContractTests(unittest.TestCase):
         child = types.SimpleNamespace(pid=12, identity={'pid': 12}, wait=None)
         r.children = {12: child}
         r.cleanup_errors = []
+        r.h1 = types.SimpleNamespace(defer_cleanup_termination=lambda: contextlib.nullcontext([]))
         r.cleanup_child = mock.Mock(side_effect=RuntimeError('cleanup distinct'))
         with mock.patch.object(gate, 'write') as write:
             try:
