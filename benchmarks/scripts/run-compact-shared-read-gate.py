@@ -399,7 +399,10 @@ def run_one(plan, member, output):
     binary = check_build(plan["builds"][member["arm"]])
     unit = f"{plan['scope_prefix']}-{member['id']}.scope"
     verify_scope(os.getpid(), unit, 4294967296, member["cpus"])
-    resource.setrlimit(resource.RLIMIT_FSIZE, (134217728, 134217728))
+    inherited_soft, inherited_hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    soft = 134217728 if inherited_soft == resource.RLIM_INFINITY else min(134217728, inherited_soft)
+    hard = 134217728 if inherited_hard == resource.RLIM_INFINITY else min(134217728, inherited_hard)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
     require(signal.getsignal(signal.SIGCHLD) in (signal.SIG_DFL, None), "unexpected SIGCHLD handler")
     signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     output.mkdir(mode=0o700)

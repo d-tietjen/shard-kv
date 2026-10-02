@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import resource
 import signal
 import tempfile
 import time
@@ -314,6 +315,66 @@ class GateRegressionTests(unittest.TestCase):
         finally:
             signal.signal(signal.SIGTERM, previous)
         return root / "output"
+
+    def isolated_file_limit_protocol(self, inherited):
+        # Lower only an isolated child's real limits; the suite keeps its outer cap.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp); reader, writer = os.pipe(); pid = None; waiter = None
+            try:
+                with gate.block_termination() as previous_mask:
+                    pid = os.fork()
+                    if pid == 0:
+                        try:
+                            os.close(writer); os.read(reader, 1); os.close(reader)
+                            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+                            signal.signal(signal.SIGALRM, signal.SIG_DFL); signal.alarm(8)
+                            resource.setrlimit(resource.RLIMIT_FSIZE, inherited)
+                            before = resource.getrlimit(resource.RLIMIT_FSIZE)
+                            output = self.run_inert_protocol(root, "success")
+                            after = resource.getrlimit(resource.RLIMIT_FSIZE)
+                            result = gate.read_json(output / "native-result.json")
+                            gate.write(root / "limit-result.json", {"inherited": before, "effective": after,
+                                       "protocol": result, "child_pid": os.getpid()})
+                            os._exit(0)
+                        except BaseException as exc:
+                            try: gate.write(root / "limit-failure.json", {"error": str(exc), "error_type": type(exc).__name__})
+                            except BaseException: pass
+                            os._exit(1)
+                    waiter = gate.NativeChildWait(pid); waiter.bind()
+                os.close(reader); reader = -1
+                os.write(writer, b"x"); os.close(writer); writer = -1
+                until = time.monotonic() + 10
+                while waiter.poll() is None and time.monotonic() < until: time.sleep(.01)
+                self.assertIsNotNone(waiter.wait, "isolated file-limit probe deadline")
+                failure = (root / "limit-failure.json").read_text() if (root / "limit-failure.json").exists() else ""
+                self.assertEqual(waiter.wait["raw_wait_status"], 0, failure)
+                self.assertIs(waiter.wait["child_reaped"], True); self.assertIs(waiter.wait["wait_observed"], True)
+                row = gate.read_json(root / "limit-result.json")
+                self.assertEqual(row["child_pid"], pid); self.assertEqual(row["inherited"], list(inherited))
+                self.assertEqual(row["effective"], [min(134217728, v) for v in inherited])
+                result = row["protocol"]
+                self.assertTrue(result["success"]); self.assertEqual(result["phase_count"], 52)
+                self.assertEqual(result["sample_count"], 132); self.assertEqual(result["wait"]["raw_wait_status"], 0)
+                self.assertIs(result["wait"]["child_reaped"], True); self.assertIs(result["wait"]["wait_observed"], True)
+                row["isolation_wait"] = waiter.wait
+                print(json.dumps({"file_limit_probe": row}, sort_keys=True), flush=True)
+                return row
+            finally:
+                for fd in (reader, writer):
+                    if fd >= 0: os.close(fd)
+                if waiter is not None: gate.stop_child(waiter)
+
+    def test_run_one_preserves_real_inherited_stricter_soft_and_hard_file_limits(self):
+        before = resource.getrlimit(resource.RLIMIT_FSIZE)
+        for limits in ((16777216, 16777216), (8388608, 16777216)):
+            with self.subTest(inherited=limits): self.isolated_file_limit_protocol(limits)
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_FSIZE), before)
+
+    def test_run_one_normal128_file_limit_protocol_has_genuine_child_wait(self):
+        before = resource.getrlimit(resource.RLIMIT_FSIZE)
+        for limits in ((134217728, 134217728), (16777216, 134217728)):
+            with self.subTest(inherited=limits): self.isolated_file_limit_protocol(limits)
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_FSIZE), before)
 
     def test_inert_full_protocol_records_fifty_two_phases_and_genuine_exit_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
