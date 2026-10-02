@@ -223,7 +223,7 @@ sampled after a one-second settling interval, with 0.2 seconds between samples.
 
 Each server receives one CPU, 4 GiB memory and no swap. The client uses
 16 connections, pipeline 1, uniform 80/20 GET/SET, 20-second measurements and
-3-second warmups. The client container has a 4-CPU/2-GiB cap. CPU affinity is
+3-second warmups. The controller/client scope has a 4-CPU/2-GiB cap. CPU affinity is
 not pinned and resources are unreserved on the shared Linux host. The recorded
 kernel is 6.8.0-139-generic, x86_64. A matching-boot **post-run** inventory at
 08:31:13 UTC reports an AMD Ryzen 9 3950X, 16 cores/32 logical CPUs, and
