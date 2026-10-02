@@ -499,7 +499,7 @@ class Runner:
             receipt = read_json(p[kind])
             require(receipt['status'] == 'independently accepted' and receipt['source_sha'] == p['source']['sha'] and (receipt['source_tree'] == p['source']['tree']), 'missing exact-source independent admission')
         regression = read_json(p['regression_acceptance'])
-        require(regression['native_unit_tests'] == 21 and regression['python_tests'] == 37 and type(regression.get('exit_codes')) is list and len(regression['exit_codes']) == 2 and all(type(code) is int and code == 0 for code in regression['exit_codes']) and (regression.get('child_reaped') is True), 'focused native/Python regression admission differs')
+        require(regression['native_unit_tests'] == 21 and regression['python_tests'] == 40 and type(regression.get('exit_codes')) is list and len(regression['exit_codes']) == 2 and all(type(code) is int and code == 0 for code in regression['exit_codes']) and (regression.get('child_reaped') is True), 'focused native/Python regression admission differs')
         early = read_json(p['early_gate_acceptance'])
         require(early['functional_success'] is True and early['screen_success'] is True and (early['processes'] == 30), 'early API gate did not pass')
         receipt = read_json(p['native_build_acceptance'])
@@ -686,6 +686,7 @@ class Runner:
         out = folder / 'saturation'
         out.mkdir()
         waiter, fd, _ = self.spawn(argv, out)
+        fds = [fd]
         until = min(time.monotonic() + 900, self.row_deadline or float('inf'))
         data = bytearray()
         try:
@@ -711,8 +712,7 @@ class Runner:
                 require(math.isfinite(float(r[name])) and float(r[name]) > 0, 'invalid saturation metric')
             return r
         finally:
-            os.close(fd)
-            self.cleanup_preserving(waiter, out)
+            self.cleanup_preserving(waiter, out, fds)
 
 class Peak:
     """Sampled current/anon maxima, not exact peaks or settled PID1 gates."""

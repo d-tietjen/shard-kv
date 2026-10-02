@@ -179,6 +179,112 @@ class RespContractTests(unittest.TestCase):
                     for waiter in waiters:
                         r.h1.stop_child(waiter)
 
+    def _access_cleanup_runner(self):
+        r, waiters = self._cleanup_runner()
+        r.plan = contract()
+        r.density = types.SimpleNamespace(TARGETS={'redis': {'backend': 'redis'}})
+        r.budget = lambda: None
+        r.row_deadline = gate.time.monotonic() + 2
+        actual_spawn = r.spawn
+        # The real child closes stdout while still alive. Access must observe EOF,
+        # enter its genuine waiter, then preserve that wait deadline during cleanup.
+        protocol = 'import os, time; os.close(1); time.sleep(60)'
+        r.spawn = lambda argv, folder, interactive=False: actual_spawn([argv[0], '-c', protocol], folder, interactive)
+        return r, waiters
+
+    @contextlib.contextmanager
+    def _access_close_error_probe(self):
+        parent = os.getpid()
+        actual_pipe, actual_close = os.pipe, os.close
+        probe = {'pipes': [], 'closed': [], 'triggered': False}
+        def pipe():
+            pair = actual_pipe()
+            probe['pipes'].extend(pair)
+            return pair
+        def close(fd):
+            if os.getpid() == parent:
+                probe['closed'].append(fd)
+            actual_close(fd)
+            if os.getpid() == parent and fd == probe['pipes'][0] and not probe['triggered']:
+                probe['triggered'] = True
+                raise OSError(errno.EIO, 'access completed close exact')
+        with mock.patch.object(gate.os, 'pipe', side_effect=pipe), mock.patch.object(gate.os, 'close', side_effect=close):
+            yield probe
+
+    def test_actual_access_eof_close_pending_term_keeps_primary_and_reaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r, waiters = self._access_cleanup_runner()
+            folder = pathlib.Path(tmp)
+            try:
+                with self._close_signal_probe(0, 'pending-on-unmask') as probe, mock.patch.object(gate, 'pinned', return_value=pathlib.Path(sys.executable).resolve()):
+                    with self.assertRaisesRegex(RuntimeError, '^actual child wait deadline$'):
+                        r.access({'scenario': 'v16-get'}, folder, 123, 1234, 'redis')
+                self._assert_closed_once(probe)
+                self.assertEqual(len(waiters), 1)
+                self._assert_genuinely_reaped(waiters[0])
+                self.assertFalse(r.children)
+                receipt = json.loads((folder / 'saturation/cleanup-failure.json').read_text())
+                self.assertTrue(receipt['original_exception_in_flight'])
+                self.assertEqual(receipt['cleanup_signals'], [signal.SIGTERM])
+                self.assertEqual(receipt['identity'], waiters[0].identity)
+                self.assertEqual(receipt['wait'], waiters[0].wait)
+                self.assertIn('deferred cleanup signals', receipt['cleanup_error'])
+            finally:
+                with r.h1.defer_cleanup_termination():
+                    for waiter in waiters:
+                        r.h1.stop_child(waiter)
+
+    def test_actual_access_eof_completed_close_error_keeps_primary_and_reaps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r, waiters = self._access_cleanup_runner()
+            folder = pathlib.Path(tmp)
+            try:
+                with self._access_close_error_probe() as probe, mock.patch.object(gate, 'pinned', return_value=pathlib.Path(sys.executable).resolve()):
+                    with self.assertRaisesRegex(RuntimeError, '^actual child wait deadline$'):
+                        r.access({'scenario': 'v16-get'}, folder, 123, 1234, 'redis')
+                self._assert_closed_once(probe)
+                self.assertEqual(len(waiters), 1)
+                self._assert_genuinely_reaped(waiters[0])
+                self.assertFalse(r.children)
+                receipt = json.loads((folder / 'saturation/cleanup-failure.json').read_text())
+                self.assertTrue(receipt['original_exception_in_flight'])
+                self.assertIn('fd cleanup: OSError', receipt['cleanup_error'])
+                self.assertIn('access completed close exact', receipt['cleanup_error'])
+                self.assertEqual(receipt['wait'], waiters[0].wait)
+            finally:
+                with r.h1.defer_cleanup_termination():
+                    for waiter in waiters:
+                        r.h1.stop_child(waiter)
+
+    def test_actual_access_primary_survives_secondary_stop_error_and_deferred_signals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r, waiters = self._access_cleanup_runner()
+            folder = pathlib.Path(tmp)
+            actual_cleanup = r.cleanup_child
+            def secondary_cleanup(waiter):
+                actual_cleanup(waiter)
+                os.kill(os.getpid(), signal.SIGINT)
+                raise RuntimeError('access secondary after genuine stop exact')
+            r.cleanup_child = secondary_cleanup
+            try:
+                with self._close_signal_probe(0, 'pending-on-unmask') as probe, mock.patch.object(gate, 'pinned', return_value=pathlib.Path(sys.executable).resolve()):
+                    with self.assertRaisesRegex(RuntimeError, '^actual child wait deadline$'):
+                        r.access({'scenario': 'v16-get'}, folder, 123, 1234, 'redis')
+                self._assert_closed_once(probe)
+                self.assertEqual(len(waiters), 1)
+                self._assert_genuinely_reaped(waiters[0])
+                self.assertFalse(r.children)
+                receipt = json.loads((folder / 'saturation/cleanup-failure.json').read_text())
+                self.assertTrue(receipt['original_exception_in_flight'])
+                self.assertIn('access secondary after genuine stop exact', receipt['cleanup_error'])
+                self.assertEqual(receipt['cleanup_signals'], [signal.SIGTERM, signal.SIGINT])
+                self.assertEqual(receipt['identity'], waiters[0].identity)
+                self.assertEqual(receipt['wait'], waiters[0].wait)
+            finally:
+                with r.h1.defer_cleanup_termination():
+                    for waiter in waiters:
+                        r.h1.stop_child(waiter)
+
     def _verify_inputs_with_receipts(self, mutate=None):
         p = contract()
         script = pathlib.Path(gate.__file__).resolve()
@@ -195,7 +301,7 @@ class RespContractTests(unittest.TestCase):
             p[kind] = {'path': '/owned/' + kind, 'sha256': '4' * 64}
             receipts[p[kind]['path']] = dict(base)
         receipts[p['early_gate_acceptance']['path']].update(functional_success=True, screen_success=True, processes=30)
-        receipts[p['regression_acceptance']['path']].update(native_unit_tests=21, python_tests=37, exit_codes=[0, 0], child_reaped=True)
+        receipts[p['regression_acceptance']['path']].update(native_unit_tests=21, python_tests=40, exit_codes=[0, 0], child_reaped=True)
         receipts[p['native_build_acceptance']['path']].update(argv=list(gate.BUILD_ARGV), exit_code=0, raw_wait_status=0, child_reaped=True, wait_observed=True, artifact_sha256={k: v['sha256'] for k, v in p['binaries'].items()}, artifact_paths={k: v['path'] for k, v in p['binaries'].items()}, compiler_sha256=p['native_build']['compiler']['sha256'], rustflags=[])
         commands = {('git', '-C', p['source']['worktree'], 'rev-parse', 'HEAD'): p['source']['sha'], ('git', '-C', p['source']['worktree'], 'rev-parse', 'HEAD^{tree}'): p['source']['tree'], ('git', '-C', p['source']['worktree'], 'status', '--porcelain'): ''}
         for arm, b in p['images'].items():

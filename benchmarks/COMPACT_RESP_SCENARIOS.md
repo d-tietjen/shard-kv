@@ -146,7 +146,14 @@ PYTHONDONTWRITEBYTECODE=1 python3 benchmarks/scripts/test-compact-storage-scenar
 cargo build --locked --release --jobs 4 -p shardcache-benchmarks --bin compact_resp_scenarios --bin saturation
 ```
 
-The prospective source counts are21 Rust methods and37 Python methods with
+The prospective source counts are21 Rust methods and40 Python methods with
 subcases. These are unexecuted expectations, not pass evidence. Product/default/
 feature-off validation, H1 ownership regressions, native build receipts and the
 early shared-API acceptance gate remain distinct prerequisites.
+
+Access saturation keeps its stdout FD in the same owned list used by command and
+native cleanup. FD closure and child stopping run together under deferred
+termination, so a signal after close or a close error retains the primary failure
+and separate cleanup receipts. Three additional inert regressions exercise real
+EOF, owned waits, close-boundary SIGTERM, completed-close errors and secondary
+stop errors; they do not execute a benchmark workload or grant runtime credit.
