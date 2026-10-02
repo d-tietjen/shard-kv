@@ -65,6 +65,10 @@ three strict larger-shape memory-screen misses; the
 [curated numerical summary](reference/compact-storage-md05-20261002/summary.json)
 retains source and input hashes.
 
+For a separate early public `FlatMap` cold/warm owned-read diagnostic, see
+[`COMPACT_SHARED_READ_GATE.md`](COMPACT_SHARED_READ_GATE.md). It defines the
+30-process, source-bound protocol and prespecified screens; results are pending.
+
 The density runner retains full Buildx metadata and a plain export log for
 each ShardCache image. Its manifest binds both declared FROM references and
 their resolved manifest digests to the Dockerfile, source revision, features,

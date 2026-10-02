@@ -10,6 +10,8 @@ publish = false
 
 [features]
 default = []
+# Enable the benchmark-only public FlatMap owned-read diagnostic.
+compact-point-storage = ["shardmap/experimental-compact-point-storage"]
 # Build the fc-embed backend on top of shardmap's reviewed unsafe hot paths.
 # Run the bench twice (default + --features unsafe) to get both rows.
 unsafe = ["shardmap/unsafe"]
@@ -139,3 +141,8 @@ required-features = ["embedded-server"]
 name = "embedded_mixed_harness"
 path = "src/bin/embedded_mixed_harness.rs"
 required-features = ["embedded-server"]
+
+[[bin]]
+name = "compact_shared_read_cost"
+path = "src/bin/compact_shared_read_cost.rs"
+required-features = ["compact-point-storage"]
