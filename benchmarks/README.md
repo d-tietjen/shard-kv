@@ -59,7 +59,11 @@ For server memory density alongside GET/SET performance, use the dedicated
 Linux runner in [`REDIS_MEMORY_DENSITY.md`](REDIS_MEMORY_DENSITY.md). It loads
 the same string keyspace into fresh Redis and ShardCache containers, samples
 process and cgroup memory, and records throughput and tail latency for each
-point.
+point. The [2026-10-02 MD05 comparison](REDIS_MEMORY_DENSITY.md#2026-10-02-md05-three-round-diagnostic)
+reports three rotated rounds of the experimental compact layout, including its
+three strict larger-shape memory-screen misses; the
+[curated numerical summary](reference/compact-storage-md05-20261002/summary.json)
+retains source and input hashes.
 
 The density runner retains full Buildx metadata and a plain export log for
 each ShardCache image. Its manifest binds both declared FROM references and

@@ -128,7 +128,7 @@ and samples while optimization runs. Its acceptance gate should compare p99 and
 throughput at the same offered load, with background work bounded so storage
 maintenance cannot consume the request path's full CPU budget.
 
-## EDEN-2266 compact candidate (unqualified)
+## EDEN-2266 compact candidate (experimental, unqualified)
 
 Build with `redis-server,experimental-compact-point-storage`. Selection is
 automatic for plain string SETs with keys up to 64 bytes and values up to 256
@@ -142,12 +142,12 @@ allocation and recycle the chunk descriptor. The allocator retains descriptor
 capacity bounded by peak chunk count and caps compact payload allocations at
 64 MiB per shard; exhausted compact allocation falls back to general storage.
 
-The next allocator candidate keeps the 32-byte per-key descriptor and, on
-64-bit targets, is expected to reduce each chunk descriptor from 56 to 24
-bytes by replacing the growable byte vector with `Box<[u8; 4096]>` and vector indexes with
-per-chunk availability links and a bounded `u16` class index. Regression checks
-enforce the descriptor size limits. Fixed list heads use 640 inline bytes per
-shard instead of the earlier 960 bytes of vector headers, saving 320 bytes and
+Candidate `78c83ad` keeps the 32-byte per-key descriptor. Its chunk descriptor
+measures 24 bytes on the tested 64-bit target; the earlier layout was 56 bytes
+by source-level layout calculation. It replaces the growable byte vector with
+`Box<[u8; 4096]>` and vector indexes with per-chunk availability links and a
+bounded `u16` class index. Adam layout checks enforce the descriptor size limits.
+Fixed list heads use 640 inline bytes per shard instead of the earlier 960 bytes of vector headers, saving 320 bytes and
 avoiding their separate backing allocations. Availability insertion, removal,
 and lookup remain constant-time. The finer classes retain the
 two-byte minimum needed for a deleted record's free-list link. They increase
@@ -161,14 +161,15 @@ The 256-byte profile still fits 14 records per chunk, so its payload chunk
 count does not improve. More distinct record lengths can leave more partly
 filled chunks; these source-level byte counts are not measured PSS results.
 
-Fresh Adam diagnostics must compare this candidate with the earlier compact
-layout at the same key count, all five value sizes, and both compressible and
-high-entropy patterns. Acceptance requires improved incremental PSS for the
-16/64-byte profiles, no worsening at 256/1024/4096 bytes, and throughput at
-least 95% with p99 at most 105% of the earlier compact candidate under matched
-settings. Total loaded PSS at 16 bytes must also be compared with Redis, with
-the target of using no more memory. These checks remain pending until evidence
-is collected; an unreserved run cannot qualify matched offered-load performance.
+The [2026-10-02 MD05 diagnostic](#2026-10-02-md05-three-round-diagnostic)
+compares this candidate with the earlier compact layout at identical key counts,
+all five value sizes, and both compressible and high-entropy patterns. The
+screen requires improved incremental PSS at 16/64 bytes, no increase at
+256/1024/4096 bytes, throughput at least 95%, and p99 at most 105% of that
+baseline. Total loaded PSS at 16 bytes must be no greater than Redis's.
+The small-value and performance screens passed; three larger-shape PSS misses
+remain. The shared-host diagnostic does not establish formal performance
+qualification.
 
 Small RESP GETs encode a borrowed chunk slice under the storage borrow, including
 queued responses below the 2048-byte response ownership threshold. A shared/owned
@@ -181,10 +182,10 @@ that uses it.
 Equal-length SET reuses its record when there are no read epochs. Length changes
 allocate one replacement record; deletes release or retire one record. A mutation
 during an epoch retains only its old record and any materialized shared owner,
-then uses a new record. The allocator reclaims at most 32 retired records per
-call after readers leave (64 across a compact allocation attempt and general
-fallback; maintenance reclaims 32). Each compact write copies at most 64
-key bytes and 256 value bytes and initializes at most one 4 KiB chunk. Normal
+then uses a new record. Compact-record reclamation is capped at 32 retired
+records per reclaim invocation after readers leave, or 64 across a compact
+allocation attempt and general fallback; compact maintenance reclaims 32. Each
+compact write copies at most 64 key bytes and 256 value bytes and initializes at most one 4 KiB chunk. Normal
 hash-table descriptor resizing does not copy payloads. TTL/governance/semantic
 metadata and overflow generation migrate only the touched key, preserving
 one representation per key and keeping untouched keys compact. Runtime policy
@@ -192,12 +193,142 @@ configuration retains both layouts and accounts for them in eviction selection;
 sampled access metadata for compact keys lives in a sparse side map. Values
 of 1 KiB and 4 KiB use the existing general layout from the first SET.
 
-The feature remains unqualified until correctness, bounded allocation/reclaim,
-churn, shared/borrowed epoch lifetime, mixed storage, and protocol regressions
-pass on Adam and the unchanged density/performance gates below are met.
+Affected correctness, layout, feature-forwarding/minimal checks and fresh native
+builds are independently accepted on Adam at source `78c83ad`. Older default
+and off-feature evidence retains its original source provenance. The original
+three-alias check's numeric outer-wrapper exit remains unverified; the fresh
+combined suite closes alias correctness through a separate audit of all three
+names and a genuine zero wrapper exit. These results do not remove the opt-in,
+experimental status or satisfy the remaining density and qualification goals.
+
+## 2026-10-02 MD05 three-round diagnostic
+
+MD05 compares the previous compact implementation at
+`98e2cc41e9b1bc79398bf03f13f2b7621c1b1d08` (B), the smaller-chunk-descriptor
+candidate at `78c83addff5f140236f9a659ff1e332bb9c35522` (C), and the actual
+cached Redis **7.4.11** image (R). Both ShardCache arms enable
+`redis-server,experimental-compact-point-storage`; B is the prior compact
+layout. Feature-off qualification is a separate comparison below.
+
+### Methodology and reproduction inputs
+
+The run contains three observations per arm and shape: three rotated blocks of
+ten shapes per round, **90 fresh-server rows** in total. Round orders are
+B/C/R, C/R/B, and R/B/C. Each profile uses 100,000 identical 18-byte keys,
+16/64/256/1024/4096-byte values, and compressible repeated `x` or deterministic
+high-entropy SplitMix64 payloads. All rows retain exactly 100,000 loaded keys,
+three exact sample-key GET checks, zero benchmark errors, and five idle plus
+five loaded PID1 memory samples (**900 verified sample gates**). Memory is
+sampled after a one-second settling interval, with 0.2 seconds between samples.
+
+Each server receives one CPU, 4 GiB memory and no swap. The client uses
+16 connections, pipeline 1, uniform 80/20 GET/SET, 20-second measurements and
+3-second warmups. The client container has a 4-CPU/2-GiB cap. CPU affinity is
+not pinned and resources are unreserved on the shared Linux host. The recorded
+kernel is 6.8.0-139-generic, x86_64. A matching-boot **post-run** inventory at
+08:31:13 UTC reports an AMD Ryzen 9 3950X, 16 cores/32 logical CPUs, and
+131,806,888 KiB MemTotal; this inventory does not establish available capacity
+during the benchmark.
+
+All arms use the **same freshly built candidate78 `saturation` driver**. Its
+native build command was:
+
+```bash
+cargo build --locked --release --jobs 4 \
+  -p shardcache-benchmarks --bin saturation --bin curve
+```
+
+The reviewed controller builds each ShardCache server image from its bound
+source revision before profiling. The per-profile entry imports that source's
+benchmark module and binds `SATURATION` to the common candidate78 executable,
+including for B and R. Reproduction must retain that common-driver binding and
+the rotated order. The nominal runner argv below records the parameters; the
+source SHA, target, tag and output directory change for each arm/profile.
+`--skip-build` uses the previously built source-bound server image.
+
+```bash
+python3 benchmarks/scripts/run-memory-density-benchmark.py \
+  --candidate-sha "$SOURCE_SHA" --targets "$TARGET" \
+  --keys 100000 --value-sizes 16,64,256,1024,4096 \
+  --value-patterns compressible,high-entropy --distribution uniform \
+  --repeats 1 --vcpus 1 --memory-limit 4g --build-jobs 4 \
+  --clients 16 --pipeline 1 --mix 80-20 --duration 20 --warmup 3 \
+  --samples 5 --sample-delay 0.2 --settle-seconds 1 --skip-build \
+  --shardcache-features redis-server,experimental-compact-point-storage \
+  --candidate-tag "$PROFILE_TAG" --out-dir "$PROFILE_OUTPUT"
+```
+
+Use `shardcache-resp` for B/C and `redis` for R. The tracked
+[curated summary](reference/compact-storage-md05-20261002/summary.json) retains
+both source SHAs/trees, all eight metric medians, profile/round identities,
+exact native hashes, and the source plan/raw-result/comparison hashes. It also
+binds each profile CSV and manifest. The fresh driver SHA-256 is
+`b3105a655b24a8af0688fe8fea1cd652a1b8c491c09bfbf26d2c6af6fe50d1b7`.
+These receipts describe source78 execution; a later documentation commit does
+not constitute a new native build or benchmark run.
+
+### Measured comparison
+
+Incremental PSS is **7.77–8.74% lower at 16 bytes** and **4.54–5.14% lower at
+64 bytes** than B. At 16 bytes, total loaded PSS is **2.35–2.93% lower than
+Redis**; C's total loaded PSS is below Redis at all ten measured shapes.
+All twenty throughput/p99 screens pass: throughput is **99.11–100.26%** of B
+and p99 is **98.83–101.10%**. The screening thresholds are throughput at least
+95% and p99 at most 105% of B.
+
+Every table entry is a **ratio of three-run medians**. A memory ratio below
+1 means less memory; a throughput ratio below 1 means fewer operations per
+second; a p99 ratio below 1 means lower latency. The p99 summary is a median
+of per-run p99 values, not a pooled request percentile.
+
+| Pattern | Value bytes | Incremental PSS C/B | Incremental PSS C/R | Total loaded PSS C/R | Throughput C/B | p99 C/B |
+|---|---:|---:|---:|---:|---:|---:|
+| compressible | 16 | 0.922305 | 0.803129 | 0.970725 | 0.999197 | 0.988287 |
+| compressible | 64 | 0.954634 | 0.831211 | 0.949101 | 0.997427 | 1.000000 |
+| compressible | 256 | 0.993467 | 0.857275 | 0.907919 | 0.991095 | 1.010965 |
+| compressible | 1024 | 1.000143 | 0.940425 | 0.954564 | 0.999390 | 1.001416 |
+| compressible | 4096 | 0.999850 | 0.831892 | 0.836385 | 0.997451 | 1.007458 |
+| high-entropy | 16 | 0.912621 | 0.801950 | 0.976544 | 1.002446 | 0.991965 |
+| high-entropy | 64 | 0.948619 | 0.829826 | 0.950715 | 0.999634 | 0.995633 |
+| high-entropy | 256 | 0.988669 | 0.854046 | 0.909359 | 1.002627 | 0.989091 |
+| high-entropy | 1024 | 1.000303 | 0.940458 | 0.955278 | 0.991596 | 1.006429 |
+| high-entropy | 4096 | 1.000221 | 0.832126 | 0.836648 | 0.997163 | 1.006868 |
+
+The strict requirement of no incremental-PSS increase at 256/1024/4096 bytes
+is **not fully satisfied**. All three misses are retained:
+
+| Pattern | Value bytes | Baseline median bytes | Candidate median bytes | Increase bytes | Increase percent |
+|---|---:|---:|---:|---:|---:|
+| compressible | 1024 | 128,602,112 | 128,620,544 | 18,432 (18 KiB) | 0.014333% |
+| high-entropy | 1024 | 128,575,488 | 128,614,400 | 38,912 (38 KiB) | 0.030264% |
+| high-entropy | 4096 | 435,976,192 | 436,072,448 | 96,256 (94 KiB) | 0.022078% |
+
+The cause and statistical significance of these differences are unknown.
+Cgroup anonymous-memory medians are equal at both 1024-byte shapes, while C's
+high-entropy 4096-byte median is 8,192 bytes lower; these observations do not
+explain the PSS increases.
+
+Raw rows, individual observations, ranges and the comparison JSON/CSV/TXT are
+retained in the ignored local archive
+`benchmarks/results/EDEN-2266-delivery/optimization-78c83ad/md05-three-round-comparison-20261002T0807Z/`.
+Independent raw-row/sample, numerical and final lifecycle review is accepted,
+including genuine zero controller-wrapper status and exact owned cleanup. The
+510-entry final archive manifest SHA-256 is
+`8ebb5d8a23e4754c0a619ae1104fa157594ead355bce4e50b2e0b5874ecfd544`.
+
+Three observations do not establish a confidence interval. Rotation retains
+host/time effects; unreserved closed-loop saturation does not qualify matched
+offered-load performance. Fixed-length profiles and settled samples do not
+qualify mixed-length fragmentation, shared-owner API costs, startup/allocation
+peaks, or mutation-heavy online maintenance. Those paths and formal performance
+qualification require separate evidence.
+
+## Remaining qualification
 
 Run both the baseline (`redis-server`) and candidate at the exact same source SHA
-on Adam, with the same reserved resources. For each build:
+on Adam, with the same reserved resources. The example enables the compact
+candidate; use `--shardcache-features redis-server` for the feature-off baseline.
+This comparison has different baseline semantics from MD05:
 
 ```bash
 python3 benchmarks/scripts/run-memory-density-benchmark.py \
