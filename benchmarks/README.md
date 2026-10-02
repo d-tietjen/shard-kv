@@ -61,6 +61,15 @@ the same string keyspace into fresh Redis and ShardCache containers, samples
 process and cgroup memory, and records throughput and tail latency for each
 point.
 
+The density runner retains full Buildx metadata and a plain export log for
+each ShardCache image. Its manifest binds both declared FROM references and
+their resolved manifest digests to the Dockerfile, source revision, features,
+platform, exported manifest/config digests, and the observed Engine image ID.
+It rejects missing or conflicting provenance before collecting rows. The
+material completeness flag is retained; these two base image bindings do not
+claim complete dependency provenance. Offline regression coverage is in
+`benchmarks/scripts/test-memory-density-provenance.py`.
+
 Both `saturation` and `curve` accept `--value-pattern repeating` (the default
 0..255 baseline), `compressible` (repeated `x`), or `high-entropy`
 (deterministic SplitMix64). Combine that flag with the existing

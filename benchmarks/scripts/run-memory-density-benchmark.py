@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import datetime as dt
 import hashlib
@@ -12,11 +13,13 @@ import json
 import os
 import pathlib
 import platform
+import re
 import statistics
 import subprocess
 import sys
 import time
 import uuid
+from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -68,13 +71,19 @@ def parse_csv_ints(value: str, label: str) -> list[int]:
     return parsed
 
 
-def command(argv: list[str], *, cwd: pathlib.Path = ROOT, log: pathlib.Path | None = None) -> str:
+def command(
+    argv: list[str],
+    *,
+    cwd: pathlib.Path = ROOT,
+    log: pathlib.Path | None = None,
+    env: dict[str, str] | None = None,
+) -> str:
     if log is None:
-        result = subprocess.run(argv, cwd=cwd, check=True, text=True, capture_output=True)
+        result = subprocess.run(argv, cwd=cwd, env=env, check=True, text=True, capture_output=True)
         return result.stdout.strip()
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("w", encoding="utf-8") as output:
-        subprocess.run(argv, cwd=cwd, check=True, text=True, stdout=output, stderr=subprocess.STDOUT)
+        subprocess.run(argv, cwd=cwd, env=env, check=True, text=True, stdout=output, stderr=subprocess.STDOUT)
     return ""
 
 
@@ -253,10 +262,112 @@ def get_inspect(container_id: str, field: str) -> str:
     return command(["docker", "inspect", "--format", f"{{{{.{field}}}}}", container_id])
 
 
-def build_shardcache_image(args: argparse.Namespace, output: pathlib.Path) -> str:
+def resolve_shardcache_build(
+    metadata: dict,
+    dockerfile: bytes,
+    build_log: str,
+    *,
+    features: str,
+    build_jobs: int,
+    candidate_sha: str,
+    image_tag: str,
+    engine_image_id: str,
+) -> dict:
+    """Bind this single-platform build's FROM materials and typed image identities.
+
+    BuildKit's material digests identify image manifests, not Engine config IDs.
+    Some Engine exporters omit config.digest in metadata; their plain export log
+    supplies it. Neither evidence source requires FROM tags in the Engine store.
+    """
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            raise RuntimeError(f"shardcache build provenance: {message}")
+
+    def digest(value: str) -> str:
+        require(isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None, "invalid image digest")
+        return value
+
+    provenance = metadata["buildx.build.provenance"]
+    require(provenance["buildType"] == "https://mobyproject.org/buildkit@v1", "unexpected build type")
+    invocation = provenance["invocation"]
+    require(invocation["configSource"]["entryPoint"] == "Dockerfile", "Dockerfile entry point differs")
+    parameters = invocation["parameters"]
+    require(parameters["frontend"] == "dockerfile.v0", "unexpected frontend")
+    for name, value in (("SHARDCACHE_FEATURES", features), ("CARGO_BUILD_JOBS", str(build_jobs))):
+        require(parameters["args"].get(f"build-arg:{name}") == value, f"build argument differs: {name}")
+    platform_name = invocation["environment"]["platform"]
+    require(isinstance(platform_name, str) and re.fullmatch(r"linux/[a-z0-9_]+", platform_name) is not None, "unsupported build platform")
+    details = provenance["metadata"]["https://mobyproject.org/buildkit@v1#metadata"]
+    require(details["vcs"]["revision"] == candidate_sha, "source revision differs")
+    sources = [item for item in details["source"]["infos"] if item.get("filename") == "Dockerfile"]
+    require(len(sources) == 1, "missing or ambiguous Dockerfile source")
+    require(base64.b64decode(sources[0]["data"], validate=True) == dockerfile, "retained Dockerfile differs from build input")
+    declared = re.findall(rb"^FROM (\S+) AS (\S+)$", dockerfile, re.MULTILINE)
+    expected = {"builder": SHARDCACHE_BUILDER_IMAGE, "runtime": SHARDCACHE_RUNTIME_BASE_IMAGE}
+    require(declared == [(value.encode(), stage.encode()) for stage, value in expected.items()], "declared FROM stages differ")
+
+    materials = provenance["materials"]
+    require(isinstance(materials, list), "materials must be a direct list")
+    bases = {}
+    for stage, reference in expected.items():
+        repository, tag = reference.split(":", 1)
+        matches = [item for item in materials if isinstance(item, dict) and isinstance(item.get("uri"), str)
+                   and re.match(rf"^pkg:docker/(?:docker\.io/library/|library/)?{repository}@", item["uri"])]
+        require(len(matches) == 1, f"missing or ambiguous FROM material: {reference}")
+        material = matches[0]
+        uri = urlsplit(material["uri"])
+        require(re.fullmatch(rf"docker/(?:docker\.io/library/|library/)?{repository}@{re.escape(tag)}", uri.path) is not None
+                and not uri.fragment and parse_qs(uri.query, strict_parsing=True) == {"platform": [platform_name]}, f"FROM tag/platform differs: {reference}")
+        require(set(material["digest"]) == {"sha256"}, f"unexpected material digest: {reference}")
+        manifest_digest = digest("sha256:" + material["digest"]["sha256"])
+        identifiers = [step.get("op", {}).get("Op", {}).get("source", {}).get("identifier", "")
+                       for step in provenance["buildConfig"]["llbDefinition"]]
+        actual_sources = [value for value in identifiers if value.startswith(f"docker-image://docker.io/library/{repository}:")]
+        require(actual_sources == [f"docker-image://docker.io/library/{reference}@{manifest_digest}"], f"material and resolved FROM source differ: {reference}")
+        bases[stage] = {"reference": reference, "uri": material["uri"], "platform": platform_name,
+                        "manifest_digest": manifest_digest}
+
+    descriptor = metadata["containerimage.descriptor"]
+    require(descriptor["mediaType"] in {"application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"}, "export must be one image manifest")
+    manifest_digest = digest(metadata["containerimage.digest"])
+    require(descriptor["digest"] == manifest_digest, "export descriptor differs")
+    require(f"{descriptor['platform']['os']}/{descriptor['platform']['architecture']}" == platform_name, "export platform differs")
+    require(metadata["image.name"] in {image_tag, "docker.io/library/" + image_tag}, "export image tag differs")
+    require(isinstance(metadata["buildx.build.ref"], str) and bool(metadata["buildx.build.ref"]), "missing build reference")
+    exports = re.findall(r"^#(\d+) exporting (manifest|config) (sha256:[0-9a-f]{64})(?: [0-9.]+s)? done$", build_log, re.MULTILINE)
+    manifests = [(step, value) for step, kind, value in exports if kind == "manifest"]
+    configs = [(step, value) for step, kind, value in exports if kind == "config"]
+    require(len(manifests) == len(configs) == 1 and manifests[0][0] == configs[0][0]
+            and manifests[0][1] == manifest_digest, "missing, ambiguous, or mismatched export log")
+    config_digest = digest(configs[0][1])
+    for value in (metadata.get("containerimage.config.digest"), descriptor.get("annotations", {}).get("config.digest")):
+        if value is not None:
+            require(digest(value) == config_digest, "metadata and exported config differ")
+    require(manifest_digest != config_digest, "manifest and config identities are ambiguous")
+    digest(engine_image_id)
+    require(engine_image_id in {manifest_digest, config_digest}, "loaded Engine image differs from export")
+    return {
+        "build_ref": metadata["buildx.build.ref"],
+        "base_materials": bases,
+        "materials_complete": provenance["metadata"]["completeness"]["materials"],
+        "dockerfile_sha256": hashlib.sha256(dockerfile).hexdigest(),
+        "features": features,
+        "runtime_manifest_digest": manifest_digest,
+        "runtime_config_digest": config_digest,
+        "runtime_engine_image_id": engine_image_id,
+        "runtime_engine_image_id_kind": "manifest-digest" if engine_image_id == manifest_digest else "config-digest",
+    }
+
+
+def build_shardcache_image(args: argparse.Namespace, output: pathlib.Path) -> dict:
     context = output / "runtime-context"
-    context.mkdir(parents=True, exist_ok=True)
     dockerfile = context / "Dockerfile"
+    metadata_path = output / "build-metadata.json"
+    build_log = output / "logs" / "docker-build-shardcache-runtime.log"
+    for retained in (dockerfile, metadata_path, build_log):
+        if retained.exists():
+            raise RuntimeError(f"preserve prior build evidence: {retained}")
+    context.mkdir(parents=True, exist_ok=True)
     dockerfile.write_text(
         f"FROM {SHARDCACHE_BUILDER_IMAGE} AS builder\n"
         "WORKDIR /app\n"
@@ -279,10 +390,15 @@ def build_shardcache_image(args: argparse.Namespace, output: pathlib.Path) -> st
         'CMD ["--bind-addr", "0.0.0.0:6380", "--disable-persistence", "--server-mode", "direct"]\n',
         encoding="utf-8",
     )
+    build_env = dict(os.environ, BUILDX_METADATA_PROVENANCE="max")
     command(
         [
             "docker",
             "build",
+            "--metadata-file",
+            str(metadata_path),
+            "--progress",
+            "plain",
             "--build-arg",
             f"CARGO_BUILD_JOBS={args.build_jobs}",
             "--build-arg",
@@ -293,9 +409,17 @@ def build_shardcache_image(args: argparse.Namespace, output: pathlib.Path) -> st
             str(dockerfile),
             str(ROOT),
         ],
-        log=output / "logs" / "docker-build-shardcache-runtime.log",
+        log=build_log,
+        env=build_env,
     )
-    return get_inspect(args.runtime_image_tag, "Id")
+    resolved = resolve_shardcache_build(
+        json.loads(metadata_path.read_text(encoding="utf-8")), dockerfile.read_bytes(),
+        build_log.read_text(encoding="utf-8"), features=args.shardcache_features,
+        build_jobs=args.build_jobs, candidate_sha=args.candidate_sha,
+        image_tag=args.runtime_image_tag, engine_image_id=get_inspect(args.runtime_image_tag, "Id"),
+    )
+    resolved.update(metadata_sha256=file_sha256(metadata_path), export_log_sha256=file_sha256(build_log))
+    return resolved
 
 
 def start_target_container(
@@ -640,7 +764,8 @@ def main() -> int:
         )
     if not SATURATION.is_file():
         parser.error(f"saturation binary is missing: {SATURATION}")
-    runtime_image_id = build_shardcache_image(args, out_dir) if "shardcache-resp" in targets else ""
+    runtime_build = build_shardcache_image(args, out_dir) if "shardcache-resp" in targets else {}
+    runtime_image_id = runtime_build.get("runtime_engine_image_id", "")
     for target in targets:
         image_tag = TARGETS[target]["image"]
         if image_tag and subprocess.run(["docker", "image", "inspect", image_tag], check=False, capture_output=True).returncode != 0:
@@ -668,10 +793,12 @@ def main() -> int:
         "settle_seconds": args.settle_seconds,
         "shardcache_features": args.shardcache_features if runtime_image_id else "",
         "shardcache_builder_image": SHARDCACHE_BUILDER_IMAGE if runtime_image_id else "",
-        "shardcache_builder_image_id": get_inspect(SHARDCACHE_BUILDER_IMAGE, "Id") if runtime_image_id else "",
+        "shardcache_builder_manifest_digest": runtime_build.get("base_materials", {}).get("builder", {}).get("manifest_digest", ""),
         "shardcache_runtime_base_image": SHARDCACHE_RUNTIME_BASE_IMAGE if runtime_image_id else "",
+        "shardcache_runtime_base_manifest_digest": runtime_build.get("base_materials", {}).get("runtime", {}).get("manifest_digest", ""),
         "shardcache_runtime_image_tag": args.runtime_image_tag if runtime_image_id else "",
         "shardcache_runtime_image_id": runtime_image_id,
+        "shardcache_build_provenance": runtime_build,
         "shardcache_dockerfile_sha256": file_sha256(out_dir / "runtime-context" / "Dockerfile") if runtime_image_id else "",
         "saturation_binary_sha256": file_sha256(SATURATION),
         "value_patterns": value_patterns,
