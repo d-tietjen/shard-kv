@@ -73,8 +73,11 @@ comparison or follow-up memory/performance result. Its failure evidence archive
 and exact cleanup are accepted. The revision-eight fixture retest failed with
 two confirmed fixture defects. Its failure archive and exact cleanup are
 accepted. The revision-nine caller regressions, complete evidence archive
-and exact cleanup are accepted. A shared-read campaign retry and the expanded
-Redis benchmark remain pending.
+and exact cleanup are accepted. The subsequent campaign retry failed during
+startup when the caller rejected a legitimate worktree status query, before
+any cohort. Its failure archive and exact cleanup are accepted. The repair
+passed independent static review and still needs a fresh regression retest.
+The expanded Redis benchmark remains pending.
 
 For a separate early public `FlatMap` cold/warm owned-read diagnostic, see
 [`COMPACT_SHARED_READ_GATE.md`](COMPACT_SHARED_READ_GATE.md). It defines the

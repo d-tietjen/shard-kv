@@ -399,13 +399,24 @@ kernel capture missed the exited process and receives no credit. Exact
 owned-session cleanup and the complete 661-file evidence archive (660 manifest
 entries) were independently accepted.
 
+The subsequent campaign retry failed during startup after 0.997 seconds,
+before any cohort. Independent review confirmed that the caller rejected a
+legitimate `git -C` status query in the planned baseline worktree: it required
+the child's working directory to match the controller's outer directory.
+Genuine child and independently observed kernel outer exits were both 1.
+All 18 copied raw files were verified. No candidate comparison or new
+memory/performance result is accepted. Exact owned-session cleanup and the
+complete 221-file failed archive (220 manifest entries) were independently
+accepted. A repair to working directory validation passed independent static
+review; its fresh regression retest remains pending.
+
 The planned [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) has
 30 process cohorts covering cold/concurrent initialization, warm reads, sparse
 memory, drop and reclamation costs. The planned
 [expanded Redis comparison](COMPACT_RESP_SCENARIOS.md) retains the ten MD05
 shapes and adds mixed lengths, overwrite/delete-reinsert, scale/eligibility and
 read/write hot/cold profiles: **378 final rows and 7,605 memory sample gates**.
-A shared-read campaign retry and the expanded Redis benchmark execution remain
+A further shared-read campaign retry and the expanded Redis benchmark execution remain
 pending. These validations and plans establish no new measured result or formal
 qualification; the existing MD05 findings and diagnostic limits still apply.
 
