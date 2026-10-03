@@ -86,7 +86,13 @@ The expanded Redis benchmark remains pending.
 
 For a separate early public `FlatMap` cold/warm owned-read diagnostic, see
 [`COMPACT_SHARED_READ_GATE.md`](COMPACT_SHARED_READ_GATE.md). It defines the
-30-process, source-bound protocol and prespecified screens; results are pending.
+30-process, source-bound protocol and prespecified screens. The
+[2026-10-03 completed diagnostic](REDIS_MEMORY_DENSITY.md#2026-10-03-sharedowned-read-diagnostic-memory-passes-drop-latency-fails)
+passed all 15 memory screens and five warm throughput/latency pairs, but failed
+three deletion/drop p99 screens. The 100k-key cold-first process PSS fell 8.43%;
+this is a native comparison against the earlier compact implementation. A new
+Redis comparison remains pending. Exact ratios, misses and evidence hashes are
+saved in the [curated summary](reference/compact-shared-read-api04-20261003/summary.json).
 
 The density runner retains full Buildx metadata and a plain export log for
 each ShardCache image. Its manifest binds both declared FROM references and

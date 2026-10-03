@@ -328,8 +328,8 @@ qualification require separate evidence.
 The follow-up product at `23bf7cc0f955d1307634d500738b834f7076460b`
 passed 28 focused storage/layout regressions on Adam. Its measured per-key
 descriptor is 24 bytes, versus 32 bytes in MD05 source `78c83ad`: **25% fewer
-descriptor bytes only**. No process-memory or performance improvement has been
-measured for this follow-up. It remains opt-in and experimental.
+descriptor bytes only**. The native gate below measures process-memory savings,
+but fails three deletion/drop latency screens. It remains opt-in and experimental.
 
 At source `23bf7cc`, the targeted borrowed RESP SET check passed one test and
 the default suite passed 182 tests. Nine ignored documentation examples remain
@@ -439,9 +439,65 @@ memory, drop and reclamation costs. The planned
 [expanded Redis comparison](COMPACT_RESP_SCENARIOS.md) retains the ten MD05
 shapes and adds mixed lengths, overwrite/delete-reinsert, scale/eligibility and
 read/write hot/cold profiles: **378 final rows and 7,605 memory sample gates**.
-A further shared-read campaign retry and the expanded Redis benchmark execution remain
-pending. These validations and plans establish no new measured result or formal
-qualification; the existing MD05 findings and diagnostic limits still apply.
+The completed shared-read campaign and its failed latency screens are documented
+below. The expanded Redis benchmark remains pending. These plans establish no
+formal qualification; the existing MD05 findings and diagnostic limits still apply.
+
+## 2026-10-03 shared/owned-read diagnostic: memory passes, drop latency fails
+
+The [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) completed all
+30 fresh native-process cohorts: five profiles, two arms and three rotations.
+Baseline build source `93b81ce` contains product source `78c83ad`; candidate
+build source `444513e` contains product source `23bf7cc`. The
+[curated numerical summary](reference/compact-shared-read-api04-20261003/summary.json)
+retains exact source, binary and evidence hashes.
+
+Independent review accepted all 1,560 phase receipts and 3,960 identity-bound
+samples, logical-state digests, genuine native child exits of 0, worker exits
+and cleanup. All 1,866 copied raw files matched the remote inventory and hashes.
+**The campaign failed:** 39 of 42 prespecified screens passed. All 15 memory
+screens and all five warm throughput/latency pairs passed; three deletion/drop
+p99 screens missed the unchanged candidate/baseline limit of 1.05.
+
+| Profile | Cold-first PSS baseline → candidate (KiB) | PSS ratio | Warm ops/s ratio | Warm p99 ratio |
+|---|---:|---:|---:|---:|
+| Empty-value sparse | 1,754 → 1,714 | 0.977195 | 0.991780 | 1.000000 |
+| Small-value sparse | 1,784 → 1,750 | 0.980942 | 0.998160 | 1.000000 |
+| Small-value dense | 2,703 → 2,617 | 0.968183 | 1.016201 | 1.000000 |
+| 100k-key sparse owned | 24,821 → 22,728 | 0.915676 | 1.006397 | 1.000000 |
+| Eight-reader first owned | 1,883 → 1,869 | 0.992565 | 1.009628 | 0.857143 |
+
+The 100k-key cold-first point uses **8.43% less total process PSS**. This is a
+native API comparison against the earlier compact implementation; a new Redis
+comparison has not run. The summary also retains borrowed-loaded and both
+post-drop memory states. Borrowed-loaded memory is diagnostic and unscreened.
+
+| Failed profile / phase | Baseline p99 (ns) | Candidate p99 (ns) | Ratio |
+|---|---:|---:|---:|
+| Small-value sparse / last live delete | 2,241 | 2,406 | 1.073628 |
+| Small-value sparse / maps dropped | 1,440 | 2,621 | 1.820139 |
+| Eight-reader first owned / maps dropped | 2,660.5 | 4,021 | 1.511370 |
+
+The delete screen uses `last_live_delete_timing`. Each process contributes the
+median of four batch quantities; each arm then uses the median of three
+process-round observations. Ratios divide those candidate and baseline
+aggregates. Histograms are not pooled. Native HDR quantiles were recorded;
+full bins and all warm timings were not retained, so they cannot be rebuilt
+from the bounded first-256 timing prefixes. Exact phase wall durations and
+physical chunk/directory counts were not persisted.
+
+Workers used 4 GiB, no swap, and one CPU except the eight-reader profile's four
+CPUs. This was an unreserved, unpinned shared-host diagnostic. Cause and
+statistical significance of the latency misses remain unknown; no threshold
+waiver or formal qualification is claimed. The controller's direct child exited
+0, while the enclosing caller rejected the failed screens and its separately
+observed kernel exit was 1. A collector failure is preserved separately from
+the corrected successful collection; neither changes the screen results.
+
+Exact owned external session cleanup and the final evidence archive are pending.
+The next optimization pass targets the deletion/drop costs. The expanded Redis
+comparison remains held until the early gate passes; the MD05 measurements and
+larger-value memory misses above remain unchanged.
 
 ## Remaining qualification
 
