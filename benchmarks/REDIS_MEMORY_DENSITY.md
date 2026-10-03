@@ -380,7 +380,7 @@ The revision-eight caller fixture retest ran seven methods and failed after
 37.532 seconds, with one failure and zero errors or skips. Genuine child and
 independently observed kernel outer exits were both 1. Review confirmed two
 fixture defects: comparing process fields that change while running, and
-repeating cleanup after a record had been removed. The allowed metadata query
+restarting an incomplete fixture probe during cleanup after its pending record had been removed. The allowed metadata query
 was observed and unauthorized auxiliary actions were refused; no production
 caller defect was confirmed. All 409 copied raw files were verified. Eleven
 composition directories were retained, but later planned probes were not
