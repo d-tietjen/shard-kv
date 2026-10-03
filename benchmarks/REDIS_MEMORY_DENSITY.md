@@ -323,7 +323,7 @@ qualify mixed-length fragmentation, shared-owner API costs, startup/allocation
 peaks, or mutation-heavy online maintenance. Those paths and formal performance
 qualification require separate evidence.
 
-## 2026-10-02 follow-up candidate, validation pending
+## 2026-10-02 follow-up candidate, correctness and measurement status
 
 The follow-up product at `23bf7cc0f955d1307634d500738b834f7076460b`
 passed 28 focused storage/layout regressions on Adam. Its measured per-key
@@ -334,29 +334,41 @@ measured for this follow-up. It remains opt-in and experimental.
 At source `23bf7cc`, the targeted borrowed RESP SET check passed one test and
 the default suite passed 182 tests. Nine ignored documentation examples remain
 excluded from coverage. Minimal embedded/no-default and feature-forwarding
-compile checks also passed; their scoped correctness and cleanup evidence was
-independently accepted. A limited comparison of the inputs for those commands
-permits reuse for composed source `3e22db7f6b629f177fe921c46a458d6ccc957f07`.
-The receipts retain their actual `23bf7cc` execution identity; no fresh
-`3e22db7` build or test is claimed. Full Redis feature suites and reference
-differential checks remain pending.
+compile checks also passed. The Redis feature suites subsequently passed
+306 tests with compact storage disabled, 338 with compact storage enabled,
+and 442 with the combined features, including the required comparisons against
+qualified Redis 7.4.11. Ignored tests remain excluded from coverage. Independent
+review accepted the complete execution and owned cleanup evidence.
 
-The composed candidate includes new benchmark coverage and cleanup changes.
+The 306/338/442 suites ran at `23bf7cc`, with a 16 GiB memory limit and CPU and
+swap unlimited. A limited comparison of the inputs for the selected commands
+permits their applicability to validation source
+`444513e1d4bb342eab6a6ab6341e0c0609cb0bc1`. Their receipts retain the actual
+`23bf7cc` identity; no fresh current-head ordinary build or test is claimed.
+
+Fresh API validation at `444513e` passed all **46 cases**: two collector
+regressions, eight binding checks and 36 source cases. Baseline `93b81ce` and
+candidate `444513e` each passed eight shared-read API unit tests and built
+separate source-bound measurement executables. All four native jobs have
+independently accepted source, build, resource and cleanup evidence.
+
+The first shared-read campaign subsequently failed at a controller identity
+check before any cohort; its failure evidence and owned cleanup were accepted.
+As of 2026-10-03 02:09 UTC, caller revision five's retest also failed: seven
+methods ran with one error and eleven compositions reached. All 396 copied
+raw files were verified, and a genuine kernel exit of 1 was observed. Final
+cleanup and failed-archive acceptance remain pending, while revision six is
+being prepared. No follow-up process-memory or performance result is accepted.
+
 The planned [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) has
 30 process cohorts covering cold/concurrent initialization, warm reads, sparse
 memory, drop and reclamation costs. The planned
 [expanded Redis comparison](COMPACT_RESP_SCENARIOS.md) retains the ten MD05
 shapes and adds mixed lengths, overwrite/delete-reinsert, scale/eligibility and
 read/write hot/cold profiles: **378 final rows and 7,605 memory sample gates**.
-New native builds, API tests, Python campaign regressions, Redis differential
-tests, image builds, and memory/performance measurements have not run.
-Scoped source/tooling uploads now have explicit user approval; the earlier
-transfer block from automatic review is resolved. Separately, all 18 inert
-Redis reference parser cases passed, with complete execution and owned cleanup
-independently accepted. This covers the parser, without Redis executable,
-differential or measurement coverage. Redis material preparation and the early
-API fixtures remain pending. These plans establish no new measured result or
-formal qualification; the existing MD05 findings and diagnostic limits still apply.
+A shared-read campaign retry and the expanded Redis benchmark execution remain
+pending. These validations and plans establish no new measured result or formal
+qualification; the existing MD05 findings and diagnostic limits still apply.
 
 ## Remaining qualification
 

@@ -65,10 +65,11 @@ three strict larger-shape memory-screen misses; the
 [curated numerical summary](reference/compact-storage-md05-20261002/summary.json)
 retains source and input hashes.
 
-The [follow-up candidate status](REDIS_MEMORY_DENSITY.md#2026-10-02-follow-up-candidate-validation-pending)
-records the accepted `23bf7cc` checks and 24-byte descriptor layout. New memory,
-performance and expanded Redis validation remain pending; the descriptor change
-is not a measured process-memory gain.
+The [follow-up candidate status](REDIS_MEMORY_DENSITY.md#2026-10-02-follow-up-candidate-correctness-and-measurement-status)
+records accepted storage and Redis correctness checks, fresh API validation,
+and source-bound native builds. The attempted shared-read campaign failed before
+its first cohort; the caller repair and expanded Redis benchmark remain pending.
+No follow-up process-memory or performance result is accepted.
 
 For a separate early public `FlatMap` cold/warm owned-read diagnostic, see
 [`COMPACT_SHARED_READ_GATE.md`](COMPACT_SHARED_READ_GATE.md). It defines the
