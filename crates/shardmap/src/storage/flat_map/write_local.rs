@@ -14,12 +14,17 @@ impl FlatMap {
         K: Into<Bytes>,
         V: Into<Bytes>,
     {
-        self.disable_fast_point_map();
+        let key = key.into();
+        let value = value.into();
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if expire_at_ms.is_none() && self.try_set_compact_point(hash, &key, &value) {
+            return;
+        }
+        self.prepare_general_key(hash, key.as_ref());
         #[cfg(feature = "telemetry")]
         let start = self.start_telemetry_latency_sample();
 
-        let key = key.into();
-        let mut replacement = Some(SharedBytes::from(value.into()));
+        let mut replacement = Some(SharedBytes::from(value));
         let access_tick = if self.eviction_policy == EvictionPolicy::None {
             0
         } else {
@@ -120,7 +125,11 @@ impl FlatMap {
         value: &[u8],
     ) {
         debug_assert_eq!(key_tag, hash_key_tag_from_hash(hash));
-        self.disable_fast_point_map();
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.try_set_compact_point(hash, key, value) {
+            return;
+        }
+        self.prepare_general_key(hash, key.as_ref());
         if !self.retired_values.is_empty() {
             self.reclaim_retired_if_quiescent();
         }
@@ -311,7 +320,11 @@ impl FlatMap {
         now_ms: u64,
     ) {
         debug_assert_eq!(key_tag, hash_key_tag_from_hash(hash));
-        self.disable_fast_point_map();
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if expire_at_ms.is_none() && self.try_set_compact_point(hash, key, value) {
+            return;
+        }
+        self.prepare_general_key(hash, key.as_ref());
         self.reclaim_retired_if_quiescent();
         #[cfg(feature = "telemetry")]
         let start = self.start_telemetry_latency_sample();

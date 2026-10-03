@@ -3,6 +3,8 @@ use super::commands::RawCommandDispatcher;
 #[cfg(feature = "embedded")]
 use super::commands::{RAW_DIRECT_CATALOG, find_primary_raw_command};
 use super::direct_protocol::*;
+#[cfg(feature = "experimental-compact-point-storage")]
+use super::fast_write::FastWriteQueue;
 use super::transactions::{TransactionCoordinator, TransactionState};
 use super::wire::*;
 use super::*;
@@ -13,6 +15,8 @@ use crate::storage::RedisObjectResult;
 use crate::storage::{hash_key, hash_key_tag, shift_for, stripe_index};
 #[cfg(feature = "redis")]
 use std::collections::BTreeSet;
+#[cfg(feature = "experimental-compact-point-storage")]
+use tokio::io::AsyncReadExt;
 
 #[cfg(feature = "redis-modules-all")]
 #[path = "tests/redis_module_semantics.rs"]
@@ -7094,4 +7098,154 @@ fn redis_modules_all_commands_and_embedded_apis_are_feature_gated() {
         store.topk().execute("TOPK.ADD", &[b"topk", b"d"]),
         crate::storage::RedisModuleApiResult::Array(items) if items.len() == 1
     ));
+}
+
+#[cfg(feature = "experimental-compact-point-storage")]
+#[test]
+fn resp_get_small_compact_values_does_not_materialize_shared_owners() {
+    for queued in [false, true] {
+        for single_threaded in [false, true] {
+            let store = EmbeddedStore::new(1);
+            for size in [16, 64, 256] {
+                let key = format!("small:{size}");
+                store.set(key.as_bytes().to_vec(), vec![7; size], None);
+                let mut args = RespDirectArgs::new();
+                args.extend([key.as_bytes()]);
+                let command = DirectProtocol::parse_resp_direct_command(b"GET", args).unwrap();
+                let mut out = BytesMut::new();
+                let mut queue = FastWriteQueue::default();
+                DirectProtocol::shared_execute_resp_direct_cmd_into(
+                    &store,
+                    command,
+                    &mut out,
+                    queued.then_some(&mut queue),
+                    single_threaded,
+                    RespProtocolVersion::Resp2,
+                    Instant::now(),
+                );
+                let mut expected = format!("${size}\r\n").into_bytes();
+                expected.extend(vec![7; size]);
+                expected.extend(b"\r\n");
+                assert_eq!(out.as_ref(), expected.as_slice());
+                assert!(queue.is_empty());
+                assert_eq!(store.compact_shared_owner_count(), 0);
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "redis", feature = "experimental-compact-point-storage"))]
+#[test]
+fn resp_set_borrowed_small_values_selects_compact_storage() {
+    let store = EmbeddedStore::new(1);
+    for size in [16, 64, 256] {
+        let key = format!("small:{size}");
+        let value = vec![7; size];
+        assert_eq!(
+            RespTestHarness::exec_resp_sequence_raw(
+                &store,
+                &[&[b"SET", key.as_bytes(), &value]],
+                TransactionMode::Disabled,
+            ),
+            b"+OK\r\n"
+        );
+        assert_eq!(store.compact_shared_owner_count(), 0);
+        assert_eq!(
+            store.get_value_bytes(key.as_bytes()).unwrap().as_ref(),
+            value
+        );
+        // Explicit Bytes reads materialize one owner only for compact entries.
+        assert_eq!(store.compact_shared_owner_count(), 1);
+        assert_eq!(
+            RespTestHarness::exec_resp(&store, &[b"SET", key.as_bytes(), &value]),
+            b"+OK\r\n"
+        );
+        assert_eq!(store.compact_shared_owner_count(), 0);
+    }
+}
+
+#[cfg(all(feature = "redis", feature = "experimental-compact-point-storage"))]
+#[test]
+fn resp_get_compact_values_preserves_object_wrongtype_and_missing_semantics() {
+    let store = EmbeddedStore::new(1);
+    store.set(b"small".to_vec(), b"value".to_vec(), None);
+    store.hset(b"object", b"field", b"value");
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"GET", b"small"]),
+        b"$5\r\nvalue\r\n"
+    );
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"GET", b"missing"]),
+        b"$-1\r\n"
+    );
+    let wrong_type = RespTestHarness::exec_resp(&store, &[b"GET", b"object"]);
+    assert!(wrong_type.starts_with(b"-WRONGTYPE"));
+    store.set(
+        b"typed".to_vec(),
+        crate::storage::VECTOR_SET_PREFIX.to_vec(),
+        None,
+    );
+    let wrong_type = RespTestHarness::exec_resp(&store, &[b"GET", b"typed"]);
+    assert!(wrong_type.starts_with(b"-WRONGTYPE"));
+    store
+        .set_semantic_slice_with_governance(b"protected", b"secret", &[1.0, 0.0], None, b"deny")
+        .unwrap();
+    assert_eq!(
+        RespTestHarness::exec_resp(&store, &[b"GET", b"protected"]),
+        b"$-1\r\n"
+    );
+    assert_eq!(store.compact_shared_owner_count(), 0);
+}
+
+#[cfg(feature = "experimental-compact-point-storage")]
+#[tokio::test]
+async fn resp_get_large_general_values_keep_response_owner_after_mutation() {
+    let store = EmbeddedStore::new(1);
+    store.set(b"large".to_vec(), vec![1; 4096], None);
+    let mut args = RespDirectArgs::new();
+    args.extend([b"large".as_slice()]);
+    let command = DirectProtocol::parse_resp_direct_command(b"GET", args).unwrap();
+    let mut out = BytesMut::new();
+    let mut queue = FastWriteQueue::default();
+    DirectProtocol::shared_execute_resp_direct_cmd_into(
+        &store,
+        command,
+        &mut out,
+        Some(&mut queue),
+        false,
+        RespProtocolVersion::Resp2,
+        Instant::now(),
+    );
+    assert!(out.is_empty());
+    assert!(!queue.is_empty());
+    store.set(b"large".to_vec(), vec![2; 4096], None);
+    let (mut writer, mut reader) = tokio::io::duplex(8192);
+    queue.write_pending_tokio(&mut writer).await.unwrap();
+    drop(writer);
+    let mut response = Vec::new();
+    reader.read_to_end(&mut response).await.unwrap();
+    let mut expected = b"$4096\r\n".to_vec();
+    expected.extend(vec![1; 4096]);
+    expected.extend(b"\r\n");
+    assert_eq!(response, expected);
+}
+
+#[cfg(all(feature = "redis", feature = "experimental-compact-point-storage"))]
+#[test]
+fn resp_flushdb_clears_compact_general_and_object_keys_together() {
+    let store = EmbeddedStore::new(1);
+    store.set(b"small".to_vec(), b"value".to_vec(), None);
+    store.set(b"large".to_vec(), vec![1; 1024], None);
+    store.hset(b"object", b"field", b"value");
+    // DBSIZE uses the borrowed-command fallback, so exercise the full RESP dispatcher.
+    assert_eq!(
+        RespTestHarness::exec_resp_sequence_raw(
+            &store,
+            &[&[b"DBSIZE"], &[b"FLUSHDB"], &[b"DBSIZE"]],
+            TransactionMode::Disabled,
+        ),
+        b":3\r\n+OK\r\n:0\r\n"
+    );
+    assert_eq!(store.stored_bytes(), 0);
+    assert!(store.key_snapshot().is_empty());
 }

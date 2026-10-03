@@ -32,6 +32,13 @@ impl FlatMap {
         key: &[u8],
         value: &[u8],
     ) {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        {
+            if self.try_set_compact_point(hash, key, value) {
+                return;
+            }
+            self.prepare_general_key(hash, key);
+        }
         debug_assert_eq!(self.memory_limit_bytes, None);
         debug_assert_eq!(self.eviction_policy, EvictionPolicy::None);
 

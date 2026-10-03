@@ -55,6 +55,64 @@ For Redis module command benchmarks, use the `redis-stack` target. It runs the
 Redis Stack server image with the common module set loaded so module rows can
 be measured instead of only recorded as unsupported-command compatibility rows.
 
+For server memory density alongside GET/SET performance, use the dedicated
+Linux runner in [`REDIS_MEMORY_DENSITY.md`](REDIS_MEMORY_DENSITY.md). It loads
+the same string keyspace into fresh Redis and ShardCache containers, samples
+process and cgroup memory, and records throughput and tail latency for each
+point. The [2026-10-02 MD05 comparison](REDIS_MEMORY_DENSITY.md#2026-10-02-md05-three-round-diagnostic)
+reports three rotated rounds of the experimental compact layout, including its
+three strict larger-shape memory-screen misses; the
+[curated numerical summary](reference/compact-storage-md05-20261002/summary.json)
+retains source and input hashes.
+
+The [follow-up candidate status](REDIS_MEMORY_DENSITY.md#2026-10-02-follow-up-candidate-correctness-and-measurement-status)
+records accepted storage and Redis correctness checks, fresh API validation,
+and source-bound native builds. The revision-seven caller regressions passed.
+Its campaign failed after four baseline cohorts, yielding no accepted candidate
+comparison or follow-up memory/performance result. Its failure evidence archive
+and exact cleanup are accepted. The revision-eight fixture retest failed with
+two confirmed fixture defects. Its failure archive and exact cleanup are
+accepted. The revision-nine caller regressions, complete evidence archive
+and exact cleanup are accepted. The subsequent campaign retry failed during
+startup when the caller rejected a legitimate worktree status query, before
+any cohort. Its failure archive and exact cleanup are accepted. The repair
+passed independent static review and installation checks. The revision-ten
+fixture retest failed with a confirmed fixture synchronization race. Its
+failure archive and exact cleanup are accepted. The fixture synchronization
+fix passed independent static review. The revision-eleven caller regressions
+passed all seven methods, all thirteen compositions and three resource cases.
+The complete evidence archive and exact cleanup are accepted.
+The expanded Redis benchmark remains pending.
+
+For a separate early public `FlatMap` cold/warm owned-read diagnostic, see
+[`COMPACT_SHARED_READ_GATE.md`](COMPACT_SHARED_READ_GATE.md). It defines the
+30-process, source-bound protocol and prespecified screens. The
+[2026-10-03 completed diagnostic](REDIS_MEMORY_DENSITY.md#2026-10-03-sharedowned-read-diagnostic-memory-passes-drop-latency-fails)
+passed all 15 memory screens and five warm throughput/latency pairs, but failed
+three deletion/drop p99 screens. The 100k-key cold-first process PSS fell 8.43%;
+this is a native comparison against the earlier compact implementation. A new
+Redis comparison remains pending. Exact ratios, misses and evidence hashes are
+saved in the [curated summary](reference/compact-shared-read-api04-20261003/summary.json). The
+closed failed-run archive and exact cleanup are accepted. The independently
+reviewed [exploratory all-state audit](reference/compact-shared-read-api04-20261003/exploratory-memory-states.json)
+also documents higher individual/incremental memory measurements and snapshot
+maxima; it adds no acceptance screens or Redis comparison.
+
+The density runner retains full Buildx metadata and a plain export log for
+each ShardCache image. Its manifest binds both declared FROM references and
+their resolved manifest digests to the Dockerfile, source revision, features,
+platform, exported manifest/config digests, and the observed Engine image ID.
+It rejects missing or conflicting provenance before collecting rows. The
+material completeness flag is retained; these two base image bindings do not
+claim complete dependency provenance. Offline regression coverage is in
+`benchmarks/scripts/test-memory-density-provenance.py`.
+
+Both `saturation` and `curve` accept `--value-pattern repeating` (the default
+0..255 baseline), `compressible` (repeated `x`), or `high-entropy`
+(deterministic SplitMix64). Combine that flag with the existing
+`--key-distribution 'hot:1000:90'` or `zipf:1.1` profiles. Payload changes
+preserve the same resident keyspace and access distribution.
+
 ## Memcached Comparison
 
 For key/value cache comparisons against Memcached, use the Docker-isolated

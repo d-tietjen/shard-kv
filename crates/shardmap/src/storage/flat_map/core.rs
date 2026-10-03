@@ -9,6 +9,10 @@ impl FlatMap {
             pending_object_faults: 0,
             pending_object_fault_bytes: 0,
             semantic_index: SemanticIndex::default(),
+            #[cfg(feature = "experimental-compact-point-storage")]
+            compact_points: compact_point::CompactPointMap::default(),
+            #[cfg(feature = "experimental-compact-point-storage")]
+            general_capacity_hint: 0,
             #[cfg(feature = "experimental-no-ttl-point-hot-path")]
             fast_points: FastPointMap::default(),
             ttl_entries: 0,
@@ -35,8 +39,13 @@ impl FlatMap {
 
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         let mut map = Self::new();
-        if capacity > 0 {
+        // Defer the general table allocation until its first insertion.
+        if capacity > 0 && !cfg!(feature = "experimental-compact-point-storage") {
             map.entries = HashTable::with_capacity(capacity);
+        }
+        #[cfg(feature = "experimental-compact-point-storage")]
+        {
+            map.general_capacity_hint = capacity;
         }
         map
     }
@@ -69,7 +78,10 @@ impl FlatMap {
         if self.fast_points.is_active() {
             return self.fast_points.len();
         }
-        self.entries.len().saturating_add(self.remote_entries.len())
+        let len = self.entries.len().saturating_add(self.remote_entries.len());
+        #[cfg(feature = "experimental-compact-point-storage")]
+        let len = len.saturating_add(self.compact_points.len());
+        len
     }
 
     #[inline(always)]
@@ -165,7 +177,7 @@ impl FlatMap {
         if self.fast_points.is_active() {
             return self.fast_points.is_empty();
         }
-        self.entries.is_empty() && self.remote_entries.is_empty()
+        self.len() == 0
     }
 
     pub fn configure_object_overflow(
@@ -175,6 +187,9 @@ impl FlatMap {
         now_ms: u64,
     ) -> crate::Result<()> {
         self.validate_object_overflow_reconfiguration(object_overflow.as_ref())?;
+        if object_overflow.is_some() {
+            self.disable_fast_point_map();
+        }
         self.object_overflow = object_overflow;
         self.object_overflow_shard_id = shard_id;
         self.enforce_memory_limit(now_ms);
@@ -247,12 +262,20 @@ impl FlatMap {
 
     #[inline(always)]
     pub(super) fn lookup_ref_hashed_lazy(&mut self, hash: u64, key: &[u8]) -> Option<&[u8]> {
+        let tick = if self.should_sample_read() {
+            self.next_access_tick()
+        } else {
+            0
+        };
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if let Some(value) = self.compact_points.get_with_access(hash, key, tick) {
+            return Some(value);
+        }
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.get(hash, key).map(|value| value.as_ref());
         }
-        if self.should_sample_read() {
-            let tick = self.next_access_tick();
+        if tick != 0 {
             self.entries
                 .find_mut(local_table_hash(hash), |entry| {
                     entry.matches_readable(hash, key)
@@ -277,12 +300,20 @@ impl FlatMap {
         key: &[u8],
         key_tag: u64,
     ) -> Option<&[u8]> {
+        let tick = if self.should_sample_read() {
+            self.next_access_tick()
+        } else {
+            0
+        };
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if let Some(value) = self.compact_points.get_with_access(hash, key, tick) {
+            return Some(value);
+        }
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.get(hash, key).map(|value| value.as_ref());
         }
-        if self.should_sample_read() {
-            let tick = self.next_access_tick();
+        if tick != 0 {
             self.entries
                 .find_mut(local_table_hash(hash), |entry| {
                     entry.matches_readable_prepared(hash, key, key_tag)
@@ -318,11 +349,41 @@ impl FlatMap {
     pub(super) fn disable_fast_point_map(&mut self) {
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
-            debug_assert!(self.entries.is_empty());
+            debug_assert!(self.entries.is_empty() || self.fast_points.is_empty());
             for fast_entry in self.fast_points.take_entries_and_disable() {
                 let entry = fast_entry.into_flat_entry();
                 self.entries
                     .insert_unique(local_table_hash(entry.hash), entry, |entry| {
+                        local_table_hash(entry.hash)
+                    });
+            }
+        }
+    }
+
+    #[cfg_attr(
+        not(feature = "experimental-compact-point-storage"),
+        allow(unused_variables)
+    )]
+    pub(super) fn prepare_general_key(&mut self, hash: u64, key: &[u8]) {
+        self.disable_fast_point_map();
+        #[cfg(feature = "experimental-compact-point-storage")]
+        {
+            if self.general_capacity_hint > 0 && self.entries.capacity() == 0 {
+                self.entries.reserve(self.general_capacity_hint, |entry| {
+                    local_table_hash(entry.hash)
+                });
+                self.general_capacity_hint = 0;
+            }
+            let active = self.has_active_readers();
+            if let Some(entry) = self.compact_points.take_general(hash, key, active) {
+                debug_assert!(
+                    self.entries
+                        .find(local_table_hash(hash), |entry| entry
+                            .matches_hashed_key(hash, key))
+                        .is_none()
+                );
+                self.entries
+                    .insert_unique(local_table_hash(hash), entry, |entry| {
                         local_table_hash(entry.hash)
                     });
             }
@@ -357,6 +418,8 @@ impl FlatMap {
 
     #[inline(always)]
     pub(super) fn reclaim_retired_if_quiescent(&mut self) {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        self.compact_points.reclaim(self.has_active_readers());
         if !self.retired_values.is_empty() && !self.has_active_readers() {
             let retired_values = mem::take(&mut self.retired_values);
             for value in retired_values {
@@ -435,11 +498,30 @@ impl FlatMap {
         self.evict_to_memory_target(self.eviction_policy, now_ms, eviction_target_bytes(limit));
     }
 
+    #[cfg(all(
+        test,
+        feature = "experimental-compact-point-storage",
+        feature = "server"
+    ))]
+    pub(crate) fn compact_shared_owner_count(&self) -> usize {
+        self.compact_points.shared_owner_count()
+    }
+
+    fn resident_eviction_entries(&self) -> impl Iterator<Item = (u64, &[u8], EntryAccessMeta)> {
+        let entries = self
+            .entries
+            .iter()
+            .map(|entry| (entry.hash, entry.key.as_ref(), entry.access));
+        #[cfg(feature = "experimental-compact-point-storage")]
+        let entries = entries.chain(self.compact_points.eviction_entries());
+        entries
+    }
+
     pub(crate) fn eviction_candidate(
         &self,
         policy: EvictionPolicy,
     ) -> Option<(EvictionRank, u64, Bytes)> {
-        if policy == EvictionPolicy::None || self.entries.is_empty() {
+        if policy == EvictionPolicy::None || self.len() == 0 {
             return None;
         }
         #[cfg(feature = "prefix-eviction")]
@@ -448,8 +530,8 @@ impl FlatMap {
         }
 
         let mut selected: Option<(EvictionRank, u64, &[u8])> = None;
-        for entry in self.entries.iter() {
-            let candidate = (entry.access.rank(policy), entry.hash, entry.key.as_ref());
+        for (hash, key, access) in self.resident_eviction_entries() {
+            let candidate = (access.rank(policy), hash, key);
             selected = match selected {
                 Some(current) if current.0 <= candidate.0 => Some(current),
                 _ => Some(candidate),
@@ -467,7 +549,10 @@ impl FlatMap {
         policy: EvictionPolicy,
         now_ms: u64,
     ) -> Option<Bytes> {
-        if policy == EvictionPolicy::Lru {
+        let use_lru_log = policy == EvictionPolicy::Lru;
+        #[cfg(feature = "experimental-compact-point-storage")]
+        let use_lru_log = use_lru_log && self.compact_points.len() == 0;
+        if use_lru_log {
             while let Some(touch) = self.lru_touch_log.pop_front() {
                 let Some(entry) = self
                     .entries
@@ -497,15 +582,15 @@ impl FlatMap {
         now_ms: u64,
         mut eligible: impl FnMut(&[u8]) -> bool,
     ) -> Option<Bytes> {
-        if policy == EvictionPolicy::None || self.entries.is_empty() {
+        if policy == EvictionPolicy::None || self.len() == 0 {
             return None;
         }
         let mut selected: Option<(EvictionRank, u64, &[u8])> = None;
-        for entry in self.entries.iter() {
-            if !eligible(entry.key.as_ref()) {
+        for (hash, key, access) in self.resident_eviction_entries() {
+            if !eligible(key) {
                 continue;
             }
-            let candidate = (entry.access.rank(policy), entry.hash, entry.key.as_ref());
+            let candidate = (access.rank(policy), hash, key);
             selected = match selected {
                 Some(current) if current.0 <= candidate.0 => Some(current),
                 _ => Some(candidate),
@@ -523,7 +608,7 @@ impl FlatMap {
         now_ms: u64,
         target_bytes: usize,
     ) -> bool {
-        if policy == EvictionPolicy::None || self.entries.is_empty() {
+        if policy == EvictionPolicy::None || self.len() == 0 {
             return false;
         }
 
@@ -539,9 +624,12 @@ impl FlatMap {
             return evicted;
         }
 
-        if policy == EvictionPolicy::Lru {
+        let use_lru_log = policy == EvictionPolicy::Lru;
+        #[cfg(feature = "experimental-compact-point-storage")]
+        let use_lru_log = use_lru_log && self.compact_points.len() == 0;
+        if use_lru_log {
             let evicted = self.evict_lru_from_touch_log(now_ms, target_bytes);
-            if self.stored_bytes <= target_bytes || self.entries.is_empty() {
+            if self.stored_bytes <= target_bytes || self.len() == 0 {
                 return evicted;
             }
         }
@@ -606,13 +694,13 @@ impl FlatMap {
         }
 
         let mut candidates = BinaryHeap::with_capacity(target_count);
-        for entry in self.entries.iter() {
-            let rank = entry.access.rank(policy);
+        for (hash, key, access) in self.resident_eviction_entries() {
+            let rank = access.rank(policy);
             if candidates.len() < target_count {
                 candidates.push(EvictionCandidate {
                     rank,
-                    hash: entry.hash,
-                    key: entry.key.as_ref().to_vec(),
+                    hash,
+                    key: key.to_vec(),
                 });
                 continue;
             }
@@ -623,8 +711,8 @@ impl FlatMap {
             if rank < warmest_candidate.rank {
                 *warmest_candidate = EvictionCandidate {
                     rank,
-                    hash: entry.hash,
-                    key: entry.key.as_ref().to_vec(),
+                    hash,
+                    key: key.to_vec(),
                 };
             }
         }
@@ -634,9 +722,9 @@ impl FlatMap {
     #[cfg(feature = "prefix-eviction")]
     fn prefix_eviction_candidate(&self) -> Option<(EvictionRank, u64, Bytes)> {
         let mut group_ranks: HashMap<Bytes, EvictionRank> = HashMap::new();
-        for entry in self.entries.iter() {
-            let prefix = prefix_eviction_key_prefix(entry.key.as_ref()).to_vec();
-            let rank = prefix_eviction_group_rank(entry.access);
+        for (_hash, key, access) in self.resident_eviction_entries() {
+            let prefix = prefix_eviction_key_prefix(key).to_vec();
+            let rank = prefix_eviction_group_rank(access);
             group_ranks
                 .entry(prefix)
                 .and_modify(|group_rank| {
@@ -653,12 +741,12 @@ impl FlatMap {
             .map(|(prefix, rank)| (rank, prefix))?;
 
         let mut selected: Option<(EvictionRank, u64, &[u8])> = None;
-        for entry in self.entries.iter() {
-            if prefix_eviction_key_prefix(entry.key.as_ref()) != prefix.as_slice() {
+        for (hash, key, access) in self.resident_eviction_entries() {
+            if prefix_eviction_key_prefix(key) != prefix.as_slice() {
                 continue;
             }
-            let rank = prefix_eviction_member_rank(prefix.len(), entry.key_len, entry.access);
-            let candidate = (rank, entry.hash, entry.key.as_ref());
+            let rank = prefix_eviction_member_rank(prefix.len(), key.len(), access);
+            let candidate = (rank, hash, key);
             selected = match selected {
                 Some(current) if current.0 <= candidate.0 => Some(current),
                 _ => Some(candidate),
@@ -670,16 +758,16 @@ impl FlatMap {
 
     fn eviction_candidate_count(&self, target_bytes: usize) -> usize {
         let bytes_to_free = self.stored_bytes.saturating_sub(target_bytes);
-        if bytes_to_free == 0 || self.entries.is_empty() {
+        if bytes_to_free == 0 || self.len() == 0 {
             return 0;
         }
 
-        let average_entry_bytes = (self.stored_bytes / self.entries.len()).max(1);
+        let average_entry_bytes = (self.stored_bytes / self.len()).max(1);
         let estimated_count = bytes_to_free.div_ceil(average_entry_bytes);
         let safety_margin = (estimated_count / 8).saturating_add(8);
         estimated_count
             .saturating_add(safety_margin)
-            .min(self.entries.len())
+            .min(self.len())
     }
 
     pub(crate) fn eviction_target_bytes(limit: usize) -> usize {

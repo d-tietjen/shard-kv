@@ -1,0 +1,1564 @@
+{
+  "aggregation": "Median of four fresh sequential batches per process; ratio of medians of three process-round observations. Per-run p99 medians are not pooled percentiles.",
+  "all_memory_screens_pass": true,
+  "all_warm_throughput_and_tail_screens_pass": true,
+  "cause_and_significance": "UNKNOWN",
+  "classification": "shared-host native FlatMap diagnostic; campaign FAILED",
+  "comparison_count": 25,
+  "date_utc": "2026-10-03",
+  "evidence": {
+    "copied_raw_hashlist_sha256": "f341eb442c12ef341333ca96c1e7a7db26a22e5010fb32ff07fda6a511fe1af7",
+    "copy_correspondence": [
+      {
+        "all_hash_type_path_file_size_mode_equal": true,
+        "directories_including_root": 1,
+        "directory_allocation_size_and_inode_equality_not_claimed": true,
+        "inventory_frame_sha256": "4a28900480c089bbb862395e8948dc87232bf145ef838219a456b6c150ce1a4f",
+        "local_root": "/Users/devon/Documents/GitHub/shard-kv/benchmarks/results/EDEN-2266-delivery/optimization-oncebox-3e22db7-final/early30-dispatch-v11-data-stage/remote-output/caller-api04-outer11",
+        "nodes": 65,
+        "regular_files": 64,
+        "relative_hash_frame_sha256": "8beee474ab2c614efe98cd2ab43b3b423906bbc3405c991beee083d3454b0392",
+        "remote_root": "/home/dtietjen/validation/EDEN-2266/444513e1d4bb342/run/api-early-eof-v1/early30-outer-caller-11",
+        "symlinks_specials_missing_extras": 0
+      },
+      {
+        "all_hash_type_path_file_size_mode_equal": true,
+        "directories_including_root": 31,
+        "directory_allocation_size_and_inode_equality_not_claimed": true,
+        "inventory_frame_sha256": "0029074b36a81e07ba8da7ca6ea40b9b232852e13c6bd45349e76ee52ec0dbd0",
+        "local_root": "/Users/devon/Documents/GitHub/shard-kv/benchmarks/results/EDEN-2266-delivery/optimization-oncebox-3e22db7-final/early30-dispatch-v11-data-stage/remote-output/campaign-04",
+        "nodes": 1833,
+        "regular_files": 1802,
+        "relative_hash_frame_sha256": "0352ec40d442d1b5f23a1a14fc4fd36ec8003e99dd523490df0162dfa01202ff",
+        "remote_root": "/home/dtietjen/validation/EDEN-2266/444513e1d4bb342/run/api-early-eof-v1/campaign-04",
+        "symlinks_specials_missing_extras": 0
+      }
+    ],
+    "copy_receipt_qualification": "Strict copies pin complete bounded R4 frames with explicit original SSH1; independently verified those frames byte-identical to full R5 postrun SSH0. R4 query remains failed and is not upgraded.",
+    "derived_numerics_sha256": "97b2cebe1b0ec76f1e59515352ef61f887e50f81dfe413ceadff682b6b38eb45",
+    "final_archive": {
+      "closure_record_sha256": "e668776168c6a2068b52a9ad646c8b2acf2d1c0a731a1462bee03014e0dac4b6",
+      "directories_including_root": 90,
+      "manifest_filename": "SHA256SUMS-campaign04-failed-final-r1",
+      "manifest_payload_rows": 2174,
+      "manifest_sha256": "41cea373393d432de06d821a885a0c0d2fbb9e4ba675d68bd279f61be5e02008",
+      "qualification": "closed FAILED; no waiver or new measurement credit",
+      "regular_files_including_manifest": 2175,
+      "scope_sha256": "4c752d959c83e39e0c0060570e1fc106fc6f4546ee6887101c577c147fde2d1d"
+    },
+    "independent_review_manifest_sha256": "1dc80a03a23d17b87ba09dbd5e8b47d525107b8832c0b513d2e757e4e7121983",
+    "independent_review_sha256": "a968720b4370791e155d184eb945c8be11802df3e7bf93e7b2b2977bbf3b3ea9",
+    "inputs_by_filename": {
+      "caller-contract.json": {
+        "bytes": 5706,
+        "sha256": "c4d7bf5243753b027edb70a323479aa664e1c3e10391e2760935089d8b882f53"
+      },
+      "caller-primary-failure.json": {
+        "bytes": 2065,
+        "sha256": "732281b533ff9e0f5d714eddf17a47da1509d3364ff27cd00316e25d219e9574"
+      },
+      "caller-result.json": {
+        "bytes": 86577,
+        "sha256": "644e221d39896e08b32f34075dd0de88444bb1e5fe5f5e6cd6b2295f0f85e6c6"
+      },
+      "controller-result.json": {
+        "bytes": 166,
+        "sha256": "a32158ad9138285d58d88de3b5084414e42e5adec378cbc4576c4fd6de9e4a93"
+      },
+      "copy-caller-api04-outer11-v11-r1.output.txt": {
+        "bytes": 673,
+        "sha256": "eab5672b2b7c31fd681ad966c690e082472ecf0e8ad74b2dd78b32c7e5c5877c"
+      },
+      "copy-caller-api04-outer11-v11-r1.scp-exit.txt": {
+        "bytes": 11,
+        "sha256": "a340f0c326c9368052b957c16be015390d87e9be7a703bf0e654fb57ec842da6"
+      },
+      "copy-campaign04-v11-r1.output.txt": {
+        "bytes": 652,
+        "sha256": "720359bd43b275e0656e7acdc0b2c6820766920cc39236a6c38a71478825d56b"
+      },
+      "copy-campaign04-v11-r1.scp-exit.txt": {
+        "bytes": 11,
+        "sha256": "a340f0c326c9368052b957c16be015390d87e9be7a703bf0e654fb57ec842da6"
+      },
+      "diagnostic-plan.json": {
+        "bytes": 38928,
+        "sha256": "bf953e35a841577758e495729d6d756a22ea540ce5bcb0e85b371f883a96e19c"
+      },
+      "early30-caller.py": {
+        "bytes": 106283,
+        "sha256": "1f6cdd6a307a940126b274c51f94d2f705d85a2f3b038c0ff46ecf82057c3956"
+      },
+      "launch-early30-dispatch-v11-r3.output.txt": {
+        "bytes": 16510,
+        "sha256": "d8c339bf1976fc718152f211b3fc2224bb4806167d0496e1868d3c5f6696b8a3"
+      },
+      "live-capture-early30-v11-r5.output.txt": {
+        "bytes": 836617,
+        "sha256": "0041139deafd04e7c0691c0c972dbfaf5406567ddb6c905f30bbe7137be5ebb5"
+      },
+      "outer-terminal.json": {
+        "bytes": 1634,
+        "sha256": "13cfcf474f2e853d85274c39caa0c1d35f6a955e8b8ca2a8bca874a37a284fc3"
+      },
+      "postrun-readonly-campaign-11-r4.output.txt": {
+        "bytes": 626329,
+        "sha256": "8a6823a9e7cc1ea3ad416f6c0f8843afbf06660370e0836798c02c73d8109cef"
+      },
+      "postrun-readonly-campaign-11-r4.ssh-exit.txt": {
+        "bytes": 11,
+        "sha256": "8c51ef2569b7a8583d92ce5b4cf980575568693ef21358d7841e07dd1aa55b72"
+      },
+      "postrun-readonly-campaign-11-r5.output.txt": {
+        "bytes": 633110,
+        "sha256": "9bf98690fe0ca996f7a84ac02adc331ef1552a27e723b4cb5e847e9067fb8de8"
+      },
+      "postrun-readonly-campaign-11-r5.ssh-exit.txt": {
+        "bytes": 11,
+        "sha256": "c81753ffc2db8dc790b0b6fcf99a6613eb15824c3034e3f383510a7fd762cdcb"
+      },
+      "run-compact-shared-read-gate.py": {
+        "bytes": 40204,
+        "sha256": "139952ce3a8db5375f51fa9ac472bbb1a6cffa329072ad2195a0b6acfeecbf44"
+      },
+      "summary.json": {
+        "bytes": 23053,
+        "sha256": "1d2e3badb46598d1f487dc583a97c21a10420e382f989f28fb3c63c40daf7873"
+      },
+      "terminal-observe-campaign-11-r4.output.txt": {
+        "bytes": 3684,
+        "sha256": "8939b62c2235626adcf7403225a398e5d96c3d711dd639adb2f3c47ac8aa467d"
+      },
+      "terminal-observe-campaign-11-r4.ssh-exit.txt": {
+        "bytes": 11,
+        "sha256": "c81753ffc2db8dc790b0b6fcf99a6613eb15824c3034e3f383510a7fd762cdcb"
+      }
+    },
+    "owned_external_cleanup": {
+      "completed_utc": "2026-10-03T16:00:18Z",
+      "output_bytes": 32900,
+      "output_lines": 538,
+      "output_sha256": "bc2082abc4b9ab655df92184a40c433f5b170c1c1f215eaad5c1c23b417078ad",
+      "qualification": "exact owned session only; original raw/source/native/TMP/STOP evidence preserved; executed ownership guards are not separately exported raw readings",
+      "ssh_exit": 0,
+      "ssh_exit_sha256": "c81753ffc2db8dc790b0b6fcf99a6613eb15824c3034e3f383510a7fd762cdcb"
+    }
+  },
+  "failed_screens": [
+    {
+      "baseline_p99_ns": 2241.0,
+      "candidate_p99_ns": 2406.0,
+      "cohort": "small-value-sparse",
+      "limit": 1.05,
+      "per_round": {
+        "baseline": [
+          2241.0,
+          2045.5,
+          2411.0
+        ],
+        "candidate": [
+          2411.0,
+          1995.5,
+          2406.0
+        ]
+      },
+      "phase": "quiescent_deleted",
+      "ratio": 1.073627844712182,
+      "screen": "tail"
+    },
+    {
+      "baseline_p99_ns": 1440.0,
+      "candidate_p99_ns": 2621.0,
+      "cohort": "small-value-sparse",
+      "limit": 1.05,
+      "per_round": {
+        "baseline": [
+          1450.0,
+          1340.0,
+          1440.0
+        ],
+        "candidate": [
+          2531.0,
+          2621.0,
+          3026.0
+        ]
+      },
+      "phase": "maps_dropped",
+      "ratio": 1.820138888888889,
+      "screen": "tail"
+    },
+    {
+      "baseline_p99_ns": 2660.5,
+      "candidate_p99_ns": 4021.0,
+      "cohort": "eight-reader-first-owned",
+      "limit": 1.05,
+      "per_round": {
+        "baseline": [
+          1610.0,
+          3867.0,
+          2660.5
+        ],
+        "candidate": [
+          4021.0,
+          4451.0,
+          2805.5
+        ]
+      },
+      "phase": "maps_dropped",
+      "ratio": 1.5113700432249577,
+      "screen": "tail"
+    }
+  ],
+  "functional": {
+    "TasksMax64": "exact requested wrapper argv for30; pids.max is not included in each persisted sample controls",
+    "all1560_sample_metric_medians": "EXACT independently recomputed",
+    "all_samples_native_PID_start_exact": true,
+    "all_samples_worker4GiB_swap0_CPUs_exact_and_no_tighter_ancestors": true,
+    "cohort_budget_seconds": 180,
+    "complete_member_elapsed_seconds_max": 73.31368859601207,
+    "complete_member_elapsed_seconds_min": 67.36280108604115,
+    "logical_shapes_counts_state_digests": "ALL1560 PASS independently rederived",
+    "members": 30,
+    "native_completion_marker": "exact runtime validation in immutable controller; no separate final completion-line artifact persisted",
+    "native_identity_worker_cgroup_cleanup": 30,
+    "native_wait_raw_zero_reaped": 30,
+    "numeric_worker_returncode_zero": 30,
+    "per_member_phase_sample_counts": [
+      52,
+      132
+    ],
+    "phase_budget_seconds": 60,
+    "phase_receipts": 1560,
+    "runtime_phase_budget_checks": "The immutable controller checks each native phase against60s and original whole cohort180s; per-phase monotonic start/end values are not persisted, so no independent exact per-phase wall duration claim. All30 persisted elapsed values are finite and under180; all120 warm native intervals at least5s.",
+    "samples": 3960,
+    "warm_minimum_seconds": 5
+  },
+  "input_lifetime_limits": "All logical records/value/key bytes/state digests checked across all13phases. Public FlatMap API exposes no physical chunk/directory counts. Total process PSS differences do not quantify per-chunk metadata or allocator/retired-owner mechanisms.",
+  "lifecycle_status": {
+    "campaign_pass": false,
+    "expanded_Redis_execution": "held until early gate passes",
+    "final_archive": "independently accepted closed FAILED archive",
+    "owned_external_cleanup": "independently accepted; all 66 actor identities and 32 scopes absent; exact private socket and root removed"
+  },
+  "limits": [
+    "Shared Adam host; unreserved and unpinned; diagnostic only; no posthoc waiver.",
+    "HDR-derived p50/p99/p99.9 retained plus bounded first256 timing prefix/count/elapsed. Full bins and all warm timings absent; native p99 cannot be reconstructed from prefixes. This review recomputes aggregate medians/ratios, not native HDR quantiles.",
+    "No histogram pooling: median of4 batch quantities per fresh native process, then median of3 process-round observations per arm; ratio candidate/baseline.",
+    "Quiescent_deleted tail uses last_live_delete_timing, not the all-delete timing field.",
+    "Memory includes whole-process PSS and recorded cgroup totals; public FlatMap workload does not observe physical chunk/directory counts.",
+    "Borrowed_loaded memory table is diagnostic and unscreened; specified memory screens use cold_first and two post-drop phases.",
+    "No new broader RESP, wide-value workload, reserved-host significance, causal conclusion or release acceptance.",
+    "Current alarm restoration field records publication before restoration; no completed-restoration claim inferred from it."
+  ],
+  "profile_tables": [
+    {
+      "cohort": "empty-value-sparse",
+      "pss": {
+        "borrowed_loaded": {
+          "baseline_KiB": 1754.0,
+          "baseline_bytes": 1796096.0,
+          "candidate_KiB": 1714.0,
+          "candidate_bytes": 1755136.0,
+          "candidate_over_baseline": 0.9771949828962372,
+          "screen": null
+        },
+        "cold_first": {
+          "baseline_KiB": 1754.0,
+          "baseline_bytes": 1796096.0,
+          "candidate_KiB": 1714.0,
+          "candidate_bytes": 1755136.0,
+          "candidate_over_baseline": 0.9771949828962372,
+          "screen": true
+        },
+        "maps_dropped": {
+          "baseline_KiB": 1756.0,
+          "baseline_bytes": 1798144.0,
+          "candidate_KiB": 1716.0,
+          "candidate_bytes": 1757184.0,
+          "candidate_over_baseline": 0.9772209567198178,
+          "screen": true
+        },
+        "quiescent_deleted": {
+          "baseline_KiB": 1754.0,
+          "baseline_bytes": 1796096.0,
+          "candidate_KiB": 1714.0,
+          "candidate_bytes": 1755136.0,
+          "candidate_over_baseline": 0.9771949828962372,
+          "screen": true
+        }
+      },
+      "timing": {
+        "cold_first": {
+          "baseline": {
+            "ops_per_sec": 3948508.1681340486,
+            "p99_ns": 1365.0
+          },
+          "candidate": {
+            "ops_per_sec": 4617386.04391323,
+            "p99_ns": 860.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 4075575.514827851,
+                "p99_ns": 1200.0
+              },
+              {
+                "ops_per_sec": 3948508.1681340486,
+                "p99_ns": 1365.0
+              },
+              {
+                "ops_per_sec": 3748440.150843159,
+                "p99_ns": 1380.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 4617386.04391323,
+                "p99_ns": 860.0
+              },
+              {
+                "ops_per_sec": 4708484.992137011,
+                "p99_ns": 720.0
+              },
+              {
+                "ops_per_sec": 4519612.229679344,
+                "p99_ns": 960.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.1694001499546787,
+            "p99_ns": 0.63003663003663
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "cold_next": {
+          "baseline": {},
+          "candidate": {},
+          "per_round": {
+            "baseline": [
+              {},
+              {},
+              {}
+            ],
+            "candidate": [
+              {},
+              {},
+              {}
+            ]
+          },
+          "ratios": {},
+          "screens": {}
+        },
+        "maps_dropped": {
+          "baseline": {
+            "ops_per_sec": 3086142.198346736,
+            "p99_ns": 2760.5
+          },
+          "candidate": {
+            "ops_per_sec": 3273492.157084133,
+            "p99_ns": 1590.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 3910952.365395854,
+                "p99_ns": 2820.5
+              },
+              {
+                "ops_per_sec": 3086142.198346736,
+                "p99_ns": 2760.5
+              },
+              {
+                "ops_per_sec": 2835620.5744562726,
+                "p99_ns": 2110.5
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 3273492.157084133,
+                "p99_ns": 1570.0
+              },
+              {
+                "ops_per_sec": 3144274.2840592302,
+                "p99_ns": 1590.0
+              },
+              {
+                "ops_per_sec": 3282059.050238383,
+                "p99_ns": 1625.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.0607068458601037,
+            "p99_ns": 0.5759826118456801
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "quiescent_deleted": {
+          "baseline": {
+            "ops_per_sec": 3351409.8470499245,
+            "p99_ns": 2065.5
+          },
+          "candidate": {
+            "ops_per_sec": 3324605.392566261,
+            "p99_ns": 1870.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 3357918.0907837143,
+                "p99_ns": 2065.5
+              },
+              {
+                "ops_per_sec": 2955657.675816643,
+                "p99_ns": 2336.0
+              },
+              {
+                "ops_per_sec": 3351409.8470499245,
+                "p99_ns": 1935.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 3324605.392566261,
+                "p99_ns": 2156.0
+              },
+              {
+                "ops_per_sec": 4170237.7298692856,
+                "p99_ns": 1870.0
+              },
+              {
+                "ops_per_sec": 3263684.471965486,
+                "p99_ns": 1825.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 0.9920020362453555,
+            "p99_ns": 0.9053497942386831
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "warm_same": {
+          "baseline": {
+            "ops_per_sec": 11149652.118936358,
+            "p99_ns": 60.0
+          },
+          "candidate": {
+            "ops_per_sec": 11057997.663630018,
+            "p99_ns": 60.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 11155776.54043659,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 11148523.608608998,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 11149652.118936358,
+                "p99_ns": 60.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 11057997.663630018,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 11033107.07352338,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 11065536.517884906,
+                "p99_ns": 60.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 0.9917796130023935,
+            "p99_ns": 1.0
+          },
+          "screens": {
+            "tail": true,
+            "throughput": true
+          }
+        }
+      }
+    },
+    {
+      "cohort": "small-value-sparse",
+      "pss": {
+        "borrowed_loaded": {
+          "baseline_KiB": 1784.0,
+          "baseline_bytes": 1826816.0,
+          "candidate_KiB": 1750.0,
+          "candidate_bytes": 1792000.0,
+          "candidate_over_baseline": 0.9809417040358744,
+          "screen": null
+        },
+        "cold_first": {
+          "baseline_KiB": 1784.0,
+          "baseline_bytes": 1826816.0,
+          "candidate_KiB": 1750.0,
+          "candidate_bytes": 1792000.0,
+          "candidate_over_baseline": 0.9809417040358744,
+          "screen": true
+        },
+        "maps_dropped": {
+          "baseline_KiB": 1784.0,
+          "baseline_bytes": 1826816.0,
+          "candidate_KiB": 1752.0,
+          "candidate_bytes": 1794048.0,
+          "candidate_over_baseline": 0.9820627802690582,
+          "screen": true
+        },
+        "quiescent_deleted": {
+          "baseline_KiB": 1784.0,
+          "baseline_bytes": 1826816.0,
+          "candidate_KiB": 1750.0,
+          "candidate_bytes": 1792000.0,
+          "candidate_over_baseline": 0.9809417040358744,
+          "screen": true
+        }
+      },
+      "timing": {
+        "cold_first": {
+          "baseline": {
+            "ops_per_sec": 3330622.978233493,
+            "p99_ns": 1510.0
+          },
+          "candidate": {
+            "ops_per_sec": 3669650.3309728103,
+            "p99_ns": 1105.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 3219433.198380567,
+                "p99_ns": 1420.0
+              },
+              {
+                "ops_per_sec": 3330622.978233493,
+                "p99_ns": 1520.0
+              },
+              {
+                "ops_per_sec": 3419319.5780076515,
+                "p99_ns": 1510.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 3781633.7118810173,
+                "p99_ns": 1175.0
+              },
+              {
+                "ops_per_sec": 3518438.5055821612,
+                "p99_ns": 920.0
+              },
+              {
+                "ops_per_sec": 3669650.3309728103,
+                "p99_ns": 1105.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.1017909727264092,
+            "p99_ns": 0.7317880794701986
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "cold_next": {
+          "baseline": {},
+          "candidate": {},
+          "per_round": {
+            "baseline": [
+              {},
+              {},
+              {}
+            ],
+            "candidate": [
+              {},
+              {},
+              {}
+            ]
+          },
+          "ratios": {},
+          "screens": {}
+        },
+        "maps_dropped": {
+          "baseline": {
+            "ops_per_sec": 3455958.3552872143,
+            "p99_ns": 1440.0
+          },
+          "candidate": {
+            "ops_per_sec": 2915456.0066365944,
+            "p99_ns": 2621.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 3329693.721414012,
+                "p99_ns": 1450.0
+              },
+              {
+                "ops_per_sec": 3455958.3552872143,
+                "p99_ns": 1340.0
+              },
+              {
+                "ops_per_sec": 3742791.7739910996,
+                "p99_ns": 1440.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 2351418.846968027,
+                "p99_ns": 2531.0
+              },
+              {
+                "ops_per_sec": 3312001.507791685,
+                "p99_ns": 2621.0
+              },
+              {
+                "ops_per_sec": 2915456.0066365944,
+                "p99_ns": 3026.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 0.8436027599048715,
+            "p99_ns": 1.820138888888889
+          },
+          "screens": {
+            "tail": false
+          }
+        },
+        "quiescent_deleted": {
+          "baseline": {
+            "ops_per_sec": 3512118.939443237,
+            "p99_ns": 2241.0
+          },
+          "candidate": {
+            "ops_per_sec": 3625679.117941487,
+            "p99_ns": 2406.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 3512118.939443237,
+                "p99_ns": 2241.0
+              },
+              {
+                "ops_per_sec": 5077932.721419947,
+                "p99_ns": 2045.5
+              },
+              {
+                "ops_per_sec": 3243711.4575491985,
+                "p99_ns": 2411.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 3536921.3196264193,
+                "p99_ns": 2411.0
+              },
+              {
+                "ops_per_sec": 3636075.282231003,
+                "p99_ns": 1995.5
+              },
+              {
+                "ops_per_sec": 3625679.117941487,
+                "p99_ns": 2406.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.0323338077258433,
+            "p99_ns": 1.073627844712182
+          },
+          "screens": {
+            "tail": false
+          }
+        },
+        "warm_same": {
+          "baseline": {
+            "ops_per_sec": 11039441.775257505,
+            "p99_ns": 60.0
+          },
+          "candidate": {
+            "ops_per_sec": 11019129.7073419,
+            "p99_ns": 60.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 11035299.64887674,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 11052673.12553801,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 11039441.775257505,
+                "p99_ns": 60.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 11011900.880732693,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 11019129.7073419,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 11046324.94436359,
+                "p99_ns": 60.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 0.9981600457406161,
+            "p99_ns": 1.0
+          },
+          "screens": {
+            "tail": true,
+            "throughput": true
+          }
+        }
+      }
+    },
+    {
+      "cohort": "small-value-dense",
+      "pss": {
+        "borrowed_loaded": {
+          "baseline_KiB": 2703.0,
+          "baseline_bytes": 2767872.0,
+          "candidate_KiB": 2617.0,
+          "candidate_bytes": 2679808.0,
+          "candidate_over_baseline": 0.9681834998150204,
+          "screen": null
+        },
+        "cold_first": {
+          "baseline_KiB": 2703.0,
+          "baseline_bytes": 2767872.0,
+          "candidate_KiB": 2617.0,
+          "candidate_bytes": 2679808.0,
+          "candidate_over_baseline": 0.9681834998150204,
+          "screen": true
+        },
+        "maps_dropped": {
+          "baseline_KiB": 2730.0,
+          "baseline_bytes": 2795520.0,
+          "candidate_KiB": 2631.0,
+          "candidate_bytes": 2694144.0,
+          "candidate_over_baseline": 0.9637362637362638,
+          "screen": true
+        },
+        "quiescent_deleted": {
+          "baseline_KiB": 2703.0,
+          "baseline_bytes": 2767872.0,
+          "candidate_KiB": 2617.0,
+          "candidate_bytes": 2679808.0,
+          "candidate_over_baseline": 0.9681834998150204,
+          "screen": true
+        }
+      },
+      "timing": {
+        "cold_first": {
+          "baseline": {
+            "ops_per_sec": 2039556.2112871043,
+            "p99_ns": 2010.0
+          },
+          "candidate": {
+            "ops_per_sec": 2497680.1779189445,
+            "p99_ns": 1100.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 2039556.2112871043,
+                "p99_ns": 1910.0
+              },
+              {
+                "ops_per_sec": 2005145.56661106,
+                "p99_ns": 2215.5
+              },
+              {
+                "ops_per_sec": 2097656.5680785095,
+                "p99_ns": 2010.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 2543255.100570217,
+                "p99_ns": 1100.0
+              },
+              {
+                "ops_per_sec": 2367819.9494843213,
+                "p99_ns": 1125.0
+              },
+              {
+                "ops_per_sec": 2497680.1779189445,
+                "p99_ns": 1030.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.2246194363737255,
+            "p99_ns": 0.5472636815920398
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "cold_next": {
+          "baseline": {
+            "ops_per_sec": 2181768.0134172603,
+            "p99_ns": 1400.0
+          },
+          "candidate": {
+            "ops_per_sec": 2541269.0613701283,
+            "p99_ns": 945.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 2108320.018191334,
+                "p99_ns": 1720.0
+              },
+              {
+                "ops_per_sec": 2229249.2880728175,
+                "p99_ns": 1215.0
+              },
+              {
+                "ops_per_sec": 2181768.0134172603,
+                "p99_ns": 1400.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 2578049.3182580853,
+                "p99_ns": 900.0
+              },
+              {
+                "ops_per_sec": 2399946.0079638255,
+                "p99_ns": 1255.0
+              },
+              {
+                "ops_per_sec": 2541269.0613701283,
+                "p99_ns": 945.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.1647751024591237,
+            "p99_ns": 0.675
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "maps_dropped": {
+          "baseline": {
+            "ops_per_sec": 133640.196099095,
+            "p99_ns": 27391.0
+          },
+          "candidate": {
+            "ops_per_sec": 81416.53867483098,
+            "p99_ns": 27991.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 127431.14126504702,
+                "p99_ns": 20015.0
+              },
+              {
+                "ops_per_sec": 135456.99532841466,
+                "p99_ns": 27391.0
+              },
+              {
+                "ops_per_sec": 133640.196099095,
+                "p99_ns": 28095.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 71959.18999801337,
+                "p99_ns": 30287.0
+              },
+              {
+                "ops_per_sec": 81416.53867483098,
+                "p99_ns": 27991.0
+              },
+              {
+                "ops_per_sec": 136007.41027829732,
+                "p99_ns": 25551.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 0.6092219336049174,
+            "p99_ns": 1.0219050052937095
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "quiescent_deleted": {
+          "baseline": {
+            "ops_per_sec": 6762586.0729309,
+            "p99_ns": 620.0
+          },
+          "candidate": {
+            "ops_per_sec": 7525050.321838573,
+            "p99_ns": 545.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 6000970.621127186,
+                "p99_ns": 630.0
+              },
+              {
+                "ops_per_sec": 6762586.0729309,
+                "p99_ns": 620.0
+              },
+              {
+                "ops_per_sec": 7318872.040046658,
+                "p99_ns": 615.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 7664714.631372262,
+                "p99_ns": 510.0
+              },
+              {
+                "ops_per_sec": 7525050.321838573,
+                "p99_ns": 570.0
+              },
+              {
+                "ops_per_sec": 6934511.435243562,
+                "p99_ns": 545.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.1127474372503212,
+            "p99_ns": 0.8790322580645161
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "warm_same": {
+          "baseline": {
+            "ops_per_sec": 10412505.638360254,
+            "p99_ns": 70.0
+          },
+          "candidate": {
+            "ops_per_sec": 10581201.161481585,
+            "p99_ns": 70.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 10412505.638360254,
+                "p99_ns": 70.0
+              },
+              {
+                "ops_per_sec": 10283926.634061266,
+                "p99_ns": 70.0
+              },
+              {
+                "ops_per_sec": 10453779.891251203,
+                "p99_ns": 70.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 10685475.317004617,
+                "p99_ns": 70.0
+              },
+              {
+                "ops_per_sec": 10581201.161481585,
+                "p99_ns": 70.0
+              },
+              {
+                "ops_per_sec": 10506835.705905804,
+                "p99_ns": 70.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.0162012419469764,
+            "p99_ns": 1.0
+          },
+          "screens": {
+            "tail": true,
+            "throughput": true
+          }
+        }
+      }
+    },
+    {
+      "cohort": "point-100k-sparse-owned",
+      "pss": {
+        "borrowed_loaded": {
+          "baseline_KiB": 24821.0,
+          "baseline_bytes": 25416704.0,
+          "candidate_KiB": 22728.0,
+          "candidate_bytes": 23273472.0,
+          "candidate_over_baseline": 0.9156762418919463,
+          "screen": null
+        },
+        "cold_first": {
+          "baseline_KiB": 24821.0,
+          "baseline_bytes": 25416704.0,
+          "candidate_KiB": 22728.0,
+          "candidate_bytes": 23273472.0,
+          "candidate_over_baseline": 0.9156762418919463,
+          "screen": true
+        },
+        "maps_dropped": {
+          "baseline_KiB": 26047.0,
+          "baseline_bytes": 26672128.0,
+          "candidate_KiB": 25044.0,
+          "candidate_bytes": 25645056.0,
+          "candidate_over_baseline": 0.9614926862978462,
+          "screen": true
+        },
+        "quiescent_deleted": {
+          "baseline_KiB": 24875.0,
+          "baseline_bytes": 25472000.0,
+          "candidate_KiB": 23852.0,
+          "candidate_bytes": 24424448.0,
+          "candidate_over_baseline": 0.9588743718592965,
+          "screen": true
+        }
+      },
+      "timing": {
+        "cold_first": {
+          "baseline": {
+            "ops_per_sec": 2812154.994195128,
+            "p99_ns": 745.0
+          },
+          "candidate": {
+            "ops_per_sec": 2831549.011879595,
+            "p99_ns": 745.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 2812154.994195128,
+                "p99_ns": 765.0
+              },
+              {
+                "ops_per_sec": 2859468.3053045,
+                "p99_ns": 745.0
+              },
+              {
+                "ops_per_sec": 2736172.2718398944,
+                "p99_ns": 745.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 2813787.105481211,
+                "p99_ns": 725.0
+              },
+              {
+                "ops_per_sec": 2831549.011879595,
+                "p99_ns": 745.0
+              },
+              {
+                "ops_per_sec": 2875136.173094393,
+                "p99_ns": 765.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.0068964967167529,
+            "p99_ns": 1.0
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "cold_next": {
+          "baseline": {
+            "ops_per_sec": 2701040.525619452,
+            "p99_ns": 730.0
+          },
+          "candidate": {
+            "ops_per_sec": 2881753.1383158863,
+            "p99_ns": 680.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 2701040.525619452,
+                "p99_ns": 730.0
+              },
+              {
+                "ops_per_sec": 2766114.189003332,
+                "p99_ns": 700.0
+              },
+              {
+                "ops_per_sec": 2649474.8332281862,
+                "p99_ns": 740.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 2842788.0167884985,
+                "p99_ns": 680.0
+              },
+              {
+                "ops_per_sec": 2881753.1383158863,
+                "p99_ns": 695.0
+              },
+              {
+                "ops_per_sec": 2911073.810577222,
+                "p99_ns": 670.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.0669048135273684,
+            "p99_ns": 0.9315068493150684
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "maps_dropped": {
+          "baseline": {
+            "ops_per_sec": 94.52260901981032,
+            "p99_ns": 10584063.0
+          },
+          "candidate": {
+            "ops_per_sec": 94.03065558987825,
+            "p99_ns": 10641407.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 94.19044462706033,
+                "p99_ns": 10620927.0
+              },
+              {
+                "ops_per_sec": 94.52260901981032,
+                "p99_ns": 10584063.0
+              },
+              {
+                "ops_per_sec": 95.66836707756295,
+                "p99_ns": 10465279.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 94.11712161770441,
+                "p99_ns": 10629119.0
+              },
+              {
+                "ops_per_sec": 94.03065558987825,
+                "p99_ns": 10641407.0
+              },
+              {
+                "ops_per_sec": 92.80914991959634,
+                "p99_ns": 10776575.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 0.9947953887960397,
+            "p99_ns": 1.0054179571682444
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "quiescent_deleted": {
+          "baseline": {
+            "ops_per_sec": 1209207.4592074594,
+            "p99_ns": 830.0
+          },
+          "candidate": {
+            "ops_per_sec": 1212165.7361151925,
+            "p99_ns": 825.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 1105442.1768707484,
+                "p99_ns": 910.0
+              },
+              {
+                "ops_per_sec": 1209207.4592074594,
+                "p99_ns": 830.0
+              },
+              {
+                "ops_per_sec": 1260304.375396322,
+                "p99_ns": 795.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 1360294.1176470588,
+                "p99_ns": 740.0
+              },
+              {
+                "ops_per_sec": 1212165.7361151925,
+                "p99_ns": 825.0
+              },
+              {
+                "ops_per_sec": 1177122.2822323777,
+                "p99_ns": 850.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.002446459360805,
+            "p99_ns": 0.9939759036144579
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "warm_same": {
+          "baseline": {
+            "ops_per_sec": 8526447.452033397,
+            "p99_ns": 110.0
+          },
+          "candidate": {
+            "ops_per_sec": 8580995.166656971,
+            "p99_ns": 110.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 8510490.797427597,
+                "p99_ns": 110.0
+              },
+              {
+                "ops_per_sec": 8651497.334333297,
+                "p99_ns": 110.0
+              },
+              {
+                "ops_per_sec": 8526447.452033397,
+                "p99_ns": 110.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 8671246.01329633,
+                "p99_ns": 110.0
+              },
+              {
+                "ops_per_sec": 8580995.166656971,
+                "p99_ns": 110.0
+              },
+              {
+                "ops_per_sec": 8574436.626283145,
+                "p99_ns": 110.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.0063974726790306,
+            "p99_ns": 1.0
+          },
+          "screens": {
+            "tail": true,
+            "throughput": true
+          }
+        }
+      }
+    },
+    {
+      "cohort": "eight-reader-first-owned",
+      "pss": {
+        "borrowed_loaded": {
+          "baseline_KiB": 1883.0,
+          "baseline_bytes": 1928192.0,
+          "candidate_KiB": 1855.0,
+          "candidate_bytes": 1899520.0,
+          "candidate_over_baseline": 0.9851301115241635,
+          "screen": null
+        },
+        "cold_first": {
+          "baseline_KiB": 1883.0,
+          "baseline_bytes": 1928192.0,
+          "candidate_KiB": 1869.0,
+          "candidate_bytes": 1913856.0,
+          "candidate_over_baseline": 0.9925650557620818,
+          "screen": true
+        },
+        "maps_dropped": {
+          "baseline_KiB": 1883.0,
+          "baseline_bytes": 1928192.0,
+          "candidate_KiB": 1871.0,
+          "candidate_bytes": 1915904.0,
+          "candidate_over_baseline": 0.9936271906532129,
+          "screen": true
+        },
+        "quiescent_deleted": {
+          "baseline_KiB": 1883.0,
+          "baseline_bytes": 1928192.0,
+          "candidate_KiB": 1869.0,
+          "candidate_bytes": 1913856.0,
+          "candidate_over_baseline": 0.9925650557620818,
+          "screen": true
+        }
+      },
+      "timing": {
+        "cold_first": {
+          "baseline": {
+            "ops_per_sec": 931844.2609921548,
+            "p99_ns": 10135.0
+          },
+          "candidate": {
+            "ops_per_sec": 2137021.909360538,
+            "p99_ns": 1465.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 1103639.3628546682,
+                "p99_ns": 9591.0
+              },
+              {
+                "ops_per_sec": 881456.3735827982,
+                "p99_ns": 10363.0
+              },
+              {
+                "ops_per_sec": 931844.2609921548,
+                "p99_ns": 10135.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 2187774.7950331494,
+                "p99_ns": 1360.0
+              },
+              {
+                "ops_per_sec": 2046272.435026233,
+                "p99_ns": 1625.0
+              },
+              {
+                "ops_per_sec": 2137021.909360538,
+                "p99_ns": 1465.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 2.293325181919567,
+            "p99_ns": 0.14454859398125308
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "cold_next": {
+          "baseline": {},
+          "candidate": {},
+          "per_round": {
+            "baseline": [
+              {},
+              {},
+              {}
+            ],
+            "candidate": [
+              {},
+              {},
+              {}
+            ]
+          },
+          "ratios": {},
+          "screens": {}
+        },
+        "maps_dropped": {
+          "baseline": {
+            "ops_per_sec": 2805971.067074577,
+            "p99_ns": 2660.5
+          },
+          "candidate": {
+            "ops_per_sec": 2491596.9158715485,
+            "p99_ns": 4021.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 2846568.6675769803,
+                "p99_ns": 1610.0
+              },
+              {
+                "ops_per_sec": 2695616.945912175,
+                "p99_ns": 3867.0
+              },
+              {
+                "ops_per_sec": 2805971.067074577,
+                "p99_ns": 2660.5
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 2491596.9158715485,
+                "p99_ns": 4021.0
+              },
+              {
+                "ops_per_sec": 2384711.5350519484,
+                "p99_ns": 4451.0
+              },
+              {
+                "ops_per_sec": 2869564.654554992,
+                "p99_ns": 2805.5
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 0.8879624402076299,
+            "p99_ns": 1.5113700432249577
+          },
+          "screens": {
+            "tail": false
+          }
+        },
+        "quiescent_deleted": {
+          "baseline": {
+            "ops_per_sec": 2412782.7017983347,
+            "p99_ns": 2511.0
+          },
+          "candidate": {
+            "ops_per_sec": 2332555.133139441,
+            "p99_ns": 2466.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 2001395.5415298557,
+                "p99_ns": 2896.0
+              },
+              {
+                "ops_per_sec": 2412782.7017983347,
+                "p99_ns": 2511.0
+              },
+              {
+                "ops_per_sec": 2476696.1784397336,
+                "p99_ns": 2361.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 2346680.141127674,
+                "p99_ns": 2466.0
+              },
+              {
+                "ops_per_sec": 1927115.679020244,
+                "p99_ns": 5521.0
+              },
+              {
+                "ops_per_sec": 2332555.133139441,
+                "p99_ns": 2391.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 0.9667489456886866,
+            "p99_ns": 0.982078853046595
+          },
+          "screens": {
+            "tail": true
+          }
+        },
+        "warm_same": {
+          "baseline": {
+            "ops_per_sec": 10684414.912989464,
+            "p99_ns": 70.0
+          },
+          "candidate": {
+            "ops_per_sec": 10787282.256370887,
+            "p99_ns": 60.0
+          },
+          "per_round": {
+            "baseline": [
+              {
+                "ops_per_sec": 10595261.403052768,
+                "p99_ns": 70.0
+              },
+              {
+                "ops_per_sec": 10684414.912989464,
+                "p99_ns": 70.0
+              },
+              {
+                "ops_per_sec": 10697738.836906139,
+                "p99_ns": 70.0
+              }
+            ],
+            "candidate": [
+              {
+                "ops_per_sec": 10787282.256370887,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 10752189.878477957,
+                "p99_ns": 60.0
+              },
+              {
+                "ops_per_sec": 10795776.89883935,
+                "p99_ns": 60.0
+              }
+            ]
+          },
+          "ratios": {
+            "ops_per_sec": 1.00962779377431,
+            "p99_ns": 0.8571428571428571
+          },
+          "screens": {
+            "tail": true,
+            "throughput": true
+          }
+        }
+      }
+    }
+  ],
+  "ratio_meaning": "candidate / baseline; below 1 uses less process PSS for the same workload",
+  "schema_version": 1,
+  "screen_count": 42,
+  "source_bindings": {
+    "baseline": {
+      "binary_sha256": "c85f88edcb54769a636d684f3319a3b1186af3b2a2eaf19680a25a8d9a4b93a8",
+      "build_source_sha": "93b81ce0496fd64f862a75cd30fb67868c4e0b40",
+      "build_source_tree": "b80f51138e240068f11352a7ca740b5d858da73f",
+      "harness_sha": "7c043354e0ca02538e5701033f7f08d3cd3dbc02",
+      "product_source_sha": "78c83addff5f140236f9a659ff1e332bb9c35522",
+      "product_source_tree": "3b148db21708d2be93c23280eb9d2455a5b5d407"
+    },
+    "candidate": {
+      "binary_sha256": "9bc663cb6f87550b660c3a12d2e01719880bb18cc1539c7555cd1527eb06ef31",
+      "build_source_sha": "444513e1d4bb342eab6a6ab6341e0c0609cb0bc1",
+      "build_source_tree": "e9c1ad58afc939dea80e862a3974d6366da6ae50",
+      "harness_sha": "444513e1d4bb342eab6a6ab6341e0c0609cb0bc1",
+      "product_source_sha": "23bf7cc0f955d1307634d500738b834f7076460b",
+      "product_source_tree": "e769a928b41f45d619faeea39d721e44dbeceb0c"
+    }
+  }
+}

@@ -15,6 +15,11 @@ impl FlatMap {
         key: &[u8],
         now_ms: u64,
     ) -> Option<SharedBytes> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if let Some(value) = self.compact_points.get_shared(hash, key).cloned() {
+            self.delete_compact_point(hash, key, DeleteReason::Explicit);
+            return Some(value);
+        }
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         let Some(entry) = self
@@ -59,6 +64,10 @@ impl FlatMap {
         _now_ms: u64,
         #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))] reason: DeleteReason,
     ) -> bool {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.delete_compact_point(hash, key, reason) {
+            return true;
+        }
         self.disable_fast_point_map();
         self.reclaim_retired_if_quiescent();
         let Some(entry) = self
@@ -92,6 +101,10 @@ impl FlatMap {
         _now_ms: u64,
         #[cfg_attr(not(feature = "telemetry"), allow(unused_variables))] reason: DeleteReason,
     ) -> bool {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.delete_compact_point(hash, key, reason) {
+            return true;
+        }
         self.disable_fast_point_map();
         let Some(entry) = self
             .entries
@@ -134,6 +147,29 @@ impl FlatMap {
         let Some(object_overflow) = self.object_overflow.clone() else {
             return ObjectOffloadAttempt::NotEligible;
         };
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if let Some(value) = self.compact_points.get(hash, key) {
+            if !object_overflow.should_offload(value.len()) {
+                return ObjectOffloadAttempt::NotEligible;
+            }
+            let access = self
+                .compact_points
+                .entry_access(hash, key)
+                .expect("compact entry found above");
+            if !object_overflow.should_offload_cold_entry(
+                value.len(),
+                access.last_touch,
+                access.frequency,
+                self.access_clock,
+            ) {
+                self.object_overflow_stats.offload_hot_skips = self
+                    .object_overflow_stats
+                    .offload_hot_skips
+                    .saturating_add(1);
+                return ObjectOffloadAttempt::HotRetainResident;
+            }
+            self.prepare_general_key(hash, key);
+        }
         let Some(entry_ref) = self
             .entries
             .find(local_table_hash(hash), |entry| entry.matches(hash, key))
@@ -448,6 +484,10 @@ impl FlatMap {
     }
 
     pub fn ttl_seconds(&mut self, key: &[u8], now_ms: u64) -> i64 {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.get(hash_key(key), key).is_some() {
+            return -1;
+        }
         self.disable_fast_point_map();
         let hash = hash_key(key);
         let Some(entry) = self
@@ -467,6 +507,10 @@ impl FlatMap {
     }
 
     pub fn ttl_millis(&mut self, key: &[u8], now_ms: u64) -> i64 {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.get(hash_key(key), key).is_some() {
+            return -1;
+        }
         self.disable_fast_point_map();
         let hash = hash_key(key);
         let Some(entry) = self
@@ -506,6 +550,10 @@ impl FlatMap {
     }
 
     pub fn persist(&mut self, key: &[u8], now_ms: u64) -> bool {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.get(hash_key(key), key).is_some() {
+            return false;
+        }
         self.disable_fast_point_map();
         let hash = hash_key(key);
         if self.entry_is_expired_hashed(hash, key, now_ms) {
@@ -542,6 +590,7 @@ impl FlatMap {
     pub fn expire(&mut self, key: &[u8], expire_at_ms: u64, now_ms: u64) -> bool {
         self.disable_fast_point_map();
         let hash = hash_key(key);
+        self.prepare_general_key(hash, key);
         if self.entry_is_expired_hashed(hash, key, now_ms) {
             self.delete_hashed(hash, key, now_ms);
             return false;
@@ -581,6 +630,25 @@ impl FlatMap {
     ) -> crate::Result<Vec<Bytes>> {
         let mut keys = Vec::new();
         let mut retained_bytes = 0usize;
+        #[cfg(feature = "experimental-compact-point-storage")]
+        for (index, key) in self.compact_points.keys().enumerate() {
+            if index % 256 == 0 && deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Err(ShardCacheError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "snapshot key capture deadline exceeded",
+                )));
+            }
+            retained_bytes = retained_bytes
+                .checked_add(std::mem::size_of::<Bytes>())
+                .and_then(|n| n.checked_add(key.len()))
+                .filter(|n| *n <= max_retained_bytes)
+                .ok_or_else(|| {
+                    ShardCacheError::Persistence(format!(
+                        "snapshot key index exceeds retained-byte limit {max_retained_bytes}"
+                    ))
+                })?;
+            keys.push(key.to_vec());
+        }
         for (index, entry) in self.entries.iter().enumerate() {
             if index % 256 == 0
                 && deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
@@ -640,7 +708,20 @@ impl FlatMap {
         let mut consumed = 0usize;
         for key in &keys[start..] {
             let hash = hash_key(key);
-            let source = if let Some(entry) = self.entries.find(local_table_hash(hash), |entry| {
+            #[cfg(feature = "experimental-compact-point-storage")]
+            let compact_source = self.compact_points.get(hash, key).map(|value| {
+                SnapshotEntrySource::Resident(StoredEntry {
+                    key: key.to_vec(),
+                    value: value.to_vec(),
+                    expire_at_ms: None,
+                    governance: None,
+                })
+            });
+            #[cfg(not(feature = "experimental-compact-point-storage"))]
+            let compact_source: Option<SnapshotEntrySource> = None;
+            let source = if compact_source.is_some() {
+                compact_source
+            } else if let Some(entry) = self.entries.find(local_table_hash(hash), |entry| {
                 entry.matches(hash, key) && !entry.is_expired(now_ms)
             }) {
                 Some(SnapshotEntrySource::Resident(StoredEntry {
@@ -705,6 +786,8 @@ impl FlatMap {
                 governance: entry.governance.as_deref().map(<[u8]>::to_vec),
             })
             .collect::<Vec<_>>();
+        #[cfg(feature = "experimental-compact-point-storage")]
+        entries.extend(self.compact_points.snapshot_entries());
         for entry in self
             .remote_entries
             .values()
@@ -731,7 +814,8 @@ impl FlatMap {
         if self.fast_points.is_active() {
             return self.fast_points.snapshot_keys();
         }
-        self.entries
+        let keys = self
+            .entries
             .iter()
             .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
             .map(|entry| entry.key.as_ref().to_vec())
@@ -741,7 +825,14 @@ impl FlatMap {
                     .filter(|entry| !entry.is_expired(now_ms) && !entry.is_protected())
                     .map(|entry| entry.key.as_ref().to_vec()),
             )
-            .collect()
+            .collect::<Vec<_>>();
+        #[cfg(feature = "experimental-compact-point-storage")]
+        let keys = {
+            let mut keys = keys;
+            keys.extend(self.compact_points.keys().map(<[u8]>::to_vec));
+            keys
+        };
+        keys
     }
 
     #[cfg(feature = "redis")]
@@ -761,23 +852,42 @@ impl FlatMap {
                 .scan_keys_visit(offset, limit, visited, emitted, visit);
         }
 
-        for (index, entry) in self.entries.iter().enumerate().skip(offset) {
-            let next_offset = index + 1;
-            if entry.is_expired(now_ms) || entry.is_protected() {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        let compact_keys = self.compact_points.keys().map(|key| Some(key));
+        #[cfg(not(feature = "experimental-compact-point-storage"))]
+        let compact_keys = std::iter::empty::<Option<&[u8]>>();
+        let general_keys = self.entries.iter().map(|entry| {
+            (!entry.is_expired(now_ms) && !entry.is_protected()).then_some(entry.key.as_ref())
+        });
+        let remote_keys = self.remote_entries.values().map(|entry| {
+            (!entry.is_expired(now_ms) && !entry.is_protected()).then_some(entry.key.as_ref())
+        });
+        for (index, key) in compact_keys
+            .chain(general_keys)
+            .chain(remote_keys)
+            .enumerate()
+            .skip(offset)
+        {
+            let Some(key) = key else {
                 continue;
-            }
+            };
             *visited = visited.saturating_add(1);
-            if visit(entry.key.as_ref()) {
+            if visit(key) {
                 *emitted = emitted.saturating_add(1);
             }
             if *visited >= limit {
-                return Some(next_offset);
+                return Some(index + 1);
             }
         }
         None
     }
 
     pub(crate) fn visit_keys(&self, now_ms: u64, visit: &mut impl FnMut(&[u8]) -> bool) -> bool {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if !self.compact_points.keys().all(&mut *visit) {
+            return false;
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return self.fast_points.visit_keys(visit);
@@ -809,6 +919,11 @@ impl FlatMap {
         now_ms: u64,
         visit: &mut impl FnMut(&[u8], &[u8], Option<u64>) -> bool,
     ) -> crate::Result<bool> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if !self.compact_points.visit_entries(visit) {
+            return Ok(false);
+        }
+
         #[cfg(feature = "experimental-no-ttl-point-hot-path")]
         if self.fast_points.is_active() {
             return Ok(self.fast_points.visit_entries(visit));
