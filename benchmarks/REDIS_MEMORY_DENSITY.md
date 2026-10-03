@@ -376,6 +376,19 @@ Exact owned-session cleanup and the complete 421-entry failed-archive manifest
 were independently accepted.
 No follow-up process-memory or performance result is accepted.
 
+The revision-eight caller fixture retest ran seven methods and failed after
+37.532 seconds, with one failure and zero errors or skips. Genuine child and
+independently observed kernel outer exits were both 1. Review confirmed two
+fixture defects: comparing process fields that change while running, and
+repeating cleanup after a record had been removed. The allowed metadata query
+was observed and unauthorized auxiliary actions were refused; no production
+caller defect was confirmed. All 409 copied raw files were verified. Eleven
+composition directories were retained, but later planned probes were not
+reached. Exact owned-session cleanup and the complete 553-file failed archive
+(552 manifest entries) were independently accepted, preserving raw files and
+temporary inputs. The revision-nine fixture repair passed independent static
+review; a fresh seven-method retest remains pending.
+
 The planned [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) has
 30 process cohorts covering cold/concurrent initialization, warm reads, sparse
 memory, drop and reclamation costs. The planned

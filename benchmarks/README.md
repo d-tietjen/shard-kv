@@ -70,7 +70,10 @@ records accepted storage and Redis correctness checks, fresh API validation,
 and source-bound native builds. The revision-seven caller regressions passed.
 Its campaign failed after four baseline cohorts, yielding no accepted candidate
 comparison or follow-up memory/performance result. Its failure evidence archive
-and exact cleanup are accepted. The expanded Redis benchmark remains pending.
+and exact cleanup are accepted. The revision-eight fixture retest failed with
+two confirmed fixture defects. Its failure archive and exact cleanup are
+accepted; the reviewed fixture repair still needs a fresh retest.
+The expanded Redis benchmark remains pending.
 
 For a separate early public `FlatMap` cold/warm owned-read diagnostic, see
 [`COMPACT_SHARED_READ_GATE.md`](COMPACT_SHARED_READ_GATE.md). It defines the
