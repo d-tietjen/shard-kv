@@ -79,7 +79,9 @@ any cohort. Its failure archive and exact cleanup are accepted. The repair
 passed independent static review and installation checks. The revision-ten
 fixture retest failed with a confirmed fixture synchronization race. Its
 failure archive and exact cleanup are accepted. The fixture synchronization
-fix passed independent static review; its fresh retest remains pending.
+fix passed independent static review. The revision-eleven caller regressions
+passed all seven methods, all thirteen compositions and three resource cases.
+The complete evidence archive and exact cleanup are accepted.
 The expanded Redis benchmark remains pending.
 
 For a separate early public `FlatMap` cold/warm owned-read diagnostic, see

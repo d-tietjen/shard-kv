@@ -419,8 +419,19 @@ All 650 copied raw files were verified. Eleven composition directories were
 retained; no completion of all thirteen compositions is credited. Exact
 owned-session cleanup and the complete 844-file failed archive (843 manifest
 entries) were independently accepted, preserving raw files and temporary
-inputs. The fixture synchronization fix passed independent static review;
-its fresh retest remains pending. No new memory/performance result is accepted.
+inputs. The fixture synchronization fix passed independent static review.
+
+The revision-eleven caller regression suite passed all seven methods with zero
+failures, errors or skips. Independent review accepted all thirteen
+compositions and three resource cases, including the new start-before-fork
+synchronization checks. The producer genuinely reaped its child with exit 0
+after 44.726 seconds. All 571 copied raw files were verified, and temporary
+inputs were absent. The observed wrapper exit was 0; the direct kernel capture
+missed the exited process and receives no credit. An initial cleanup guard was
+held before execution and corrected; only the reviewed correction was used.
+Exact owned-session cleanup and the complete 791-file evidence archive
+(790 manifest entries) were independently accepted. No new memory/performance
+result is accepted.
 
 The planned [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) has
 30 process cohorts covering cold/concurrent initialization, warm reads, sparse
