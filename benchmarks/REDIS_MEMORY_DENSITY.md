@@ -358,13 +358,23 @@ Revision six failed before completing the seven planned methods. Its complete
 218-file failed archive and exact cleanup were independently accepted, with all
 179 raw files and temporary inputs retained.
 
-Revision seven passed all seven methods with zero failures, errors or skips in
-43.462 seconds. Independent review accepted all thirteen compositions and three
-resource cases, the actual source and limits, genuine child exit of 0 and
-observed wrapper exit of 0. Its complete 502-file evidence archive and exact
-owned cleanup were accepted, preserving all 428 raw files. The direct kernel
-capture missed the exited process and receives no credit. No follow-up
-process-memory or performance result is accepted.
+The revision-seven caller regression suite passed all seven methods with zero
+failures, errors or skips in 43.462 seconds. Independent review accepted all
+thirteen compositions and three resource cases, the actual source and limits,
+genuine child exit of 0 and observed wrapper exit of 0. Its complete 502-file
+evidence archive and exact owned cleanup were accepted, preserving all 428 raw
+files. The fixture's direct kernel capture missed the exited process and
+receives no credit.
+
+The subsequent revision-seven campaign failed after 278.238 seconds, retaining
+four completed baseline cohorts (`r1-b-1` through `r1-b-4`). No candidate
+comparison, campaign summary or screen is accepted. The caller rejected a
+legitimate read-only status query issued by the verified controller's child.
+The original error was retained before cleanup; genuine child and independently
+observed kernel outer exits were both 1. All 266 copied raw files were verified.
+Exact owned-session cleanup and the complete 421-entry failed-archive manifest
+were independently accepted.
+No follow-up process-memory or performance result is accepted.
 
 The planned [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) has
 30 process cohorts covering cold/concurrent initialization, warm reads, sparse

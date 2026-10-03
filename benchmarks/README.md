@@ -67,10 +67,10 @@ retains source and input hashes.
 
 The [follow-up candidate status](REDIS_MEMORY_DENSITY.md#2026-10-02-follow-up-candidate-correctness-and-measurement-status)
 records accepted storage and Redis correctness checks, fresh API validation,
-and source-bound native builds. The shared-read campaign failed before its first
-cohort. Revision seven's caller tests, complete evidence and exact cleanup are
-accepted. A campaign retry and the expanded Redis benchmark remain pending;
-no follow-up memory or performance result is accepted.
+and source-bound native builds. The revision-seven caller regressions passed.
+Its campaign failed after four baseline cohorts, yielding no accepted candidate
+comparison or follow-up memory/performance result. Its failure evidence archive
+and exact cleanup are accepted. The expanded Redis benchmark remains pending.
 
 For a separate early public `FlatMap` cold/warm owned-read diagnostic, see
 [`COMPACT_SHARED_READ_GATE.md`](COMPACT_SHARED_READ_GATE.md). It defines the
