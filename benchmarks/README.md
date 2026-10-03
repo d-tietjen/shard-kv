@@ -72,8 +72,9 @@ Its campaign failed after four baseline cohorts, yielding no accepted candidate
 comparison or follow-up memory/performance result. Its failure evidence archive
 and exact cleanup are accepted. The revision-eight fixture retest failed with
 two confirmed fixture defects. Its failure archive and exact cleanup are
-accepted; the reviewed fixture repair still needs a fresh retest.
-The expanded Redis benchmark remains pending.
+accepted. The revision-nine caller regressions, complete evidence archive
+and exact cleanup are accepted. A shared-read campaign retry and the expanded
+Redis benchmark remain pending.
 
 For a separate early public `FlatMap` cold/warm owned-read diagnostic, see
 [`COMPACT_SHARED_READ_GATE.md`](COMPACT_SHARED_READ_GATE.md). It defines the

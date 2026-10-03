@@ -386,8 +386,18 @@ caller defect was confirmed. All 409 copied raw files were verified. Eleven
 composition directories were retained, but later planned probes were not
 reached. Exact owned-session cleanup and the complete 553-file failed archive
 (552 manifest entries) were independently accepted, preserving raw files and
-temporary inputs. The revision-nine fixture repair passed independent static
-review; a fresh seven-method retest remains pending.
+temporary inputs.
+
+The revision-nine caller regression suite passed all seven methods with zero
+failures, errors or skips. Independent review accepted all thirteen
+compositions and three resource cases, including allowed metadata queries,
+refusal of unauthorized actions and prevention of incomplete fixture probe
+reentry during cleanup.
+The producer genuinely reaped its child with exit 0 after 44.132 seconds. All
+491 raw files were verified. The observed wrapper exit was 0; the direct
+kernel capture missed the exited process and receives no credit. Exact
+owned-session cleanup and the complete 661-file evidence archive (660 manifest
+entries) were independently accepted.
 
 The planned [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) has
 30 process cohorts covering cold/concurrent initialization, warm reads, sparse
