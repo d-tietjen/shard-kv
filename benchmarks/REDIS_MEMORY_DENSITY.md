@@ -407,8 +407,20 @@ Genuine child and independently observed kernel outer exits were both 1.
 All 18 copied raw files were verified. No candidate comparison or new
 memory/performance result is accepted. Exact owned-session cleanup and the
 complete 221-file failed archive (220 manifest entries) were independently
-accepted. A repair to working directory validation passed independent static
-review; its fresh regression retest remains pending.
+accepted. The repair to working directory validation passed independent
+static review and installation checks.
+
+The revision-ten caller fixture retest ran seven methods and failed after
+38.482 seconds, with one failure and zero errors or skips. Genuine child and
+independently observed kernel outer exits were both 1. Independent review
+confirmed a synchronization race in the fixture: an earlier probe had correctly
+observed the next child before exec. No helper policy defect was confirmed.
+All 650 copied raw files were verified. Eleven composition directories were
+retained; no completion of all thirteen compositions is credited. Exact
+owned-session cleanup and the complete 844-file failed archive (843 manifest
+entries) were independently accepted, preserving raw files and temporary
+inputs. The fixture synchronization fix passed independent static review;
+its fresh retest remains pending. No new memory/performance result is accepted.
 
 The planned [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) has
 30 process cohorts covering cold/concurrent initialization, warm reads, sparse

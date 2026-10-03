@@ -76,7 +76,10 @@ accepted. The revision-nine caller regressions, complete evidence archive
 and exact cleanup are accepted. The subsequent campaign retry failed during
 startup when the caller rejected a legitimate worktree status query, before
 any cohort. Its failure archive and exact cleanup are accepted. The repair
-passed independent static review and still needs a fresh regression retest.
+passed independent static review and installation checks. The revision-ten
+fixture retest failed with a confirmed fixture synchronization race. Its
+failure archive and exact cleanup are accepted. The fixture synchronization
+fix passed independent static review; its fresh retest remains pending.
 The expanded Redis benchmark remains pending.
 
 For a separate early public `FlatMap` cold/warm owned-read diagnostic, see
