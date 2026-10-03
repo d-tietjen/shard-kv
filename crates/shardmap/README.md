@@ -593,15 +593,7 @@ size classes. Fixed list heads track available chunks without separate class
 allocations. Workloads with many distinct lengths can retain more partially
 filled chunks. Small RESP GET responses encode those slices directly;
 explicit shared/owned `Bytes` reads lazily copy
-one owner per value version. The safe pointer-sized `OnceBox` cache is expected
-to reduce the 64-bit entry descriptor to 24 bytes while keeping the chunk
-descriptor at 24 bytes, the map at 816 bytes, and the existing payload classes.
-Concurrent first reads can temporarily
-copy one bounded value per competing caller; all receive the same winning
-owner, and losing owners are dropped before return. Borrowed reads allocate no
-shared owner, and no per-chunk owner array is created. Cold/concurrent and warm
-read performance require separate measurements. Supplied `Bytes` buffers
-without unique ownership
+one owner per value version. Supplied `Bytes` buffers without unique ownership
 use general storage; raw `value_mut_no_ttl` access rejects outstanding owned
 aliases in either layout. Deletes and length changes reuse records, and
 TTL/governance/semantic/overflow metadata migrates only the affected key into

@@ -171,7 +171,6 @@ impl FlatMap {
                 vacant.insert(FlatEntry {
                     hash,
                     key_tag,
-                    key_len,
                     key: key.to_vec().into_boxed_slice(),
                     value: stored_value,
                     expire_at_ms: None,

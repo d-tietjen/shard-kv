@@ -2517,7 +2517,6 @@ dependencies = [
  "memchr",
  "monoio",
  "object_store",
- "once_cell",
  "parking_lot",
  "rblock",
  "rcgen",

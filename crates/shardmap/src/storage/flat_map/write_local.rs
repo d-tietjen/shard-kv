@@ -67,7 +67,6 @@ impl FlatMap {
                 vacant.insert(FlatEntry {
                     hash,
                     key_tag: hash_key_tag_from_hash(hash),
-                    key_len,
                     key: key.into_boxed_slice(),
                     value: replacement.take().unwrap(),
                     expire_at_ms,
@@ -274,7 +273,6 @@ impl FlatMap {
                 vacant.insert(FlatEntry {
                     hash,
                     key_tag,
-                    key_len,
                     key: key.to_vec().into_boxed_slice(),
                     value: stored_value,
                     expire_at_ms: None,
@@ -412,7 +410,6 @@ impl FlatMap {
                 vacant.insert(FlatEntry {
                     hash,
                     key_tag,
-                    key_len,
                     key: key.to_vec().into_boxed_slice(),
                     value: shared_bytes_from_slice(value),
                     expire_at_ms,

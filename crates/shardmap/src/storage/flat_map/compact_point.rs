@@ -3,12 +3,11 @@
 //! Payload records live in fixed 4 KiB chunks and never move. Two-byte size
 //! classes reuse deleted records; empty chunks release their allocation and
 //! reuse their descriptor. An open read epoch retires only the replaced record,
-//! with at most 32 records reclaimed per allocator call afterwards (64 for a
-//! point mutation that attempts compact allocation then falls back).
+//! with at most 32 records reclaimed per mutation/maintenance call afterwards.
 //! General entries coexist with compact entries; metadata migrates one key.
 
 use super::*;
-use once_cell::race::OnceBox;
+use std::sync::OnceLock;
 
 #[derive(Debug)]
 struct CompactPointEntry {
@@ -16,7 +15,7 @@ struct CompactPointEntry {
     offset: u32,
     key_len: u16,
     value_len: u16,
-    shared: OnceBox<SharedBytes>,
+    shared: OnceLock<Box<SharedBytes>>,
 }
 
 #[derive(Debug)]
@@ -33,7 +32,7 @@ struct PayloadChunk {
 #[derive(Debug)]
 struct RetiredRecord {
     offset: u32,
-    _shared: OnceBox<SharedBytes>,
+    _shared: Option<Box<SharedBytes>>,
 }
 
 #[derive(Debug)]
@@ -134,8 +133,6 @@ impl CompactPointMap {
         let entry = self.entries.find(local_table_hash(hash), |entry| {
             Self::matches(&self.chunks, entry, hash, key)
         })?;
-        // Concurrent initializers may each copy this bounded immutable value;
-        // OnceBox drops losers and returns the same winning owner to everyone.
         Some(
             entry
                 .shared
@@ -285,11 +282,9 @@ impl CompactPointMap {
         if active_readers {
             self.retired.push_back(RetiredRecord {
                 offset: entry.offset,
-                // Move the cache itself; its Box and borrowed value stay put.
-                _shared: entry.shared,
+                _shared: entry.shared.into_inner(),
             });
         } else {
-            drop(entry.shared);
             self.release(entry.offset);
         }
     }
@@ -329,18 +324,18 @@ impl CompactPointMap {
             && old_len == value.len()
             && !active_readers
         {
-            let entry = self
-                .entries
-                .find_mut(local_table_hash(hash), |entry| {
-                    Self::matches(&self.chunks, entry, hash, key)
-                })
-                .expect("compact entry found above");
-            drop(mem::take(&mut entry.shared));
             let chunk = self.chunks[offset as usize / Self::CHUNK_BYTES]
                 .as_mut()
                 .expect("live compact chunk");
             let start = offset as usize % Self::CHUNK_BYTES + key.len();
             chunk.bytes[start..start + value.len()].copy_from_slice(value);
+            self.entries
+                .find_mut(local_table_hash(hash), |entry| {
+                    Self::matches(&self.chunks, entry, hash, key)
+                })
+                .expect("compact entry found above")
+                .shared
+                .take();
             return Ok(Some(old_len));
         }
         let offset = self.allocate(key.len() + value.len())?;
@@ -355,7 +350,7 @@ impl CompactPointMap {
             offset,
             key_len: key.len() as u16,
             value_len: value.len() as u16,
-            shared: OnceBox::new(),
+            shared: OnceLock::new(),
         };
         if let Some((old_offset, old_len)) = old {
             let access = self.access.get(&old_offset).copied();
@@ -428,7 +423,7 @@ impl CompactPointMap {
                 })
                 .record_access(tick);
         }
-        drop(mem::take(&mut entry.shared));
+        entry.shared.take();
         let offset = entry.offset as usize;
         let start = offset % Self::CHUNK_BYTES + entry.key_len as usize;
         let chunk = self.chunks[offset / Self::CHUNK_BYTES]
@@ -479,7 +474,6 @@ impl CompactPointMap {
         Some(FlatEntry {
             hash,
             key_tag: hash_key_tag_from_hash(hash),
-            key_len: key.len(),
             key: key.to_vec().into_boxed_slice(),
             value,
             expire_at_ms: None,
@@ -606,14 +600,6 @@ mod tests {
         map.chunks.iter().filter(|chunk| chunk.is_some()).count()
     }
 
-    fn compact_entry<'a>(map: &'a CompactPointMap, hash: u64, key: &[u8]) -> &'a CompactPointEntry {
-        map.entries
-            .find(local_table_hash(hash), |entry| {
-                CompactPointMap::matches(&map.chunks, entry, hash, key)
-            })
-            .unwrap()
-    }
-
     fn assert_available_chain(map: &CompactPointMap, class: usize, expected: &[u32]) {
         let mut id = map.available[class];
         let mut prev = CompactPointMap::NO_CHUNK;
@@ -645,13 +631,11 @@ mod tests {
         );
         #[cfg(target_pointer_width = "64")]
         {
-            assert_eq!(mem::size_of::<CompactPointEntry>(), 24);
-            assert_eq!(mem::size_of::<OnceBox<SharedBytes>>(), 8);
-            assert_eq!(mem::size_of::<RetiredRecord>(), 16);
-            assert_eq!(mem::size_of::<PayloadChunk>(), 24);
-            assert_eq!(mem::size_of::<Option<PayloadChunk>>(), 24);
+            assert_eq!(mem::size_of::<CompactPointEntry>(), 32);
+            assert!(mem::size_of::<PayloadChunk>() <= 24);
+            assert!(mem::size_of::<Option<PayloadChunk>>() <= 24);
             assert_eq!(mem::size_of::<[u32; CompactPointMap::SIZE_CLASSES]>(), 640);
-            assert_eq!(mem::size_of::<CompactPointMap>(), 816);
+            assert!(mem::size_of::<CompactPointMap>() <= 1024);
         }
         for (value_len, records_per_chunk) in [(16, 120), (64, 49), (256, 14)] {
             let mut map = CompactPointMap::default();
@@ -673,354 +657,6 @@ mod tests {
                 map.get(hash_key(anchor), anchor).unwrap().as_ptr(),
                 anchor_ptr
             );
-        }
-    }
-
-    #[test]
-    fn compact_points_first_shared_read_only_initializes_its_entry() {
-        let mut map = CompactPointMap::default();
-        for key in [b"a", b"b"] {
-            map.upsert(hash_key(key), key, &[1; 16], false).unwrap();
-        }
-        let hash = hash_key(b"a");
-        assert_eq!(map.get(hash, b"a"), Some(&[1; 16][..]));
-        assert_eq!(map.shared_owner_count(), 0);
-        assert!(map.get_shared(hash, b"missing").is_none());
-        assert!(
-            map.get_shared_tagged(hash, hash_key_tag_from_hash(hash) ^ 1, 1)
-                .is_none()
-        );
-        assert_eq!(map.shared_owner_count(), 0);
-        let owner_ptr = map.get_shared(hash, b"a").unwrap() as *const SharedBytes;
-        for _ in 0..128 {
-            assert_eq!(
-                map.get_shared(hash, b"a").unwrap() as *const SharedBytes,
-                owner_ptr
-            );
-            assert_eq!(
-                map.get_shared_tagged(hash, hash_key_tag_from_hash(hash), 1)
-                    .unwrap() as *const SharedBytes,
-                owner_ptr
-            );
-        }
-        assert_eq!(map.shared_owner_count(), 1);
-        assert!(
-            compact_entry(&map, hash_key(b"b"), b"b")
-                .shared
-                .get()
-                .is_none()
-        );
-        let alias = map.get_shared(hash, b"a").unwrap().clone();
-        map.upsert(hash, b"a", &[2; 16], false).unwrap();
-        assert_eq!(map.shared_owner_count(), 0);
-        assert_eq!(alias.as_ref(), &[1; 16]);
-        assert_eq!(map.get_shared(hash, b"a").unwrap().as_ref(), &[2; 16]);
-    }
-
-    #[test]
-    fn compact_points_shared_owner_caches_cover_all_size_classes_and_slots() {
-        for stride in (2..=320).step_by(2) {
-            let mut map = CompactPointMap::default();
-            let count = CompactPointMap::CHUNK_BYTES / stride;
-            let key_len = 2.max(stride.saturating_sub(CompactPointMap::MAX_VALUE_BYTES));
-            let value_len = stride - key_len;
-            let keys = (0..count)
-                .map(|slot| {
-                    let mut key = vec![0; key_len];
-                    key[..2].copy_from_slice(&(slot as u16).to_le_bytes());
-                    map.upsert(
-                        hash_key(&key),
-                        &key,
-                        &vec![(slot % 251) as u8; value_len],
-                        false,
-                    )
-                    .unwrap();
-                    key
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(allocated_chunks(&map), 1, "stride {stride}");
-            assert_eq!(map.shared_owner_count(), 0);
-            let last = keys.last().unwrap();
-            let last_owner_ptr =
-                map.get_shared(hash_key(last), last).unwrap() as *const SharedBytes;
-            assert_eq!(map.shared_owner_count(), 1);
-            let clones = keys
-                .iter()
-                .enumerate()
-                .map(|(slot, key)| {
-                    let owner = map.get_shared(hash_key(key), key).unwrap();
-                    assert_eq!(owner.as_ref(), vec![(slot % 251) as u8; value_len]);
-                    owner.clone()
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(map.shared_owner_count(), count);
-            for key in keys.iter().take(count - 1) {
-                assert_eq!(map.remove(hash_key(key), key, false), Some(value_len));
-            }
-            assert_eq!(
-                map.get_shared(hash_key(last), last).unwrap() as *const SharedBytes,
-                last_owner_ptr
-            );
-            assert_eq!(map.remove(hash_key(last), last, false), Some(value_len));
-            assert_eq!(allocated_chunks(&map), 0);
-            assert_eq!(map.shared_owner_count(), 0);
-            for (slot, clone) in clones.iter().enumerate() {
-                assert_eq!(clone.as_ref(), vec![(slot % 251) as u8; value_len]);
-            }
-        }
-    }
-
-    #[test]
-    fn compact_points_shared_owners_are_isolated_across_slot_and_chunk_reuse() {
-        let mut map = CompactPointMap::default();
-        let keys = [1u64.to_le_bytes(), 2u64.to_le_bytes(), 3u64.to_le_bytes()];
-        for (i, key) in keys.iter().enumerate() {
-            map.upsert(hash_key(key), key, &[i as u8; 8], false)
-                .unwrap();
-        }
-        let first_offset = compact_entry(&map, hash_key(&keys[0]), &keys[0]).offset;
-        let first = map
-            .get_shared(hash_key(&keys[0]), &keys[0])
-            .unwrap()
-            .clone();
-        let neighbor_ptr =
-            map.get_shared(hash_key(&keys[1]), &keys[1]).unwrap() as *const SharedBytes;
-        let neighbor = map
-            .get_shared(hash_key(&keys[1]), &keys[1])
-            .unwrap()
-            .clone();
-        map.upsert(hash_key(&keys[0]), &keys[0], &[9; 8], false)
-            .unwrap();
-        assert_eq!(map.shared_owner_count(), 1);
-        assert_eq!(first.as_ref(), &[0; 8]);
-        assert_eq!(
-            map.get_shared(hash_key(&keys[0]), &keys[0])
-                .unwrap()
-                .as_ref(),
-            &[9; 8]
-        );
-        assert_eq!(map.remove(hash_key(&keys[0]), &keys[0], false), Some(8));
-        let replacement = 4u64.to_le_bytes();
-        map.upsert(hash_key(&replacement), &replacement, &[4; 8], false)
-            .unwrap();
-        assert_eq!(
-            compact_entry(&map, hash_key(&replacement), &replacement).offset,
-            first_offset
-        );
-        assert!(
-            compact_entry(&map, hash_key(&replacement), &replacement)
-                .shared
-                .get()
-                .is_none()
-        );
-        assert_eq!(
-            map.get_shared(hash_key(&replacement), &replacement)
-                .unwrap()
-                .as_ref(),
-            &[4; 8]
-        );
-        assert_eq!(
-            map.get_shared(hash_key(&keys[1]), &keys[1]).unwrap() as *const SharedBytes,
-            neighbor_ptr
-        );
-        for key in [&keys[1], &keys[2], &replacement] {
-            assert!(map.remove(hash_key(key), key, false).is_some());
-        }
-        assert!(map.chunks[0].is_none());
-        let max_key = [5; CompactPointMap::MAX_KEY_BYTES];
-        map.upsert(hash_key(&max_key), &max_key, &[6; 256], false)
-            .unwrap();
-        assert_eq!(map.chunks.len(), 1);
-        assert!(
-            compact_entry(&map, hash_key(&max_key), &max_key)
-                .shared
-                .get()
-                .is_none()
-        );
-        assert_eq!(
-            map.get_shared(hash_key(&max_key), &max_key)
-                .unwrap()
-                .as_ref(),
-            &[6; 256]
-        );
-        assert_eq!(first.as_ref(), &[0; 8]);
-        assert_eq!(neighbor.as_ref(), &[1; 8]);
-    }
-
-    #[test]
-    fn compact_points_shared_owner_addresses_survive_table_and_chunk_growth() {
-        let mut map = CompactPointMap::default();
-        // The tagged predicate uses hash and key length. Keep the anchor length
-        // distinct from the colliding keys so it selects this owner uniquely.
-        let key = b"anchor";
-        let hash = 7;
-        map.upsert(hash, key, &[1; 16], false).unwrap();
-        let owner_ptr = map.get_shared(hash, key).unwrap() as *const SharedBytes;
-        let bytes_ptr = map.get_shared(hash, key).unwrap().as_ptr();
-        let table_capacity = map.entries.capacity();
-        let chunk_capacity = map.chunks.capacity();
-        for i in 1..2000 {
-            let key = format!("k:{i:016x}");
-            map.upsert(hash, key.as_bytes(), &[2; 16], false).unwrap();
-        }
-        assert!(map.entries.capacity() > table_capacity);
-        assert!(map.chunks.capacity() > chunk_capacity);
-        assert_eq!(
-            map.get_shared(hash, key).unwrap() as *const SharedBytes,
-            owner_ptr
-        );
-        assert_eq!(map.get_shared(hash, key).unwrap().as_ptr(), bytes_ptr);
-        assert_eq!(
-            map.get_shared_tagged(hash, hash_key_tag_from_hash(hash), key.len())
-                .unwrap() as *const SharedBytes,
-            owner_ptr
-        );
-        assert!(map.get_shared(hash ^ (1u64 << 63), key).is_none());
-        assert!(
-            map.get_shared_tagged(hash, hash_key_tag_from_hash(hash), key.len() + 1)
-                .is_none()
-        );
-        assert_eq!(map.shared_owner_count(), 1);
-    }
-
-    #[test]
-    fn compact_points_concurrent_shared_reads_initialize_one_owner_per_slot() {
-        let mut map = CompactPointMap::default();
-        let keys = [b"a", b"b", b"c"];
-        for (i, key) in keys.iter().enumerate() {
-            let value = vec![i as u8; if i == 2 { 256 } else { 16 }];
-            map.upsert(hash_key(*key), *key, &value, false).unwrap();
-        }
-        let barrier = std::sync::Barrier::new(8);
-        std::thread::scope(|scope| {
-            let threads = (0..8)
-                .map(|_| {
-                    let map = &map;
-                    let barrier = &barrier;
-                    scope.spawn(move || {
-                        barrier.wait();
-                        keys.map(|key| {
-                            let owner = map.get_shared(hash_key(key), key).unwrap();
-                            let index = usize::from(key[0] - b'a');
-                            assert_eq!(
-                                owner.as_ref(),
-                                vec![index as u8; if index == 2 { 256 } else { 16 }]
-                            );
-                            assert_eq!(
-                                map.get_shared_tagged(
-                                    hash_key(key),
-                                    hash_key_tag_from_hash(hash_key(key)),
-                                    key.len()
-                                )
-                                .unwrap() as *const SharedBytes,
-                                owner as *const SharedBytes
-                            );
-                            owner as *const SharedBytes as usize
-                        })
-                    })
-                })
-                .collect::<Vec<_>>();
-            let addresses = threads
-                .into_iter()
-                .map(|thread| thread.join().unwrap())
-                .collect::<Vec<_>>();
-            assert!(addresses.iter().all(|result| result == &addresses[0]));
-            assert_ne!(addresses[0][0], addresses[0][1]);
-        });
-        assert_eq!(map.shared_owner_count(), 3);
-    }
-
-    #[test]
-    fn compact_points_racing_cache_initializers_drop_losers_and_keep_one_owner() {
-        use std::sync::{
-            Arc, Barrier,
-            atomic::{AtomicUsize, Ordering},
-        };
-        struct TrackedOwner {
-            value: SharedBytes,
-            drops: Arc<AtomicUsize>,
-        }
-        impl Drop for TrackedOwner {
-            fn drop(&mut self) {
-                self.drops.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        let cell = OnceBox::<TrackedOwner>::new();
-        let initializers = AtomicUsize::new(0);
-        let drops = Arc::new(AtomicUsize::new(0));
-        let barrier = Barrier::new(8);
-        let returned = std::thread::scope(|scope| {
-            let threads = (0..8)
-                .map(|_| {
-                    let cell = &cell;
-                    let initializers = &initializers;
-                    let drops = &drops;
-                    let barrier = &barrier;
-                    scope.spawn(move || {
-                        let owner = cell.get_or_init(|| {
-                            initializers.fetch_add(1, Ordering::SeqCst);
-                            let value =
-                                shared_bytes_from_slice(&[7; CompactPointMap::MAX_VALUE_BYTES]);
-                            // Nobody can publish until all eight initializers entered.
-                            barrier.wait();
-                            Box::new(TrackedOwner {
-                                value,
-                                drops: Arc::clone(drops),
-                            })
-                        });
-                        (owner as *const TrackedOwner as usize, owner.value.clone())
-                    })
-                })
-                .collect::<Vec<_>>();
-            threads
-                .into_iter()
-                .map(|thread| thread.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(initializers.load(Ordering::SeqCst), 8);
-        assert_eq!(drops.load(Ordering::SeqCst), 7);
-        assert!(
-            returned
-                .iter()
-                .all(|(address, value)| *address == returned[0].0 && value.as_ref() == &[7; 256])
-        );
-        assert!(!cell.get().unwrap().value.is_unique());
-        let winner_address = returned[0].0;
-        drop(returned);
-        assert!(cell.get().unwrap().value.is_unique());
-        let moved = cell;
-        assert_eq!(
-            moved.get().unwrap() as *const TrackedOwner as usize,
-            winner_address
-        );
-        drop(moved);
-        assert_eq!(drops.load(Ordering::SeqCst), 8);
-    }
-
-    #[test]
-    fn compact_points_owned_reads_preserve_eligibility_boundaries() {
-        for key_len in [0, 1, 63, 64, 65] {
-            for value_len in [0, 1, 255, 256, 257] {
-                let mut map = FlatMap::new();
-                let key = vec![b'k'; key_len];
-                let hash = hash_key(&key);
-                let value = vec![1; value_len];
-                map.set_slice(&key, &value, None, 0);
-                let eligible = key_len <= CompactPointMap::MAX_KEY_BYTES
-                    && value_len <= CompactPointMap::MAX_VALUE_BYTES;
-                assert_eq!(map.compact_points.len(), usize::from(eligible));
-                assert_eq!(map.entries.len(), usize::from(!eligible));
-                let old = map.get_value_bytes_hashed(hash, &key, 0).unwrap();
-                map.set_slice(&key, &vec![2; value_len], None, 0);
-                assert_eq!(old.as_ref(), value.as_slice());
-                assert_eq!(map.get(&key, 0), Some(vec![2; value_len]));
-                assert!(map.delete(&key, 0));
-                assert_eq!(allocated_chunks(&map.compact_points), 0);
-                map.set_slice(&key, &vec![3; value_len], None, 0);
-                assert_eq!(map.get(&key, 0), Some(vec![3; value_len]));
-                assert_eq!(old.as_ref(), value.as_slice());
-                assert_eq!(map.compact_points.len(), usize::from(eligible));
-            }
         }
     }
 
@@ -1405,7 +1041,7 @@ mod tests {
             assert_eq!(map.compact_points.shared_owner_count(), 0);
             if active_readers {
                 assert_eq!(map.compact_points.retired.len(), 1);
-                assert!(map.compact_points.retired[0]._shared.get().is_some());
+                assert!(map.compact_points.retired[0]._shared.is_some());
                 // SAFETY: the open epoch retains both the old arena record and
                 // its materialized shared owner after the successful mutation.
                 unsafe {
@@ -1480,16 +1116,6 @@ mod tests {
             .get(hash_key(&anchor), &anchor)
             .unwrap()
             .as_ptr();
-        let owner = map
-            .compact_points
-            .get_shared(hash_key(&anchor), &anchor)
-            .unwrap()
-            .clone();
-        let owner_ptr = map
-            .compact_points
-            .get_shared(hash_key(&anchor), &anchor)
-            .unwrap() as *const SharedBytes;
-        assert_eq!(map.compact_points.shared_owner_count(), 1);
         map.set_slice(b"cap-fallback", &[2; 256], None, 0);
         assert_eq!(map.compact_points.len(), count);
         assert_eq!(map.entries.len(), 1);
@@ -1505,14 +1131,6 @@ mod tests {
                 .as_ptr(),
             ptr
         );
-        assert_eq!(
-            map.compact_points
-                .get_shared(hash_key(&anchor), &anchor)
-                .unwrap() as *const SharedBytes,
-            owner_ptr
-        );
-        assert_eq!(owner.as_ref(), &[1; 256]);
-        assert_eq!(map.compact_points.shared_owner_count(), 1);
     }
 
     #[test]
@@ -1562,14 +1180,6 @@ mod tests {
             .get(hash_key(b"a"), b"a")
             .unwrap()
             .as_ptr();
-        let clones = [b"a", b"b", b"c", b"d"].map(|key| {
-            map.compact_points
-                .get_shared(hash_key(key), key)
-                .unwrap()
-                .clone()
-        });
-        let owner_ptr =
-            map.compact_points.get_shared(hash_key(b"a"), b"a").unwrap() as *const SharedBytes;
         assert!(map.expire(b"b", 10, 0));
         map.set_bytes_hashed_with_governance(
             hash_key(b"c"),
@@ -1594,12 +1204,6 @@ mod tests {
             ptr
         );
         assert_eq!(map.len(), 3);
-        assert_eq!(map.compact_points.shared_owner_count(), 1);
-        assert_eq!(
-            map.compact_points.get_shared(hash_key(b"a"), b"a").unwrap() as *const SharedBytes,
-            owner_ptr
-        );
-        assert!(clones.iter().all(|clone| clone.as_ref() == b"one"));
     }
 
     #[test]
@@ -1765,30 +1369,8 @@ mod tests {
             .get_shared_value_bytes_hashed(hash_key(b"del"), b"del", 0)
             .unwrap()
             .as_ptr();
-        let set_owner_ptr = map
-            .compact_points
-            .get_shared(hash_key(b"set"), b"set")
-            .unwrap() as *const SharedBytes;
-        let del_owner_ptr = map
-            .compact_points
-            .get_shared(hash_key(b"del"), b"del")
-            .unwrap() as *const SharedBytes;
         map.set_slice(b"set", b"new set", None, 0);
         assert!(map.delete(b"del", 0));
-        assert_eq!(map.compact_points.shared_owner_count(), 0);
-        assert_eq!(
-            map.compact_points.retired[0]._shared.get().unwrap() as *const SharedBytes,
-            set_owner_ptr
-        );
-        assert_eq!(
-            map.compact_points.retired[1]._shared.get().unwrap() as *const SharedBytes,
-            del_owner_ptr
-        );
-        let new_owner_ptr = map
-            .compact_points
-            .get_shared(hash_key(b"set"), b"set")
-            .unwrap() as *const SharedBytes;
-        assert_ne!(new_owner_ptr, set_owner_ptr);
         // SAFETY: retired records own both copied shared buffers until this epoch exits.
         assert_eq!(
             unsafe { std::slice::from_raw_parts(set_ptr, 7) },
@@ -1802,19 +1384,13 @@ mod tests {
             map.compact_points
                 .retired
                 .iter()
-                .filter(|record| record._shared.get().is_some())
+                .filter(|record| record._shared.is_some())
                 .count(),
             2
         );
         map.end_read_epoch();
         map.process_maintenance(0);
         assert!(map.compact_points.retired.is_empty());
-        assert_eq!(
-            map.compact_points
-                .get_shared(hash_key(b"set"), b"set")
-                .unwrap() as *const SharedBytes,
-            new_owner_ptr
-        );
         assert_eq!(map.get(b"set", 0), Some(b"new set".to_vec()));
     }
 

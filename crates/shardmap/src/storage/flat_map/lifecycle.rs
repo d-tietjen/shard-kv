@@ -387,7 +387,7 @@ impl FlatMap {
             let (removed, _) = entry.remove();
             let remote = RemoteEntry {
                 hash: removed.hash,
-                key_len: removed.key_len,
+                key_len: removed.key.len(),
                 key: removed.key.clone(),
                 object,
                 expire_at_ms: removed.expire_at_ms,

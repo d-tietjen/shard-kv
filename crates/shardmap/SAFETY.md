@@ -37,16 +37,11 @@ write copies at most 64 key bytes and 256 value bytes and can initialize one
 4 KiB chunk. Normal descriptor hash-table resizing remains proportional to
 its descriptor count and does not copy stored key/value payloads.
 
-On 64-bit targets the per-key descriptor is expected to occupy 24 bytes,
-including the full 64-bit hash, record offset, key/value lengths, and a
-pointer-sized lazy shared-owner cache. The cache uses the safe `OnceBox` API
-from the locked `once_cell` dependency, enabled directly only by this compact
-feature. Its owning Box remains stable when the hash table moves descriptors.
-The fixed buffer and per-chunk availability links, with a bounded `u16` class
-index, keep the chunk descriptor at 24 bytes; regression checks enforce the
-expected sizes of 24 bytes per entry, 24 per chunk, and 816 per map. The 160
-size-class list heads occupy 640 inline bytes per shard, 320 fewer than the
-earlier 40 vector headers, and need no separate
+On 64-bit targets the per-key descriptor remains 32 bytes. The fixed buffer
+and per-chunk availability links, with a bounded `u16` class index, are expected
+to reduce the chunk descriptor from 56 to 24 bytes; regression checks enforce
+those size limits. The 160 size-class list heads occupy 640 inline bytes per
+shard, 320 fewer than the earlier 40 vector headers, and need no separate
 allocations.
 Availability membership, insertion, and removal use a head comparison and at
 most two neighboring chunk links; they never scan or relocate payloads.
@@ -57,27 +52,11 @@ filled chunks when a workload uses many distinct lengths. The allocation cap,
 record retirement, and reclaim budget still bound those costs; memory and
 latency require fresh workload measurements.
 
-Borrowed reads leave the shared-owner cache empty. A shared read copies at most
-256 value bytes into a separately boxed owner. Concurrent first readers can
-each run this private, side-effect-free initializer once; only one owner is
-published, every reader receives that same owner, and losing owners are dropped
-before their calls return. This preserves value/owner identity, but concurrent
-first reads can make temporary allocations and bounded copies per competing
-caller rather than just one initializer for the group. Cold single/concurrent
-reads and warm reads therefore need separate latency/allocation measurements.
-There is no per-chunk owner-cell array or initialized-array destructor. Owner
-allocations, descriptor tables and retired records are outside the 64 MiB payload
-cap. No user callback is passed to the cache initializer.
-
 Ordinary reads hold the map/shard borrow or lock. Equal-length overwrite reuses
 its record only when no read epoch is active. During an epoch, overwrite or
 delete retires the affected record together with any lazily materialized shared
-owner. Moving the whole cache into the retired record preserves the owner's
-Box address without extracting or cloning it. Exclusive mutation resets the
-cache by replacing it with an empty cache before writing or releasing its
-record. Neither its arena slice nor a borrowed `Bytes` buffer is overwritten,
-freed, or reused until all readers leave. The allocator reclaims at most 32
-retired compact records per call after
+owner; neither its arena slice nor a borrowed `Bytes` buffer is overwritten,
+freed, or reused until all readers leave. The allocator reclaims at most 32 retired compact records per call after
 quiescence. A point mutation can attempt compact allocation and then fall back
 to the general path, for a combined maximum of 64; maintenance reclaims 32. Owned `Bytes` clones
 retain their independent old versions through normal reference counting.
