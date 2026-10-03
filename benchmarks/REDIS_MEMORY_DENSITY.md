@@ -352,13 +352,19 @@ candidate `444513e` each passed eight shared-read API unit tests and built
 separate source-bound measurement executables. All four native jobs have
 independently accepted source, build, resource and cleanup evidence.
 
-The first shared-read campaign subsequently failed at a controller identity
-check before any cohort; its failure evidence and owned cleanup were accepted.
-As of 2026-10-03 02:09 UTC, caller revision five's retest also failed: seven
-methods ran with one error and eleven compositions reached. All 396 copied
-raw files were verified, and a genuine kernel exit of 1 was observed. Final
-cleanup and failed-archive acceptance remain pending, while revision six is
-being prepared. No follow-up process-memory or performance result is accepted.
+The first shared-read campaign failed before any cohort; its failure evidence
+and owned cleanup were accepted. Subsequent caller attempts remain preserved.
+Revision six failed before completing the seven planned methods. Its complete
+218-file failed archive and exact cleanup were independently accepted, with all
+179 raw files and temporary inputs retained.
+
+Revision seven passed all seven methods with zero failures, errors or skips in
+43.462 seconds. Independent review accepted all thirteen compositions and three
+resource cases, the actual source and limits, genuine child exit of 0 and
+observed wrapper exit of 0. Its complete 502-file evidence archive and exact
+owned cleanup were accepted, preserving all 428 raw files. The direct kernel
+capture missed the exited process and receives no credit. No follow-up
+process-memory or performance result is accepted.
 
 The planned [early shared/owned-read gate](COMPACT_SHARED_READ_GATE.md) has
 30 process cohorts covering cold/concurrent initialization, warm reads, sparse
