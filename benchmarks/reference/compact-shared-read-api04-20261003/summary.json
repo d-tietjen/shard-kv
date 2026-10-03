@@ -36,6 +36,16 @@
     ],
     "copy_receipt_qualification": "Strict copies pin complete bounded R4 frames with explicit original SSH1; independently verified those frames byte-identical to full R5 postrun SSH0. R4 query remains failed and is not upgraded.",
     "derived_numerics_sha256": "97b2cebe1b0ec76f1e59515352ef61f887e50f81dfe413ceadff682b6b38eb45",
+    "final_archive": {
+      "closure_record_sha256": "e668776168c6a2068b52a9ad646c8b2acf2d1c0a731a1462bee03014e0dac4b6",
+      "directories_including_root": 90,
+      "manifest_filename": "SHA256SUMS-campaign04-failed-final-r1",
+      "manifest_payload_rows": 2174,
+      "manifest_sha256": "41cea373393d432de06d821a885a0c0d2fbb9e4ba675d68bd279f61be5e02008",
+      "qualification": "closed FAILED; no waiver or new measurement credit",
+      "regular_files_including_manifest": 2175,
+      "scope_sha256": "4c752d959c83e39e0c0060570e1fc106fc6f4546ee6887101c577c147fde2d1d"
+    },
     "independent_review_manifest_sha256": "1dc80a03a23d17b87ba09dbd5e8b47d525107b8832c0b513d2e757e4e7121983",
     "independent_review_sha256": "a968720b4370791e155d184eb945c8be11802df3e7bf93e7b2b2977bbf3b3ea9",
     "inputs_by_filename": {
@@ -123,6 +133,15 @@
         "bytes": 11,
         "sha256": "c81753ffc2db8dc790b0b6fcf99a6613eb15824c3034e3f383510a7fd762cdcb"
       }
+    },
+    "owned_external_cleanup": {
+      "completed_utc": "2026-10-03T16:00:18Z",
+      "output_bytes": 32900,
+      "output_lines": 538,
+      "output_sha256": "bc2082abc4b9ab655df92184a40c433f5b170c1c1f215eaad5c1c23b417078ad",
+      "qualification": "exact owned session only; original raw/source/native/TMP/STOP evidence preserved; executed ownership guards are not separately exported raw readings",
+      "ssh_exit": 0,
+      "ssh_exit_sha256": "c81753ffc2db8dc790b0b6fcf99a6613eb15824c3034e3f383510a7fd762cdcb"
     }
   },
   "failed_screens": [
@@ -218,8 +237,8 @@
   "lifecycle_status": {
     "campaign_pass": false,
     "expanded_Redis_execution": "held until early gate passes",
-    "final_archive": "pending",
-    "owned_external_cleanup": "pending"
+    "final_archive": "independently accepted closed FAILED archive",
+    "owned_external_cleanup": "independently accepted; all 66 actor identities and 32 scopes absent; exact private socket and root removed"
   },
   "limits": [
     "Shared Adam host; unreserved and unpinned; diagnostic only; no posthoc waiver.",

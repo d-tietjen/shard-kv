@@ -494,7 +494,38 @@ waiver or formal qualification is claimed. The controller's direct child exited
 observed kernel exit was 1. A collector failure is preserved separately from
 the corrected successful collection; neither changes the screen results.
 
-Exact owned external session cleanup and the final evidence archive are pending.
+Exact owned external session cleanup and the closed failed-run archive are
+independently accepted. All 66 recorded actor identities and 32 scopes are absent;
+the exact private socket and its empty root were removed. The archive retains
+2,175 regular files (2,174 payload hash rows), preserving the original raw data,
+failures, source/binary evidence and STOP records. The curated summary saves the
+cleanup and archive hashes. This closure does not change the three failed screens.
+
+### Supplemental audit of every recorded memory state
+
+The independently reviewed [exploratory memory-state summary](reference/compact-shared-read-api04-20261003/exploratory-memory-states.json)
+covers all 65 profile/state comparisons and six recorded metrics. Aggregate total
+process PSS and RSS are lower in all 65 comparisons, including fully owned values
+and retained epochs. At 100k keys, fully owned PSS is **24,825 → 23,818 KiB**;
+epoch-retired PSS is **26,047 → 25,052 KiB**. These use the original nested
+four-batch/three-rotation medians, not a new experiment or additional passing screens.
+
+Some other measurements are higher. Candidate PSS is higher in 20 of 195 paired
+rotation-state medians and 118 of 780 paired batch-state medians. Same-batch-empty
+PSS increments are higher in 29 of 65 aggregate comparisons: at 100k keys,
+fully owned is **892 → 1,090 KiB**. The separately labeled first-batch contrast
+is **15,528 → 14,504 KiB**. Four batches share a process, and later empty
+snapshots follow earlier batches; that timeline does not establish a physical
+allocator or cache cause. Neither estimator replaces the original screens.
+
+The summary records higher private-clean/cgroup measurements, first-batch
+contrasts and snapshot maxima. For example, the
+eight-reader profile's observed maximum PSS is **1,891 → 1,895 KiB**, even though
+its aggregate PSS is lower. Snapshot maxima are not continuous peaks. Full
+individual data, every higher case and 43 negative individual increments remain
+in the separately hashed audit, without clipping negative values to zero.
+No allocator cause, new Redis result or qualification is claimed.
+
 The next optimization pass targets the deletion/drop costs. The expanded Redis
 comparison remains held until the early gate passes; the MD05 measurements and
 larger-value memory misses above remain unchanged.

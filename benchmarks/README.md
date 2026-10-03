@@ -92,7 +92,11 @@ passed all 15 memory screens and five warm throughput/latency pairs, but failed
 three deletion/drop p99 screens. The 100k-key cold-first process PSS fell 8.43%;
 this is a native comparison against the earlier compact implementation. A new
 Redis comparison remains pending. Exact ratios, misses and evidence hashes are
-saved in the [curated summary](reference/compact-shared-read-api04-20261003/summary.json).
+saved in the [curated summary](reference/compact-shared-read-api04-20261003/summary.json). The
+closed failed-run archive and exact cleanup are accepted. The independently
+reviewed [exploratory all-state audit](reference/compact-shared-read-api04-20261003/exploratory-memory-states.json)
+also documents higher individual/incremental memory measurements and snapshot
+maxima; it adds no acceptance screens or Redis comparison.
 
 The density runner retains full Buildx metadata and a plain export log for
 each ShardCache image. Its manifest binds both declared FROM references and
