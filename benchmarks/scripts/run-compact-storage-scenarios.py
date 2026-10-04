@@ -60,7 +60,9 @@ HWM_PYTHON_TESTS = ('test_hwm_catalog_members_and_legacy_catalog', 'test_hwm_pay
                     'test_hwm_oracle_counts_and_workers', 'test_hwm_corruption_and_worker_rejection',
                     'test_hwm_refuses_missing_delegation', 'test_hwm_boundary_identity_and_caps',
                     'test_hwm_placement_handshake_and_reaping', 'test_hwm_placement_failure_reaped',
-                    'test_hwm_guard_freshness')
+                    'test_hwm_guard_freshness', 'test_hwm_docker_parent_mapping',
+                    'test_hwm_docker_parent_refuses_before_effect', 'test_hwm_terminal_controller_deadline',
+                    'test_hwm_terminal_deadline_preserves_cleanup', 'test_hwm_terminal_result_write_overrun')
 
 def require(ok, message):
     if not ok:
@@ -1006,7 +1008,8 @@ def validate_hwm_contract(p):
     require(p['builds']=={'common':{'worktree':p['source']['worktree']}},'HWM target accounting differs')
     require(p['sampling']=={'idle':5,'final':5,'intermediate':5,'delay_seconds':0.2,'settle_seconds':1.0,'peak_interval_seconds':0.2},'HWM sample contract differs')
     require(set(p['resources'])=={'parent','controller','client','docker_parent','delegation_acceptance'},'HWM resource admission absent')
-    require(p['resources']['docker_parent']==pathlib.Path(p['resources']['parent']['path']).name and p['resources']['docker_parent'].endswith('.slice'),'Docker aggregate parent not exact owned slice')
+    require(hwm_docker_parent_path(p['resources']['docker_parent'],'systemd')==pathlib.Path(p['resources']['parent']['path']),
+            'Docker slice mapping differs from admitted aggregate parent')
     require(digest(p['source']['sha'],40) and digest(p['source']['tree'],40) and p['source']['sha']!=HWM_SOURCE,'fresh benchmark driver source missing')
     require(set(p['source']['file_sha256'])==set(HWM_INPUTS),'HWM driver input closure incomplete')
     for b in p['images'].values():
@@ -1055,6 +1058,16 @@ def hwm_boundary(binding,parent=None):
     hwm_stat_matches(path.stat(),binding)
     return path
 
+def hwm_docker_parent_path(name,driver):
+    """Docker systemd slice names encode the complete ancestry from the root."""
+    require(driver=='systemd','Docker systemd parent binding unavailable')
+    require(isinstance(name,str) and len(name)<=255 and name.endswith('.slice'),
+            'unsupported Docker systemd slice name')
+    parts = name[:-6].split('-')
+    require(all(part and set(part)<=set('abcdefghijklmnopqrstuvwxyz0123456789') for part in parts),
+            'unsupported Docker systemd slice name')
+    return pathlib.Path('/sys/fs/cgroup').joinpath(*('-'.join(parts[:i])+'.slice' for i in range(1,len(parts)+1)))
+
 class HwmBaselineRunner(Runner):
     """Separate admitted resources; writes only the owned client cgroup.procs FD."""
 
@@ -1071,6 +1084,8 @@ class HwmBaselineRunner(Runner):
                 and admission.get('source_tree')==self.plan['source']['tree'],'resource admission absent or wrong driver')
         parent = hwm_boundary(r['parent'])
         require(parent.name==r['docker_parent'] and parent.name.startswith(self.plan['owner']), 'aggregate slice not task owned')
+        require(hwm_docker_parent_path(r['docker_parent'],'systemd')==parent,
+                'Docker slice mapping differs from admitted aggregate parent')
         control = hwm_boundary(r['controller'],parent)
         client = hwm_boundary(r['client'],parent)
         require(control!=client and control==self.h1.cgroup_path(os.getpid()),'controller placement differs')
@@ -1118,6 +1133,10 @@ class HwmBaselineRunner(Runner):
                 and operating['owned_run_root']==p['owned_run_root'] and operating['output_root']==p['output_root']
                 and operating['helper_sha256']=={k:v['sha256'] for k,v in p['helpers'].items()}
                 and operating['docker_receipt']==p['docker_receipt'],'current operating/runtime boundary differs')
+        mapping = {'driver':'systemd','parent_argument':p['resources']['docker_parent'],
+                   'parent_path':str(hwm_docker_parent_path(p['resources']['docker_parent'],'systemd'))}
+        require(operating.get('docker_parent_mapping')==mapping and operating.get('docker_parent_mapping_proven') is True,
+                'genuine delegated kernel/Docker parent mapping admission missing')
         build = read_json(p['native_build_acceptance'])
         require(build['argv']==HWM_BUILD_ARGV and build['exit_code']==0 and build['wait_observed'] is True
                 and build['child_reaped'] is True and build['raw_wait_status']==0 and build['rustflags']==[]
@@ -1183,11 +1202,32 @@ class HwmBaselineRunner(Runner):
         self.next_hwm_budget = time.monotonic()+5
 
     def command(self,argv,timeout=30):
-        if argv[:2]==['docker','run']:
-            self.verify_resources(True)
+        if argv[:2] in (['docker','run'],['docker','create']):
+            parent,_,_ = self.verify_resources(True)
             require(not any(a in ('--cgroup-parent','--pids-limit') or a.startswith(('--cgroup-parent=','--pids-limit=')) for a in argv),'unexpected preexisting Docker placement')
+            driver = super().command(['docker','info','--format','{{.CgroupDriver}}'],timeout)
+            require(hwm_docker_parent_path(self.plan['resources']['docker_parent'],driver)==parent,
+                    'Docker slice mapping differs from admitted aggregate parent')
             argv = argv[:2]+['--pids-limit','512','--cgroup-parent',self.plan['resources']['docker_parent']]+argv[2:]
         return super().command(argv,timeout)
+
+    def terminal_elapsed(self):
+        # Row cleanup and terminal hashes/reporting never extend successful work.
+        # Recheck after budget's observations too; owned failure cleanup remains separate.
+        self.budget()
+        elapsed = time.monotonic()-self.started
+        require(elapsed<5400,'controller deadline before terminal success')
+        return elapsed
+
+    def publish_result(self,result):
+        # The candidate is evidence only. Include serialization/fsync in the
+        # original work clock before a create-only atomic terminal publication.
+        candidate = self.root/'result-candidate.json'
+        result = dict(result,elapsed_seconds=self.terminal_elapsed(),
+            elapsed_seconds_observation='before candidate serialization; terminal publication requires a post-fsync clock check')
+        write(candidate,result)
+        self.terminal_elapsed()
+        os.link(candidate,self.root/'result.json',follow_symlinks=False)
 
     def snapshot(self,cid,pid,user,cg,port):
         parent,_,_ = self.verify_resources()
@@ -1403,7 +1443,8 @@ def main():
             require(sha(pathlib.Path(plan['source']['worktree']) / relative) == expected, 'bound source changed during effects')
         report = summarize(rows)
         write(root / 'summary.json', report)
-        write(root / 'result.json', {'success': True, 'rows': 6 if plan['package']==HWM_PACKAGE else 72,
+        result_writer = runner.publish_result if plan['package']==HWM_PACKAGE else functools.partial(write,root/'result.json')
+        result_writer({'success': True, 'rows': 6 if plan['package']==HWM_PACKAGE else 72,
             'minimum_idle_final_gates':60 if plan['package']==HWM_PACKAGE else 720,
             'phase_gates': sum((len(r['phases']) * 5 for r in rows)), 'screen_success': report['screen_success'], 'elapsed_seconds': time.monotonic() - runner.started})
         return 0

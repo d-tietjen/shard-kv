@@ -106,9 +106,20 @@ one exact task-owned systemd slice. It never substitutes the old combined
 The plan binds canonical parent/controller/client paths, current device/inode,
 UID/GID/mode, the exact writable client `cgroup.procs` file metadata and an
 independently accepted delegation receipt. Real caps, parent relationships,
-controller placement and all ancestors are checked. The Docker server uses
-the exact admitted systemd parent and pids ceiling; its actual cgroup is
-checked after startup. Runtime setup must obtain real delegation; this
+controller placement and all ancestors are checked. Before Docker create/run,
+the configured driver must be systemd and the complete root hierarchy encoded
+by its slice name must equal the admitted canonical parent. This finite adapter
+accepts only nonempty lowercase ASCII letter/digit components separated by
+dashes, ending in `.slice`, at most255 bytes. For example, `eden2266-hwm1.slice`
+encodes `/sys/fs/cgroup/eden2266.slice/eden2266-hwm1.slice`; an identically named
+slice nested inside a user manager is refused before container creation.
+Docker's [systemd parent rules](https://docs.docker.com/reference/cli/dockerd/#default-cgroup-parent)
+define this ancestry. Other drivers or ambiguous names are unsupported.
+The independently accepted operating receipt must bind the actual driver,
+parent argument, complete parent path and genuine delegated kernel/Docker
+mapping proof. Those admissions remain NULL until actual Adam qualification.
+The Docker server uses that exact parent and pids ceiling; its actual live
+PID/cgroup/caps are still checked after startup. Runtime setup must obtain real delegation; this
 controller does not create or adjust scopes or permissions.
 
 Before native exec, the directly forked child enters a private session and
@@ -124,7 +135,19 @@ Per-row runtime/native deadline is 840 seconds; six rows fit a planned 90-minute
 controller cap with 360 seconds left for oracle/preparation. This is a ceiling,
 not a promised duration; exceeding it fails and preserves evidence. Build is
 bounded at 2700 seconds, cleanup at 300, complete package at 8400. Output limits
-remain 128 MiB/file and 1 GiB/package. The original free-disk >=100 GB,
+remain 128 MiB/file and 1 GiB/package.
+The original monotonic controller start is checked again after last-row cleanup,
+terminal hashes and summary reporting, including time spent on final resource
+observations. At/after5400 seconds, no successful terminal result is admitted.
+Result serialization/fsync first writes `result-candidate.json`, which alone is
+unadmitted evidence. A fresh controller-clock check after that write precedes
+the create-only atomic publication of `result.json`. Overrun retains the candidate
+and failure receipt without a successful terminal result. The elapsed field is
+explicitly observed before candidate serialization; publication checks the clock
+again. A genuine outer controller/package deadline remains required.
+Owned stop/remove/reaping and failure receipts remain mandatory under their
+separate bounded cleanup allowance; cleanup never extends successful work.
+The original free-disk >=100 GB,
 global guard age <=90 seconds, STOP predicate and whole RUN plus driver target
 <30 GiB remain enforced. No clock or predicate is relaxed.
 
@@ -138,11 +161,16 @@ equivalence are distinct from the new benchmark driver admission. The template
 does not manufacture these receipts. Exact helper hashes and source inputs are
 rechecked before and after the package; full raw output must be retained.
 
-Seven Rust and nine Python regression methods are defined for new phases,
+Seven Rust and fourteen Python regression methods are defined for new phases,
 mixed-generation uniqueness, survivor counts, corruption/stale/absent rejection,
 all-worker witnesses, admission/path/owner/cap failures, guard freshness and
-direct-child placement/handshake/exec reaping. Isolated unit placement probes
-use a private regular FD, never qualify Linux delegation. A genuine delegated
+direct-child placement/handshake/exec reaping. New focused regressions also cover
+exact systemd ancestry, nested-user-manager/wrong-driver refusal
+before Docker effects, and fake-clock terminal boundaries after cleanup/reporting.
+They also inject candidate-write overruns and verify no terminal publication or
+overwrite of an existing terminal artifact.
+Fake-clock cleanup receipts are explicitly unit fixtures, not genuine waits.
+Isolated unit placement probes use a private regular FD, never qualify Linux delegation. A genuine delegated
 kernel placement integration is still required by the operating admission.
 The original 21 native/40 Python regressions retain their definitions.
 

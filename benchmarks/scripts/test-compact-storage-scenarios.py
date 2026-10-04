@@ -810,5 +810,171 @@ class HwmBaselineTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 gate.hwm_guard_status(text(age),stop,now)
 
+    def test_hwm_docker_parent_mapping(self):
+        self.assertEqual(gate.hwm_docker_parent_path('eden2266-hwm1.slice','systemd'),
+            pathlib.Path('/sys/fs/cgroup/eden2266.slice/eden2266-hwm1.slice'))
+        self.assertEqual(gate.hwm_docker_parent_path('eden2266-hwm1-work.slice','systemd'),
+            pathlib.Path('/sys/fs/cgroup/eden2266.slice/eden2266-hwm1.slice/eden2266-hwm1-work.slice'))
+        for name in ('','-.slice','-eden.slice','eden-.slice','eden--work.slice',
+                     'eden/other.slice','eden\\other.slice','eden_work.slice',
+                     'Eden.slice','eden.service','éden.slice','a'*250+'.slice'):
+            with self.subTest(name=name), self.assertRaisesRegex(RuntimeError,'unsupported Docker'):
+                gate.hwm_docker_parent_path(name,'systemd')
+        with self.assertRaisesRegex(RuntimeError,'systemd parent binding'):
+            gate.hwm_docker_parent_path('eden2266-hwm1.slice','cgroupfs')
+
+    def test_hwm_docker_parent_refuses_before_effect(self):
+        r = gate.HwmBaselineRunner.__new__(gate.HwmBaselineRunner)
+        r.plan = {'resources':{'docker_parent':'eden2266-hwm1.slice'}}
+        mapped = gate.hwm_docker_parent_path(r.plan['resources']['docker_parent'],'systemd')
+        nested = pathlib.Path('/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/eden2266-hwm1.slice')
+        for verb in ('run','create'):
+            argv = ['docker',verb,'--name','isolated-unit-fixture','image-id']
+            for parent,driver in ((nested,'systemd'),(mapped,'cgroupfs'),(mapped,'systemd\ncgroupfs')):
+                with self.subTest(verb=verb,parent=parent,driver=driver), \
+                     mock.patch.object(r,'verify_resources',return_value=(parent,None,None)) as verify, \
+                     mock.patch.object(gate.Runner,'command',autospec=True,return_value=driver) as command:
+                    with self.assertRaises(RuntimeError):
+                        r.command(argv,17)
+                    verify.assert_called_once_with(True)
+                    # The sole helper was read-only info; no Docker create/run was dispatched.
+                    self.assertEqual(command.call_args_list,
+                        [mock.call(r,['docker','info','--format','{{.CgroupDriver}}'],17)])
+            with mock.patch.object(r,'verify_resources',return_value=(mapped,None,None)), \
+                 mock.patch.object(gate.Runner,'command',autospec=True,side_effect=['systemd','owned-id']) as command:
+                self.assertEqual(r.command(argv,17),'owned-id')
+                self.assertEqual(command.call_args_list,
+                    [mock.call(r,['docker','info','--format','{{.CgroupDriver}}'],17),
+                     mock.call(r,argv[:2]+['--pids-limit','512','--cgroup-parent','eden2266-hwm1.slice']+argv[2:],17)])
+            with mock.patch.object(r,'verify_resources',return_value=(mapped,None,None)), \
+                 mock.patch.object(gate.Runner,'command',autospec=True) as command:
+                with self.assertRaisesRegex(RuntimeError,'preexisting Docker placement'):
+                    r.command(argv+['--cgroup-parent=other.slice'])
+                command.assert_not_called()
+
+    def test_hwm_terminal_controller_deadline(self):
+        r = gate.HwmBaselineRunner.__new__(gate.HwmBaselineRunner)
+        r.started = 100.0
+        r.row_deadline = None  # Last-row cleanup must not reset the controller clock.
+        for before,after,accepted in ((5499.999,5499.999,True),(5500.0,5500.0,False),
+                                     (5500.001,5500.001,False),(5499.999,5500.0,False)):
+            clock = [before]
+            r.budget = mock.Mock(side_effect=lambda:clock.__setitem__(0,after))
+            with self.subTest(before=before,after=after), \
+                 mock.patch.object(gate.time,'monotonic',side_effect=lambda:clock[0]):
+                if accepted:
+                    self.assertAlmostEqual(r.terminal_elapsed(),5399.999)
+                else:
+                    with self.assertRaisesRegex(RuntimeError,'controller deadline before terminal success'):
+                        r.terminal_elapsed()
+            r.budget.assert_called_once_with()
+            self.assertEqual(r.started,100.0)
+
+    def test_hwm_terminal_deadline_preserves_cleanup(self):
+        # Unit orchestration only: fake clock and labeled cleanup receipts do not
+        # qualify an actual Docker mapping, Linux delegation or genuine wait.
+        for overrun in (None,'last-row-cleanup','summary'):
+            with self.subTest(overrun=overrun), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)/'output'
+                plan = {'package':gate.HWM_PACKAGE,'output_root':str(root),'members':gate.members(gate.HWM_PACKAGE),
+                        'binaries':{},'helpers':{},'source':{'file_sha256':{},'worktree':directory}}
+                clock = [5499.999]
+                observations = {}
+                r = gate.HwmBaselineRunner.__new__(gate.HwmBaselineRunner)
+                r.started = 100.0
+                r.root = root
+                r.row_deadline = None
+                r.cleanup_errors = []
+                r.verify_inputs = mock.Mock()
+                r.budget = mock.Mock()
+                fixture_wait = {'fake_clock_fixture':True,'child_reaped':True,'wait_observed':True,'raw_wait_status':0}
+                r.cleanup_child = mock.Mock(return_value=[fixture_wait])
+                r.h1 = types.SimpleNamespace(defer_cleanup_termination=lambda:contextlib.nullcontext([]))
+                count = [0]
+                def row(_member,_witness):
+                    count[0] += 1
+                    if count[0]==6:
+                        gate.write(root/'last-row-owned-cleanup.json',fixture_wait)
+                        if overrun=='last-row-cleanup':
+                            clock[0] = 5500.0
+                    return {'phases':[]}
+                r.row = mock.Mock(side_effect=row)
+                def record(path,value):
+                    observations[path.name] = value
+                    if path.name=='summary.json' and overrun=='summary':
+                        clock[0] = 5500.0
+                def publish(candidate,terminal,**kw):
+                    self.assertEqual(candidate,root/'result-candidate.json')
+                    self.assertEqual(terminal,root/'result.json')
+                    self.assertEqual(kw,{'follow_symlinks':False})
+                    self.assertNotIn('result.json',observations)
+                    observations['result.json'] = observations['result-candidate.json']
+                with mock.patch.object(sys,'argv',['controller','--plan',str(root.parent/'plan.json'),'--plan-sha256','1'*64]), \
+                     mock.patch.object(gate,'read_json',return_value=plan), \
+                     mock.patch.object(gate,'validate_contract',side_effect=lambda p:p), \
+                     mock.patch.object(gate,'HwmBaselineRunner',return_value=r), \
+                     mock.patch.object(gate,'hwm_expected_phase',return_value={}), \
+                     mock.patch.object(gate,'sha',return_value='1'*64), \
+                     mock.patch.object(gate,'summarize',return_value={'screen_success':None}), \
+                     mock.patch.object(gate,'write',side_effect=record), \
+                     mock.patch.object(gate.os,'link',side_effect=publish), \
+                     mock.patch.object(gate.resource,'setrlimit'), \
+                     mock.patch.object(gate.signal,'signal'), \
+                     mock.patch.object(gate.time,'monotonic',side_effect=lambda:clock[0]):
+                    status = gate.main()
+                self.assertEqual(count[0],6)
+                self.assertIs(observations['last-row-owned-cleanup.json'],fixture_wait)
+                if overrun is None:
+                    self.assertEqual(status,0)
+                    self.assertTrue(observations['result.json']['success'])
+                    self.assertLess(observations['result.json']['elapsed_seconds'],5400)
+                    self.assertNotIn('failure.json',observations)
+                    r.cleanup_child.assert_not_called()
+                else:
+                    self.assertEqual(status,1)
+                    self.assertNotIn('result.json',observations)
+                    self.assertFalse(observations['failure.json']['success'])
+                    self.assertIn('controller deadline before terminal success',observations['failure.json']['error'])
+                    self.assertEqual(observations['failure.json']['cleanup'],[fixture_wait])
+                    r.cleanup_child.assert_called_once_with()
+
+    def test_hwm_terminal_result_write_overrun(self):
+        # The real candidate writer/fsync and create-only link operate on private
+        # unit files; the clock remains synthetic and provides no runtime admission.
+        actual_write = gate.write
+        for after,existing in ((5499.999,False),(5500.0,False),(5500.001,False),(5499.999,True)):
+            with self.subTest(after=after,existing=existing), tempfile.TemporaryDirectory() as directory:
+                r = gate.HwmBaselineRunner.__new__(gate.HwmBaselineRunner)
+                r.root = pathlib.Path(directory)
+                r.started = 100.0
+                r.budget = mock.Mock()
+                clock = [5499.0]
+                terminal = r.root/'result.json'
+                if existing:
+                    terminal.write_bytes(b'preserved-existing-terminal')
+                def record(path,value):
+                    actual_write(path,value)
+                    clock[0] = after
+                with mock.patch.object(gate,'write',side_effect=record), \
+                     mock.patch.object(gate.time,'monotonic',side_effect=lambda:clock[0]):
+                    if after>=5500:
+                        with self.assertRaisesRegex(RuntimeError,'controller deadline before terminal success'):
+                            r.publish_result({'success':True})
+                    elif existing:
+                        with self.assertRaises(FileExistsError):
+                            r.publish_result({'success':True})
+                    else:
+                        r.publish_result({'success':True})
+                candidate = r.root/'result-candidate.json'
+                self.assertTrue(json.loads(candidate.read_text())['success'])
+                self.assertIn('post-fsync',json.loads(candidate.read_text())['elapsed_seconds_observation'])
+                if after>=5500:
+                    self.assertFalse(terminal.exists())
+                elif existing:
+                    self.assertEqual(terminal.read_bytes(),b'preserved-existing-terminal')
+                else:
+                    self.assertEqual(terminal.read_bytes(),candidate.read_bytes())
+                    self.assertEqual(terminal.stat().st_ino,candidate.stat().st_ino)
+
 if __name__ == '__main__':
     unittest.main()
