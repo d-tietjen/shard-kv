@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import datetime
 import functools
 import hashlib
 import importlib.util
@@ -20,6 +21,7 @@ import resource
 import select
 import signal
 import statistics
+import stat
 import struct
 import sys
 import threading
@@ -34,6 +36,31 @@ BUDGETS = {'complete_lifecycle_seconds': 8400, 'build_seconds': 2700, 'controlle
 ACCEPTANCE = {'settled_delta_pss_ratio_max': 1.0, 'throughput_ratio_min': 0.95, 'p99_ratio_max': 1.05}
 FEATURES = 'redis-server,experimental-compact-point-storage'
 BUILD_ARGV = ['cargo', 'build', '--locked', '--release', '--jobs', '4', '-p', 'shardcache-benchmarks', '--bin', 'compact_resp_scenarios', '--bin', 'saturation']
+HWM_ID = 'storage-hwm-str-v1'
+HWM_PACKAGE = 'storage-hwm-baseline6-v1'
+HWM_SOURCE = '016a521b12968f38b703b3e3e39a8eb0be745429'
+HWM_TREE = '16f855f045f44877d53d4ce5e840d20a555d31de'
+HWM_SEED = 0xC0FFEE
+HWM_KEYS = 1000000
+HWM_BUDGETS = dict(BUDGETS, runtime_seconds=840)
+HWM_BUILD_ARGV = BUILD_ARGV[:-2]
+HWM_CAPS = {'server_memory':4294967296,'server_cpus':1,'server_pids':512,
+            'client_memory':2147483648,'client_cpus':4,'client_pids':512,
+            'controller_memory':2147483648,'controller_cpus':1,'controller_pids':64,
+            'parent_memory':8589934592,'parent_cpus':6,'parent_pids':1088,'swap':0}
+HWM_INPUTS = ('benchmarks/scripts/run-compact-storage-scenarios.py',
+              'benchmarks/src/bin/compact_resp_scenarios.rs', 'benchmarks/Cargo.toml',
+              'Cargo.lock', 'benchmarks/scripts/run-memory-density-benchmark.py',
+              'benchmarks/scripts/test-compact-storage-scenarios.py')
+HWM_NATIVE_TESTS = ('hwm_catalog_and_survivor_permutation', 'hwm_payload_mixed_generations_are_unique',
+                    'hwm_survivors_keep_generation_zero', 'hwm_mutation_preserves_survivors_and_idle',
+                    'hwm_verifier_requires_bytes_type_and_absence', 'hwm_verifier_rejects_stale_generation',
+                    'hwm_state_digest_binds_generation_and_absence')
+HWM_PYTHON_TESTS = ('test_hwm_catalog_members_and_legacy_catalog', 'test_hwm_payload_mixed_generations',
+                    'test_hwm_oracle_counts_and_workers', 'test_hwm_corruption_and_worker_rejection',
+                    'test_hwm_refuses_missing_delegation', 'test_hwm_boundary_identity_and_caps',
+                    'test_hwm_placement_handshake_and_reaping', 'test_hwm_placement_failure_reaped',
+                    'test_hwm_guard_freshness')
 
 def require(ok, message):
     if not ok:
@@ -75,6 +102,9 @@ def import_file(name, path):
     return m
 
 def scenario(id, access=False):
+    if id == HWM_ID and not access:
+        return {'id':id,'keys':HWM_KEYS,'key_length':18,'value_length':64,
+                'pattern':'per-key-unique-high-entropy-v1','family':'hwm','saturation':False}
     require(id in (ACCESS + CORE if access else IDS), 'unknown finite scenario')
     s = {'id': id, 'keys': 100000, 'key_length': 18, 'value_length': 16, 'pattern': 'high-entropy', 'family': 'fixed', 'saturation': access}
     if access and id in CORE:
@@ -105,6 +135,9 @@ def scenario(id, access=False):
     return s
 
 def phases(s):
+    if s['family'] == 'hwm':
+        return [{'id':'load','step':0}, *({'id':f'{name}-{cycle}','step':(cycle-1)*3+offset+1}
+            for cycle in range(1,4) for offset,name in enumerate(('delete','idle','refill')))]
     family = s['family']
     if s['saturation']:
         return [{'id': 'verify', 'step': 0}]
@@ -122,6 +155,12 @@ def fixed_key(index, length):
     return b'k' * (length - 8) + index.to_bytes(8, 'big')
 
 def record(s, p, index):
+    if s['family'] == 'hwm':
+        survivor = hwm_survivor(index)
+        step = p['step']
+        absent = step > 0 and step % 3 != 0 and not survivor
+        generation = 0 if survivor or step == 0 else (step-1)//3 + int(step%3 == 0)
+        return (fixed_key(index,18),64,generation,0 if absent else 1,False)
     key = fixed_key(index, s['key_length'])
     n = s['value_length']
     g = 0
@@ -221,6 +260,8 @@ def distribution(s):
     return [{'key_bytes': k, 'value_bytes': v, 'records': n, 'logical_bytes': n * (k + v), 'compact_class': max(1, (k + v + 1) // 2) if k <= 64 and v <= 256 else None} for (k, v), n in sorted(counts.items())]
 
 def expected_phase(s, p):
+    if s['family'] == 'hwm':
+        return hwm_expected_phase(s,p)
     state = hashlib.sha256()
     mutation = hashlib.sha256()
     verification = hashlib.sha256()
@@ -256,6 +297,9 @@ def expected_phase(s, p):
     return {'live_keys': live, 'absent_keys': s['keys'] - live, 'logical_bytes': logical, 'state_sha256': state.hexdigest(), 'mutation_trace_sha256': hashlib.sha256().hexdigest() if s['saturation'] else mutation.hexdigest(), 'verification_trace_sha256': verification.hexdigest(), 'mutation_operations': mops, 'verification_operations': vops, 'mutation_transactions': mtx, 'verification_transactions': s['keys'], 'mutation_command_counts': dict(mix), 'verification_command_counts': dict(vmix), 'control_commands': {'DBSIZE': 1}}
 
 def members(package):
+    if package == HWM_PACKAGE:
+        return [{'id':f'r{r}-{arm}-{HWM_ID}','round':r,'arm':arm,'scenario':HWM_ID}
+            for r in range(1,4) for arm in (('current','redis') if r%2 else ('redis','current'))]
     require(package in ('stateful-a', 'stateful-b', 'stateful-c', 'access'), 'unknown bounded package')
     ids = ACCESS if package == 'access' else IDS[(ord(package[-1]) - 97) * 8:(ord(package[-1]) - 96) * 8]
     out = []
@@ -265,6 +309,8 @@ def members(package):
     return out
 
 def validate_contract(p):
+    if p.get('package') == HWM_PACKAGE:
+        return validate_hwm_contract(p)
     require(p['schema'] == 1 and p['status'] == 'frozen with independently accepted gates', 'unfinished RESP package')
     require(p['classification'] == 'diagnostic-unreserved-closed-loop', 'qualification classification differs')
     require(p['members'] == members(p['package']), 'missing/extra/duplicate/reordered members')
@@ -292,12 +338,16 @@ def validate_contract(p):
     return p
 
 def validate_ready(e, s, pid):
+    if s['family'] == 'hwm':
+        return validate_hwm_ready(e,s,pid)
     require(e['schema'] == 1 and e['event'] == 'ready' and (e['pid'] == pid) and (e['scenario'] == s), 'native ready identity differs')
     require(e['seed'] == SEED and e['clients'] == 16 and (e['pipeline'] == 1) and (e['deadline_seconds'] == 900), 'native workload bounds differ')
     require(e['initial_dbsize_checks'] == int(not s['saturation']), 'initial DBsize check differs')
     require(e['phases'] == phases(s) and e['distribution'] == distribution(s), 'native phase/distribution differs')
 
 def validate_phase(e, s, p, pid, witness):
+    if s['family'] == 'hwm':
+        return validate_hwm_phase(e,s,p,pid,witness)
     require((e['schema'], e['event'], e['pid'], e['scenario'], e['phase']) == (1, 'phase', pid, s['id'], p['id']), 'native phase order/identity differs')
     for k, v in witness.items():
         if k.endswith(('_operations', '_transactions')):
@@ -558,6 +608,7 @@ class Runner:
         until = min(time.monotonic() + 900, self.row_deadline or float('inf'))
         try:
             for phase in [None, *phases(s), 'complete']:
+                quiet = None
                 while b'\n' not in buffer:
                     self.budget()
                     require(time.monotonic() < until, 'native runtime deadline')
@@ -568,13 +619,39 @@ class Runner:
                         require(len(buffer) <= 65536, 'native event line bound')
                 line, buffer = buffer.split(b'\n', 1)
                 e = json.loads(line)
+                if s['family']=='hwm' and isinstance(phase,dict) and phase['step']%3==2:
+                    write(folder/('observed-'+phase['id']+'-quiet.json'),e)
+                    require((e['schema'],e['event'],e['pid'],e['scenario'],e['phase'])==
+                            (2,'idle-boundary',waiter.pid,s['id'],phase['id']),'quiet boundary differs')
+                    require(type(e['idle_elapsed_ns']) is int and 10000000000<=e['idle_elapsed_ns']<840000000000,'quiet duration differs')
+                    actual = int(self.density.redis_command(port,b'DBSIZE'))
+                    require(actual==witnesses[phase['id']]['live_keys'],'quiet logical count differs')
+                    quiet = {'native_boundary':e,'controller_dbsize':actual,'settled':self.snapshots(cid,pid,user,cg,port),
+                             'client_and_controller':self.client_snapshot(waiter),'before_exhaustive_reads':True}
+                    write(folder/(phase['id']+'-quiet.json'),quiet)
+                    os.write(ack,b'continue\n')
+                    while b'\n' not in buffer:
+                        self.budget()
+                        require(time.monotonic()<until,'native runtime deadline after quiet boundary')
+                        if select.select([fd],[],[],0.2)[0]:
+                            chunk = os.read(fd,8192)
+                            require(bool(chunk),'native EOF after quiet boundary')
+                            buffer += chunk
+                            require(len(buffer)<=65536,'native event line bound')
+                    line,buffer = buffer.split(b'\n',1)
+                    e = json.loads(line)
+                if s['family']=='hwm':
+                    label = 'ready' if phase is None else 'complete' if phase=='complete' else phase['id']
+                    write(folder / ('observed-'+label+'.json'),e)
                 if phase is None:
                     validate_ready(e, s, waiter.pid)
                     identity = self.h1.proc_identity(waiter.pid, pathlib.Path(argv[0]))
                     require(identity['start_ticks'] == waiter.identity['start_ticks'], 'native fork/executed ELF identity differs')
                     write(folder / 'ready.json', dict(e, executed_identity=identity))
+                    if s['family']=='hwm':
+                        self.client_started(waiter,folder)
                 elif phase == 'complete':
-                    require(e == {'schema': 1, 'event': 'complete', 'pid': waiter.pid, 'scenario': s['id'], 'phases': len(phases(s)), 'errors': 0}, 'native terminal event differs')
+                    require(e == {'schema': 2 if s['family']=='hwm' else 1, 'event': 'complete', 'pid': waiter.pid, 'scenario': s['id'], 'phases': len(phases(s)), 'errors': 0}, 'native terminal event differs')
                     break
                 else:
                     validate_phase(e, s, phase, waiter.pid, witnesses[phase['id']])
@@ -582,6 +659,9 @@ class Runner:
                     require(dbsize == e['live_keys'], 'post-phase DBSIZE differs')
                     samples = self.snapshots(cid, pid, user, cg, port)
                     receipt = {'native': e, 'settled': samples, 'controller_dbsize': {'checks': 1, 'actual': dbsize, 'expected': e['live_keys']}}
+                    if s['family']=='hwm':
+                        receipt['client_and_controller'] = self.client_snapshot(waiter)
+                        receipt['quiet_after_idle'] = quiet
                     write(folder / (phase['id'] + '.json'), receipt)
                     events.append(receipt)
                 os.write(ack, b'continue\n')
@@ -597,7 +677,7 @@ class Runner:
     def row(self, m, witnesses):
         self.budget()
         row_started = time.monotonic()
-        self.row_deadline = row_started + 900
+        self.row_deadline = row_started + (840 if self.plan['package']==HWM_PACKAGE else 900)
         folder = self.root / m['id']
         folder.mkdir()
         cid = ''
@@ -764,6 +844,8 @@ class Peak:
         return {'interval_seconds': 0.2, 'samples': self.count, 'sampled_maximum_bytes': self.maximum, 'exact_peak': False, 'error': self.error, 'pid': self.pid, 'start_ticks': self.start_ticks, 'cgroup_path': str(self.cg)}
 
 def summarize(rows):
+    if rows and all(r['member']['scenario']==HWM_ID for r in rows):
+        return summarize_hwm(rows)
     require(len(rows) == 72 and len({r['member']['id'] for r in rows}) == 72, 'missing/duplicate final rows')
     grouped = collections.defaultdict(list)
     for r in rows:
@@ -807,6 +889,474 @@ def summarize(rows):
         comparisons.append({'scenario': id, 'observations': arms, 'logical_dataset': dict(arms['baseline'][0]['logical_dataset']), 'delta_pss_medians': median, 'memory_medians_and_ranges': memory, 'explicit_candidate_over_reference_memory_ratios': ratios, 'ratio_meaning': 'less than1 means candidate uses less memory at this exact logical dataset, not extra inserted data', 'settled_memory_screen': screen, 'phase_medians': perf, 'access_native_medians': native})
     return {'functional_success': True, 'screen_success': not misses, 'screen_misses': misses, 'comparisons': comparisons, 'classification': 'diagnostic-unreserved-closed-loop', 'cause_and_significance': 'unknown', 'aggregation': 'ratio/screens of three-run medians; median per-run p99 is not a pooled percentile; no confidence interval', 'qualification': 'external reservation and matched offered-load authority absent; diagnostic only'}
 
+def hwm_survivor(index):
+    return (index*104729+12345)%HWM_KEYS < 50000
+
+def hwm_mix(word):
+    mask = (1<<64)-1
+    word = (word ^ word>>30)*0xbf58476d1ce4e5b9 & mask
+    word = (word ^ word>>27)*0x94d049bb133111eb & mask
+    return word ^ word>>31
+
+def hwm_payload(index,generation):
+    mask = (1<<64)-1
+    rotated = ((index<<17)|(index>>(64-17))) & mask
+    out = bytearray(hwm_mix(HWM_SEED ^ index).to_bytes(8,'little'))
+    for word in range(1,8):
+        value = HWM_SEED ^ rotated ^ (generation*0x9e3779b97f4a7c15 & mask) ^ (word*0xd1342543de82ef95 & mask)
+        out.extend(hwm_mix(value).to_bytes(8,'little'))
+    return bytes(out)
+
+def hwm_payload_witnesses():
+    return [{'index':i,'generation':g,'sha256':hashlib.sha256(hwm_payload(i,g)).hexdigest()}
+            for i,g in ((0,0),(0,1),(17,0),(500001,2),(999999,3))]
+
+def hwm_expected_phase(s,p,budget=lambda:None):
+    state,mutation,verification = (hashlib.sha256() for _ in range(3))
+    live = logical = mops = mtx = 0
+    mix,vmix = collections.Counter(),collections.Counter()
+    workers = {'mutation':[],'verification':[]}
+    for worker in range(16):
+        hs,hm,hv = (hashlib.sha256() for _ in range(3))
+        mc,vc = collections.Counter(),collections.Counter()
+        local_records = 0
+        start,end = s['keys']*worker//16,s['keys']*(worker+1)//16
+        for i in range(start,end):
+            if i % 4096 == 0:
+                budget()
+            r = record(s,p,i)
+            key,n,g,kind,expiry = r
+            value = hwm_payload(i,g)
+            live += int(kind!=0)
+            logical += 82 if kind else 0
+            for b in (key,bytes([kind]),b'\x00',value if kind else b''):
+                frame(hs,b)
+            changed = p['step']==0 or p['step']%3!=2 and not hwm_survivor(i)
+            cmds = [(b'DEL',key)] if changed and kind==0 else [(b'SET',key,value)] if changed else []
+            local_records += int(bool(cmds))
+            for cmd in cmds:
+                command_frame(hm,cmd)
+                mc[cmd[0].decode()] += 1
+            for cmd in ((b'GET',key),(b'TYPE',key),(b'PTTL',key)):
+                command_frame(hv,cmd)
+                vc[cmd[0].decode()] += 1
+        for name,trace,st,counts,records in (('mutation',hm,hashlib.sha256(),mc,local_records),('verification',hv,hs,vc,end-start)):
+            workers[name].append({'worker':worker,'range_start':start,'range_end':end,
+                'wire_commands':sum(counts.values()),'completed_records':records,'histogram_samples':records,
+                'trace_sha256':trace.hexdigest(),'state_sha256':st.hexdigest(),
+                'command_counts':dict(counts),'errors':0,'error':None})
+        frame(state,hs.hexdigest().encode())
+        frame(mutation,hm.hexdigest().encode())
+        frame(verification,hv.hexdigest().encode())
+        mix.update(mc); vmix.update(vc)
+        mops += sum(mc.values()); mtx += local_records
+    return {'live_keys':live,'absent_keys':s['keys']-live,'logical_bytes':logical,'state_sha256':state.hexdigest(),
+        'mutation_trace_sha256':mutation.hexdigest(),'verification_trace_sha256':verification.hexdigest(),
+        'mutation_operations':mops,'verification_operations':s['keys']*3,'mutation_transactions':mtx,
+        'verification_transactions':s['keys'],'mutation_command_counts':dict(mix),'verification_command_counts':dict(vmix),
+        'control_commands':{'DBSIZE':1},'workers':workers}
+
+def validate_hwm_ready(e,s,pid):
+    require((e['schema'],e['event'],e['pid'],e['scenario'])==(2,'ready',pid,s),'HWM native identity differs')
+    require((e['seed'],e['clients'],e['pipeline'],e['deadline_seconds'])==(HWM_SEED,16,1,840),'HWM bounds differ')
+    require(e['initial_dbsize_checks']==1 and e['phases']==phases(s) and e['distribution']==distribution(s),'HWM catalog differs')
+    require(e['survivor_rule']=={'multiplier':104729,'offset':12345,'modulus':HWM_KEYS,'below':50000},'survivor rule differs')
+    require(e['idle_seconds']==10 and e['classification']=='high-water-lifecycle-subset' and e['steady_get_set_tested'] is False,'HWM scope differs')
+    require(e['payload_witnesses']==hwm_payload_witnesses(),'Rust/Python payload correspondence differs')
+
+def validate_hwm_phase(e,s,p,pid,w):
+    require((e['schema'],e['event'],e['pid'],e['scenario'],e['phase'])==(2,'phase',pid,s['id'],p['id']),'HWM phase identity differs')
+    for k,v in w.items():
+        if k=='workers' or k.endswith(('_operations','_transactions')):
+            continue
+        require(e[k]==v,f'HWM {k} differs')
+    for name in ('mutation','verification'):
+        t = e[name]
+        n,records = w[name+'_operations'],w[name+'_transactions']
+        require(type(t['wire_commands']) is int and type(t['completed_records']) is int and (t['wire_commands'],t['completed_records'])==(n,records),'HWM counts differ')
+        actual_workers = e[name+'_workers']
+        require(len(actual_workers)==16 and all(isinstance(r.get('rust_thread_id'),str) and len(r['rust_thread_id'])<=80 for r in actual_workers)
+                and len({r['rust_thread_id'] for r in actual_workers})==16,'all16 distinct Rust worker identities missing')
+        require([{k:v for k,v in r.items() if k!='rust_thread_id'} for r in actual_workers]==w['workers'][name],
+                'all16 worker counts/ranges/trace/state/errors differ')
+        require(all(type(t[k]) is int and t[k]>=0 for k in ('elapsed_ns','p50_ns','p99_ns','p999_ns','maximum_ns')),'HWM timing type differs')
+        if n:
+            require(t['elapsed_ns']>0 and 0<t['p50_ns']<=t['p99_ns']<=t['p999_ns']<=t['maximum_ns']<=60000000000,'HWM latency bounds differ')
+            require(t['latency_unit']==('logical-record-transition' if name=='mutation' else 'full-record-verification'),'HWM latency unit differs')
+            for k,count in (('wire_commands_per_sec',n),('completed_records_per_sec',records)):
+                require(type(t[k]) in (int,float) and math.isfinite(t[k]) and math.isclose(t[k],count*1e9/t['elapsed_ns'],rel_tol=1e-9),'HWM rate arithmetic differs')
+        else:
+            require(t['latency_unit']=='absent' and all(v==0 for k,v in t.items() if k!='latency_unit'),'zero-command timing differs')
+    idle = e['idle_elapsed_ns']
+    require(type(idle) is int and (10000000000<=idle<840000000000 if p['step']%3==2 else idle==0),'idle duration differs')
+
+def validate_hwm_contract(p):
+    require(p['schema']==2 and p['status']=='frozen with independently accepted gates','HWM operating inputs pending')
+    require(p['classification']=='high-water-lifecycle-subset' and p['steady_get_set_tested'] is False,'HWM subset attribution differs')
+    require(p['members']==members(HWM_PACKAGE),'HWM missing/extra/reordered members')
+    require(p['budgets']==HWM_BUDGETS and p['caps']==HWM_CAPS,'HWM clocks/resources differ')
+    require(set(p['images'])=={'current','redis'} and p['images']['current']['source_sha']==HWM_SOURCE and p['images']['current']['source_tree']==HWM_TREE,'HWM server source/arms differ')
+    require(p['images']['current']['features']==FEATURES and p['images']['redis']['version']=='7.4.11','HWM features/reference differ')
+    require(p['native_build']['argv']==HWM_BUILD_ARGV and p['native_build']['features']==[],'HWM native build differs')
+    require(p['native_build']['rust_version']=='1.93.1','HWM pinned Rust version differs')
+    require(p['native_build']['source_sha']==p['source']['sha'] and p['native_build']['source_tree']==p['source']['tree'],'driver build/source differs')
+    require(set(p['binaries'])=={'compact_resp_scenarios'} and set(p['helpers'])=={'density','child_wait','docker','git'},'HWM artifacts/helper closure differs')
+    require(p['owners']=={a:p['owner']+'-'+a for a in ('current','redis')},'HWM owners differ')
+    require(p['owner'].startswith('eden2266-') and len(p['owner'])<=80 and set(p['owner'])<=set('abcdefghijklmnopqrstuvwxyz0123456789-'),'HWM owner differs')
+    require(p['builds']=={'common':{'worktree':p['source']['worktree']}},'HWM target accounting differs')
+    require(p['sampling']=={'idle':5,'final':5,'intermediate':5,'delay_seconds':0.2,'settle_seconds':1.0,'peak_interval_seconds':0.2},'HWM sample contract differs')
+    require(set(p['resources'])=={'parent','controller','client','docker_parent','delegation_acceptance'},'HWM resource admission absent')
+    require(p['resources']['docker_parent']==pathlib.Path(p['resources']['parent']['path']).name and p['resources']['docker_parent'].endswith('.slice'),'Docker aggregate parent not exact owned slice')
+    require(digest(p['source']['sha'],40) and digest(p['source']['tree'],40) and p['source']['sha']!=HWM_SOURCE,'fresh benchmark driver source missing')
+    require(set(p['source']['file_sha256'])==set(HWM_INPUTS),'HWM driver input closure incomplete')
+    for b in p['images'].values():
+        require(b['engine_image_id'].startswith('sha256:') and digest(b['engine_image_id'][7:]),'invalid Engine image identity')
+    require(p['stop_path']=='/home/dtietjen/.local/state/eden-resource-guard/DO_NOT_START_NEW_ADAM_RUNS' and p['global_disk_guard']=='/home/dtietjen/.local/state/eden-resource-guard/disk-status.tsv','global resource guard paths differ')
+    run = pathlib.Path(p['owned_run_root'])
+    require(run.is_absolute() and str(run).startswith('/home/dtietjen/validation/EDEN-2266/'),'owned RUN missing')
+    require(pathlib.Path(p['output_root']).parent==run,'output must be a fresh direct RUN child')
+    return p
+
+def hwm_guard_status(text,stop,now):
+    # Same 90-second consumer predicate as the retained runtime.
+    rows = text.splitlines()
+    fields = rows[1].split() if len(rows)>1 else []
+    require(len(fields)>=4 and fields[3]=='OK' and not stop,'global disk guard/STOP blocks launch')
+    checked = datetime.datetime.fromisoformat(fields[0].replace('Z','+00:00'))
+    age = (now-checked).total_seconds()
+    require(0<=age<=90,'global disk guard stale/future')
+    return {'checked_utc':fields[0],'status':fields[3],'age_seconds':age,'STOP':False}
+
+def hwm_stat_matches(actual,binding,directory=True):
+    require((stat.S_ISDIR(actual.st_mode) if directory else stat.S_ISREG(actual.st_mode)), 'delegated cgroup type differs')
+    require((actual.st_dev,actual.st_ino,actual.st_uid,actual.st_gid,stat.S_IMODE(actual.st_mode))==
+            tuple(binding[k] for k in ('device','inode','uid','gid','mode')),'delegated cgroup metadata differs')
+    require(actual.st_uid==os.getuid() and actual.st_gid==os.getgid() and not actual.st_mode & 0o022,'delegation owner/write permissions differ')
+
+def hwm_cap_values(read,memory,cpus,pids,exact=True):
+    actual = {name:read(name).strip() for name in ('memory.max','memory.swap.max','cpu.max','pids.max')}
+    quota,period = actual['cpu.max'].split()
+    require(int(period)>0,'cgroup CPU period invalid')
+    if exact:
+        require(actual['memory.max']==str(memory) and actual['memory.swap.max']=='0' and actual['pids.max']==str(pids)
+                and quota!='max' and int(quota)==cpus*int(period),'actual cgroup caps differ')
+    else:
+        require((actual['memory.max']=='max' or int(actual['memory.max'])>=memory)
+                and (actual['pids.max']=='max' or int(actual['pids.max'])>=pids)
+                and (quota=='max' or int(quota)>=cpus*int(period)),'ancestor is tighter than aggregate envelope')
+    return actual
+
+def hwm_boundary(binding,parent=None):
+    path = pathlib.Path(binding['path'])
+    require(path.is_absolute() and path!=pathlib.Path('/sys/fs/cgroup') and path.is_relative_to('/sys/fs/cgroup')
+            and path.resolve(strict=True)==path and not path.is_symlink(),'delegation path not canonical cgroup')
+    if parent is not None:
+        require(path.parent==parent,'delegation is not a direct aggregate child')
+    hwm_stat_matches(path.stat(),binding)
+    return path
+
+class HwmBaselineRunner(Runner):
+    """Separate admitted resources; writes only the owned client cgroup.procs FD."""
+
+    def verify_resources(self,empty_client=False):
+        r = self.plan['resources']
+        require(isinstance(r.get('delegation_acceptance'),dict)
+                and isinstance(r['delegation_acceptance'].get('path'),str)
+                and digest(r['delegation_acceptance'].get('sha256')),'resource admission error: writable client delegation is pending')
+        admission = read_json(r['delegation_acceptance'])
+        expected = {k:r[k] for k in ('parent','controller','client','docker_parent')}
+        require(admission.get('status')=='independently accepted' and admission.get('writable_delegation_proven') is True
+                and admission.get('resources')==expected and admission.get('caps')==HWM_CAPS
+                and admission.get('source_sha')==self.plan['source']['sha']
+                and admission.get('source_tree')==self.plan['source']['tree'],'resource admission absent or wrong driver')
+        parent = hwm_boundary(r['parent'])
+        require(parent.name==r['docker_parent'] and parent.name.startswith(self.plan['owner']), 'aggregate slice not task owned')
+        control = hwm_boundary(r['controller'],parent)
+        client = hwm_boundary(r['client'],parent)
+        require(control!=client and control==self.h1.cgroup_path(os.getpid()),'controller placement differs')
+        for path,memory,cpus,pids in ((parent,8589934592,6,1088),(control,2147483648,1,64),(client,2147483648,4,512)):
+            hwm_cap_values(lambda name:(path/name).read_text(),memory,cpus,pids)
+        for ancestor in parent.parents:
+            if not ancestor.is_relative_to('/sys/fs/cgroup'):
+                break
+            def read_control(name):
+                file = ancestor/name
+                if file.exists():
+                    return file.read_text()
+                require(ancestor==pathlib.Path('/sys/fs/cgroup'),'missing non-root hierarchy control')
+                return 'max 100000' if name=='cpu.max' else 'max'
+            hwm_cap_values(read_control,8589934592,6,1088,False)
+        if empty_client:
+            require(not (client/'cgroup.procs').read_text().strip(),'client cgroup contains an unowned process')
+        return parent,control,client
+
+    def verify_inputs(self):
+        p = self.plan
+        self.verify_resources(True)
+        self.h1.verify_scope(os.getpid(),p['controller_scope'],2147483648,1)
+        work = pathlib.Path(p['source']['worktree'])
+        require(work.resolve(strict=True)==work and not work.is_symlink(),'driver checkout not canonical')
+        require(self.command(['git','-C',str(work),'rev-parse','HEAD'])==p['source']['sha']
+                and self.command(['git','-C',str(work),'rev-parse','HEAD^{tree}'])==p['source']['tree']
+                and not self.command(['git','-C',str(work),'status','--porcelain']),'driver HEAD/tree/clean differs')
+        require(pathlib.Path(__file__).resolve()==work/'benchmarks/scripts/run-compact-storage-scenarios.py','executed controller differs')
+        for relative,expected in p['source']['file_sha256'].items():
+            require(sha(work/relative)==expected,'driver input bytes differ')
+        for b in p['binaries'].values():
+            pinned(b,executable=True)
+        for key in ('regression_acceptance','native_build_acceptance','operating_acceptance'):
+            receipt = read_json(p[key])
+            require(receipt['status']=='independently accepted' and receipt['source_sha']==p['source']['sha']
+                    and receipt['source_tree']==p['source']['tree'],'fresh driver admission missing')
+        regression = read_json(p['regression_acceptance'])
+        require(regression['new_native_names']==list(HWM_NATIVE_TESTS) and regression['new_python_names']==list(HWM_PYTHON_TESTS)
+                and regression['legacy_native_tests']==21 and regression['legacy_python_tests']==40
+                and regression['exit_codes']==[0,0] and regression['wait_observed'] is True
+                and regression['child_reaped'] is True and regression['raw_wait_status']==0,'fresh focused/legacy regression evidence missing')
+        operating = read_json(p['operating_acceptance'])
+        require(operating['owner']==p['owner'] and operating['caps']==HWM_CAPS and operating['budgets']==HWM_BUDGETS
+                and operating['owned_run_root']==p['owned_run_root'] and operating['output_root']==p['output_root']
+                and operating['helper_sha256']=={k:v['sha256'] for k,v in p['helpers'].items()}
+                and operating['docker_receipt']==p['docker_receipt'],'current operating/runtime boundary differs')
+        build = read_json(p['native_build_acceptance'])
+        require(build['argv']==HWM_BUILD_ARGV and build['exit_code']==0 and build['wait_observed'] is True
+                and build['child_reaped'] is True and build['raw_wait_status']==0 and build['rustflags']==[]
+                and build['artifact_sha256']=={k:v['sha256'] for k,v in p['binaries'].items()}
+                and build['artifact_paths']=={k:v['path'] for k,v in p['binaries'].items()}
+                and build['compiler_sha256']==p['native_build']['compiler']['sha256']
+                and build['rust_version']=='1.93.1','fresh native ELF/build/wait missing')
+        pinned(p['native_build']['compiler'],executable=True)
+        early = read_json(p['early_gate_acceptance'])
+        require(early['status']=='independently accepted' and early['source_sha']==HWM_SOURCE and early['source_tree']==HWM_TREE
+                and early['functional_success'] is True and early['screen_success'] is True and early['processes']==30,'source016 strict EARLY gate missing')
+        equivalence = read_json(p['product_input_equivalence'])
+        require(equivalence['status']=='independently accepted' and equivalence['server_source_sha']==HWM_SOURCE
+                and equivalence['server_source_tree']==HWM_TREE and equivalence['driver_source_sha']==p['source']['sha']
+                and equivalence['driver_source_tree']==p['source']['tree'] and equivalence['all_product_inputs_equal'] is True
+                and equivalence['early_gate_sha256']==p['early_gate_acceptance']['sha256'],'complete relevant product equivalence missing')
+        for arm,b in p['images'].items():
+            inspected = json.loads(self.command(['docker','image','inspect',b['engine_image_id']]))
+            require(len(inspected)==1 and inspected[0]['Id']==b['engine_image_id'],'cached image identity differs')
+            if arm=='current':
+                provenance = b['provenance']
+                resolved = self.density.resolve_shardcache_build(read_json(provenance['metadata'],134217728),
+                    pinned(provenance['dockerfile']).read_bytes(),pinned(provenance['export_log']).read_text(),
+                    features=FEATURES,build_jobs=4,candidate_sha=HWM_SOURCE,image_tag=b['original_tag'],engine_image_id=b['engine_image_id'])
+                require(resolved==b['resolved_build'],'source016 image provenance differs')
+                context = read_json(provenance['source_context_acceptance'])
+                require(context['status']=='independently accepted' and context['source_sha']==HWM_SOURCE
+                        and context['source_tree']==HWM_TREE,'source016 image context missing')
+            else:
+                require(inspected[0]['RepoDigests']==b['repo_digests'] and bool(b['repo_digests']),'Redis digest closure differs')
+                reference = read_json(b['reference_acceptance'])
+                require(reference['status']=='independently accepted' and reference['engine_image_id']==b['engine_image_id']
+                        and reference['version']=='7.4.11' and reference['repo_digests']==b['repo_digests'],'Redis reference admission differs')
+        require(os.environ.get('EDEN_DENSITY_OWNER')==p['owners']['current']
+                and pathlib.Path(os.environ['EDEN_DENSITY_DOCKER_RECEIPT'])==pathlib.Path(p['docker_receipt']),'adapter environment differs')
+        require(self.command(['docker','info','--format','{{.CgroupDriver}}'])=='systemd','Docker systemd parent binding unavailable')
+
+    def budget(self):
+        super().budget()
+        now = time.monotonic()
+        if now < getattr(self,'next_hwm_budget',0):
+            return
+        guard = hwm_guard_status(pathlib.Path(self.plan['global_disk_guard']).read_text(),
+            pathlib.Path(self.plan['stop_path']).exists(),datetime.datetime.now(datetime.timezone.utc))
+        parent,control,client = self.verify_resources()
+        root = pathlib.Path(self.plan['owned_run_root'])
+        require(root.resolve(strict=True)==root and root.stat().st_uid==os.getuid(),'owned RUN differs')
+        # Conservatively count hard links again. Targets outside RUN are separately counted
+        # by the unchanged H1 gate; the operating receipt binds their aggregate footprint.
+        total = 0
+        for directory,dirs,files in os.walk(root,followlinks=False):
+            for name in dirs+files:
+                path = pathlib.Path(directory)/name
+                require(not path.is_symlink(),'owned RUN symlink')
+                if path.is_file():
+                    total += path.stat().st_size
+        target = pathlib.Path(self.plan['source']['worktree'])/'target'
+        if not target.is_relative_to(root):
+            total += self.h1.TARGET_BYTES[target]
+        require(total<32212254720,'whole RUN plus driver target exceeds 30GiB')
+        self.last_resource_observation = {'guard':guard,'owned_bytes':total,'monotonic':now,
+            'parent':str(parent),'controller':str(control),'client':str(client)}
+        self.next_hwm_budget = time.monotonic()+5
+
+    def command(self,argv,timeout=30):
+        if argv[:2]==['docker','run']:
+            self.verify_resources(True)
+            require(not any(a in ('--cgroup-parent','--pids-limit') or a.startswith(('--cgroup-parent=','--pids-limit=')) for a in argv),'unexpected preexisting Docker placement')
+            argv = argv[:2]+['--pids-limit','512','--cgroup-parent',self.plan['resources']['docker_parent']]+argv[2:]
+        return super().command(argv,timeout)
+
+    def snapshot(self,cid,pid,user,cg,port):
+        parent,_,_ = self.verify_resources()
+        require(cg.parent==parent,'Docker server is outside admitted aggregate parent')
+        hwm_cap_values(lambda name:(cg/name).read_text(),4294967296,1,512)
+        sample = super().snapshot(cid,pid,user,cg,port)
+        sample['resource_scope'] = self.scope_sample(cg)
+        return sample
+
+    def scope_sample(self,path):
+        return {'path':str(path),'cpu_stat':dict(line.split() for line in (path/'cpu.stat').read_text().splitlines()),
+            'cpu_max':(path/'cpu.max').read_text().strip(),'cpuset_effective':(path/'cpuset.cpus.effective').read_text().strip(),
+            'memory_current':int((path/'memory.current').read_text()),'memory_peak_since_cgroup_creation':int((path/'memory.peak').read_text()),
+            'pids_current':int((path/'pids.current').read_text()),'pids_max':(path/'pids.max').read_text().strip(),
+            'monotonic_ns':time.monotonic_ns()}
+
+    def client_started(self,waiter,folder):
+        require(self.h1.cgroup_path(waiter.pid)==pathlib.Path(self.plan['resources']['client']['path']),'native left admitted client cgroup')
+        write(folder/'client-ready.json',self.client_snapshot(waiter))
+
+    def client_snapshot(self,waiter):
+        parent,control,client = self.verify_resources()
+        executable = pinned(self.plan['binaries']['compact_resp_scenarios'],executable=True)
+        identity = self.h1.proc_identity(waiter.pid,executable)
+        require(identity['start_ticks']==waiter.identity['start_ticks'] and self.h1.cgroup_path(waiter.pid)==client,'native client identity/placement changed')
+        def memory(pid):
+            fields = dict(line.split(':',1) for line in pathlib.Path(f'/proc/{pid}/smaps_rollup').read_text().splitlines() if ':' in line)
+            return {k:int(fields[k].split()[0])*1024 for k in ('Pss','Rss','Private_Clean','Private_Dirty')}
+        result = {'identity':identity,'client_process_bytes':memory(waiter.pid),'controller_process_bytes':memory(os.getpid()),
+            'client':self.scope_sample(client),'controller':self.scope_sample(control),'parent':self.scope_sample(parent)}
+        after = self.h1.proc_identity(waiter.pid,executable)
+        require(all(after[k]==identity[k] for k in ('pid','start_ticks','exe','uid','boot_id','user_namespace'))
+                and self.h1.cgroup_path(waiter.pid)==client,'client identity changed during sample')
+        return result
+
+    def open_client_procs(self):
+        _,_,client = self.verify_resources(True)
+        binding = self.plan['resources']['client']
+        directory = os.open(client,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+        try:
+            hwm_stat_matches(os.fstat(directory),binding)
+            fd = os.open('cgroup.procs',os.O_WRONLY|os.O_NOFOLLOW|os.O_CLOEXEC,dir_fd=directory)
+            try:
+                hwm_stat_matches(os.fstat(fd),binding['procs'],False)
+                require(os.fstat(fd).st_mode & stat.S_IWUSR,'no writable client delegation')
+                return fd
+            except BaseException:
+                os.close(fd)
+                raise
+        finally:
+            os.close(directory)
+
+    def placement_confirmed(self,waiter):
+        self.verify_resources()
+        require(waiter.poll() is None and self.h1.child_wait_identity(waiter.pid)==waiter.identity,'placed child no longer directly owned')
+        client = pathlib.Path(self.plan['resources']['client']['path'])
+        require(self.h1.cgroup_path(waiter.pid)==client and (client/'cgroup.procs').read_text().split()==[str(waiter.pid)],'partial/wrong client placement')
+        require(os.getpgid(waiter.pid)==waiter.pid and os.getsid(waiter.pid)==waiter.pid,'child session handshake incomplete')
+
+    def spawn(self,argv,folder,interactive=False):
+        if argv[0]!=self.plan['binaries']['compact_resp_scenarios']['path']:
+            return super().spawn(argv,folder,interactive)
+        require(interactive and len(self.children)<2,'native placement requires owned interactive child')
+        fds = [-1]*9
+        waiter = None
+        try:
+            with self.h1.block_termination() as mask:
+                fds[8] = self.open_client_procs()
+                fds[0],fds[1] = os.pipe()  # native stdout
+                fds[2],fds[3] = os.pipe()  # native acknowledgement
+                fds[4],fds[5] = os.pipe()  # placement ready
+                fds[6],fds[7] = os.pipe()  # parent permits exec
+                pid = os.fork()
+                if pid==0:
+                    try:
+                        os.setsid()
+                        for i in (0,3,4,7):
+                            os.close(fds[i])
+                        message = f'{os.getpid()}\n'.encode()
+                        if os.write(fds[8],message)!=len(message):
+                            os._exit(126)
+                        os.close(fds[8])
+                        if os.write(fds[5],b'placed\n')!=7:
+                            os._exit(126)
+                        os.close(fds[5])
+                        if os.read(fds[6],5)!=b'exec\n':
+                            os._exit(126)
+                        os.close(fds[6])
+                        os.dup2(fds[2],0); os.dup2(fds[1],1)
+                        stderr = os.open(folder/'stderr.log',os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+                        os.dup2(stderr,2)
+                        for fd in (fds[2],fds[1],stderr):
+                            os.close(fd)
+                        signal.pthread_sigmask(signal.SIG_SETMASK,mask)
+                        os.execv(argv[0],argv)
+                    except BaseException:
+                        os._exit(127)
+                waiter = self.h1.NativeChildWait(pid)
+                self.children[pid] = waiter
+                waiter.bind()  # still masked; own direct child before any pending signal
+            for i in (1,2,5,6,8):
+                self.close_owned_fd(fds,i)
+            until = min(time.monotonic()+10,self.row_deadline or float('inf'))
+            placed = b''
+            while b'\n' not in placed:
+                self.budget()
+                require(waiter.poll() is None and time.monotonic()<until,'placement handshake failed/expired')
+                if select.select([fds[4]],[],[],0.05)[0]:
+                    data = os.read(fds[4],16)
+                    require(bool(data),'placement handshake EOF')
+                    placed += data
+                    require(len(placed)<=7,'placement handshake extra bytes')
+            require(placed==b'placed\n','placement handshake differs')
+            self.placement_confirmed(waiter)
+            write(folder/'placement.json',{'identity':waiter.identity,'client':self.plan['resources']['client'],
+                'handshake':'placement-before-parent-check-before-exec','native_pid_is_direct_child':True})
+            require(os.write(fds[7],b'exec\n')==5,'partial exec acknowledgement')
+            for i in (4,7):
+                self.close_owned_fd(fds,i)
+            write(folder/'child.json',{'argv':argv,'identity':waiter.identity})
+            return waiter,fds[0],fds[3]
+        except BaseException:
+            self.cleanup_preserving(waiter,folder,fds)
+            raise
+
+def summarize_hwm(rows):
+    require([r['member'] for r in rows]==members(HWM_PACKAGE),'HWM incomplete/reordered rows')
+    by_arm = {a:[r for r in rows if r['member']['arm']==a] for a in ('current','redis')}
+    comparison = {}
+    for phase in phases(scenario(HWM_ID)):
+        selected = {a:[next(p for p in r['phases'] if p['native']['phase']==phase['id']) for r in v] for a,v in by_arm.items()}
+        states = {tuple(p['native'][k] for k in ('live_keys','absent_keys','logical_bytes','state_sha256')) for v in selected.values() for p in v}
+        require(len(states)==1,'HWM matched logical states differ')
+        comparison[phase['id']] = {a:{'total_pss_median_bytes':statistics.median(p['settled']['medians']['pss_bytes'] for p in v),
+            'mutation_records_per_sec_median':statistics.median(p['native']['mutation']['completed_records_per_sec'] for p in v),
+            'mutation_wire_commands_per_sec_median':statistics.median(p['native']['mutation']['wire_commands_per_sec'] for p in v),
+            'record_transition_p99_median_ns':statistics.median(p['native']['mutation']['p99_ns'] for p in v),
+            'full_observations':v} for a,v in selected.items()}
+    return {'functional_success':True,'classification':'high-water-lifecycle-subset','steady_get_set_tested':False,
+        'optimized_variant':None,'source_reference':HWM_SOURCE,'rows':rows,'phase_comparisons':comparison,
+        'screen_success':None,'qualification':'baseline lifecycle observations only; no optimization, fixed offered load, or inserted capacity result',
+        'aggregation':'three-run medians; p99 medians not pooled percentiles; no confidence interval'}
+
+def hwm_plan_template():
+    """Concrete schema producer, not an admission or a source/ELF receipt builder."""
+    binding = lambda:{'path':None,'sha256':None}
+    metadata = lambda:{'path':None,'device':None,'inode':None,'uid':None,'gid':None,'mode':None}
+    client = metadata()
+    client['procs'] = {k:None for k in ('device','inode','uid','gid','mode')}
+    return {'schema':2,'status':'planned; runtime and delegation admissions pending',
+        'classification':'high-water-lifecycle-subset','steady_get_set_tested':False,
+        'package':HWM_PACKAGE,'members':members(HWM_PACKAGE),'budgets':dict(HWM_BUDGETS),'caps':dict(HWM_CAPS),
+        'source':{'sha':None,'tree':None,'worktree':None,'file_sha256':dict.fromkeys(HWM_INPUTS)},
+        'images':{'current':{'source_sha':HWM_SOURCE,'source_tree':HWM_TREE,'features':FEATURES,
+            'engine_image_id':None,'original_tag':None,'resolved_build':None,
+            'provenance':{k:binding() for k in ('metadata','dockerfile','export_log','source_context_acceptance')}},
+            'redis':{'version':'7.4.11','engine_image_id':None,'repo_digests':None,'reference_acceptance':binding()}},
+        'native_build':{'argv':list(HWM_BUILD_ARGV),'features':[],'source_sha':None,'source_tree':None,'rust_version':'1.93.1','compiler':binding()},
+        'binaries':{'compact_resp_scenarios':binding()},'helpers':{k:binding() for k in ('density','child_wait','docker','git')},
+        'owner':None,'owners':{'current':None,'redis':None},'builds':{'common':{'worktree':None}},
+        'sampling':{'idle':5,'final':5,'intermediate':5,'delay_seconds':0.2,'settle_seconds':1.0,'peak_interval_seconds':0.2},
+        'resources':{'parent':metadata(),'controller':metadata(),'client':client,'docker_parent':None,'delegation_acceptance':binding()},
+        'controller_scope':None,'owned_run_root':None,'output_root':None,'docker_receipt':None,
+        'stop_path':'/home/dtietjen/.local/state/eden-resource-guard/DO_NOT_START_NEW_ADAM_RUNS',
+        'global_disk_guard':'/home/dtietjen/.local/state/eden-resource-guard/disk-status.tsv',
+        **{k:binding() for k in ('regression_acceptance','native_build_acceptance','operating_acceptance',
+                               'early_gate_acceptance','product_input_equivalence')},
+        'actual_measurements':None,'qualified_native_elf':None}
+
 def interrupted(signum, _frame):
     raise RuntimeError(f'controller interrupted by signal {signum}')
 
@@ -814,9 +1364,16 @@ def main():
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, interrupted)
     a = argparse.ArgumentParser()
-    a.add_argument('--plan', type=pathlib.Path, required=True)
-    a.add_argument('--plan-sha256', required=True)
+    a.add_argument('--plan', type=pathlib.Path)
+    a.add_argument('--plan-sha256')
+    a.add_argument('--write-hwm-baseline-template',type=pathlib.Path,
+                   help='Write the finite six-row schema with NULL runtime inputs; no helper imports or effects')
     args = a.parse_args()
+    if args.write_hwm_baseline_template:
+        require(args.plan is None and args.plan_sha256 is None,'template mode cannot accept runtime plan')
+        write(args.write_hwm_baseline_template,hwm_plan_template())
+        return 0
+    require(args.plan is not None and args.plan_sha256 is not None,'--plan and --plan-sha256 are required for execution')
     plan = validate_contract(read_json({'path': str(args.plan), 'sha256': args.plan_sha256}))
     root = pathlib.Path(plan['output_root'])
     require(root.is_absolute() and (not root.exists()) and (root.parent.resolve() == root.parent), 'fresh canonical output root required')
@@ -825,13 +1382,13 @@ def main():
     resource.setrlimit(resource.RLIMIT_FSIZE, (134217728, 134217728))
     runner = None
     try:
-        runner = Runner(plan, root)
+        runner = HwmBaselineRunner(plan,root) if plan['package']==HWM_PACKAGE else Runner(plan,root)
         runner.verify_inputs()
         runner.budget()
         contracts = {}
         for id in {m['scenario'] for m in plan['members']}:
             s = scenario(id, plan['package'] == 'access')
-            contracts[id] = {p['id']: expected_phase(s, p) for p in phases(s)}
+            contracts[id] = {p['id']: hwm_expected_phase(s,p,runner.budget) if s['family']=='hwm' else expected_phase(s, p) for p in phases(s)}
         write(root / 'expected-state-contracts.json', contracts)
         rows = []
         for m in plan['members']:
@@ -846,7 +1403,9 @@ def main():
             require(sha(pathlib.Path(plan['source']['worktree']) / relative) == expected, 'bound source changed during effects')
         report = summarize(rows)
         write(root / 'summary.json', report)
-        write(root / 'result.json', {'success': True, 'rows': 72, 'minimum_idle_final_gates': 720, 'phase_gates': sum((len(r['phases']) * 5 for r in rows)), 'screen_success': report['screen_success'], 'elapsed_seconds': time.monotonic() - runner.started})
+        write(root / 'result.json', {'success': True, 'rows': 6 if plan['package']==HWM_PACKAGE else 72,
+            'minimum_idle_final_gates':60 if plan['package']==HWM_PACKAGE else 720,
+            'phase_gates': sum((len(r['phases']) * 5 for r in rows)), 'screen_success': report['screen_success'], 'elapsed_seconds': time.monotonic() - runner.started})
         return 0
     except BaseException as exc:
         cleanup = None

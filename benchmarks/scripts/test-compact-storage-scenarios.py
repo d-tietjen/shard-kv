@@ -617,5 +617,198 @@ class RespContractTests(unittest.TestCase):
                 self.assertEqual(str(exc), 'primary exact')
             self.assertEqual(len(r.cleanup_errors), 1)
             self.assertTrue(write.call_args.args[1]['original_exception_in_flight'])
+class HwmBaselineTests(unittest.TestCase):
+    """New branch regressions; definitions only until exact Adam qualification."""
+
+    def _small(self):
+        s = gate.scenario(gate.HWM_ID)
+        s['keys'] = 64
+        return s
+
+    def _event(self,s,p):
+        witness = gate.hwm_expected_phase(s,p)
+        e = {'schema':2,'event':'phase','pid':12,'scenario':s['id'],'phase':p['id'],
+             'idle_elapsed_ns':10000000000 if p['step']%3==2 else 0}
+        e.update({k:v for k,v in witness.items() if k!='workers' and not k.endswith(('_operations','_transactions'))})
+        for name in ('mutation','verification'):
+            n = witness[name+'_operations']; records = witness[name+'_transactions']
+            e[name+'_workers'] = copy.deepcopy(witness['workers'][name])
+            for worker in e[name+'_workers']:
+                worker['rust_thread_id'] = 'isolated-unit-worker-'+str(worker['worker'])
+            e[name] = {'wire_commands':n,'completed_records':records,'elapsed_ns':100000 if n else 0,
+                'wire_commands_per_sec':n*10000,'completed_records_per_sec':records*10000,
+                'latency_unit':('logical-record-transition' if name=='mutation' else 'full-record-verification') if n else 'absent',
+                'p50_ns':10 if n else 0,'p99_ns':20 if n else 0,'p999_ns':30 if n else 0,'maximum_ns':40 if n else 0}
+        return e,witness
+
+    def test_hwm_catalog_members_and_legacy_catalog(self):
+        self.assertEqual(len(gate.IDS),24)
+        self.assertNotIn(gate.HWM_ID,gate.IDS)
+        for name in ('stateful-a','stateful-b','stateful-c','access'):
+            self.assertEqual(len(gate.members(name)),72)
+        ms = gate.members(gate.HWM_PACKAGE)
+        self.assertEqual([m['arm'] for m in ms],['current','redis','redis','current','current','redis'])
+        self.assertEqual(len({m['id'] for m in ms}),6)
+        phases = gate.phases(gate.scenario(gate.HWM_ID))
+        self.assertEqual([p['step'] for p in phases],list(range(10)))
+        self.assertEqual(phases[-1]['id'],'refill-3')
+        self.assertEqual(sum(gate.hwm_survivor(i) for i in range(gate.HWM_KEYS)),50000)
+        self.assertEqual(gate.HWM_BUDGETS['runtime_seconds'],840)
+        self.assertEqual(gate.BUDGETS['runtime_seconds'],900)
+        self.assertIsNone(gate.hwm_plan_template()['actual_measurements'])
+
+    def test_hwm_payload_mixed_generations(self):
+        prefixes = set()
+        for i in range(gate.HWM_KEYS):
+            g = 0 if gate.hwm_survivor(i) else i%3+1
+            value = gate.hwm_payload(i,g)
+            self.assertEqual(len(value),64)
+            self.assertEqual(value[:8],gate.hwm_payload(i,0)[:8])
+            prefixes.add(value[:8])
+        self.assertEqual(len(prefixes),gate.HWM_KEYS)
+        self.assertNotEqual(gate.hwm_payload(0,0),gate.hwm_payload(1,1))
+        self.assertNotEqual(gate.hwm_payload(17,0)[8:],gate.hwm_payload(17,1)[8:])
+        # A genuine native --describe event must carry these independently computed
+        # Python hashes; the production ready validator compares all five.
+        self.assertEqual([(w['index'],w['generation']) for w in gate.hwm_payload_witnesses()],
+                         [(0,0),(0,1),(17,0),(500001,2),(999999,3)])
+
+    def test_hwm_oracle_counts_and_workers(self):
+        s = self._small()
+        previous = None
+        for p in gate.phases(s):
+            e,w = self._event(s,p)
+            gate.validate_hwm_phase(e,s,p,12,w)
+            self.assertEqual(w['verification_operations'],3*s['keys'])
+            self.assertEqual(sum(r['completed_records'] for r in w['workers']['verification']),s['keys'])
+            self.assertEqual([r['worker'] for r in w['workers']['verification']],list(range(16)))
+            if p['step']%3==2:
+                self.assertEqual(w['mutation_operations'],0)
+                self.assertEqual(w['state_sha256'],previous['state_sha256'])
+            if p['step']%3==0:
+                self.assertEqual(w['live_keys'],s['keys'])
+            else:
+                self.assertEqual(w['live_keys'],sum(gate.hwm_survivor(i) for i in range(s['keys'])))
+            previous = w
+
+    def test_hwm_corruption_and_worker_rejection(self):
+        s = self._small(); p = gate.phases(s)[3]
+        e,w = self._event(s,p)
+        for key in ('live_keys','logical_bytes','state_sha256','mutation_trace_sha256','verification_trace_sha256'):
+            bad = copy.deepcopy(e)
+            bad[key] = '0'*64 if isinstance(bad[key],str) else bad[key]+1
+            with self.assertRaises(RuntimeError):
+                gate.validate_hwm_phase(bad,s,p,12,w)
+        for replacement in (e['verification_workers'][:-1],e['verification_workers']+[e['verification_workers'][0]]):
+            bad = copy.deepcopy(e); bad['verification_workers'] = replacement
+            with self.assertRaises(RuntimeError):
+                gate.validate_hwm_phase(bad,s,p,12,w)
+        for field,value in (('errors',1),('range_end',0),('state_sha256','0'*64),('completed_records',0)):
+            bad = copy.deepcopy(e); bad['verification_workers'][15][field] = value
+            with self.assertRaises(RuntimeError):
+                gate.validate_hwm_phase(bad,s,p,12,w)
+        with self.assertRaises(RuntimeError):
+            gate.validate_hwm_phase(e,s,p,13,w)
+
+    def test_hwm_refuses_missing_delegation(self):
+        r = gate.HwmBaselineRunner.__new__(gate.HwmBaselineRunner)
+        r.plan = gate.hwm_plan_template()
+        with mock.patch.object(gate.os,'fork') as fork:
+            with self.assertRaisesRegex(RuntimeError,'resource admission error'):
+                r.open_client_procs()
+            fork.assert_not_called()
+
+    def test_hwm_boundary_identity_and_caps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            p = pathlib.Path(directory)
+            info = p.stat()
+            binding = dict(zip(('device','inode','uid','gid','mode'),
+                (info.st_dev,info.st_ino,info.st_uid,info.st_gid,info.st_mode & 0o777)))
+            gate.hwm_stat_matches(info,binding)
+            bad = dict(binding,uid=info.st_uid+1)
+            with self.assertRaises(RuntimeError):
+                gate.hwm_stat_matches(info,bad)
+            with self.assertRaisesRegex(RuntimeError,'canonical cgroup'):
+                gate.hwm_boundary(dict(binding,path=str(p)))
+            with self.assertRaises(RuntimeError):
+                gate.hwm_stat_matches(info,binding,False)
+        caps = {'memory.max':'2147483648','memory.swap.max':'0','cpu.max':'400000 100000','pids.max':'512'}
+        self.assertEqual(gate.hwm_cap_values(caps.__getitem__,2147483648,4,512),caps)
+        for key,value in (('memory.max','4294967296'),('memory.swap.max','max'),('cpu.max','100000 100000'),('pids.max','max')):
+            bad = dict(caps,**{key:value})
+            with self.assertRaises(RuntimeError):
+                gate.hwm_cap_values(bad.__getitem__,2147483648,4,512)
+
+    def _placement_runner(self,executable):
+        r,waiters = RespContractTests()._cleanup_runner()
+        r.__class__ = gate.HwmBaselineRunner
+        r.plan = {'binaries':{'compact_resp_scenarios':{'path':executable}},'resources':{'client':{'path':'isolated-unit-fixture'}}}
+        r.budget = lambda:None
+        return r,waiters
+
+    def test_hwm_placement_handshake_and_reaping(self):
+        executable = str(pathlib.Path(sys.executable).resolve())
+        r,waiters = self._placement_runner(executable)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory); output = root/'output'; output.mkdir()
+            target = root/'procs-unit-fixture'
+            confirmed = []
+            def confirm(waiter):
+                self.assertEqual(target.read_text(),str(waiter.pid)+'\n')
+                self.assertIsNone(waiter.poll())
+                self.assertEqual(r.h1.proc_identity(waiter.pid,pathlib.Path(executable))['start_ticks'],waiter.identity['start_ticks'])
+                self.assertEqual(os.getpgid(waiter.pid),waiter.pid)
+                confirmed.append(waiter.pid)
+            # Unit placement mechanics use a private regular FD. This is never an
+            # admission for Linux cgroups; resource validation has separate tests
+            # and an actual delegated-kernel integration remains mandatory.
+            with mock.patch.object(r,'open_client_procs',side_effect=lambda:os.open(target,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)),\
+                 mock.patch.object(r,'placement_confirmed',side_effect=confirm):
+                waiter,readfd,ack = r.spawn([executable,'-c','import os,sys; print(os.getpid(),flush=True); sys.stdin.readline()'],output,True)
+            self.assertEqual(confirmed,[waiter.pid])
+            self.assertTrue(gate.select.select([readfd],[],[],5)[0])
+            self.assertEqual(os.read(readfd,128).strip(),str(waiter.pid).encode())
+            os.write(ack,b'done\n')
+            wait = r.wait(waiter,gate.time.monotonic()+5)
+            self.assertEqual(wait['raw_wait_status'],0)
+            r.children.pop(waiter.pid)
+            os.close(readfd); os.close(ack)
+            RespContractTests()._assert_genuinely_reaped(waiters[0])
+
+    def test_hwm_placement_failure_reaped(self):
+        executable = str(pathlib.Path(sys.executable).resolve())
+        for stage in ('child-write','parent-check','exec'):
+            r,waiters = self._placement_runner(executable if stage!='exec' else '/nonexistent/hwm-native')
+            with tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                fd_factory = (lambda:os.open(root/'private-procs',os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)) if stage!='child-write' else lambda:os.open('/dev/null',os.O_RDONLY)
+                def confirmed(waiter):
+                    if stage=='parent-check':
+                        raise RuntimeError('injected isolated parent-check failure')
+                with mock.patch.object(r,'open_client_procs',side_effect=fd_factory),\
+                     mock.patch.object(r,'placement_confirmed',side_effect=confirmed):
+                    if stage!='exec':
+                        with self.assertRaises(RuntimeError):
+                            r.spawn([executable,'-c','raise SystemExit(99)'],root,True)
+                    else:
+                        waiter,readfd,ack = r.spawn(['/nonexistent/hwm-native'],root,True)
+                        wait = r.wait(waiter,gate.time.monotonic()+5)
+                        self.assertEqual(wait['exit_code'],127)
+                        r.children.pop(waiter.pid)
+                        os.close(readfd); os.close(ack)
+                self.assertFalse(r.children)
+                self.assertEqual(len(waiters),1)
+                RespContractTests()._assert_genuinely_reaped(waiters[0])
+
+    def test_hwm_guard_freshness(self):
+        now = gate.datetime.datetime(2026,10,4,tzinfo=gate.datetime.timezone.utc)
+        def text(age):
+            when = now-gate.datetime.timedelta(seconds=age)
+            return 'checked free used status\n'+when.isoformat()+' 100000000000 0 OK\n'
+        self.assertEqual(gate.hwm_guard_status(text(90),False,now)['age_seconds'],90)
+        for age,stop in ((91,False),(-1,False),(0,True)):
+            with self.assertRaises(RuntimeError):
+                gate.hwm_guard_status(text(age),stop,now)
+
 if __name__ == '__main__':
     unittest.main()
