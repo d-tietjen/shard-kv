@@ -975,6 +975,67 @@ class HwmBaselineTests(unittest.TestCase):
                 else:
                     self.assertEqual(terminal.read_bytes(),candidate.read_bytes())
                     self.assertEqual(terminal.stat().st_ino,candidate.stat().st_ino)
+    def test_hwm_steady_catalog_and_windows(self):
+        s = gate.scenario(gate.HWM_STEADY_ID)
+        expected = ['load','delete-1','refill-1','delete-2','refill-2','delete-3','refill-3']
+        self.assertEqual(gate.hwm_steady_contract(s)['phases'],expected)
+        self.assertEqual(gate.hwm_steady_contract(s)['measured_seconds'],20)
+        self.assertEqual(gate.hwm_steady_contract(s)['warmup_seconds'],3)
+        self.assertEqual(len(gate.members(gate.HWM_STEADY_PACKAGE)),6)
+        plan = gate.hwm_plan_template(True)
+        self.assertEqual(plan['package'],gate.HWM_STEADY_PACKAGE)
+        self.assertEqual(plan['budgets']['runtime_seconds'],840)
+        self.assertIsNone(plan['actual_measurements'])
+        self.assertFalse(gate.hwm_plan_template()['steady_get_set_tested'])
+        self.assertNotIn(gate.HWM_STEADY_ID,gate.IDS)
+
+    def test_hwm_steady_prefix_oracle(self):
+        s = gate.scenario(gate.HWM_STEADY_ID); s['keys'] = 64
+        for p in gate.phases(s):
+            if p['step']%3==2:
+                continue
+            for worker in range(16):
+                first = gate.hwm_steady_prefix(s,p,worker,37)
+                self.assertEqual(first['wire_commands'],{'GET':30,'SET':7})
+                self.assertEqual(first,gate.hwm_steady_prefix(s,p,worker,37))
+        self.assertNotEqual(gate.hwm_steady_prefix(s,gate.phases(s)[0],0,37)['trace_sha256'],
+                            gate.hwm_steady_prefix(s,gate.phases(s)[3],0,37)['trace_sha256'])
+        with self.assertRaises(RuntimeError):
+            gate.hwm_uniform_rank(0,0,0)
+
+    def _steady_event(self):
+        s = gate.scenario(gate.HWM_STEADY_ID); s['keys'] = 64; p = gate.phases(s)[3]
+        workers = []; outer = hashlib.sha256()
+        for worker in range(16):
+            prefix = gate.hwm_steady_prefix(s,p,worker,37)
+            workers.append({'worker':worker,'rust_thread_id':'isolated-unit-worker-'+str(worker),
+                'sequence_start':0,'sequence_end':37,'wire_commands':prefix['wire_commands'],'trace_sha256':prefix['trace_sha256'],
+                'successful_replies':37,'warmup_completions':10,'warmup_straddled':0,'late_completions_excluded':1,
+                'measured_command_counts':{'GET':21,'SET':5},'histogram_samples':26,
+                'last_completion_ns_from_epoch':23000000001,'errors':0,'error':None})
+            gate.frame(outer,prefix['trace_sha256'].encode())
+        e = {'schema':2,'event':'steady-complete','pid':12,'scenario':s['id'],'phase':p['id'],
+            'pipeline':1,'clients':16,'warmup_seconds':3,'measured_seconds':20,'live_keys':64,
+            'access_policy':'uniform-live-key-rejection-v1','mix':'4GET-1SET-XX','trace_sha256':outer.hexdigest(),
+            'workers':workers,'errors':0,'measured_command_counts':{'GET':336,'SET':80},'completed_requests':416,
+            'histogram_samples':416,'ops_per_sec':416/20,'latency_unit':'checked-P1-request-completion',
+            'histogram_scope':'fully measured requests only; warmup straddles and late completions excluded',
+            'elapsed_ns_from_epoch':23000000002,'p50_ns':10,'p99_ns':20,'p999_ns':30,'maximum_ns':40}
+        return s,p,e
+
+    def test_hwm_steady_rejects_missing_workers_errors_and_bad_counts(self):
+        s,p,e = self._steady_event()
+        gate.validate_hwm_steady(e,s,p,12)
+        for field,value in (('errors',1),('histogram_samples',0),('warmup_completions',9),('late_completions_excluded',2),
+                            ('trace_sha256','0'*64),('rust_thread_id',e['workers'][0]['rust_thread_id'])):
+            bad = copy.deepcopy(e); bad['workers'][15][field] = value
+            with self.assertRaises(RuntimeError):
+                gate.validate_hwm_steady(bad,s,p,12)
+        for field,value in (('workers',e['workers'][:-1]),('completed_requests',415),('ops_per_sec',0),('measured_seconds',21),
+                            ('phase','idle-1'),('trace_sha256','0'*64)):
+            bad = copy.deepcopy(e); bad[field] = value
+            with self.assertRaises(RuntimeError):
+                gate.validate_hwm_steady(bad,s,p,12)
 
 if __name__ == '__main__':
     unittest.main()

@@ -3,15 +3,16 @@
 This is the first executable producer slice for the storage optimization plan.
 It compares current product `016a521b12968f38b703b3e3e39a8eb0be745429`
 (tree `16f855f045f44877d53d4ce5e840d20a555d31de`) with Redis 7.4.11 over
-the same loopback RESP transport. It is a **lifecycle diagnostic subset** of
-HWM_STR. Steady uniform 80/20 GET/SET windows are pending in this revision.
+the same loopback RESP transport. The first selector is a **lifecycle diagnostic
+subset** of HWM_STR. A separate selector adds the full P1/16-worker steady
+windows specified below. Neither profile has run or received runtime qualification.
 There are no measurements, qualified new native ELF, or accepted runtime
 admissions in this change. The new benchmark driver commit is distinct from
 the source016 server build; neither identity may be substituted for the other.
 
 ## Workload and six rows
 
-The new selector is `storage-hwm-str-v1`. The existing 24 selectors, original
+The lifecycle selector is `storage-hwm-str-v1`. The existing 24 selectors, original
 seed/payloads and 378-row composition remain unchanged. The new package
 `storage-hwm-baseline6-v1` has these exact members, in execution order:
 
@@ -64,12 +65,53 @@ per-row peak. Raw snapshots remain available; shared CPU sets are not a reservat
 No optimization attribution, fixed-RAM inserted capacity, or competitive
 percentage is claimed from this diagnostic producer alone.
 
+## Separate steady-window profile
+
+`storage-hwm-str-steady-v1` / package `storage-hwm-baseline6-steady-v1` preserves
+the same two arms, three paired rounds, key/value definitions and ten lifecycle
+phases. It adds seven fixed windows, after the load and each delete/refill
+mutation, **before exhaustive verification**. The low-occupancy windows use the
+50,000 surviving live keys; full-occupancy windows use all 1,000,000 keys.
+The timing locations are prescribed before any actual data, so reclamation and
+access costs can be compared at both occupancies without picking a best phase.
+
+Each window has 3 seconds warmup followed by 20 seconds measured traffic,
+16 real workers and P1. Every worker selects uniformly from the exact live-key
+domain using a deterministic mixed sequence and bounded rejection to remove
+modulo bias. The repeating schedule is four GETs then one idempotent SET XX.
+SET values retain the correct survivor/refill generation. An absent GET, failed
+XX condition, wrong value or any wire error fails the window; SET cannot
+silently recreate a deleted key. Persistent TTL/type/absence/count/state are
+exhaustively verified again after every window. There is no steady traffic
+inside the 10-second idle interval.
+
+The measured histogram covers completed P1 requests, including driver payload
+construction and checked replies. Requests started during warmup or completing
+after the fixed measured end are explicitly excluded and counted separately.
+The native reports all 16 workers' complete command prefixes, actual GET/SET
+counts, successful replies, warmup/straddle/late counts, histogram samples,
+errors and trace hashes. Python reconstructs every actual prefix independently
+and checks count conservation and the exact generation-sensitive commands.
+Actual measured mix can differ slightly from 80/20 at the interval edges;
+the full repeating schedule and realized counts are both reported.
+
+Memory and CPU snapshots bracket warmup plus measured traffic, connection
+setup and boundary overhead, before oracle reconstruction/exhaustive reads.
+They report raw server/client/controller/aggregate CPU usage and throttle,
+actual consumed cores, effective CPU sets, PID1 PSS, client/controller PSS
+and memory counters. These CPU averages are explicitly not measured-only
+20-second averages or per-request CPU costs. Results retain all phase/arm/round
+rows, request p99, throughput, memory and error vectors together. This is a
+closed-loop diagnostic: offered-arrival latency, reservation and a server
+throughput ceiling are not qualified by these windows.
+
 ## Entry points
 
 The existing executable gains one finite selector:
 
 ```bash
 compact_resp_scenarios --scenario storage-hwm-str-v1 --describe
+compact_resp_scenarios --scenario storage-hwm-str-steady-v1 --describe
 ```
 
 The controller has a concrete template producer. It writes NULL runtime inputs
@@ -78,6 +120,8 @@ and does not import runtime helpers or start a workload:
 ```bash
 python3 benchmarks/scripts/run-compact-storage-scenarios.py \
   --write-hwm-baseline-template /absolute/new/hwm-plan.json
+python3 benchmarks/scripts/run-compact-storage-scenarios.py \
+  --write-hwm-baseline-template /absolute/new/hwm-steady-plan.json --hwm-profile steady
 ```
 
 A separately bound and independently reviewed plan uses the existing invocation:
@@ -161,7 +205,10 @@ equivalence are distinct from the new benchmark driver admission. The template
 does not manufacture these receipts. Exact helper hashes and source inputs are
 rechecked before and after the package; full raw output must be retained.
 
-Seven Rust and fourteen Python regression methods are defined for new phases,
+Seven Rust and fourteen Python regression methods are defined for the lifecycle
+subset. The steady child adds three Rust and three Python methods for live-key
+selection, generation-correct XX, exact prefixes, finite windows and missing/
+failed workers/counts. Lifecycle checks cover phases,
 mixed-generation uniqueness, survivor counts, corruption/stale/absent rejection,
 all-worker witnesses, admission/path/owner/cap failures, guard freshness and
 direct-child placement/handshake/exec reaping. New focused regressions also cover
@@ -174,6 +221,10 @@ Isolated unit placement probes use a private regular FD, never qualify Linux del
 kernel placement integration is still required by the operating admission.
 The original 21 native/40 Python regressions retain their definitions.
 
-Full HWM_STR steady windows, other five optimization proposal profiles,
-optimized-head attribution, SCNP/embedded modes, offered-load latency and
-actual fixed-RAM capacity remain pending. This slice implements no optimization.
+Fresh qualification/measurements for both profiles, other five optimization
+proposal profiles, optimized-head attribution, SCNP/embedded modes, pipeline
+scaling, offered-load latency and actual fixed-RAM capacity remain pending.
+This producer implements no storage optimization. The steady child adds 161
+prescribed traffic seconds per row and retains the same 840-second row and
+5400/8400-second controller/package ceilings; timeout fails and preserves raw
+output rather than extending the clocks.

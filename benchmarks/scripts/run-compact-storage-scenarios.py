@@ -38,6 +38,9 @@ FEATURES = 'redis-server,experimental-compact-point-storage'
 BUILD_ARGV = ['cargo', 'build', '--locked', '--release', '--jobs', '4', '-p', 'shardcache-benchmarks', '--bin', 'compact_resp_scenarios', '--bin', 'saturation']
 HWM_ID = 'storage-hwm-str-v1'
 HWM_PACKAGE = 'storage-hwm-baseline6-v1'
+HWM_STEADY_ID = 'storage-hwm-str-steady-v1'
+HWM_STEADY_PACKAGE = 'storage-hwm-baseline6-steady-v1'
+HWM_PACKAGES = (HWM_PACKAGE,HWM_STEADY_PACKAGE)
 HWM_SOURCE = '016a521b12968f38b703b3e3e39a8eb0be745429'
 HWM_TREE = '16f855f045f44877d53d4ce5e840d20a555d31de'
 HWM_SEED = 0xC0FFEE
@@ -63,6 +66,10 @@ HWM_PYTHON_TESTS = ('test_hwm_catalog_members_and_legacy_catalog', 'test_hwm_pay
                     'test_hwm_guard_freshness', 'test_hwm_docker_parent_mapping',
                     'test_hwm_docker_parent_refuses_before_effect', 'test_hwm_terminal_controller_deadline',
                     'test_hwm_terminal_deadline_preserves_cleanup', 'test_hwm_terminal_result_write_overrun')
+HWM_STEADY_NATIVE_TESTS = ('hwm_steady_selects_live_uniform_keys',
+                         'hwm_steady_set_xx_preserves_value_and_requires_exists','hwm_steady_checked_prefix_counts_trace')
+HWM_STEADY_PYTHON_TESTS = ('test_hwm_steady_catalog_and_windows','test_hwm_steady_prefix_oracle',
+                         'test_hwm_steady_rejects_missing_workers_errors_and_bad_counts')
 
 def require(ok, message):
     if not ok:
@@ -104,7 +111,7 @@ def import_file(name, path):
     return m
 
 def scenario(id, access=False):
-    if id == HWM_ID and not access:
+    if id in (HWM_ID,HWM_STEADY_ID) and not access:
         return {'id':id,'keys':HWM_KEYS,'key_length':18,'value_length':64,
                 'pattern':'per-key-unique-high-entropy-v1','family':'hwm','saturation':False}
     require(id in (ACCESS + CORE if access else IDS), 'unknown finite scenario')
@@ -299,8 +306,9 @@ def expected_phase(s, p):
     return {'live_keys': live, 'absent_keys': s['keys'] - live, 'logical_bytes': logical, 'state_sha256': state.hexdigest(), 'mutation_trace_sha256': hashlib.sha256().hexdigest() if s['saturation'] else mutation.hexdigest(), 'verification_trace_sha256': verification.hexdigest(), 'mutation_operations': mops, 'verification_operations': vops, 'mutation_transactions': mtx, 'verification_transactions': s['keys'], 'mutation_command_counts': dict(mix), 'verification_command_counts': dict(vmix), 'control_commands': {'DBSIZE': 1}}
 
 def members(package):
-    if package == HWM_PACKAGE:
-        return [{'id':f'r{r}-{arm}-{HWM_ID}','round':r,'arm':arm,'scenario':HWM_ID}
+    if package in HWM_PACKAGES:
+        id = HWM_STEADY_ID if package==HWM_STEADY_PACKAGE else HWM_ID
+        return [{'id':f'r{r}-{arm}-{id}','round':r,'arm':arm,'scenario':id}
             for r in range(1,4) for arm in (('current','redis') if r%2 else ('redis','current'))]
     require(package in ('stateful-a', 'stateful-b', 'stateful-c', 'access'), 'unknown bounded package')
     ids = ACCESS if package == 'access' else IDS[(ord(package[-1]) - 97) * 8:(ord(package[-1]) - 96) * 8]
@@ -311,7 +319,7 @@ def members(package):
     return out
 
 def validate_contract(p):
-    if p.get('package') == HWM_PACKAGE:
+    if p.get('package') in HWM_PACKAGES:
         return validate_hwm_contract(p)
     require(p['schema'] == 1 and p['status'] == 'frozen with independently accepted gates', 'unfinished RESP package')
     require(p['classification'] == 'diagnostic-unreserved-closed-loop', 'qualification classification differs')
@@ -611,6 +619,7 @@ class Runner:
         try:
             for phase in [None, *phases(s), 'complete']:
                 quiet = None
+                steady = None
                 while b'\n' not in buffer:
                     self.budget()
                     require(time.monotonic() < until, 'native runtime deadline')
@@ -642,6 +651,43 @@ class Runner:
                             require(len(buffer)<=65536,'native event line bound')
                     line,buffer = buffer.split(b'\n',1)
                     e = json.loads(line)
+                if s['id']==HWM_STEADY_ID and isinstance(phase,dict) and phase['step']%3!=2:
+                    write(folder/('observed-'+phase['id']+'-steady-ready.json'),e)
+                    require(e=={'schema':2,'event':'steady-ready','pid':waiter.pid,'scenario':s['id'],
+                        'phase':phase['id'],'warmup_seconds':3,'measured_seconds':20,'clients':16,'pipeline':1},'steady boundary differs')
+                    before = self.steady_snapshot(waiter,cid,pid,user,cg,port)
+                    os.write(ack,b'continue\n')
+                    while b'\n' not in buffer:
+                        self.budget()
+                        require(time.monotonic()<until,'native steady runtime deadline')
+                        if select.select([fd],[],[],0.2)[0]:
+                            chunk = os.read(fd,8192)
+                            require(bool(chunk),'native EOF in steady window')
+                            buffer += chunk
+                            require(len(buffer)<=65536,'native steady event line bound')
+                    line,buffer = buffer.split(b'\n',1)
+                    window = json.loads(line)
+                    write(folder/('observed-'+phase['id']+'-steady-complete.json'),window)
+                    after = self.steady_snapshot(waiter,cid,pid,user,cg,port)
+                    # CPU/memory boundaries are sampled before oracle work and
+                    # before permitting exhaustive reads, so validation CPU is
+                    # not incorrectly attributed to the traffic interval.
+                    validate_hwm_steady(window,s,phase,waiter.pid,self.budget)
+                    steady = {'native':window,'before':before,'after':after,
+                        'cpu_intervals':hwm_cpu_intervals(before,after),
+                        'cpu_scope':'warmup + measured traffic + boundary/connection overhead, before exhaustive verification'}
+                    write(folder/(phase['id']+'-steady.json'),steady)
+                    os.write(ack,b'continue\n')
+                    while b'\n' not in buffer:
+                        self.budget()
+                        require(time.monotonic()<until,'native runtime deadline after steady window')
+                        if select.select([fd],[],[],0.2)[0]:
+                            chunk = os.read(fd,8192)
+                            require(bool(chunk),'native EOF after steady window')
+                            buffer += chunk
+                            require(len(buffer)<=65536,'native event line bound')
+                    line,buffer = buffer.split(b'\n',1)
+                    e = json.loads(line)
                 if s['family']=='hwm':
                     label = 'ready' if phase is None else 'complete' if phase=='complete' else phase['id']
                     write(folder / ('observed-'+label+'.json'),e)
@@ -664,6 +710,8 @@ class Runner:
                     if s['family']=='hwm':
                         receipt['client_and_controller'] = self.client_snapshot(waiter)
                         receipt['quiet_after_idle'] = quiet
+                        if s['id']==HWM_STEADY_ID:
+                            receipt['steady'] = steady
                     write(folder / (phase['id'] + '.json'), receipt)
                     events.append(receipt)
                 os.write(ack, b'continue\n')
@@ -679,7 +727,7 @@ class Runner:
     def row(self, m, witnesses):
         self.budget()
         row_started = time.monotonic()
-        self.row_deadline = row_started + (840 if self.plan['package']==HWM_PACKAGE else 900)
+        self.row_deadline = row_started + (840 if self.plan['package'] in HWM_PACKAGES else 900)
         folder = self.root / m['id']
         folder.mkdir()
         cid = ''
@@ -846,7 +894,7 @@ class Peak:
         return {'interval_seconds': 0.2, 'samples': self.count, 'sampled_maximum_bytes': self.maximum, 'exact_peak': False, 'error': self.error, 'pid': self.pid, 'start_ticks': self.start_ticks, 'cgroup_path': str(self.cg)}
 
 def summarize(rows):
-    if rows and all(r['member']['scenario']==HWM_ID for r in rows):
+    if rows and all(r['member']['scenario'] in (HWM_ID,HWM_STEADY_ID) for r in rows):
         return summarize_hwm(rows)
     require(len(rows) == 72 and len({r['member']['id'] for r in rows}) == 72, 'missing/duplicate final rows')
     grouped = collections.defaultdict(list)
@@ -913,6 +961,94 @@ def hwm_payload_witnesses():
     return [{'index':i,'generation':g,'sha256':hashlib.sha256(hwm_payload(i,g)).hexdigest()}
             for i,g in ((0,0),(0,1),(17,0),(500001,2),(999999,3))]
 
+def hwm_steady_contract(s):
+    return {'warmup_seconds':3,'measured_seconds':20,'pipeline':1,'clients':16,
+        'phases':[p['id'] for p in phases(s) if p['step']%3!=2],
+        'access_policy':'uniform-live-key-rejection-v1','mix':'4GET-1SET-XX','verification':'exhaustive after every window'}
+
+def hwm_uniform_rank(worker,sequence,cardinality):
+    require(type(cardinality) is int and cardinality>0,'empty steady live domain')
+    mask = (1<<64)-1
+    threshold = ((-cardinality)&mask)%cardinality
+    for retry in range(threshold+1):
+        word = hwm_mix((HWM_SEED ^ (worker<<32) ^ sequence)+retry*0x9e3779b97f4a7c15 & mask)
+        if word>=threshold:
+            return word%cardinality
+    raise RuntimeError('uniform rejection bound violated')
+
+def hwm_steady_prefix(s,p,worker,attempts,budget=lambda:None):
+    require(type(worker) is int and 0<=worker<16 and type(attempts) is int and 0<=attempts<=100000000,'steady prefix bound differs')
+    live = [i for i in range(s['keys']) if p['step']%3==0 or hwm_survivor(i)]
+    require(bool(live),'steady live domain empty')
+    trace = hashlib.sha256()
+    counts = collections.Counter()
+    for sequence in range(attempts):
+        if sequence%4096==0:
+            budget()
+        i = live[hwm_uniform_rank(worker,sequence,len(live))]
+        key,n,g,kind,expiry = record(s,p,i)
+        require(kind==1 and not expiry,'steady selection is not a persistent live string')
+        command = (b'SET',key,hwm_payload(i,g),b'XX') if sequence%5==4 else (b'GET',key)
+        command_frame(trace,command)
+        counts[command[0].decode()] += 1
+    return {'trace_sha256':trace.hexdigest(),'wire_commands':dict(counts)}
+
+def hwm_mix_counts(attempts):
+    sets = attempts//5
+    return {'GET':attempts-sets,'SET':sets}
+
+def validate_hwm_steady(e,s,p,pid,budget=lambda:None):
+    require((e['schema'],e['event'],e['pid'],e['scenario'],e['phase'])==
+            (2,'steady-complete',pid,s['id'],p['id']) and s['id']==HWM_STEADY_ID and p['step']%3!=2,'steady identity/phase differs')
+    require((e['pipeline'],e['clients'],e['warmup_seconds'],e['measured_seconds'],e['errors'])==(1,16,3,20,0)
+            and e['access_policy']=='uniform-live-key-rejection-v1' and e['mix']=='4GET-1SET-XX','steady workload differs')
+    require(e['live_keys']==sum(p['step']%3==0 or hwm_survivor(i) for i in range(s['keys'])),'steady live cardinality differs')
+    workers = e['workers']
+    require(len(workers)==16 and [w['worker'] for w in workers]==list(range(16))
+            and all(isinstance(w.get('rust_thread_id'),str) and len(w['rust_thread_id'])<=80 for w in workers)
+            and len({w['rust_thread_id'] for w in workers})==16,'all16 steady identities missing')
+    outer = hashlib.sha256(); counts = collections.Counter(); samples = 0
+    for worker in workers:
+        numeric = ('sequence_start','sequence_end','successful_replies','warmup_completions','warmup_straddled',
+                   'late_completions_excluded','histogram_samples','last_completion_ns_from_epoch','errors')
+        require(all(type(worker[k]) is int and worker[k]>=0 for k in numeric),'steady counter type differs')
+        require(worker['errors']==0 and worker['error'] is None and worker['sequence_start']==0
+                and worker['sequence_end']==worker['successful_replies']
+                and worker['warmup_completions']>0 and worker['histogram_samples']>0
+                and worker['warmup_straddled']<=1 and worker['late_completions_excluded']<=1,'steady worker missing/failed/no measured completions')
+        require(worker['successful_replies']==worker['warmup_completions']+worker['histogram_samples']+worker['late_completions_excluded'],
+                'steady warmup/measured/late count conservation differs')
+        prefix = hwm_steady_prefix(s,p,worker['worker'],worker['sequence_end'],budget)
+        require(worker['wire_commands']==prefix['wire_commands'] and worker['trace_sha256']==prefix['trace_sha256'],'steady full prefix differs')
+        start = hwm_mix_counts(worker['warmup_completions']); end = hwm_mix_counts(worker['warmup_completions']+worker['histogram_samples'])
+        measured = {k:end[k]-start[k] for k in ('GET','SET') if end[k]!=start[k]}
+        require(worker['measured_command_counts']==measured,'steady measured command mix differs')
+        counts.update(measured); samples += worker['histogram_samples']
+        frame(outer,worker['trace_sha256'].encode())
+    require(e['trace_sha256']==outer.hexdigest() and e['measured_command_counts']==dict(counts)
+            and e['completed_requests']==samples==e['histogram_samples'],'steady aggregate differs')
+    require(type(e['ops_per_sec']) in (int,float) and math.isfinite(e['ops_per_sec'])
+            and math.isclose(e['ops_per_sec'],samples/20.0,rel_tol=1e-9),'steady throughput arithmetic differs')
+    require(type(e['elapsed_ns_from_epoch']) is int and 23000000000<=e['elapsed_ns_from_epoch']<840000000000,'steady elapsed bound differs')
+    require(e['latency_unit']=='checked-P1-request-completion'
+            and e['histogram_scope']=='fully measured requests only; warmup straddles and late completions excluded','steady latency scope differs')
+    require(all(type(e[k]) is int for k in ('p50_ns','p99_ns','p999_ns','maximum_ns'))
+            and 0<e['p50_ns']<=e['p99_ns']<=e['p999_ns']<=e['maximum_ns']<=60000000000,'steady request histogram differs')
+
+def hwm_cpu_intervals(before,after):
+    out = {}
+    for role in ('server','client','controller','parent'):
+        b = before['server_scope'] if role=='server' else before['client_and_controller'][role]
+        a = after['server_scope'] if role=='server' else after['client_and_controller'][role]
+        require(a['path']==b['path'] and a['cpu_max']==b['cpu_max'] and a['monotonic_ns']>b['monotonic_ns'],'steady CPU scope/interval differs')
+        delta = {k:int(a['cpu_stat'][k])-int(b['cpu_stat'][k]) for k in ('usage_usec','user_usec','system_usec','nr_periods','nr_throttled','throttled_usec')}
+        require(all(v>=0 for v in delta.values()),'steady CPU counters reset')
+        elapsed = (a['monotonic_ns']-b['monotonic_ns'])/1e9
+        out[role] = {'elapsed_seconds':elapsed,'counter_deltas':delta,'actual_consumed_cores':delta['usage_usec']/1e6/elapsed,
+            'cpu_max':a['cpu_max'],'cpuset_before':b['cpuset_effective'],'cpuset_after':a['cpuset_effective'],
+            'reserved':False,'scope':'warmup plus measured traffic and connection/boundary overhead; not per-command CPU'}
+    return out
+
 def hwm_expected_phase(s,p,budget=lambda:None):
     state,mutation,verification = (hashlib.sha256() for _ in range(3))
     live = logical = mops = mtx = 0
@@ -963,7 +1099,11 @@ def validate_hwm_ready(e,s,pid):
     require((e['seed'],e['clients'],e['pipeline'],e['deadline_seconds'])==(HWM_SEED,16,1,840),'HWM bounds differ')
     require(e['initial_dbsize_checks']==1 and e['phases']==phases(s) and e['distribution']==distribution(s),'HWM catalog differs')
     require(e['survivor_rule']=={'multiplier':104729,'offset':12345,'modulus':HWM_KEYS,'below':50000},'survivor rule differs')
-    require(e['idle_seconds']==10 and e['classification']=='high-water-lifecycle-subset' and e['steady_get_set_tested'] is False,'HWM scope differs')
+    steady = s['id']==HWM_STEADY_ID
+    require(e['idle_seconds']==10 and e['classification']==('high-water-steady-lifecycle-diagnostic' if steady else 'high-water-lifecycle-subset')
+            and e['steady_get_set_tested'] is steady,'HWM scope differs')
+    if steady:
+        require(e['steady_contract']==hwm_steady_contract(s),'HWM steady window contract differs')
     require(e['payload_witnesses']==hwm_payload_witnesses(),'Rust/Python payload correspondence differs')
 
 def validate_hwm_phase(e,s,p,pid,w):
@@ -994,8 +1134,12 @@ def validate_hwm_phase(e,s,p,pid,w):
 
 def validate_hwm_contract(p):
     require(p['schema']==2 and p['status']=='frozen with independently accepted gates','HWM operating inputs pending')
-    require(p['classification']=='high-water-lifecycle-subset' and p['steady_get_set_tested'] is False,'HWM subset attribution differs')
-    require(p['members']==members(HWM_PACKAGE),'HWM missing/extra/reordered members')
+    steady = p['package']==HWM_STEADY_PACKAGE
+    require(p['classification']==('high-water-steady-lifecycle-diagnostic' if steady else 'high-water-lifecycle-subset')
+            and p['steady_get_set_tested'] is steady,'HWM subset attribution differs')
+    require(p['members']==members(p['package']),'HWM missing/extra/reordered members')
+    if steady:
+        require(p['steady_contract']==hwm_steady_contract(scenario(HWM_STEADY_ID)),'HWM steady windows differ')
     require(p['budgets']==HWM_BUDGETS and p['caps']==HWM_CAPS,'HWM clocks/resources differ')
     require(set(p['images'])=={'current','redis'} and p['images']['current']['source_sha']==HWM_SOURCE and p['images']['current']['source_tree']==HWM_TREE,'HWM server source/arms differ')
     require(p['images']['current']['features']==FEATURES and p['images']['redis']['version']=='7.4.11','HWM features/reference differ')
@@ -1124,7 +1268,9 @@ class HwmBaselineRunner(Runner):
             require(receipt['status']=='independently accepted' and receipt['source_sha']==p['source']['sha']
                     and receipt['source_tree']==p['source']['tree'],'fresh driver admission missing')
         regression = read_json(p['regression_acceptance'])
-        require(regression['new_native_names']==list(HWM_NATIVE_TESTS) and regression['new_python_names']==list(HWM_PYTHON_TESTS)
+        extra_native = HWM_STEADY_NATIVE_TESTS if p['package']==HWM_STEADY_PACKAGE else ()
+        extra_python = HWM_STEADY_PYTHON_TESTS if p['package']==HWM_STEADY_PACKAGE else ()
+        require(regression['new_native_names']==list(HWM_NATIVE_TESTS+extra_native) and regression['new_python_names']==list(HWM_PYTHON_TESTS+extra_python)
                 and regression['legacy_native_tests']==21 and regression['legacy_python_tests']==40
                 and regression['exit_codes']==[0,0] and regression['wait_observed'] is True
                 and regression['child_reaped'] is True and regression['raw_wait_status']==0,'fresh focused/legacy regression evidence missing')
@@ -1248,6 +1394,12 @@ class HwmBaselineRunner(Runner):
         require(self.h1.cgroup_path(waiter.pid)==pathlib.Path(self.plan['resources']['client']['path']),'native left admitted client cgroup')
         write(folder/'client-ready.json',self.client_snapshot(waiter))
 
+    def steady_snapshot(self,waiter,cid,pid,user,cg,port):
+        self.budget()
+        memory = self.snapshot(cid,pid,user,cg,port)
+        return {'server_pid1_memory':memory,'server_scope':self.scope_sample(cg),
+                'client_and_controller':self.client_snapshot(waiter)}
+
     def client_snapshot(self,waiter):
         parent,control,client = self.verify_resources()
         executable = pinned(self.plan['binaries']['compact_resp_scenarios'],executable=True)
@@ -1354,10 +1506,12 @@ class HwmBaselineRunner(Runner):
             raise
 
 def summarize_hwm(rows):
-    require([r['member'] for r in rows]==members(HWM_PACKAGE),'HWM incomplete/reordered rows')
+    steady = rows[0]['member']['scenario']==HWM_STEADY_ID
+    package = HWM_STEADY_PACKAGE if steady else HWM_PACKAGE
+    require([r['member'] for r in rows]==members(package),'HWM incomplete/reordered rows')
     by_arm = {a:[r for r in rows if r['member']['arm']==a] for a in ('current','redis')}
     comparison = {}
-    for phase in phases(scenario(HWM_ID)):
+    for phase in phases(scenario(HWM_STEADY_ID if steady else HWM_ID)):
         selected = {a:[next(p for p in r['phases'] if p['native']['phase']==phase['id']) for r in v] for a,v in by_arm.items()}
         states = {tuple(p['native'][k] for k in ('live_keys','absent_keys','logical_bytes','state_sha256')) for v in selected.values() for p in v}
         require(len(states)==1,'HWM matched logical states differ')
@@ -1366,20 +1520,31 @@ def summarize_hwm(rows):
             'mutation_wire_commands_per_sec_median':statistics.median(p['native']['mutation']['wire_commands_per_sec'] for p in v),
             'record_transition_p99_median_ns':statistics.median(p['native']['mutation']['p99_ns'] for p in v),
             'full_observations':v} for a,v in selected.items()}
-    return {'functional_success':True,'classification':'high-water-lifecycle-subset','steady_get_set_tested':False,
+        if steady and phase['step']%3!=2:
+            for arm,observations in selected.items():
+                require(all(p['steady'] is not None for p in observations),'required steady window missing')
+                comparison[phase['id']][arm]['steady'] = {
+                    'ops_per_sec_median':statistics.median(p['steady']['native']['ops_per_sec'] for p in observations),
+                    'P1_request_p99_median_ns':statistics.median(p['steady']['native']['p99_ns'] for p in observations),
+                    'cpu_boundary_scope':'warmup + measured + connection/boundary overhead; no exhaustive reads',
+                    'actual_server_cores_median':statistics.median(p['steady']['cpu_intervals']['server']['actual_consumed_cores'] for p in observations),
+                    'actual_client_cores_median':statistics.median(p['steady']['cpu_intervals']['client']['actual_consumed_cores'] for p in observations),
+                    'full_observations':[p['steady'] for p in observations]}
+    return {'functional_success':True,'classification':'high-water-steady-lifecycle-diagnostic' if steady else 'high-water-lifecycle-subset','steady_get_set_tested':steady,
         'optimized_variant':None,'source_reference':HWM_SOURCE,'rows':rows,'phase_comparisons':comparison,
-        'screen_success':None,'qualification':'baseline lifecycle observations only; no optimization, fixed offered load, or inserted capacity result',
+        'screen_success':None,'qualification':'baseline diagnostic observations only; no optimization, fixed offered load, or inserted capacity result',
         'aggregation':'three-run medians; p99 medians not pooled percentiles; no confidence interval'}
 
-def hwm_plan_template():
+def hwm_plan_template(steady=False):
     """Concrete schema producer, not an admission or a source/ELF receipt builder."""
     binding = lambda:{'path':None,'sha256':None}
     metadata = lambda:{'path':None,'device':None,'inode':None,'uid':None,'gid':None,'mode':None}
     client = metadata()
     client['procs'] = {k:None for k in ('device','inode','uid','gid','mode')}
-    return {'schema':2,'status':'planned; runtime and delegation admissions pending',
-        'classification':'high-water-lifecycle-subset','steady_get_set_tested':False,
-        'package':HWM_PACKAGE,'members':members(HWM_PACKAGE),'budgets':dict(HWM_BUDGETS),'caps':dict(HWM_CAPS),
+    package = HWM_STEADY_PACKAGE if steady else HWM_PACKAGE
+    plan = {'schema':2,'status':'planned; runtime and delegation admissions pending',
+        'classification':'high-water-steady-lifecycle-diagnostic' if steady else 'high-water-lifecycle-subset','steady_get_set_tested':steady,
+        'package':package,'members':members(package),'budgets':dict(HWM_BUDGETS),'caps':dict(HWM_CAPS),
         'source':{'sha':None,'tree':None,'worktree':None,'file_sha256':dict.fromkeys(HWM_INPUTS)},
         'images':{'current':{'source_sha':HWM_SOURCE,'source_tree':HWM_TREE,'features':FEATURES,
             'engine_image_id':None,'original_tag':None,'resolved_build':None,
@@ -1396,6 +1561,9 @@ def hwm_plan_template():
         **{k:binding() for k in ('regression_acceptance','native_build_acceptance','operating_acceptance',
                                'early_gate_acceptance','product_input_equivalence')},
         'actual_measurements':None,'qualified_native_elf':None}
+    if steady:
+        plan['steady_contract'] = hwm_steady_contract(scenario(HWM_STEADY_ID))
+    return plan
 
 def interrupted(signum, _frame):
     raise RuntimeError(f'controller interrupted by signal {signum}')
@@ -1408,10 +1576,11 @@ def main():
     a.add_argument('--plan-sha256')
     a.add_argument('--write-hwm-baseline-template',type=pathlib.Path,
                    help='Write the finite six-row schema with NULL runtime inputs; no helper imports or effects')
+    a.add_argument('--hwm-profile',choices=('lifecycle','steady'),default='lifecycle',help='Template profile only; runtime profile is fixed by the frozen plan')
     args = a.parse_args()
     if args.write_hwm_baseline_template:
         require(args.plan is None and args.plan_sha256 is None,'template mode cannot accept runtime plan')
-        write(args.write_hwm_baseline_template,hwm_plan_template())
+        write(args.write_hwm_baseline_template,hwm_plan_template(args.hwm_profile=='steady'))
         return 0
     require(args.plan is not None and args.plan_sha256 is not None,'--plan and --plan-sha256 are required for execution')
     plan = validate_contract(read_json({'path': str(args.plan), 'sha256': args.plan_sha256}))
@@ -1422,7 +1591,7 @@ def main():
     resource.setrlimit(resource.RLIMIT_FSIZE, (134217728, 134217728))
     runner = None
     try:
-        runner = HwmBaselineRunner(plan,root) if plan['package']==HWM_PACKAGE else Runner(plan,root)
+        runner = HwmBaselineRunner(plan,root) if plan['package'] in HWM_PACKAGES else Runner(plan,root)
         runner.verify_inputs()
         runner.budget()
         contracts = {}
@@ -1443,9 +1612,9 @@ def main():
             require(sha(pathlib.Path(plan['source']['worktree']) / relative) == expected, 'bound source changed during effects')
         report = summarize(rows)
         write(root / 'summary.json', report)
-        result_writer = runner.publish_result if plan['package']==HWM_PACKAGE else functools.partial(write,root/'result.json')
-        result_writer({'success': True, 'rows': 6 if plan['package']==HWM_PACKAGE else 72,
-            'minimum_idle_final_gates':60 if plan['package']==HWM_PACKAGE else 720,
+        result_writer = runner.publish_result if plan['package'] in HWM_PACKAGES else functools.partial(write,root/'result.json')
+        result_writer({'success': True, 'rows': 6 if plan['package'] in HWM_PACKAGES else 72,
+            'minimum_idle_final_gates':60 if plan['package'] in HWM_PACKAGES else 720,
             'phase_gates': sum((len(r['phases']) * 5 for r in rows)), 'screen_success': report['screen_success'], 'elapsed_seconds': time.monotonic() - runner.started})
         return 0
     except BaseException as exc:

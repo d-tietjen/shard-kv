@@ -729,7 +729,7 @@ fn acknowledge() -> Result<()> {
 }
 fn main() -> Result<()> {
     let args = Args::parse();
-    if args.scenario == HWM_ID {
+    if args.scenario == HWM_ID || args.scenario == HWM_STEADY_ID {
         return hwm_main(args);
     }
     let s = Scenario::parse(&args.scenario, args.verify_saturation)?;
@@ -825,6 +825,7 @@ fn main() -> Result<()> {
 // The original catalog, seed, payloads and event schema above stay unchanged.
 // This finite selector is a new driver contract, independent of server source.
 const HWM_ID: &str = "storage-hwm-str-v1";
+const HWM_STEADY_ID: &str = "storage-hwm-str-steady-v1";
 const HWM_KEYS: usize = 1_000_000;
 const HWM_SEED: u64 = 0xC0FFEE;
 const HWM_DEADLINE_SECS: u64 = 840;
@@ -913,7 +914,7 @@ struct HwmTimed {
     workers: Vec<serde_json::Value>,
 }
 
-fn hwm_timed(phase: &Phase, addr: SocketAddr, mutation: bool, started: Instant) -> Result<HwmTimed> {
+fn hwm_timed(phase: &Phase, addr: SocketAddr, mutation: bool, started: Instant, scenario: &str) -> Result<HwmTimed> {
     let begin = Instant::now();
     let idle = mutation && phase.step % 3 == 2;
     let empty_histogram = Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3)?;
@@ -975,7 +976,7 @@ fn hwm_timed(phase: &Phase, addr: SocketAddr, mutation: bool, started: Instant) 
     let workers: Vec<_> = results.iter().map(|(r, _)| r.clone()).collect();
     if workers.iter().any(|r| r["errors"] != 0) {
         emit(&serde_json::json!({"schema":2,"event":"worker-failure","pid":std::process::id(),
-            "scenario":HWM_ID,"phase":phase.id,"mutation":mutation,"workers":workers}))?;
+            "scenario":scenario,"phase":phase.id,"mutation":mutation,"workers":workers}))?;
         return Err("HWM worker failure; all sixteen observations retained".into());
     }
     let mut h = Histogram::<u64>::new_with_bounds(1,60_000_000_000,3)?;
@@ -1001,15 +1002,170 @@ fn hwm_timed(phase: &Phase, addr: SocketAddr, mutation: bool, started: Instant) 
     Ok(HwmTimed { timing,trace:hex(trace),state:hex(state),commands,workers })
 }
 
+fn hwm_live_indices(phase: &Phase) -> Vec<usize> {
+    (0..HWM_KEYS).filter(|&i| phase.step % 3 == 0 || hwm_survivor(i)).collect()
+}
+
+fn hwm_uniform_rank(worker: usize, sequence: u64, cardinality: usize) -> Result<usize> {
+    // Rejection removes modulo bias. Each candidate mixer is bijective; the
+    // retry domain is separate from the worker/sequence domain.
+    let input = HWM_SEED ^ (worker as u64).rotate_left(32) ^ sequence;
+    let divisor = cardinality as u64;
+    if divisor == 0 { return Err("empty steady live domain".into()); }
+    let threshold = divisor.wrapping_neg() % divisor;
+    // Odd addition and the mixer are bijective; at most `threshold` distinct
+    // rejected words exist. No unbounded random retry loop is needed.
+    for retry in 0..=threshold {
+        let word = hwm_mix(input.wrapping_add(retry.wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+        if word >= threshold { return Ok((word % divisor) as usize); }
+    }
+    Err("uniform rejection bound violated".into())
+}
+
+fn hwm_steady_request(c: &mut impl Wire, phase: &Phase, index: usize, set: bool) -> Result<()> {
+    let r = hwm_record(index,phase);
+    if r.kind != Kind::String { return Err("steady key selection is not live".into()); }
+    let value = hwm_payload(index,r.generation);
+    if set { ok(c,&[b"SET",&r.key,&value,b"XX"])?; }
+    else { expect(c.command(&[b"GET",&r.key])?,Reply::Bulk(Some(value)))?; }
+    Ok(())
+}
+
+fn hwm_steady(phase: &Phase,addr: SocketAddr,started: Instant) -> Result<serde_json::Value> {
+    use std::sync::{Arc,Condvar,Mutex};
+    use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
+    let indices = Arc::new(hwm_live_indices(phase));
+    let latch = Arc::new((Mutex::new(None::<Instant>),Condvar::new()));
+    let ready = Arc::new(AtomicUsize::new(0));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let histogram = Histogram::<u64>::new_with_bounds(1,60_000_000_000,3)?;
+    let mut spawn_error = None;
+    let (results,epoch) = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for worker in 0..CLIENTS {
+            let keys = indices.clone();
+            let worker_latch = latch.clone();
+            let worker_ready = ready.clone();
+            let worker_cancel = cancel.clone();
+            let mut hist = histogram.clone();
+            let result = thread::Builder::new().name(format!("hwm-steady-{worker}")).spawn_scoped(scope,move || {
+                let mut connection = Conn::connect(addr);
+                let mut error = connection.as_ref().err().map(|e| e.to_string());
+                if error.is_some() { worker_cancel.store(true,Ordering::Release); }
+                worker_ready.fetch_add(1,Ordering::AcqRel);
+                let mut lock = worker_latch.0.lock().unwrap_or_else(|e| e.into_inner());
+                while lock.is_none() { lock = worker_latch.1.wait(lock).unwrap_or_else(|e| e.into_inner()); }
+                let epoch = lock.ok_or("window epoch missing").map_err(|e| e.to_string());
+                drop(lock);
+                let mut attempts = 0u64;
+                let mut replies = 0u64;
+                let mut warmup = 0u64;
+                let mut straddled = 0u64;
+                let mut late = 0u64;
+                let mut measured = std::collections::BTreeMap::<String,u64>::new();
+                let mut finish_ns = 0u64;
+                if let (Ok(c),Ok(epoch)) = (&mut connection,epoch) {
+                    while !worker_cancel.load(Ordering::Acquire) && epoch.elapsed() < Duration::from_secs(23) {
+                        if started.elapsed().as_secs() >= HWM_DEADLINE_SECS {
+                            error = Some("native runtime deadline".into()); worker_cancel.store(true,Ordering::Release); break;
+                        }
+                        let rank = match hwm_uniform_rank(worker,attempts,keys.len()) {
+                            Ok(rank) => rank,
+                            Err(e) => { error=Some(e.to_string()); worker_cancel.store(true,Ordering::Release); break; }
+                        };
+                        let index = keys[rank];
+                        let set = attempts % 5 == 4;
+                        let began = epoch.elapsed();
+                        attempts += 1;
+                        if let Err(e) = hwm_steady_request(c,phase,index,set) {
+                            error = Some(e.to_string()); worker_cancel.store(true,Ordering::Release); break;
+                        }
+                        let finished = epoch.elapsed();
+                        finish_ns = finished.as_nanos().min(u64::MAX as u128) as u64;
+                        replies += 1;
+                        if began < Duration::from_secs(3) {
+                            warmup += 1;
+                            if finished >= Duration::from_secs(3) { straddled += 1; }
+                        } else if finished <= Duration::from_secs(23) {
+                            let ns = (finished-began).as_nanos().max(1).min(u64::MAX as u128) as u64;
+                            if let Err(e) = hist.record(ns) {
+                                error = Some(e.to_string()); worker_cancel.store(true,Ordering::Release); break;
+                            }
+                            *measured.entry(if set { "SET" } else { "GET" }.into()).or_default() += 1;
+                        } else { late += 1; }
+                    }
+                }
+                let (trace,commands) = match connection {
+                    Ok(c) => (hex(c.trace),c.command_counts),
+                    Err(_) => (hex(Sha256::new()),std::collections::BTreeMap::new()),
+                };
+                (serde_json::json!({"worker":worker,"rust_thread_id":format!("{:?}",thread::current().id()),
+                    "sequence_start":0,"sequence_end":attempts,"wire_commands":commands,"trace_sha256":trace,
+                    "successful_replies":replies,"warmup_completions":warmup,"warmup_straddled":straddled,
+                    "late_completions_excluded":late,"measured_command_counts":measured,"histogram_samples":hist.len(),
+                    "last_completion_ns_from_epoch":finish_ns,"errors":u64::from(error.is_some()),"error":error}),hist)
+            });
+            match result {
+                Ok(handle) => handles.push((worker,handle)),
+                Err(e) => { spawn_error = Some(e.to_string()); cancel.store(true,Ordering::Release); break; }
+            }
+        }
+        let setup = Instant::now();
+        while ready.load(Ordering::Acquire)<handles.len() && setup.elapsed()<Duration::from_secs(12)
+            && started.elapsed().as_secs()<HWM_DEADLINE_SECS {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if ready.load(Ordering::Acquire)!=CLIENTS { cancel.store(true,Ordering::Release); }
+        let epoch = Instant::now();
+        *latch.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(epoch);
+        latch.1.notify_all();
+        let mut results: Vec<_> = handles.into_iter().map(|(worker,handle)| match handle.join() {
+            Ok(result) => result,
+            Err(_) => (serde_json::json!({"worker":worker,"rust_thread_id":null,"errors":1,
+                "error":"steady worker panic; counters unobserved"}),histogram.clone()),
+        }).collect();
+        for worker in results.len()..CLIENTS {
+            results.push((serde_json::json!({"worker":worker,"rust_thread_id":null,"errors":1,
+                "error":"steady worker not spawned; counters unobserved"}),histogram.clone()));
+        }
+        (results,epoch)
+    });
+    let mut all = histogram.clone();
+    let mut outer = Sha256::new();
+    let mut measured = std::collections::BTreeMap::<String,u64>::new();
+    let workers: Vec<_> = results.iter().map(|(r,_)| r.clone()).collect();
+    if spawn_error.is_some() || ready.load(Ordering::Acquire)!=CLIENTS || workers.iter().any(|w| w["errors"]!=0) {
+        emit(&serde_json::json!({"schema":2,"event":"worker-failure","pid":std::process::id(),
+            "scenario":HWM_STEADY_ID,"phase":phase.id,"steady":true,"workers":workers,"spawn_error":spawn_error}))?;
+        return Err("steady worker failure; all sixteen observations retained".into());
+    }
+    for (r,h) in results {
+        all.add(&h)?;
+        frame(&mut outer,r["trace_sha256"].as_str().ok_or("steady trace absent")?.as_bytes());
+        let counts: std::collections::BTreeMap<String,u64> = serde_json::from_value(r["measured_command_counts"].clone())?;
+        for (k,n) in counts { *measured.entry(k).or_default() += n; }
+    }
+    Ok(serde_json::json!({"schema":2,"event":"steady-complete","pid":std::process::id(),"scenario":HWM_STEADY_ID,
+        "phase":phase.id,"pipeline":1,"clients":CLIENTS,"warmup_seconds":3,"measured_seconds":20,
+        "live_keys":indices.len(),"access_policy":"uniform-live-key-rejection-v1","mix":"4GET-1SET-XX",
+        "trace_sha256":hex(outer),"workers":workers,"errors":0,"measured_command_counts":measured,
+        "completed_requests":all.len(),"histogram_samples":all.len(),"ops_per_sec":all.len() as f64/20.0,
+        "latency_unit":"checked-P1-request-completion","histogram_scope":"fully measured requests only; warmup straddles and late completions excluded",
+        "elapsed_ns_from_epoch":epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+        "p50_ns":all.value_at_quantile(0.5),"p99_ns":all.value_at_quantile(0.99),"p999_ns":all.value_at_quantile(0.999),"maximum_ns":all.max()}))
+}
+
 fn hwm_main(args: Args) -> Result<()> {
     if args.verify_saturation { return Err("HWM cannot verify a saturation keyspace".into()); }
     let phases = hwm_phases();
-    let spec = Scenario { id:HWM_ID.into(),keys:HWM_KEYS,key_length:18,value_length:64,
+    let steady = args.scenario == HWM_STEADY_ID;
+    let id = args.scenario.clone();
+    let spec = Scenario { id:id.clone(),keys:HWM_KEYS,key_length:18,value_length:64,
         pattern:"per-key-unique-high-entropy-v1".into(),family:"hwm".into(),saturation:false };
-    let contract = serde_json::json!({"schema":2,"event":"ready","pid":std::process::id(),
+    let mut contract = serde_json::json!({"schema":2,"event":"ready","pid":std::process::id(),
         "scenario":spec,"seed":HWM_SEED,"clients":CLIENTS,"pipeline":1,"deadline_seconds":HWM_DEADLINE_SECS,
         "phases":phases,"initial_dbsize_checks":1,"survivor_rule":{"multiplier":104729,"offset":12345,"modulus":HWM_KEYS,"below":50000},
-        "idle_seconds":10,"classification":"high-water-lifecycle-subset","steady_get_set_tested":false,
+        "idle_seconds":10,"classification":if steady { "high-water-steady-lifecycle-diagnostic" } else { "high-water-lifecycle-subset" },"steady_get_set_tested":steady,
         "payload_witnesses":[[0,0],[0,1],[17,0],[500001,2],[999999,3]].map(|[index,generation]| {
             let value=hwm_payload(index,generation);
             serde_json::json!({"index":index,"generation":generation,"sha256":format!("{:x}",Sha256::digest(value))})
@@ -1017,6 +1173,9 @@ fn hwm_main(args: Args) -> Result<()> {
         "distribution":[{"key_bytes":18,"value_bytes":64,"records":HWM_KEYS,"logical_bytes":HWM_KEYS*82,"compact_class":41}],
         "timing_scope":"mutation: record transition and checked replies; verification: GET/TYPE/PTTL per record, separately timed; no per-wire-command percentile inferred",
         "trace_order":"sixteen canonical contiguous worker ranges; concurrent wire interleaving is not hashed"});
+    if steady { contract["steady_contract"] = serde_json::json!({"warmup_seconds":3,"measured_seconds":20,"pipeline":1,
+        "clients":CLIENTS,"phases":phases.iter().filter(|p| p.step%3!=2).map(|p| p.id.clone()).collect::<Vec<_>>(),
+        "access_policy":"uniform-live-key-rejection-v1","mix":"4GET-1SET-XX","verification":"exhaustive after every window"}); }
     if args.describe {
         if args.addr.is_some() { return Err("describe cannot accept endpoint".into()); }
         return emit(&contract);
@@ -1039,14 +1198,21 @@ fn hwm_main(args: Args) -> Result<()> {
             // Let the controller sample the genuinely quiet server before the
             // exhaustive reads below. The next acknowledgement permits reads.
             emit(&serde_json::json!({"schema":2,"event":"idle-boundary","pid":std::process::id(),
-                "scenario":HWM_ID,"phase":phase.id,"idle_elapsed_ns":idle_elapsed_ns}))?;
+                "scenario":id,"phase":phase.id,"idle_elapsed_ns":idle_elapsed_ns}))?;
             acknowledge()?;
         }
-        let mutation = hwm_timed(phase,addr,true,started)?;
-        let verification = hwm_timed(phase,addr,false,started)?;
+        let mutation = hwm_timed(phase,addr,true,started,&id)?;
+        if steady && phase.step%3!=2 {
+            emit(&serde_json::json!({"schema":2,"event":"steady-ready","pid":std::process::id(),"scenario":id,
+                "phase":phase.id,"warmup_seconds":3,"measured_seconds":20,"clients":CLIENTS,"pipeline":1}))?;
+            acknowledge()?;
+            emit(&hwm_steady(phase,addr,started)?)?;
+            acknowledge()?;
+        }
+        let verification = hwm_timed(phase,addr,false,started,&id)?;
         let live = if phase.step>0 && phase.step%3!=0 { 50000 } else { HWM_KEYS };
         integer(&mut control,&[b"DBSIZE"],live as i64)?;
-        emit(&serde_json::json!({"schema":2,"event":"phase","pid":std::process::id(),"scenario":HWM_ID,"phase":phase.id,
+        emit(&serde_json::json!({"schema":2,"event":"phase","pid":std::process::id(),"scenario":id,"phase":phase.id,
             "control_commands":{"DBSIZE":1},"live_keys":live,"absent_keys":HWM_KEYS-live,"logical_bytes":live*82,
             "state_sha256":verification.state,"mutation_trace_sha256":mutation.trace,"verification_trace_sha256":verification.trace,
             "mutation":mutation.timing,"verification":verification.timing,"mutation_command_counts":mutation.commands,
@@ -1055,7 +1221,7 @@ fn hwm_main(args: Args) -> Result<()> {
         acknowledge()?;
         if started.elapsed().as_secs()>=HWM_DEADLINE_SECS { return Err("native runtime deadline".into()); }
     }
-    emit(&serde_json::json!({"schema":2,"event":"complete","pid":std::process::id(),"scenario":HWM_ID,"phases":phases.len(),"errors":0}))
+    emit(&serde_json::json!({"schema":2,"event":"complete","pid":std::process::id(),"scenario":id,"phases":phases.len(),"errors":0}))
 }
 
 #[cfg(test)]
@@ -1441,5 +1607,69 @@ mod tests {
             hex(hash)
         });
         assert_eq!(states.iter().collect::<HashSet<_>>().len(), states.len());
+    }
+    #[test]
+    fn hwm_steady_selects_live_uniform_keys() {
+        for step in [0,1,3,4,6,7,9] {
+            let phase = &hwm_phases()[step];
+            let keys = hwm_live_indices(phase);
+            assert_eq!(keys.len(),if step%3==0 { HWM_KEYS } else { 50000 });
+            for worker in 0..CLIENTS {
+                for sequence in 0..128 {
+                    let rank = hwm_uniform_rank(worker,sequence,keys.len()).unwrap();
+                    let index = keys[rank];
+                    assert_eq!(hwm_record(index,phase).kind,Kind::String);
+                    assert_eq!(rank,hwm_uniform_rank(worker,sequence,keys.len()).unwrap());
+                }
+            }
+        }
+        assert!(hwm_uniform_rank(0,0,0).is_err());
+        assert_eq!((0..10).filter(|&step| step%3!=2).count(),7);
+    }
+    #[test]
+    fn hwm_steady_set_xx_preserves_value_and_requires_exists() {
+        let survivor = (0..HWM_KEYS).find(|&i| hwm_survivor(i)).unwrap();
+        let refilled = (0..HWM_KEYS).find(|&i| !hwm_survivor(i)).unwrap();
+        let phase = &hwm_phases()[6];
+        for index in [survivor,refilled] {
+            let r = hwm_record(index,phase);
+            let value = hwm_payload(index,r.generation);
+            let mut wire = Transcript { replies:[
+                response(&[b"GET",&r.key],Reply::Bulk(Some(value.clone()))),
+                response(&[b"SET",&r.key,&value,b"XX"],Reply::Simple(b"OK".to_vec())),
+            ].into() };
+            hwm_steady_request(&mut wire,phase,index,false).unwrap();
+            hwm_steady_request(&mut wire,phase,index,true).unwrap();
+            assert!(wire.replies.is_empty());
+            let mut absent = Transcript { replies:[response(&[b"SET",&r.key,&value,b"XX"],Reply::Bulk(None))].into() };
+            assert!(hwm_steady_request(&mut absent,phase,index,true).is_err());
+        }
+        let mut none = Transcript { replies:[].into() };
+        assert!(hwm_steady_request(&mut none,&hwm_phases()[1],refilled,true).is_err());
+    }
+    #[test]
+    fn hwm_steady_checked_prefix_counts_trace() {
+        let phase = &hwm_phases()[3];
+        let keys = hwm_live_indices(phase);
+        let mut expected_trace = Sha256::new();
+        let mut transcript = Transcript { replies:[].into() };
+        for sequence in 0..37 {
+            let index = keys[hwm_uniform_rank(15,sequence,keys.len()).unwrap()];
+            let r = hwm_record(index,phase); let value = hwm_payload(index,r.generation);
+            let parts: Vec<&[u8]> = if sequence%5==4 { vec![b"SET",&r.key,&value,b"XX"] } else { vec![b"GET",&r.key] };
+            expected_trace.update((parts.len() as u64).to_be_bytes());
+            for part in &parts { frame(&mut expected_trace,part); }
+            transcript.replies.push_back(response(&parts,if sequence%5==4 { Reply::Simple(b"OK".to_vec()) } else { Reply::Bulk(Some(value.clone())) }));
+        }
+        // The native trace is checked against Python's independent prefix oracle
+        // at actual window admission. This transcript exercises the exact argv
+        // and generation-correct values for the same deterministic sequence.
+        for sequence in 0..37 {
+            let index = keys[hwm_uniform_rank(15,sequence,keys.len()).unwrap()];
+            hwm_steady_request(&mut transcript,phase,index,sequence%5==4).unwrap();
+        }
+        assert!(transcript.replies.is_empty());
+        assert_eq!((0..37).filter(|sequence| sequence%5==4).count(),7);
+        assert_ne!(hex(expected_trace),hex(Sha256::new()));
     }
 }
