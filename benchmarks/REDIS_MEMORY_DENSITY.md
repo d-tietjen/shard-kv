@@ -8,6 +8,9 @@ cgroup anonymous memory is the cross-server cross-check, and allocator-specific
 numbers are supporting data. Process maps are read under the server's in-container
 user so Linux permits access to its `smaps_rollup` data.
 
+For the planned Redis comparisons of six further storage proposals, see
+[Storage optimization Redis baselines](STORAGE_OPTIMIZATION_REDIS_BASELINE.md).
+
 ## Run
 
 Run on Adam or another Linux host with Docker Engine and cgroup v2:
