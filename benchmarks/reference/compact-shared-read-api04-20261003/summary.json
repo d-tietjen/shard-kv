@@ -18,7 +18,8 @@
         "nodes": 65,
         "regular_files": 64,
         "relative_hash_frame_sha256": "8beee474ab2c614efe98cd2ab43b3b423906bbc3405c991beee083d3454b0392",
-        "remote_root": "/home/dtietjen/validation/EDEN-2266/444513e1d4bb342/run/api-early-eof-v1/early30-outer-caller-11",
+        "remote_root": null,
+        "remote_root_redacted": true,
         "symlinks_specials_missing_extras": 0
       },
       {
@@ -30,7 +31,8 @@
         "nodes": 1833,
         "regular_files": 1802,
         "relative_hash_frame_sha256": "0352ec40d442d1b5f23a1a14fc4fd36ec8003e99dd523490df0162dfa01202ff",
-        "remote_root": "/home/dtietjen/validation/EDEN-2266/444513e1d4bb342/run/api-early-eof-v1/campaign-04",
+        "remote_root": null,
+        "remote_root_redacted": true,
         "symlinks_specials_missing_extras": 0
       }
     ],
