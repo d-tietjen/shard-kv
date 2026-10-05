@@ -30,7 +30,9 @@ For the 0.6.0 overflow feature catalog and upgrade notes, see
 known limits, security requirements, and benchmark commands are in
 `docs/KV_OVERFLOW.md`.
 
-The release gate also includes:
+Release validation also requires the following checks. The release script runs
+some of them; run the remaining commands separately and retain their results for
+the final source revision:
 
 ```bash
 cargo fmt --check

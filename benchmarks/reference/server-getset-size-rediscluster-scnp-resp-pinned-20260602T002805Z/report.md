@@ -1,9 +1,9 @@
 # standardized server benchmark server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z
 
-Primary CSV: `/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/redis-cluster.csv`
+Primary CSV: `redis-cluster.csv`
 Reference CSVs:
-- `/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-scnp-direct.csv`
-- `/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/server-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-resp.csv`
+- `shardcache-scnp-direct.csv`
+- `shardcache-resp.csv`
 
 ## Target Summary
 
@@ -64,3 +64,5 @@ Reference CSVs:
 | string | `SET` | SET large 4KiB value | large | 1572488.9 | 19688.5 | 34504.7 | 0 |
 | string | `SET` | SET large 1KiB value | large | 4371801.1 | 7279.0 | 14409.7 | 0 |
 | string | `GET` | GET large 1KiB value | large | 4371801.1 | 7277.1 | 14401.5 | 0 |
+
+Historical capture paths are relative to their original checkout. CSV names in curated reports refer to the copies beside each report. Private capture roots are redacted.

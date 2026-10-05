@@ -1,6 +1,6 @@
 # standardized server benchmark server-suite-20260603T043950Z
 
-Primary CSV: `/home/dtietjen/shard-kv-bench-shared-scnp.kzgP5a/benchmarks/results/server-getset-size-shardcache-scnp-shared-pinned-20260603T043950Z/server-suite-20260603T043950Z/shardcache-scnp.csv`
+Primary CSV: `shardcache-scnp.csv`
 Reference CSVs: none
 
 ## Target Summary
@@ -27,3 +27,5 @@ _No comparison targets shared command cases with `shardcache-scnp`._
 | string | `SET` | SET large 64KiB value | large | 39052.5 | 595444.0 | 1000341.5 | 0 |
 | string | `SET` | SET large 64KiB value | large | 61531.5 | 343537.0 | 808452.1 | 0 |
 | string | `GET` | GET large 64KiB value | large | 61531.5 | 340713.8 | 807927.8 | 0 |
+
+Historical capture paths are relative to their original checkout. CSV names in curated reports refer to the copies beside each report. Private capture roots are redacted.

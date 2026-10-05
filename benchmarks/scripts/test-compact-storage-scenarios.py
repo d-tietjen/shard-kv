@@ -620,6 +620,35 @@ class RespContractTests(unittest.TestCase):
 class HwmBaselineTests(unittest.TestCase):
     """New branch regressions; definitions only until exact Adam qualification."""
 
+    def test_hwm_guard_paths_use_system_account_home(self):
+        account_home = pathlib.Path('/owned/benchmark-account')
+        account = types.SimpleNamespace(pw_dir=str(account_home))
+        with mock.patch.object(gate.os, 'getuid', return_value=12345), \
+             mock.patch.object(gate.pwd, 'getpwuid', return_value=account) as lookup:
+            paths = gate.hwm_guard_paths()
+        lookup.assert_called_once_with(12345)
+        state = account_home / '.local' / 'state' / 'eden-resource-guard'
+        self.assertEqual(paths, (str(state / 'DO_NOT_START_NEW_ADAM_RUNS'),
+                                 str(state / 'disk-status.tsv'),
+                                 str(account_home / 'validation' / 'EDEN-2266') + '/'))
+
+    def test_hwm_guard_paths_require_a_system_account(self):
+        with mock.patch.object(gate.pwd, 'getpwuid', side_effect=KeyError('missing account')):
+            with self.assertRaises(KeyError):
+                gate.hwm_guard_paths()
+
+    def test_hwm_plan_templates_use_system_account_guards(self):
+        account_home = pathlib.Path('/owned/other-benchmark-account')
+        account = types.SimpleNamespace(pw_dir=str(account_home))
+        state = account_home / '.local' / 'state' / 'eden-resource-guard'
+        with mock.patch.object(gate.pwd, 'getpwuid', return_value=account):
+            for steady in (False, True):
+                with self.subTest(steady=steady):
+                    plan = gate.hwm_plan_template(steady)
+                    self.assertEqual(plan['stop_path'], str(state / 'DO_NOT_START_NEW_ADAM_RUNS'))
+                    self.assertEqual(plan['global_disk_guard'], str(state / 'disk-status.tsv'))
+                    self.assertIsNone(plan['actual_measurements'])
+
     def _small(self):
         s = gate.scenario(gate.HWM_ID)
         s['keys'] = 64

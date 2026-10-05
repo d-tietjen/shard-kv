@@ -1,11 +1,11 @@
 {
   "schema_version": 3,
   "label": "standardized server benchmark adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z",
-  "source_csv": "/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/redis-cluster.csv",
-  "primary_csv": "/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/redis-cluster.csv",
+  "source_csv": "redis-cluster.csv",
+  "primary_csv": "redis-cluster.csv",
   "reference_csvs": [
-    "/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-scnp-direct.csv",
-    "/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/adam-getset-size-rediscluster-scnp-resp-pinned-20260602T002805Z/shardcache-resp.csv"
+    "shardcache-scnp-direct.csv",
+    "shardcache-resp.csv"
   ],
   "baseline": "redis-cluster",
   "targets": [
@@ -86,5 +86,6 @@
       "baseline_errors": 0,
       "baseline_ratio": 1.684217
     }
-  ]
+  ],
+  "private_capture_roots_redacted": true
 }

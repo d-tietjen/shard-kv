@@ -4,8 +4,8 @@
   "run_id": "server-suite-20260603T043950Z",
   "git_sha": "8e1795a6f492509635d2fa52acd4f6f6c81a52f5",
   "git_branch": "benchmark/redis-cluster-scalability",
-  "config_file": "/home/dtietjen/shard-kv-bench-shared-scnp.kzgP5a/benchmarks/bench.toml",
-  "compose_file": "/home/dtietjen/shard-kv-bench-shared-scnp.kzgP5a/benchmarks/docker/compose.yml",
+  "config_file": "benchmarks/bench.toml",
+  "compose_file": "benchmarks/docker/compose.yml",
   "suites": "redis-getset-size-small,redis-getset-size-1k,redis-getset-size-4k,redis-getset-size-16k,redis-getset-size-64k,redis-getset-size-256k",
   "targets": "shardcache-scnp",
   "redis_module_target": "redis-stack",
@@ -23,5 +23,6 @@
   "command_budget": 0,
   "server_cpu_pinning": "first-n-linux-cpus",
   "client_cpu_pinning": "remaining-linux-cpus",
-  "server_memory_limit": ""
+  "server_memory_limit": "",
+  "private_capture_roots_redacted": true
 }

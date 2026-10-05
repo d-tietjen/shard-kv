@@ -17,6 +17,7 @@ import json
 import math
 import os
 import pathlib
+import pwd
 import resource
 import select
 import signal
@@ -1158,9 +1159,10 @@ def validate_hwm_contract(p):
     require(set(p['source']['file_sha256'])==set(HWM_INPUTS),'HWM driver input closure incomplete')
     for b in p['images'].values():
         require(b['engine_image_id'].startswith('sha256:') and digest(b['engine_image_id'][7:]),'invalid Engine image identity')
-    require(p['stop_path']=='/home/dtietjen/.local/state/eden-resource-guard/DO_NOT_START_NEW_ADAM_RUNS' and p['global_disk_guard']=='/home/dtietjen/.local/state/eden-resource-guard/disk-status.tsv','global resource guard paths differ')
+    stop_path, global_disk_guard, run_prefix = hwm_guard_paths()
+    require(p['stop_path']==stop_path and p['global_disk_guard']==global_disk_guard,'global resource guard paths differ')
     run = pathlib.Path(p['owned_run_root'])
-    require(run.is_absolute() and str(run).startswith('/home/dtietjen/validation/EDEN-2266/'),'owned RUN missing')
+    require(run.is_absolute() and str(run).startswith(run_prefix),'owned RUN missing')
     require(pathlib.Path(p['output_root']).parent==run,'output must be a fresh direct RUN child')
     return p
 
@@ -1535,6 +1537,13 @@ def summarize_hwm(rows):
         'screen_success':None,'qualification':'baseline diagnostic observations only; no optimization, fixed offered load, or inserted capacity result',
         'aggregation':'three-run medians; p99 medians not pooled percentiles; no confidence interval'}
 
+def hwm_guard_paths():
+    account_home = pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir)
+    state = account_home / '.local' / 'state' / 'eden-resource-guard'
+    return (str(state / 'DO_NOT_START_NEW_ADAM_RUNS'),
+            str(state / 'disk-status.tsv'),
+            str(account_home / 'validation' / 'EDEN-2266') + '/')
+
 def hwm_plan_template(steady=False):
     """Concrete schema producer, not an admission or a source/ELF receipt builder."""
     binding = lambda:{'path':None,'sha256':None}
@@ -1556,8 +1565,8 @@ def hwm_plan_template(steady=False):
         'sampling':{'idle':5,'final':5,'intermediate':5,'delay_seconds':0.2,'settle_seconds':1.0,'peak_interval_seconds':0.2},
         'resources':{'parent':metadata(),'controller':metadata(),'client':client,'docker_parent':None,'delegation_acceptance':binding()},
         'controller_scope':None,'owned_run_root':None,'output_root':None,'docker_receipt':None,
-        'stop_path':'/home/dtietjen/.local/state/eden-resource-guard/DO_NOT_START_NEW_ADAM_RUNS',
-        'global_disk_guard':'/home/dtietjen/.local/state/eden-resource-guard/disk-status.tsv',
+        'stop_path':hwm_guard_paths()[0],
+        'global_disk_guard':hwm_guard_paths()[1],
         **{k:binding() for k in ('regression_acceptance','native_build_acceptance','operating_acceptance',
                                'early_gate_acceptance','product_input_equivalence')},
         'actual_measurements':None,'qualified_native_elf':None}
