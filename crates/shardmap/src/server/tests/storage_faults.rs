@@ -526,9 +526,23 @@ fn assert_observation(pid: u32, actual: &Observation, model: &Ledger, counts: (u
         "full key/value/TTL/governance ledger"
     );
     assert_eq!(
-        actual.keys,
+        actual
+            .entries
+            .iter()
+            .map(|entry| entry.key.clone())
+            .collect::<Vec<_>>(),
         model.keys().cloned().collect::<Vec<_>>(),
-        "exhaustive keys and absence"
+        "exhaustive physical keys and absence"
+    );
+    // Governance hides keys from public enumeration; physical retention remains exhaustive.
+    assert_eq!(
+        actual.keys,
+        model
+            .values()
+            .filter(|entry| entry.governance.is_none())
+            .map(|entry| entry.key.clone())
+            .collect::<Vec<_>>(),
+        "exhaustive Redis-visible keys and absence"
     );
     assert_eq!(
         actual.general + actual.compact,
