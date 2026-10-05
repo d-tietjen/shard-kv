@@ -1288,10 +1288,10 @@ fn hwm_main(args: Args) -> Result<()> {
         "scenario":spec,"seed":HWM_SEED,"clients":CLIENTS,"pipeline":1,"deadline_seconds":HWM_DEADLINE_SECS,
         "phases":phases,"initial_dbsize_checks":1,"survivor_rule":{"multiplier":104729,"offset":12345,"modulus":HWM_KEYS,"below":50000},
         "idle_seconds":10,"classification":if steady { "high-water-steady-lifecycle-diagnostic" } else { "high-water-lifecycle-subset" },"steady_get_set_tested":steady,
-        "payload_witnesses":[[0,0],[0,1],[17,0],[500001,2],[999999,3]].map(|[index,generation]| {
+        "payload_witnesses":([[0,0],[0,1],[17,0],[500001,2],[999999,3]].map(|[index,generation]| {
             let value=hwm_payload(index,generation);
             serde_json::json!({"index":index,"generation":generation,"sha256":format!("{:x}",Sha256::digest(value))})
-        }),
+        })),
         "distribution":[{"key_bytes":18,"value_bytes":64,"records":HWM_KEYS,"logical_bytes":HWM_KEYS*82,"compact_class":41}],
         "timing_scope":"mutation: record transition and checked replies; verification: GET/TYPE/PTTL per record, separately timed; no per-wire-command percentile inferred",
         "trace_order":"sixteen canonical contiguous worker ranges; concurrent wire interleaving is not hashed"});
