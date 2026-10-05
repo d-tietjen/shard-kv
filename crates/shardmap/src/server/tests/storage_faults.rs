@@ -145,7 +145,12 @@ fn storage_fault_child() {
     // permission to populate it. The marker is removed before state admission.
     let ready_key = format!("__storage_fault_ready:{}", std::process::id()).into_bytes();
     let ready_value = format!("{}:{data_dir:?}", std::process::id()).into_bytes();
-    store.set_slice(&ready_key, &ready_value, None);
+    store.set_slice_prehashed(
+        crate::storage::hash_key(&ready_key),
+        &ready_key,
+        &ready_value,
+        None,
+    );
     let control_store = store.clone();
     thread::spawn(move || {
         emit(

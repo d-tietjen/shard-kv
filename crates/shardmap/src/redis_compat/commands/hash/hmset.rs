@@ -14,7 +14,9 @@ impl crate::commands::redis::RedisCommand for HMSet {
             return wrong_arity("HMSET");
         }
         let fields = args[1..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0], pair[1]))
             .collect::<Vec<_>>();
         match store.hset_many(args[0], &fields) {
@@ -31,7 +33,9 @@ impl crate::commands::redis::RedisCommand for HMSet {
         }
 
         let fields = args[1..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0], pair[1]))
             .collect::<Vec<_>>();
         match store.hset_many(args[0], &fields) {

@@ -23,7 +23,7 @@ impl EmbeddedStore {
             "TS.ADD" if args.len() >= 3 => self.ts_add(args[0], args[1], args[2]),
             "TS.MADD" if args.len() >= 3 && args.len().is_multiple_of(3) => {
                 let mut out = Vec::with_capacity(args.len() / 3);
-                for triple in args.chunks_exact(3) {
+                for triple in args.as_chunks::<3>().0 {
                     out.push(match self.ts_add(triple[0], triple[1], triple[2]) {
                         RedisModuleApiResult::Integer(timestamp) => {
                             RedisModuleApiResult::Integer(timestamp)
@@ -351,7 +351,7 @@ fn ts_record_label_value<'a>(record: &'a ModuleRecord, label: &[u8]) -> Option<&
         .args
         .iter()
         .position(|arg| bytes_eq(arg, b"LABELS"))?;
-    for pair in record.args[labels_at + 1..].chunks_exact(2) {
+    for pair in record.args[labels_at + 1..].as_chunks::<2>().0 {
         if pair[0].as_slice() == label {
             return Some(pair[1].as_slice());
         }

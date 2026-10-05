@@ -3180,22 +3180,37 @@ impl KvOverflowMetadataBudget {
         let Some(charge) = Self::charge(key_len) else {
             return false;
         };
-        self.used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                used.checked_add(charge).filter(|next| *next <= self.limit)
-            })
-            .is_ok()
+        let mut used = self.used.load(Ordering::Acquire);
+        loop {
+            let Some(next) = used.checked_add(charge).filter(|next| *next <= self.limit) else {
+                return false;
+            };
+            match self
+                .used
+                .compare_exchange_weak(used, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return true,
+                Err(observed) => used = observed,
+            }
+        }
     }
 
     fn release(&self, key_len: usize) {
         let Some(charge) = Self::charge(key_len) else {
             return;
         };
-        let _ = self
-            .used
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                Some(used.saturating_sub(charge))
-            });
+        let mut used = self.used.load(Ordering::Acquire);
+        loop {
+            match self.used.compare_exchange_weak(
+                used,
+                used.saturating_sub(charge),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => used = observed,
+            }
+        }
     }
 
     fn used(&self) -> usize {
@@ -6285,11 +6300,17 @@ fn reserve_in_flight(
 }
 
 fn try_reserve_in_flight(in_flight: &AtomicUsize, capacity: usize) -> bool {
-    in_flight
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| {
-            (depth < capacity).then_some(depth + 1)
-        })
-        .is_ok()
+    let mut depth = in_flight.load(Ordering::Acquire);
+    loop {
+        if depth >= capacity {
+            return false;
+        }
+        match in_flight.compare_exchange_weak(depth, depth + 1, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(_) => return true,
+            Err(observed) => depth = observed,
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

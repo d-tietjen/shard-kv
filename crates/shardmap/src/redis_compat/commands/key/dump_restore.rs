@@ -177,8 +177,8 @@ pub(crate) fn crc64_jones(mut crc: u64, bytes: &[u8]) -> u64 {
         return crc64_jones_bytewise(crc, bytes);
     }
 
-    let mut chunks = bytes.chunks_exact(8);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = bytes.as_chunks::<8>();
+    for chunk in chunks {
         let word = u64::from_le_bytes([
             chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
         ]);
@@ -192,7 +192,7 @@ pub(crate) fn crc64_jones(mut crc: u64, bytes: &[u8]) -> u64 {
             ^ CRC64_JONES_TABLES[1][((crc >> 48) & 0xff) as usize]
             ^ CRC64_JONES_TABLES[0][((crc >> 56) & 0xff) as usize];
     }
-    for byte in chunks.remainder() {
+    for byte in remainder {
         crc = CRC64_JONES_TABLES[0][((crc as u8) ^ *byte) as usize] ^ (crc >> 8);
     }
     crc

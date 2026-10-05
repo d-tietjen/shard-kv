@@ -143,14 +143,48 @@ impl WalStats {
 }
 
 fn atomic_add_u64(target: &AtomicU64, value: u64) {
-    let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-        Some(current.saturating_add(value))
-    });
+    let mut current = target.load(Ordering::Relaxed);
+    loop {
+        match target.compare_exchange_weak(
+            current,
+            current.saturating_add(value),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::WalStats;
+    use super::{WalStats, atomic_add_u64};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn atomic_add_preserves_concurrent_updates_and_saturation() {
+        let counter = Arc::new(AtomicU64::new(0));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let counter = Arc::clone(&counter);
+                std::thread::spawn(move || {
+                    for _ in 0..1_000 {
+                        atomic_add_u64(&counter, 1);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("counter worker completed");
+        }
+        assert_eq!(counter.load(Ordering::Relaxed), 8_000);
+        counter.store(u64::MAX - 1, Ordering::Relaxed);
+        atomic_add_u64(&counter, 2);
+        atomic_add_u64(&counter, 1);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
 
     #[test]
     fn snapshot_reflects_lock_free_updates() {

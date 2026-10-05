@@ -20,7 +20,7 @@ impl EmbeddedStore {
                 let mut shard = self.module_state.write(route);
                 let counts = shard.multisets.entry(args[0].to_vec()).or_default();
                 let mut out = Vec::with_capacity(args[1..].len() / 2);
-                for pair in args[1..].chunks_exact(2) {
+                for pair in args[1..].as_chunks::<2>().0 {
                     let Some(increment) = parse_i64_lossy(pair[1]) else {
                         return invalid_arg("invalid CMS increment");
                     };

@@ -1218,13 +1218,20 @@ impl ObjectOverflowWorkerPool {
                 index += 1;
             }
         }
-        let reserved =
-            self.live_workers
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
-                    (live < self.max_worker_threads).then_some(live + 1)
-                });
-        if reserved.is_err() {
-            return Ok(false);
+        let mut live = self.live_workers.load(Ordering::Acquire);
+        loop {
+            if live >= self.max_worker_threads {
+                return Ok(false);
+            }
+            match self.live_workers.compare_exchange_weak(
+                live,
+                live + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => live = observed,
+            }
         }
         let worker = ObjectOverflowWorker {
             index: self.next_worker_index.fetch_add(1, Ordering::Relaxed),

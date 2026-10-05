@@ -18,12 +18,14 @@ impl crate::commands::redis::RedisCommand for MSet {
             return wrong_arity("MSET");
         }
         if args
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .any(|pair| !store.point_mutation_is_accepted(pair[0], pair[1].len(), None))
         {
             return error("ERR mutation rejected by an installed storage extension");
         }
-        for pair in args.chunks_exact(2) {
+        for pair in args.as_chunks::<2>().0 {
             store.set(pair[0].to_vec(), pair[1].to_vec(), None);
         }
         simple("OK")
@@ -36,7 +38,9 @@ impl crate::commands::redis::RedisCommand for MSet {
             return;
         }
         if args
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .any(|pair| !store.point_mutation_is_accepted(pair[0], pair[1].len(), None))
         {
             ServerWire::write_resp_error(
@@ -45,7 +49,7 @@ impl crate::commands::redis::RedisCommand for MSet {
             );
             return;
         }
-        for pair in args.chunks_exact(2) {
+        for pair in args.as_chunks::<2>().0 {
             store.set(pair[0].to_vec(), pair[1].to_vec(), None);
         }
         write_resp_simple_string(out, "OK");

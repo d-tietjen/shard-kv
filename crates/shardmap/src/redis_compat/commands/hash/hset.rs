@@ -18,7 +18,9 @@ impl crate::commands::redis::RedisCommand for HSet {
             store.hset_many(
                 args[0],
                 &args[1..]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|pair| (pair[0], pair[1]))
                     .collect::<Vec<_>>(),
             ),
@@ -32,7 +34,9 @@ impl crate::commands::redis::RedisCommand for HSet {
             return;
         }
         let fields = args[1..]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0], pair[1]))
             .collect::<Vec<_>>();
         write_result_resp(out, store.hset_many(args[0], &fields));

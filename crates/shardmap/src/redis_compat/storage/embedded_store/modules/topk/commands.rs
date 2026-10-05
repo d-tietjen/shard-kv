@@ -40,7 +40,7 @@ impl EmbeddedStore {
             },
             "TOPK.INCRBY" if args.len() >= 3 && args[1..].len().is_multiple_of(2) => {
                 let mut updates = Vec::with_capacity(args[1..].len() / 2);
-                for pair in args[1..].chunks_exact(2) {
+                for pair in args[1..].as_chunks::<2>().0 {
                     let Ok(increment) = parse_i64_arg(pair[1]) else {
                         return RedisModuleApiResult::Error("invalid increment".to_string());
                     };

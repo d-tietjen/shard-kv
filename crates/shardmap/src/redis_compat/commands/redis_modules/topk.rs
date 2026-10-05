@@ -94,7 +94,7 @@ fn topk_incrby(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
         return wrong_arity("TOPK.INCRBY");
     }
     let mut updates = Vec::with_capacity(rest.len() / 2);
-    for pair in rest.chunks_exact(2) {
+    for pair in rest.as_chunks::<2>().0 {
         let increment = match parse_i64(pair[1]) {
             Ok(increment) => increment,
             Err(()) => return error("ERR invalid increment"),

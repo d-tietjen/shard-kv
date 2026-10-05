@@ -14,10 +14,15 @@ impl crate::commands::redis::RedisCommand for MSetNx {
         if args.is_empty() || !args.len().is_multiple_of(2) {
             return wrong_arity("MSETNX");
         }
-        if args.chunks_exact(2).any(|pair| store.exists(pair[0])) {
+        if args
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|pair| store.exists(pair[0]))
+        {
             return int(0);
         }
-        for pair in args.chunks_exact(2) {
+        for pair in args.as_chunks::<2>().0 {
             store.set(pair[0].to_vec(), pair[1].to_vec(), None);
         }
         int(1)
@@ -29,11 +34,16 @@ impl crate::commands::redis::RedisCommand for MSetNx {
             write_resp_wrong_arity(out, "MSETNX");
             return;
         }
-        if args.chunks_exact(2).any(|pair| store.exists(pair[0])) {
+        if args
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .any(|pair| store.exists(pair[0]))
+        {
             ServerWire::write_resp_integer(out, 0);
             return;
         }
-        for pair in args.chunks_exact(2) {
+        for pair in args.as_chunks::<2>().0 {
             store.set(pair[0].to_vec(), pair[1].to_vec(), None);
         }
         ServerWire::write_resp_integer(out, 1);

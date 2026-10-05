@@ -123,7 +123,9 @@ fn parse_field_value_clause<'a>(tail: &'a [&'a [u8]]) -> Option<Vec<(&'a [u8], &
     }
     Some(
         pairs
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0], pair[1]))
             .collect(),
     )

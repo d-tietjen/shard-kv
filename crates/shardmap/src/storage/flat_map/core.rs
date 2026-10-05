@@ -537,7 +537,7 @@ impl FlatMap {
         &self,
         policy: EvictionPolicy,
     ) -> Option<(EvictionRank, u64, Bytes)> {
-        if policy == EvictionPolicy::None || self.len() == 0 {
+        if policy == EvictionPolicy::None || self.is_empty() {
             return None;
         }
         #[cfg(feature = "prefix-eviction")]
@@ -598,7 +598,7 @@ impl FlatMap {
         now_ms: u64,
         mut eligible: impl FnMut(&[u8]) -> bool,
     ) -> Option<Bytes> {
-        if policy == EvictionPolicy::None || self.len() == 0 {
+        if policy == EvictionPolicy::None || self.is_empty() {
             return None;
         }
         let mut selected: Option<(EvictionRank, u64, &[u8])> = None;
@@ -624,7 +624,7 @@ impl FlatMap {
         now_ms: u64,
         target_bytes: usize,
     ) -> bool {
-        if policy == EvictionPolicy::None || self.len() == 0 {
+        if policy == EvictionPolicy::None || self.is_empty() {
             return false;
         }
 
@@ -645,7 +645,7 @@ impl FlatMap {
         let use_lru_log = use_lru_log && self.compact_points.len() == 0;
         if use_lru_log {
             let evicted = self.evict_lru_from_touch_log(now_ms, target_bytes);
-            if self.stored_bytes <= target_bytes || self.len() == 0 {
+            if self.stored_bytes <= target_bytes || self.is_empty() {
                 return evicted;
             }
         }
@@ -774,7 +774,7 @@ impl FlatMap {
 
     fn eviction_candidate_count(&self, target_bytes: usize) -> usize {
         let bytes_to_free = self.stored_bytes.saturating_sub(target_bytes);
-        if bytes_to_free == 0 || self.len() == 0 {
+        if bytes_to_free == 0 || self.is_empty() {
             return 0;
         }
 

@@ -4807,7 +4807,9 @@ fn raw_resp_object_streaming_commands_round_trip() {
     let hgetall = decode_bulk_array(&RespTestHarness::exec_resp(&store, &[b"HGETALL", b"h"]));
     assert_eq!(
         hgetall
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0].clone(), pair[1].clone()))
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
@@ -4821,7 +4823,9 @@ fn raw_resp_object_streaming_commands_round_trip() {
     assert_eq!(cursor, 0);
     assert_eq!(
         hscan
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0].clone(), pair[1].clone()))
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
@@ -4904,7 +4908,9 @@ fn raw_resp_object_streaming_commands_round_trip() {
     assert_eq!(cursor, 0);
     assert_eq!(
         zscan
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0].clone(), pair[1].clone()))
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([
@@ -5537,7 +5543,9 @@ fn scnp_redis_opcode_hot_arrays_use_fast_array_responses() {
     };
     assert_eq!(
         values
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| (pair[0].clone().unwrap(), pair[1].clone().unwrap()))
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([

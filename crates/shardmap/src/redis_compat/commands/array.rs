@@ -650,7 +650,9 @@ fn parse_indices(args: &[&[u8]]) -> Result<Vec<i64>, Frame> {
 }
 
 fn parse_index_value_pairs<'a>(args: &'a [&'a [u8]]) -> Result<Vec<(i64, &'a [u8])>, Frame> {
-    args.chunks_exact(2)
+    args.as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let index = parse_i64(pair[0])
                 .ok()
@@ -662,7 +664,9 @@ fn parse_index_value_pairs<'a>(args: &'a [&'a [u8]]) -> Result<Vec<(i64, &'a [u8
 }
 
 fn parse_ranges(args: &[&[u8]]) -> Result<Vec<(i64, i64)>, Frame> {
-    args.chunks_exact(2)
+    args.as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| parse_start_end(pair[0], pair[1]))
         .collect()
 }
