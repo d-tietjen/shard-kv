@@ -238,7 +238,7 @@ impl Scenario {
                 r.generation = phase.step;
             }
             "half" => {
-                if index % 2 == 0 {
+                if index.is_multiple_of(2) {
                     if phase.step % 2 == 1 {
                         r.kind = Kind::Absent;
                     }
@@ -255,7 +255,7 @@ impl Scenario {
                 }
             }
             "metadata" => {
-                if index % 10 == 0 {
+                if index.is_multiple_of(10) {
                     r.expiring = phase.step == 1;
                     if phase.step == 3 {
                         r.kind = Kind::Absent;
@@ -265,22 +265,20 @@ impl Scenario {
                     }
                 }
             }
-            "types" => {
-                if index % 10 == 0 {
-                    r.kind = match phase.step {
-                        1 => {
-                            if index % 20 == 0 {
-                                Kind::Hash
-                            } else {
-                                Kind::List
-                            }
+            "types" if index.is_multiple_of(10) => {
+                r.kind = match phase.step {
+                    1 => {
+                        if index.is_multiple_of(20) {
+                            Kind::Hash
+                        } else {
+                            Kind::List
                         }
-                        2 => Kind::Absent,
-                        _ => Kind::String,
-                    };
-                    if phase.step == 3 {
-                        r.generation = 1;
                     }
+                    2 => Kind::Absent,
+                    _ => Kind::String,
+                };
+                if phase.step == 3 {
+                    r.generation = 1;
                 }
             }
             _ => {}
@@ -483,9 +481,9 @@ fn mutate(c: &mut impl Wire, s: &Scenario, p: &Phase, i: usize) -> Result<u64> {
         return Ok(1);
     }
     let affected = match s.family.as_str() {
-        "half" => i % 2 == 0,
+        "half" => i.is_multiple_of(2),
         "groups" => i % 4 != 3,
-        "metadata" | "types" => i % 10 == 0,
+        "metadata" | "types" => i.is_multiple_of(10),
         _ => true,
     };
     if !affected {
@@ -853,11 +851,11 @@ fn hwm_survivor(index: usize) -> bool {
 
 fn hwm_record(index: usize, phase: &Phase) -> Record {
     let survivor = hwm_survivor(index);
-    let absent = phase.step > 0 && phase.step % 3 != 0 && !survivor;
+    let absent = phase.step > 0 && !phase.step.is_multiple_of(3) && !survivor;
     let generation = if survivor || phase.step == 0 {
         0
     } else {
-        (phase.step - 1) / 3 + usize::from(phase.step % 3 == 0)
+        (phase.step - 1) / 3 + usize::from(phase.step.is_multiple_of(3))
     };
     Record {
         key: fixed_key(index, 18),
@@ -1073,7 +1071,7 @@ fn hwm_timed(
 
 fn hwm_live_indices(phase: &Phase) -> Vec<usize> {
     (0..HWM_KEYS)
-        .filter(|&i| phase.step % 3 == 0 || hwm_survivor(i))
+        .filter(|&i| phase.step.is_multiple_of(3) || hwm_survivor(i))
         .collect()
 }
 
@@ -1346,7 +1344,7 @@ fn hwm_main(args: Args) -> Result<()> {
             acknowledge()?;
         }
         let verification = hwm_timed(phase, addr, false, started, &id)?;
-        let live = if phase.step > 0 && phase.step % 3 != 0 {
+        let live = if phase.step > 0 && !phase.step.is_multiple_of(3) {
             50000
         } else {
             HWM_KEYS
@@ -1692,7 +1690,7 @@ mod tests {
             assert_eq!(a.kind, Kind::String);
             assert!(!a.expiring);
             let b = hwm_record(deleted, &phase);
-            if phase.step % 3 == 0 {
+            if phase.step.is_multiple_of(3) {
                 assert_eq!(b.generation, phase.step / 3);
                 assert_eq!(b.kind, Kind::String);
             } else {
@@ -1730,7 +1728,7 @@ mod tests {
         let index = (0..HWM_KEYS).find(|&i| !hwm_survivor(i)).unwrap();
         let key = fixed_key(index, 18);
         for phase in [&phases[1], &phases[3]] {
-            let live = phase.step % 3 == 0;
+            let live = phase.step.is_multiple_of(3);
             let value = hwm_payload(index, 1);
             let mut wire = Transcript {
                 replies: [
@@ -1802,7 +1800,14 @@ mod tests {
         for step in [0, 1, 3, 4, 6, 7, 9] {
             let phase = &hwm_phases()[step];
             let keys = hwm_live_indices(phase);
-            assert_eq!(keys.len(), if step % 3 == 0 { HWM_KEYS } else { 50000 });
+            assert_eq!(
+                keys.len(),
+                if step.is_multiple_of(3) {
+                    HWM_KEYS
+                } else {
+                    50000
+                }
+            );
             for worker in 0..CLIENTS {
                 for sequence in 0..128 {
                     let rank = hwm_uniform_rank(worker, sequence, keys.len()).unwrap();
