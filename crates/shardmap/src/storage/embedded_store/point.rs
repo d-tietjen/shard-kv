@@ -534,6 +534,22 @@ impl EmbeddedStore {
             .sum()
     }
 
+    #[cfg(all(
+        test,
+        feature = "server",
+        feature = "redis",
+        target_os = "linux",
+        not(feature = "no-ttl")
+    ))]
+    pub(crate) fn storage_backend_counts(&self) -> (usize, usize) {
+        self.shards
+            .iter()
+            .fold((0, 0), |(general, compact), shard| {
+                let counts = shard.read().map.storage_backend_counts();
+                (general + counts.0, compact + counts.1)
+            })
+    }
+
     #[cfg(feature = "server")]
     pub(crate) fn try_with_response_value_bytes_route_hashed<F>(
         &self,

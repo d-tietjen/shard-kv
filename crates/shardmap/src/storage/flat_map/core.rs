@@ -89,6 +89,22 @@ impl FlatMap {
         self.stored_bytes
     }
 
+    // Test reachability only; this does not change a production layout or API.
+    #[cfg(all(
+        test,
+        feature = "server",
+        feature = "redis",
+        target_os = "linux",
+        not(feature = "no-ttl")
+    ))]
+    pub(crate) fn storage_backend_counts(&self) -> (usize, usize) {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        let compact = self.compact_points.len();
+        #[cfg(not(feature = "experimental-compact-point-storage"))]
+        let compact = 0;
+        (self.entries.len(), compact)
+    }
+
     #[inline(always)]
     pub fn remote_value_bytes(&self) -> usize {
         self.remote_value_bytes

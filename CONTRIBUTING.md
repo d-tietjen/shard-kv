@@ -14,16 +14,16 @@ cargo test -p shardmap --features unsafe
 cargo test -p shardmap --features redis
 cargo check -p shardcache --features redis
 cargo check -p shardcache --features redis-server
-cargo check -p shardcache-redis --all-features
+cargo check -p shardcache --all-features
 cargo doc -p shardmap --no-deps --all-features
-cargo doc -p shardcache-redis --no-deps --all-features
+cargo doc -p shardcache --no-deps --all-features
 cargo package -p shardmap --locked
 ```
 
 Before making larger changes, skim [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md)
 for the repository map, common change locations, and generated artifact policy.
 For release work, also follow
-[docs/RELEASE_0_2_READINESS.md](docs/RELEASE_0_2_READINESS.md).
+[RELEASE.md](RELEASE.md).
 
 ## Pull Requests
 

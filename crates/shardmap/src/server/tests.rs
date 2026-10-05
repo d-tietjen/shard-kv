@@ -22,6 +22,10 @@ use tokio::io::AsyncReadExt;
 #[path = "tests/redis_module_semantics.rs"]
 mod redis_module_semantics;
 
+#[cfg(all(feature = "redis", target_os = "linux", not(feature = "no-ttl")))]
+#[path = "tests/storage_faults.rs"]
+mod storage_faults;
+
 struct RespTestHarness;
 
 impl RespTestHarness {

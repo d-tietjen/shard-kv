@@ -831,7 +831,10 @@ const HWM_SEED: u64 = 0xC0FFEE;
 const HWM_DEADLINE_SECS: u64 = 840;
 
 fn hwm_phases() -> Vec<Phase> {
-    let mut phases = vec![Phase { id: "load".into(), step: 0 }];
+    let mut phases = vec![Phase {
+        id: "load".into(),
+        step: 0,
+    }];
     for cycle in 1..=3 {
         for (offset, name) in ["delete", "idle", "refill"].into_iter().enumerate() {
             phases.push(Phase {
@@ -857,8 +860,11 @@ fn hwm_record(index: usize, phase: &Phase) -> Record {
         (phase.step - 1) / 3 + usize::from(phase.step % 3 == 0)
     };
     Record {
-        key: fixed_key(index, 18), value_length: 64, generation,
-        kind: if absent { Kind::Absent } else { Kind::String }, expiring: false,
+        key: fixed_key(index, 18),
+        value_length: 64,
+        generation,
+        kind: if absent { Kind::Absent } else { Kind::String },
+        expiring: false,
     }
 }
 
@@ -873,7 +879,8 @@ fn hwm_payload(index: usize, generation: usize) -> Vec<u8> {
     // The first word is bijective in index; later words change with generation.
     value.extend_from_slice(&hwm_mix(HWM_SEED ^ index as u64).to_le_bytes());
     for word in 1u64..8 {
-        let input = HWM_SEED ^ (index as u64).rotate_left(17)
+        let input = HWM_SEED
+            ^ (index as u64).rotate_left(17)
             ^ (generation as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
             ^ word.wrapping_mul(0xd134_2543_de82_ef95);
         value.extend_from_slice(&hwm_mix(input).to_le_bytes());
@@ -899,8 +906,18 @@ fn hwm_verify(c: &mut impl Wire, phase: &Phase, index: usize, state: &mut Sha256
     let r = hwm_record(index, phase);
     let value = hwm_payload(index, r.generation);
     let live = r.kind != Kind::Absent;
-    expect(c.command(&[b"GET", &r.key])?, Reply::Bulk(live.then(|| value.clone())))?;
-    expect(c.command(&[b"TYPE", &r.key])?, Reply::Simple(if live { b"string".to_vec() } else { b"none".to_vec() }))?;
+    expect(
+        c.command(&[b"GET", &r.key])?,
+        Reply::Bulk(live.then(|| value.clone())),
+    )?;
+    expect(
+        c.command(&[b"TYPE", &r.key])?,
+        Reply::Simple(if live {
+            b"string".to_vec()
+        } else {
+            b"none".to_vec()
+        }),
+    )?;
     integer(c, &[b"PTTL", &r.key], if live { -1 } else { -2 })?;
     state_frame(state, &r, &value);
     Ok(3)
@@ -914,7 +931,13 @@ struct HwmTimed {
     workers: Vec<serde_json::Value>,
 }
 
-fn hwm_timed(phase: &Phase, addr: SocketAddr, mutation: bool, started: Instant, scenario: &str) -> Result<HwmTimed> {
+fn hwm_timed(
+    phase: &Phase,
+    addr: SocketAddr,
+    mutation: bool,
+    started: Instant,
+    scenario: &str,
+) -> Result<HwmTimed> {
     let begin = Instant::now();
     let idle = mutation && phase.step % 3 == 2;
     let empty_histogram = Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3)?;
@@ -975,35 +998,83 @@ fn hwm_timed(phase: &Phase, addr: SocketAddr, mutation: bool, started: Instant, 
     });
     let workers: Vec<_> = results.iter().map(|(r, _)| r.clone()).collect();
     if workers.iter().any(|r| r["errors"] != 0) {
-        emit(&serde_json::json!({"schema":2,"event":"worker-failure","pid":std::process::id(),
-            "scenario":scenario,"phase":phase.id,"mutation":mutation,"workers":workers}))?;
+        emit(
+            &serde_json::json!({"schema":2,"event":"worker-failure","pid":std::process::id(),
+            "scenario":scenario,"phase":phase.id,"mutation":mutation,"workers":workers}),
+        )?;
         return Err("HWM worker failure; all sixteen observations retained".into());
     }
-    let mut h = Histogram::<u64>::new_with_bounds(1,60_000_000_000,3)?;
+    let mut h = Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3)?;
     let mut trace = Sha256::new();
     let mut state = Sha256::new();
     let mut commands = std::collections::BTreeMap::new();
     for (receipt, local) in results {
         h.add(&local)?;
-        frame(&mut trace, receipt["trace_sha256"].as_str().ok_or("worker trace absent")?.as_bytes());
-        frame(&mut state, receipt["state_sha256"].as_str().ok_or("worker state absent")?.as_bytes());
-        let counts: std::collections::BTreeMap<String,u64> = serde_json::from_value(receipt["command_counts"].clone())?;
-        for (name,n) in counts { *commands.entry(name).or_insert(0u64) += n; }
+        frame(
+            &mut trace,
+            receipt["trace_sha256"]
+                .as_str()
+                .ok_or("worker trace absent")?
+                .as_bytes(),
+        );
+        frame(
+            &mut state,
+            receipt["state_sha256"]
+                .as_str()
+                .ok_or("worker state absent")?
+                .as_bytes(),
+        );
+        let counts: std::collections::BTreeMap<String, u64> =
+            serde_json::from_value(receipt["command_counts"].clone())?;
+        for (name, n) in counts {
+            *commands.entry(name).or_insert(0u64) += n;
+        }
     }
     let wire: u64 = commands.values().sum();
-    let elapsed_ns: u64 = if wire == 0 { 0 } else { begin.elapsed().as_nanos().try_into()? };
-    let timing = Timing {
-        wire_commands: wire, completed_records: h.len(), elapsed_ns,
-        wire_commands_per_sec: if wire == 0 { 0.0 } else { wire as f64*1e9/elapsed_ns.max(1) as f64 },
-        completed_records_per_sec: if wire == 0 { 0.0 } else { h.len() as f64*1e9/elapsed_ns.max(1) as f64 },
-        latency_unit: if wire == 0 { "absent" } else if mutation { "logical-record-transition" } else { "full-record-verification" },
-        p50_ns:h.value_at_quantile(0.5),p99_ns:h.value_at_quantile(0.99),p999_ns:h.value_at_quantile(0.999),maximum_ns:h.max(),
+    let elapsed_ns: u64 = if wire == 0 {
+        0
+    } else {
+        begin.elapsed().as_nanos().try_into()?
     };
-    Ok(HwmTimed { timing,trace:hex(trace),state:hex(state),commands,workers })
+    let timing = Timing {
+        wire_commands: wire,
+        completed_records: h.len(),
+        elapsed_ns,
+        wire_commands_per_sec: if wire == 0 {
+            0.0
+        } else {
+            wire as f64 * 1e9 / elapsed_ns.max(1) as f64
+        },
+        completed_records_per_sec: if wire == 0 {
+            0.0
+        } else {
+            h.len() as f64 * 1e9 / elapsed_ns.max(1) as f64
+        },
+        latency_unit: if wire == 0 {
+            "absent"
+        } else if mutation {
+            "logical-record-transition"
+        } else {
+            "full-record-verification"
+        },
+        p50_ns: h.value_at_quantile(0.5),
+        p99_ns: h.value_at_quantile(0.99),
+        p999_ns: h.value_at_quantile(0.999),
+        maximum_ns: h.max(),
+    };
+    Ok(HwmTimed {
+        timing,
+        trace: hex(trace),
+        state: hex(state),
+        commands,
+        workers,
+    })
 }
 
 fn hwm_live_indices(phase: &Phase) -> Vec<usize> {
-    (0..HWM_KEYS).filter(|&i| phase.step % 3 == 0 || hwm_survivor(i)).collect()
+    (0..HWM_KEYS)
+        .filter(|&i| phase.step % 3 == 0 || hwm_survivor(i))
+        .collect()
 }
 
 fn hwm_uniform_rank(worker: usize, sequence: u64, cardinality: usize) -> Result<usize> {
@@ -1011,36 +1082,45 @@ fn hwm_uniform_rank(worker: usize, sequence: u64, cardinality: usize) -> Result<
     // retry domain is separate from the worker/sequence domain.
     let input = HWM_SEED ^ (worker as u64).rotate_left(32) ^ sequence;
     let divisor = cardinality as u64;
-    if divisor == 0 { return Err("empty steady live domain".into()); }
+    if divisor == 0 {
+        return Err("empty steady live domain".into());
+    }
     let threshold = divisor.wrapping_neg() % divisor;
     // Odd addition and the mixer are bijective; at most `threshold` distinct
     // rejected words exist. No unbounded random retry loop is needed.
     for retry in 0..=threshold {
         let word = hwm_mix(input.wrapping_add(retry.wrapping_mul(0x9e37_79b9_7f4a_7c15)));
-        if word >= threshold { return Ok((word % divisor) as usize); }
+        if word >= threshold {
+            return Ok((word % divisor) as usize);
+        }
     }
     Err("uniform rejection bound violated".into())
 }
 
 fn hwm_steady_request(c: &mut impl Wire, phase: &Phase, index: usize, set: bool) -> Result<()> {
-    let r = hwm_record(index,phase);
-    if r.kind != Kind::String { return Err("steady key selection is not live".into()); }
-    let value = hwm_payload(index,r.generation);
-    if set { ok(c,&[b"SET",&r.key,&value,b"XX"])?; }
-    else { expect(c.command(&[b"GET",&r.key])?,Reply::Bulk(Some(value)))?; }
+    let r = hwm_record(index, phase);
+    if r.kind != Kind::String {
+        return Err("steady key selection is not live".into());
+    }
+    let value = hwm_payload(index, r.generation);
+    if set {
+        ok(c, &[b"SET", &r.key, &value, b"XX"])?;
+    } else {
+        expect(c.command(&[b"GET", &r.key])?, Reply::Bulk(Some(value)))?;
+    }
     Ok(())
 }
 
-fn hwm_steady(phase: &Phase,addr: SocketAddr,started: Instant) -> Result<serde_json::Value> {
-    use std::sync::{Arc,Condvar,Mutex};
-    use std::sync::atomic::{AtomicBool,AtomicUsize,Ordering};
+fn hwm_steady(phase: &Phase, addr: SocketAddr, started: Instant) -> Result<serde_json::Value> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
     let indices = Arc::new(hwm_live_indices(phase));
-    let latch = Arc::new((Mutex::new(None::<Instant>),Condvar::new()));
+    let latch = Arc::new((Mutex::new(None::<Instant>), Condvar::new()));
     let ready = Arc::new(AtomicUsize::new(0));
     let cancel = Arc::new(AtomicBool::new(false));
-    let histogram = Histogram::<u64>::new_with_bounds(1,60_000_000_000,3)?;
+    let histogram = Histogram::<u64>::new_with_bounds(1, 60_000_000_000, 3)?;
     let mut spawn_error = None;
-    let (results,epoch) = thread::scope(|scope| {
+    let (results, epoch) = thread::scope(|scope| {
         let mut handles = Vec::new();
         for worker in 0..CLIENTS {
             let keys = indices.clone();
@@ -1106,62 +1186,104 @@ fn hwm_steady(phase: &Phase,addr: SocketAddr,started: Instant) -> Result<serde_j
                     "last_completion_ns_from_epoch":finish_ns,"errors":u64::from(error.is_some()),"error":error}),hist)
             });
             match result {
-                Ok(handle) => handles.push((worker,handle)),
-                Err(e) => { spawn_error = Some(e.to_string()); cancel.store(true,Ordering::Release); break; }
+                Ok(handle) => handles.push((worker, handle)),
+                Err(e) => {
+                    spawn_error = Some(e.to_string());
+                    cancel.store(true, Ordering::Release);
+                    break;
+                }
             }
         }
         let setup = Instant::now();
-        while ready.load(Ordering::Acquire)<handles.len() && setup.elapsed()<Duration::from_secs(12)
-            && started.elapsed().as_secs()<HWM_DEADLINE_SECS {
+        while ready.load(Ordering::Acquire) < handles.len()
+            && setup.elapsed() < Duration::from_secs(12)
+            && started.elapsed().as_secs() < HWM_DEADLINE_SECS
+        {
             thread::sleep(Duration::from_millis(1));
         }
-        if ready.load(Ordering::Acquire)!=CLIENTS { cancel.store(true,Ordering::Release); }
+        if ready.load(Ordering::Acquire) != CLIENTS {
+            cancel.store(true, Ordering::Release);
+        }
         let epoch = Instant::now();
         *latch.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(epoch);
         latch.1.notify_all();
-        let mut results: Vec<_> = handles.into_iter().map(|(worker,handle)| match handle.join() {
-            Ok(result) => result,
-            Err(_) => (serde_json::json!({"worker":worker,"rust_thread_id":null,"errors":1,
-                "error":"steady worker panic; counters unobserved"}),histogram.clone()),
-        }).collect();
+        let mut results: Vec<_> = handles
+            .into_iter()
+            .map(|(worker, handle)| match handle.join() {
+                Ok(result) => result,
+                Err(_) => (
+                    serde_json::json!({"worker":worker,"rust_thread_id":null,"errors":1,
+                "error":"steady worker panic; counters unobserved"}),
+                    histogram.clone(),
+                ),
+            })
+            .collect();
         for worker in results.len()..CLIENTS {
-            results.push((serde_json::json!({"worker":worker,"rust_thread_id":null,"errors":1,
-                "error":"steady worker not spawned; counters unobserved"}),histogram.clone()));
+            results.push((
+                serde_json::json!({"worker":worker,"rust_thread_id":null,"errors":1,
+                "error":"steady worker not spawned; counters unobserved"}),
+                histogram.clone(),
+            ));
         }
-        (results,epoch)
+        (results, epoch)
     });
     let mut all = histogram.clone();
     let mut outer = Sha256::new();
-    let mut measured = std::collections::BTreeMap::<String,u64>::new();
-    let workers: Vec<_> = results.iter().map(|(r,_)| r.clone()).collect();
-    if spawn_error.is_some() || ready.load(Ordering::Acquire)!=CLIENTS || workers.iter().any(|w| w["errors"]!=0) {
-        emit(&serde_json::json!({"schema":2,"event":"worker-failure","pid":std::process::id(),
-            "scenario":HWM_STEADY_ID,"phase":phase.id,"steady":true,"workers":workers,"spawn_error":spawn_error}))?;
+    let mut measured = std::collections::BTreeMap::<String, u64>::new();
+    let workers: Vec<_> = results.iter().map(|(r, _)| r.clone()).collect();
+    if spawn_error.is_some()
+        || ready.load(Ordering::Acquire) != CLIENTS
+        || workers.iter().any(|w| w["errors"] != 0)
+    {
+        emit(
+            &serde_json::json!({"schema":2,"event":"worker-failure","pid":std::process::id(),
+            "scenario":HWM_STEADY_ID,"phase":phase.id,"steady":true,"workers":workers,"spawn_error":spawn_error}),
+        )?;
         return Err("steady worker failure; all sixteen observations retained".into());
     }
-    for (r,h) in results {
+    for (r, h) in results {
         all.add(&h)?;
-        frame(&mut outer,r["trace_sha256"].as_str().ok_or("steady trace absent")?.as_bytes());
-        let counts: std::collections::BTreeMap<String,u64> = serde_json::from_value(r["measured_command_counts"].clone())?;
-        for (k,n) in counts { *measured.entry(k).or_default() += n; }
+        frame(
+            &mut outer,
+            r["trace_sha256"]
+                .as_str()
+                .ok_or("steady trace absent")?
+                .as_bytes(),
+        );
+        let counts: std::collections::BTreeMap<String, u64> =
+            serde_json::from_value(r["measured_command_counts"].clone())?;
+        for (k, n) in counts {
+            *measured.entry(k).or_default() += n;
+        }
     }
-    Ok(serde_json::json!({"schema":2,"event":"steady-complete","pid":std::process::id(),"scenario":HWM_STEADY_ID,
+    Ok(
+        serde_json::json!({"schema":2,"event":"steady-complete","pid":std::process::id(),"scenario":HWM_STEADY_ID,
         "phase":phase.id,"pipeline":1,"clients":CLIENTS,"warmup_seconds":3,"measured_seconds":20,
         "live_keys":indices.len(),"access_policy":"uniform-live-key-rejection-v1","mix":"4GET-1SET-XX",
         "trace_sha256":hex(outer),"workers":workers,"errors":0,"measured_command_counts":measured,
         "completed_requests":all.len(),"histogram_samples":all.len(),"ops_per_sec":all.len() as f64/20.0,
         "latency_unit":"checked-P1-request-completion","histogram_scope":"fully measured requests only; warmup straddles and late completions excluded",
         "elapsed_ns_from_epoch":epoch.elapsed().as_nanos().min(u64::MAX as u128) as u64,
-        "p50_ns":all.value_at_quantile(0.5),"p99_ns":all.value_at_quantile(0.99),"p999_ns":all.value_at_quantile(0.999),"maximum_ns":all.max()}))
+        "p50_ns":all.value_at_quantile(0.5),"p99_ns":all.value_at_quantile(0.99),"p999_ns":all.value_at_quantile(0.999),"maximum_ns":all.max()}),
+    )
 }
 
 fn hwm_main(args: Args) -> Result<()> {
-    if args.verify_saturation { return Err("HWM cannot verify a saturation keyspace".into()); }
+    if args.verify_saturation {
+        return Err("HWM cannot verify a saturation keyspace".into());
+    }
     let phases = hwm_phases();
     let steady = args.scenario == HWM_STEADY_ID;
     let id = args.scenario.clone();
-    let spec = Scenario { id:id.clone(),keys:HWM_KEYS,key_length:18,value_length:64,
-        pattern:"per-key-unique-high-entropy-v1".into(),family:"hwm".into(),saturation:false };
+    let spec = Scenario {
+        id: id.clone(),
+        keys: HWM_KEYS,
+        key_length: 18,
+        value_length: 64,
+        pattern: "per-key-unique-high-entropy-v1".into(),
+        family: "hwm".into(),
+        saturation: false,
+    };
     let mut contract = serde_json::json!({"schema":2,"event":"ready","pid":std::process::id(),
         "scenario":spec,"seed":HWM_SEED,"clients":CLIENTS,"pipeline":1,"deadline_seconds":HWM_DEADLINE_SECS,
         "phases":phases,"initial_dbsize_checks":1,"survivor_rule":{"multiplier":104729,"offset":12345,"modulus":HWM_KEYS,"below":50000},
@@ -1173,55 +1295,79 @@ fn hwm_main(args: Args) -> Result<()> {
         "distribution":[{"key_bytes":18,"value_bytes":64,"records":HWM_KEYS,"logical_bytes":HWM_KEYS*82,"compact_class":41}],
         "timing_scope":"mutation: record transition and checked replies; verification: GET/TYPE/PTTL per record, separately timed; no per-wire-command percentile inferred",
         "trace_order":"sixteen canonical contiguous worker ranges; concurrent wire interleaving is not hashed"});
-    if steady { contract["steady_contract"] = serde_json::json!({"warmup_seconds":3,"measured_seconds":20,"pipeline":1,
+    if steady {
+        contract["steady_contract"] = serde_json::json!({"warmup_seconds":3,"measured_seconds":20,"pipeline":1,
         "clients":CLIENTS,"phases":phases.iter().filter(|p| p.step%3!=2).map(|p| p.id.clone()).collect::<Vec<_>>(),
-        "access_policy":"uniform-live-key-rejection-v1","mix":"4GET-1SET-XX","verification":"exhaustive after every window"}); }
+        "access_policy":"uniform-live-key-rejection-v1","mix":"4GET-1SET-XX","verification":"exhaustive after every window"});
+    }
     if args.describe {
-        if args.addr.is_some() { return Err("describe cannot accept endpoint".into()); }
+        if args.addr.is_some() {
+            return Err("describe cannot accept endpoint".into());
+        }
         return emit(&contract);
     }
     let addr = args.addr.ok_or("missing endpoint")?;
-    if !addr.ip().is_loopback() || addr.port()==0 { return Err("endpoint must be loopback and nonzero".into()); }
+    if !addr.ip().is_loopback() || addr.port() == 0 {
+        return Err("endpoint must be loopback and nonzero".into());
+    }
     let started = Instant::now();
     let mut control = Conn::connect(addr)?;
-    integer(&mut control,&[b"DBSIZE"],0)?;
+    integer(&mut control, &[b"DBSIZE"], 0)?;
     emit(&contract)?;
     acknowledge()?;
     for phase in &phases {
         let idle_start = Instant::now();
         let idle_elapsed_ns: u64 = if phase.step % 3 == 2 {
-            if started.elapsed().as_secs()+10 >= HWM_DEADLINE_SECS { return Err("idle would exceed HWM native deadline".into()); }
+            if started.elapsed().as_secs() + 10 >= HWM_DEADLINE_SECS {
+                return Err("idle would exceed HWM native deadline".into());
+            }
             thread::sleep(std::time::Duration::from_secs(10));
             idle_start.elapsed().as_nanos().try_into()?
-        } else { 0 };
+        } else {
+            0
+        };
         if phase.step % 3 == 2 {
             // Let the controller sample the genuinely quiet server before the
             // exhaustive reads below. The next acknowledgement permits reads.
-            emit(&serde_json::json!({"schema":2,"event":"idle-boundary","pid":std::process::id(),
-                "scenario":id,"phase":phase.id,"idle_elapsed_ns":idle_elapsed_ns}))?;
+            emit(
+                &serde_json::json!({"schema":2,"event":"idle-boundary","pid":std::process::id(),
+                "scenario":id,"phase":phase.id,"idle_elapsed_ns":idle_elapsed_ns}),
+            )?;
             acknowledge()?;
         }
-        let mutation = hwm_timed(phase,addr,true,started,&id)?;
-        if steady && phase.step%3!=2 {
-            emit(&serde_json::json!({"schema":2,"event":"steady-ready","pid":std::process::id(),"scenario":id,
-                "phase":phase.id,"warmup_seconds":3,"measured_seconds":20,"clients":CLIENTS,"pipeline":1}))?;
+        let mutation = hwm_timed(phase, addr, true, started, &id)?;
+        if steady && phase.step % 3 != 2 {
+            emit(
+                &serde_json::json!({"schema":2,"event":"steady-ready","pid":std::process::id(),"scenario":id,
+                "phase":phase.id,"warmup_seconds":3,"measured_seconds":20,"clients":CLIENTS,"pipeline":1}),
+            )?;
             acknowledge()?;
-            emit(&hwm_steady(phase,addr,started)?)?;
+            emit(&hwm_steady(phase, addr, started)?)?;
             acknowledge()?;
         }
-        let verification = hwm_timed(phase,addr,false,started,&id)?;
-        let live = if phase.step>0 && phase.step%3!=0 { 50000 } else { HWM_KEYS };
-        integer(&mut control,&[b"DBSIZE"],live as i64)?;
-        emit(&serde_json::json!({"schema":2,"event":"phase","pid":std::process::id(),"scenario":id,"phase":phase.id,
+        let verification = hwm_timed(phase, addr, false, started, &id)?;
+        let live = if phase.step > 0 && phase.step % 3 != 0 {
+            50000
+        } else {
+            HWM_KEYS
+        };
+        integer(&mut control, &[b"DBSIZE"], live as i64)?;
+        emit(
+            &serde_json::json!({"schema":2,"event":"phase","pid":std::process::id(),"scenario":id,"phase":phase.id,
             "control_commands":{"DBSIZE":1},"live_keys":live,"absent_keys":HWM_KEYS-live,"logical_bytes":live*82,
             "state_sha256":verification.state,"mutation_trace_sha256":mutation.trace,"verification_trace_sha256":verification.trace,
             "mutation":mutation.timing,"verification":verification.timing,"mutation_command_counts":mutation.commands,
             "verification_command_counts":verification.commands,"mutation_workers":mutation.workers,"verification_workers":verification.workers,
-            "idle_elapsed_ns":idle_elapsed_ns}))?;
+            "idle_elapsed_ns":idle_elapsed_ns}),
+        )?;
         acknowledge()?;
-        if started.elapsed().as_secs()>=HWM_DEADLINE_SECS { return Err("native runtime deadline".into()); }
+        if started.elapsed().as_secs() >= HWM_DEADLINE_SECS {
+            return Err("native runtime deadline".into());
+        }
     }
-    emit(&serde_json::json!({"schema":2,"event":"complete","pid":std::process::id(),"scenario":id,"phases":phases.len(),"errors":0}))
+    emit(
+        &serde_json::json!({"schema":2,"event":"complete","pid":std::process::id(),"scenario":id,"phases":phases.len(),"errors":0}),
+    )
 }
 
 #[cfg(test)]
@@ -1503,23 +1649,34 @@ mod tests {
     fn hwm_catalog_and_survivor_permutation() {
         let phases = hwm_phases();
         assert_eq!(phases.len(), 10);
-        assert_eq!(phases.iter().map(|p| p.step).collect::<Vec<_>>(), (0..10).collect::<Vec<_>>());
+        assert_eq!(
+            phases.iter().map(|p| p.step).collect::<Vec<_>>(),
+            (0..10).collect::<Vec<_>>()
+        );
         assert_eq!(phases[9].id, "refill-3");
         assert_eq!((0..HWM_KEYS).filter(|&i| hwm_survivor(i)).count(), 50_000);
-        assert_eq!((0..HWM_KEYS).map(|i| (i * 104_729 + 12_345) % HWM_KEYS).collect::<HashSet<_>>().len(), HWM_KEYS);
+        assert_eq!(
+            (0..HWM_KEYS)
+                .map(|i| (i * 104_729 + 12_345) % HWM_KEYS)
+                .collect::<HashSet<_>>()
+                .len(),
+            HWM_KEYS
+        );
         assert_eq!(IDS.len(), 24);
         assert!(!IDS.contains(&HWM_ID));
     }
     #[test]
     fn hwm_payload_mixed_generations_are_unique() {
         // Includes the formerly aliasing (index=0,g=0), (index=1,g=1) pair.
-        let values = (0..HWM_KEYS).map(|i| {
-            let generation = if hwm_survivor(i) { 0 } else { i % 3 + 1 };
-            let value = hwm_payload(i, generation);
-            assert_eq!(value.len(), 64);
-            assert_eq!(&value[..8], &hwm_payload(i, 0)[..8]);
-            value[..8].to_vec()
-        }).collect::<HashSet<_>>();
+        let values = (0..HWM_KEYS)
+            .map(|i| {
+                let generation = if hwm_survivor(i) { 0 } else { i % 3 + 1 };
+                let value = hwm_payload(i, generation);
+                assert_eq!(value.len(), 64);
+                assert_eq!(&value[..8], &hwm_payload(i, 0)[..8]);
+                value[..8].to_vec()
+            })
+            .collect::<HashSet<_>>();
         assert_eq!(values.len(), HWM_KEYS);
         assert_ne!(hwm_payload(0, 0), hwm_payload(1, 1));
         assert_ne!(&hwm_payload(17, 0)[8..], &hwm_payload(17, 1)[8..]);
@@ -1552,10 +1709,18 @@ mod tests {
         assert_eq!(hwm_mutate(&mut none, &phases[1], survivor).unwrap(), 0);
         assert_eq!(hwm_mutate(&mut none, &phases[2], deleted).unwrap(), 0);
         let key = fixed_key(deleted, 18);
-        let mut delete = Transcript { replies: [response(&[b"DEL", &key], Reply::Integer(1))].into() };
+        let mut delete = Transcript {
+            replies: [response(&[b"DEL", &key], Reply::Integer(1))].into(),
+        };
         assert_eq!(hwm_mutate(&mut delete, &phases[1], deleted).unwrap(), 1);
         let value = hwm_payload(deleted, 1);
-        let mut refill = Transcript { replies: [response(&[b"SET", &key, &value], Reply::Simple(b"OK".to_vec()))].into() };
+        let mut refill = Transcript {
+            replies: [response(
+                &[b"SET", &key, &value],
+                Reply::Simple(b"OK".to_vec()),
+            )]
+            .into(),
+        };
         assert_eq!(hwm_mutate(&mut refill, &phases[3], deleted).unwrap(), 1);
         assert!(refill.replies.is_empty() && delete.replies.is_empty());
     }
@@ -1567,109 +1732,354 @@ mod tests {
         for phase in [&phases[1], &phases[3]] {
             let live = phase.step % 3 == 0;
             let value = hwm_payload(index, 1);
-            let mut wire = Transcript { replies: [
-                response(&[b"GET", &key], Reply::Bulk(live.then_some(value))),
-                response(&[b"TYPE", &key], Reply::Simple(if live { b"string".to_vec() } else { b"none".to_vec() })),
-                response(&[b"PTTL", &key], Reply::Integer(if live { -1 } else { -2 })),
-            ].into() };
-            assert_eq!(hwm_verify(&mut wire, phase, index, &mut Sha256::new()).unwrap(), 3);
+            let mut wire = Transcript {
+                replies: [
+                    response(&[b"GET", &key], Reply::Bulk(live.then_some(value))),
+                    response(
+                        &[b"TYPE", &key],
+                        Reply::Simple(if live {
+                            b"string".to_vec()
+                        } else {
+                            b"none".to_vec()
+                        }),
+                    ),
+                    response(&[b"PTTL", &key], Reply::Integer(if live { -1 } else { -2 })),
+                ]
+                .into(),
+            };
+            assert_eq!(
+                hwm_verify(&mut wire, phase, index, &mut Sha256::new()).unwrap(),
+                3
+            );
             assert!(wire.replies.is_empty());
         }
-        let mut resurrected = Transcript { replies: [response(&[b"GET", &key], Reply::Bulk(Some(vec![0;64])))].into() };
+        let mut resurrected = Transcript {
+            replies: [response(&[b"GET", &key], Reply::Bulk(Some(vec![0; 64])))].into(),
+        };
         assert!(hwm_verify(&mut resurrected, &phases[1], index, &mut Sha256::new()).is_err());
-        let mut missing = Transcript { replies: [response(&[b"GET", &key], Reply::Bulk(None))].into() };
+        let mut missing = Transcript {
+            replies: [response(&[b"GET", &key], Reply::Bulk(None))].into(),
+        };
         assert!(hwm_verify(&mut missing, &phases[3], index, &mut Sha256::new()).is_err());
         let value = hwm_payload(index, 1);
-        let mut wrong_type = Transcript { replies: [
-            response(&[b"GET", &key], Reply::Bulk(Some(value))),
-            response(&[b"TYPE", &key], Reply::Simple(b"hash".to_vec())),
-        ].into() };
+        let mut wrong_type = Transcript {
+            replies: [
+                response(&[b"GET", &key], Reply::Bulk(Some(value))),
+                response(&[b"TYPE", &key], Reply::Simple(b"hash".to_vec())),
+            ]
+            .into(),
+        };
         assert!(hwm_verify(&mut wrong_type, &phases[3], index, &mut Sha256::new()).is_err());
     }
     #[test]
     fn hwm_verifier_rejects_stale_generation() {
         let phase = &hwm_phases()[6];
         let index = (0..HWM_KEYS).find(|&i| !hwm_survivor(i)).unwrap();
-        for mut value in [hwm_payload(index,1), hwm_payload(index,2)] {
-            if value == hwm_payload(index,2) { value[63] ^= 1; }
-            let key = fixed_key(index,18);
-            let mut wire = Transcript { replies: [response(&[b"GET", &key], Reply::Bulk(Some(value)))].into() };
-            assert!(hwm_verify(&mut wire,phase,index,&mut Sha256::new()).is_err());
+        for mut value in [hwm_payload(index, 1), hwm_payload(index, 2)] {
+            if value == hwm_payload(index, 2) {
+                value[63] ^= 1;
+            }
+            let key = fixed_key(index, 18);
+            let mut wire = Transcript {
+                replies: [response(&[b"GET", &key], Reply::Bulk(Some(value)))].into(),
+            };
+            assert!(hwm_verify(&mut wire, phase, index, &mut Sha256::new()).is_err());
         }
     }
     #[test]
     fn hwm_state_digest_binds_generation_and_absence() {
         let index = (0..HWM_KEYS).find(|&i| !hwm_survivor(i)).unwrap();
-        let states = [0,1,3,6,9].map(|step| {
-            let r = hwm_record(index,&hwm_phases()[step]);
+        let states = [0, 1, 3, 6, 9].map(|step| {
+            let r = hwm_record(index, &hwm_phases()[step]);
             let mut hash = Sha256::new();
-            state_frame(&mut hash,&r,&hwm_payload(index,r.generation));
+            state_frame(&mut hash, &r, &hwm_payload(index, r.generation));
             hex(hash)
         });
         assert_eq!(states.iter().collect::<HashSet<_>>().len(), states.len());
     }
     #[test]
     fn hwm_steady_selects_live_uniform_keys() {
-        for step in [0,1,3,4,6,7,9] {
+        for step in [0, 1, 3, 4, 6, 7, 9] {
             let phase = &hwm_phases()[step];
             let keys = hwm_live_indices(phase);
-            assert_eq!(keys.len(),if step%3==0 { HWM_KEYS } else { 50000 });
+            assert_eq!(keys.len(), if step % 3 == 0 { HWM_KEYS } else { 50000 });
             for worker in 0..CLIENTS {
                 for sequence in 0..128 {
-                    let rank = hwm_uniform_rank(worker,sequence,keys.len()).unwrap();
+                    let rank = hwm_uniform_rank(worker, sequence, keys.len()).unwrap();
                     let index = keys[rank];
-                    assert_eq!(hwm_record(index,phase).kind,Kind::String);
-                    assert_eq!(rank,hwm_uniform_rank(worker,sequence,keys.len()).unwrap());
+                    assert_eq!(hwm_record(index, phase).kind, Kind::String);
+                    assert_eq!(
+                        rank,
+                        hwm_uniform_rank(worker, sequence, keys.len()).unwrap()
+                    );
                 }
             }
         }
-        assert!(hwm_uniform_rank(0,0,0).is_err());
-        assert_eq!((0..10).filter(|&step| step%3!=2).count(),7);
+        assert!(hwm_uniform_rank(0, 0, 0).is_err());
+        assert_eq!((0..10).filter(|&step| step % 3 != 2).count(), 7);
     }
     #[test]
     fn hwm_steady_set_xx_preserves_value_and_requires_exists() {
         let survivor = (0..HWM_KEYS).find(|&i| hwm_survivor(i)).unwrap();
         let refilled = (0..HWM_KEYS).find(|&i| !hwm_survivor(i)).unwrap();
         let phase = &hwm_phases()[6];
-        for index in [survivor,refilled] {
-            let r = hwm_record(index,phase);
-            let value = hwm_payload(index,r.generation);
-            let mut wire = Transcript { replies:[
-                response(&[b"GET",&r.key],Reply::Bulk(Some(value.clone()))),
-                response(&[b"SET",&r.key,&value,b"XX"],Reply::Simple(b"OK".to_vec())),
-            ].into() };
-            hwm_steady_request(&mut wire,phase,index,false).unwrap();
-            hwm_steady_request(&mut wire,phase,index,true).unwrap();
+        for index in [survivor, refilled] {
+            let r = hwm_record(index, phase);
+            let value = hwm_payload(index, r.generation);
+            let mut wire = Transcript {
+                replies: [
+                    response(&[b"GET", &r.key], Reply::Bulk(Some(value.clone()))),
+                    response(
+                        &[b"SET", &r.key, &value, b"XX"],
+                        Reply::Simple(b"OK".to_vec()),
+                    ),
+                ]
+                .into(),
+            };
+            hwm_steady_request(&mut wire, phase, index, false).unwrap();
+            hwm_steady_request(&mut wire, phase, index, true).unwrap();
             assert!(wire.replies.is_empty());
-            let mut absent = Transcript { replies:[response(&[b"SET",&r.key,&value,b"XX"],Reply::Bulk(None))].into() };
-            assert!(hwm_steady_request(&mut absent,phase,index,true).is_err());
+            let mut absent = Transcript {
+                replies: [response(
+                    &[b"SET", &r.key, &value, b"XX"],
+                    Reply::Bulk(None),
+                )]
+                .into(),
+            };
+            assert!(hwm_steady_request(&mut absent, phase, index, true).is_err());
         }
-        let mut none = Transcript { replies:[].into() };
-        assert!(hwm_steady_request(&mut none,&hwm_phases()[1],refilled,true).is_err());
+        let mut none = Transcript { replies: [].into() };
+        assert!(hwm_steady_request(&mut none, &hwm_phases()[1], refilled, true).is_err());
     }
     #[test]
     fn hwm_steady_checked_prefix_counts_trace() {
         let phase = &hwm_phases()[3];
         let keys = hwm_live_indices(phase);
         let mut expected_trace = Sha256::new();
-        let mut transcript = Transcript { replies:[].into() };
+        let mut transcript = Transcript { replies: [].into() };
         for sequence in 0..37 {
-            let index = keys[hwm_uniform_rank(15,sequence,keys.len()).unwrap()];
-            let r = hwm_record(index,phase); let value = hwm_payload(index,r.generation);
-            let parts: Vec<&[u8]> = if sequence%5==4 { vec![b"SET",&r.key,&value,b"XX"] } else { vec![b"GET",&r.key] };
+            let index = keys[hwm_uniform_rank(15, sequence, keys.len()).unwrap()];
+            let r = hwm_record(index, phase);
+            let value = hwm_payload(index, r.generation);
+            let parts: Vec<&[u8]> = if sequence % 5 == 4 {
+                vec![b"SET", &r.key, &value, b"XX"]
+            } else {
+                vec![b"GET", &r.key]
+            };
             expected_trace.update((parts.len() as u64).to_be_bytes());
-            for part in &parts { frame(&mut expected_trace,part); }
-            transcript.replies.push_back(response(&parts,if sequence%5==4 { Reply::Simple(b"OK".to_vec()) } else { Reply::Bulk(Some(value.clone())) }));
+            for part in &parts {
+                frame(&mut expected_trace, part);
+            }
+            transcript.replies.push_back(response(
+                &parts,
+                if sequence % 5 == 4 {
+                    Reply::Simple(b"OK".to_vec())
+                } else {
+                    Reply::Bulk(Some(value.clone()))
+                },
+            ));
         }
         // The native trace is checked against Python's independent prefix oracle
         // at actual window admission. This transcript exercises the exact argv
         // and generation-correct values for the same deterministic sequence.
         for sequence in 0..37 {
-            let index = keys[hwm_uniform_rank(15,sequence,keys.len()).unwrap()];
-            hwm_steady_request(&mut transcript,phase,index,sequence%5==4).unwrap();
+            let index = keys[hwm_uniform_rank(15, sequence, keys.len()).unwrap()];
+            hwm_steady_request(&mut transcript, phase, index, sequence % 5 == 4).unwrap();
         }
         assert!(transcript.replies.is_empty());
-        assert_eq!((0..37).filter(|sequence| sequence%5==4).count(),7);
-        assert_ne!(hex(expected_trace),hex(Sha256::new()));
+        assert_eq!((0..37).filter(|sequence| sequence % 5 == 4).count(), 7);
+        assert_ne!(hex(expected_trace), hex(Sha256::new()));
+    }
+
+    // These tests use real loopback sockets and the production Conn parser.
+    // They qualify checked failure paths, not a benchmark row or a server image.
+    fn hwm_release_fault_peer(parts: &[&[u8]], response: &[u8]) -> (Conn, thread::JoinHandle<()>) {
+        use std::net::{Shutdown, TcpListener};
+        let mut expected = format!("*{}\r\n", parts.len()).into_bytes();
+        for part in parts {
+            expected.extend_from_slice(format!("${}\r\n", part.len()).as_bytes());
+            expected.extend_from_slice(part);
+            expected.extend_from_slice(b"\r\n");
+        }
+        let response = response.to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let until = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < until, "fault peer accept deadline");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("fault peer accept: {error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut observed = vec![0; expected.len()];
+            stream.read_exact(&mut observed).unwrap();
+            assert_eq!(
+                observed, expected,
+                "fault missed the intended checked request"
+            );
+            stream.write_all(&response).unwrap();
+            stream.shutdown(Shutdown::Write).unwrap();
+        });
+        (Conn::connect(address).unwrap(), peer)
+    }
+
+    #[test]
+    fn hwm_release_mutation_transport_faults() {
+        let phases = hwm_phases();
+        let index = (0..HWM_KEYS).find(|&i| !hwm_survivor(i)).unwrap();
+        let key = fixed_key(index, 18);
+        let value = hwm_payload(index, 0);
+        for response in [
+            b"+OK\r".as_slice(),
+            b"-WRONGTYPE injected\r\n",
+            b"$-1\r\n",
+            b":1\r\n",
+        ] {
+            let (mut connection, peer) = hwm_release_fault_peer(&[b"SET", &key, &value], response);
+            let result = hwm_mutate(&mut connection, &phases[0], index);
+            peer.join().unwrap();
+            assert!(result.is_err(), "unchecked mutation response was accepted");
+            assert_eq!(connection.command_counts.get("SET"), Some(&1));
+        }
+        let (mut connection, peer) = hwm_release_fault_peer(&[b"DEL", &key], b":0\r\n");
+        let result = hwm_mutate(&mut connection, &phases[1], index);
+        peer.join().unwrap();
+        assert!(result.is_err(), "missing deletion was accepted");
+    }
+
+    #[test]
+    fn hwm_release_verification_transport_faults() {
+        let phase = &hwm_phases()[6];
+        let index = (0..HWM_KEYS).find(|&i| !hwm_survivor(i)).unwrap();
+        let key = fixed_key(index, 18);
+        let mut stale = b"$64\r\n".to_vec();
+        stale.extend_from_slice(&hwm_payload(index, 1));
+        stale.extend_from_slice(b"\r\n");
+        let responses = [
+            b"$64\r\ntruncated".to_vec(),
+            b"-WRONGTYPE injected\r\n".to_vec(),
+            b"$-1\r\n".to_vec(),
+            b"$8193\r\n".to_vec(),
+            stale,
+        ];
+        for response in responses {
+            let (mut connection, peer) = hwm_release_fault_peer(&[b"GET", &key], &response);
+            let mut state = Sha256::new();
+            let result = hwm_verify(&mut connection, phase, index, &mut state);
+            peer.join().unwrap();
+            assert!(result.is_err(), "invalid checked value was accepted");
+            assert_eq!(
+                hex(state),
+                hex(Sha256::new()),
+                "failed record entered the state digest"
+            );
+            assert_eq!(connection.command_counts.get("GET"), Some(&1));
+            assert!(!connection.command_counts.contains_key("TYPE"));
+        }
+    }
+
+    #[test]
+    fn hwm_release_steady_transport_faults() {
+        let phase = &hwm_phases()[6];
+        let index = (0..HWM_KEYS).find(|&i| !hwm_survivor(i)).unwrap();
+        let key = fixed_key(index, 18);
+        let value = hwm_payload(index, 2);
+        for response in [b"$-1\r\n".as_slice(), b"-WRONGTYPE injected\r\n", b"+OK\r"] {
+            let (mut connection, peer) =
+                hwm_release_fault_peer(&[b"SET", &key, &value, b"XX"], response);
+            let result = hwm_steady_request(&mut connection, phase, index, true);
+            peer.join().unwrap();
+            assert!(
+                result.is_err(),
+                "failed SET XX was counted as a checked request"
+            );
+            assert_eq!(connection.command_counts.get("SET"), Some(&1));
+        }
+        let (mut connection, peer) = hwm_release_fault_peer(&[b"GET", &key], b"$64\r\ntruncated");
+        let result = hwm_steady_request(&mut connection, phase, index, false);
+        peer.join().unwrap();
+        assert!(result.is_err(), "truncated steady GET was accepted");
+        assert_eq!(connection.command_counts.get("GET"), Some(&1));
+    }
+
+    #[test]
+    fn hwm_release_steady_workers_fail_closed_on_wire_error() {
+        use std::net::{Shutdown, TcpListener};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let peer = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let until = Instant::now() + Duration::from_secs(5);
+            let mut connections = Vec::new();
+            while connections.len() < CLIENTS {
+                match listener.accept() {
+                    Ok((stream, _)) => connections.push(stream),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < until, "steady fault accept deadline");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("steady fault accept: {error}"),
+                }
+            }
+            let handlers: Vec<_> = connections
+                .into_iter()
+                .map(|mut stream| {
+                    let observed = observed.clone();
+                    thread::spawn(move || {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_secs(5)))
+                            .unwrap();
+                        let prefix = b"*2\r\n$3\r\nGET\r\n$18\r\n";
+                        let mut first = [0];
+                        if stream.read(&mut first).unwrap() == 0 {
+                            return; // Another real worker's checked failure cancelled this worker.
+                        }
+                        let mut tail = vec![0; prefix.len() + 20 - 1];
+                        stream.read_exact(&mut tail).unwrap();
+                        let mut request = first.to_vec();
+                        request.extend_from_slice(&tail);
+                        assert_eq!(&request[..prefix.len()], prefix);
+                        assert_eq!(&request[prefix.len()..prefix.len() + 10], &[b'k'; 10]);
+                        assert_eq!(&request[request.len() - 2..], b"\r\n");
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        stream.write_all(b"$-1\r\n").unwrap();
+                        stream.shutdown(Shutdown::Write).unwrap();
+                    })
+                })
+                .collect();
+            for handler in handlers {
+                handler.join().unwrap();
+            }
+            CLIENTS
+        });
+        // Call the actual steady function directly to reach checked failure and
+        // cancellation without pretending a small fixture completed a 1M fill.
+        // Its actual worker-failure event is retained in the --nocapture log.
+        let result = hwm_steady(&hwm_phases()[0], address, Instant::now());
+        assert_eq!(peer.join().unwrap(), CLIENTS);
+        assert!(
+            result.is_err(),
+            "faulty steady workers published a completion"
+        );
+        assert!((1..=CLIENTS).contains(&requests.load(Ordering::SeqCst)));
     }
 }
