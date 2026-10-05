@@ -853,7 +853,7 @@ impl FlatMap {
         }
 
         #[cfg(feature = "experimental-compact-point-storage")]
-        let compact_keys = self.compact_points.keys().map(|key| Some(key));
+        let compact_keys = self.compact_points.keys().map(Some);
         #[cfg(not(feature = "experimental-compact-point-storage"))]
         let compact_keys = std::iter::empty::<Option<&[u8]>>();
         let general_keys = self.entries.iter().map(|entry| {
