@@ -225,12 +225,14 @@ fn storage_fault_child() {
             }
         }
     });
-    let mut config = ShardCacheConfig::default();
-    config.bind_addr = addr;
-    config.shard_count = 1;
-    config.max_connections = 16;
+    let mut config = ShardCacheConfig {
+        bind_addr: addr,
+        shard_count: 1,
+        max_connections: 16,
+        ttl_sweep_interval_ms: 10,
+        ..ShardCacheConfig::default()
+    };
     config.persistence.enabled = false;
-    config.ttl_sweep_interval_ms = 10;
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

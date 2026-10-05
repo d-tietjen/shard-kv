@@ -539,13 +539,11 @@ fn checksum_slices<'a>(slices: impl Iterator<Item = &'a [u8]>) -> u64 {
 
 fn read_sum(slice: &[u8]) -> u64 {
     let mut checksum = 0u64;
-    let mut chunks = slice.chunks_exact(std::mem::size_of::<u64>());
-    for chunk in &mut chunks {
-        checksum = checksum.wrapping_add(u64::from_ne_bytes(
-            chunk.try_into().expect("chunk has u64 width"),
-        ));
+    let (chunks, remainder) = slice.as_chunks::<{ std::mem::size_of::<u64>() }>();
+    for chunk in chunks {
+        checksum = checksum.wrapping_add(u64::from_ne_bytes(*chunk));
     }
-    for byte in chunks.remainder() {
+    for byte in remainder {
         checksum = checksum.wrapping_add(*byte as u64);
     }
     black_box(checksum)
@@ -556,24 +554,22 @@ fn read_sum_unrolled(slice: &[u8]) -> u64 {
     const BLOCK: usize = WORDS * std::mem::size_of::<u64>();
 
     let mut acc = [0u64; WORDS];
-    let mut chunks = slice.chunks_exact(BLOCK);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = slice.as_chunks::<BLOCK>();
+    for chunk in chunks {
         let ptr = chunk.as_ptr();
         for (word, slot) in acc.iter_mut().enumerate() {
-            // SAFETY: `chunks_exact(BLOCK)` guarantees `word * 8 + 8 <= chunk.len()`.
+            // SAFETY: `as_chunks::<BLOCK>()` guarantees `word * 8 + 8 <= chunk.len()`.
             let value = unsafe { std::ptr::read_unaligned(ptr.add(word * 8).cast::<u64>()) };
             *slot = slot.wrapping_add(value);
         }
     }
 
     let mut checksum = acc.into_iter().fold(0u64, u64::wrapping_add);
-    let mut tail = chunks.remainder().chunks_exact(std::mem::size_of::<u64>());
-    for chunk in &mut tail {
-        checksum = checksum.wrapping_add(u64::from_ne_bytes(
-            chunk.try_into().expect("chunk has u64 width"),
-        ));
+    let (tail, remainder) = remainder.as_chunks::<{ std::mem::size_of::<u64>() }>();
+    for chunk in tail {
+        checksum = checksum.wrapping_add(u64::from_ne_bytes(*chunk));
     }
-    for byte in tail.remainder() {
+    for byte in remainder {
         checksum = checksum.wrapping_add(*byte as u64);
     }
     black_box(checksum)
@@ -763,4 +759,51 @@ unsafe fn copy_non_temporal_avx2_x86_64(dst: *mut u8, src: *const u8, len: usize
         unsafe { std::ptr::copy_nonoverlapping(src.add(offset), dst.add(offset), len - offset) };
     }
     _mm_sfence();
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::{read_sum, read_sum_unrolled};
+
+    fn reference_sum(slice: &[u8]) -> u64 {
+        let mut checksum = 0u64;
+        let mut offset = 0;
+        while offset + 8 <= slice.len() {
+            let bytes = [
+                slice[offset],
+                slice[offset + 1],
+                slice[offset + 2],
+                slice[offset + 3],
+                slice[offset + 4],
+                slice[offset + 5],
+                slice[offset + 6],
+                slice[offset + 7],
+            ];
+            checksum = checksum.wrapping_add(u64::from_ne_bytes(bytes));
+            offset += 8;
+        }
+        for &byte in &slice[offset..] {
+            checksum = checksum.wrapping_add(u64::from(byte));
+        }
+        checksum
+    }
+
+    #[test]
+    fn scalar_checksums_preserve_unaligned_words_and_every_remainder() {
+        let data: Vec<u8> = (0usize..272)
+            .map(|index| index.wrapping_mul(73).wrapping_add(41) as u8)
+            .collect();
+        for offset in 0..8 {
+            for length in 0..=256 {
+                let slice = &data[offset..offset + length];
+                let expected = reference_sum(slice);
+                assert_eq!(read_sum(slice), expected, "offset={offset} length={length}");
+                assert_eq!(
+                    read_sum_unrolled(slice),
+                    expected,
+                    "offset={offset} length={length}"
+                );
+            }
+        }
+    }
 }
