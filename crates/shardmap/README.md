@@ -59,6 +59,21 @@ Run any example with:
 cargo run -p shardmap --example basic_map
 ```
 
+
+### SET KEEPTTL expiry
+
+For TTL-enabled builds, `SET ... KEEPTTL` retains the live key's absolute
+expiration at the storage write. A missing or already expired key is created
+without a TTL. An intervening write supplies the expiry retained by KEEPTTL;
+the existing NX/XX condition checks remain unchanged. Plain SET still clears
+the TTL and keeps its existing prehashed writer.
+
+The exact expiry regression tests run separately with the default server
+features and with `experimental-compact-point-storage`. The `no-ttl` feature,
+also enabled by `experimental-no-ttl-point-hot-path` and `--all-features`,
+intentionally opts out of TTL behavior; those builds exclude the TTL regression
+module and do not establish TTL correctness.
+
 ## Typed Map Operations
 
 Use `ShardMap<K, V>` for the native typed embedded API. It stores Rust objects

@@ -58,6 +58,8 @@ jobs:
         run: cargo test -p shardmap --features unsafe
       - name: test redis feature
         run: cargo test -p shardmap --features redis
+      - name: test compact storage with TTL
+        run: cargo test --locked -p shardmap --lib --features redis,server,experimental-compact-point-storage
       - name: test redis command coverage
         run: cargo test -p shardmap --features redis --test redis_tier1_coverage_test
       - name: test benchmark command tooling

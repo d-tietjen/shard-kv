@@ -32,7 +32,7 @@ package_shardmap_with_local_client_patch() {
 unpack_crate() {
   local package="$1"
   local version="$2"
-  local crate_file="$root/target/package/${package}-${version}.crate"
+  local crate_file="${CARGO_TARGET_DIR:-$root/target}/package/${package}-${version}.crate"
 
   if [[ ! -f "$crate_file" ]]; then
     echo "missing packaged crate: $crate_file" >&2

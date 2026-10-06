@@ -175,6 +175,46 @@ impl FlatMap {
         self.ttl_entries == 0
     }
 
+    /// Reads only the scalar live expiry needed by SET KEEPTTL. Local point
+    /// mutation views continue to use their existing local-only accessor.
+    #[cfg(any(feature = "server", feature = "redis"))]
+    pub(crate) fn entry_expire_at_for_keep_ttl_hashed(
+        &mut self,
+        hash: u64,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Option<Option<u64>> {
+        #[cfg(feature = "experimental-compact-point-storage")]
+        if self.compact_points.get(hash, key).is_some() {
+            return Some(None);
+        }
+        #[cfg(feature = "experimental-no-ttl-point-hot-path")]
+        if self.ttl_entries == 0 && self.fast_points.get(hash, key).is_some() {
+            return Some(None);
+        }
+        if let Some(expiry) = self
+            .entries
+            .find(local_table_hash(hash), |entry| entry.matches(hash, key))
+            .map(|entry| entry.expire_at_ms)
+        {
+            if expiry.is_some_and(|deadline| deadline <= now_ms) {
+                let _ = self.delete_hashed_internal(hash, key, now_ms, DeleteReason::Expired);
+                return None;
+            }
+            return Some(expiry);
+        }
+        let expiry = self
+            .remote_entries
+            .get(key)
+            .filter(|remote| remote.matches(hash, key))
+            .map(|remote| remote.expire_at_ms)?;
+        if expiry.is_some_and(|deadline| deadline <= now_ms) {
+            let _ = self.delete_hashed_internal(hash, key, now_ms, DeleteReason::Expired);
+            return None;
+        }
+        Some(expiry)
+    }
+
     #[inline(always)]
     pub(crate) fn entry_expire_at_hashed(
         &mut self,
