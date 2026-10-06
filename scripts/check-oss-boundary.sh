@@ -3,6 +3,11 @@
 
 set -euo pipefail
 
+if ! command -v rg >/dev/null 2>&1; then
+  echo "ripgrep (rg) is required for the OSS/private boundary check" >&2
+  exit 1
+fi
+
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 

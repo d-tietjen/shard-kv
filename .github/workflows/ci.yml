@@ -31,10 +31,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: install boundary scanner and Redis reference server
+        run: sudo apt-get update && sudo apt-get install -y ripgrep redis-server
       - name: OSS/private availability boundary
         run: ./scripts/check-oss-boundary.sh
-      - name: install Redis reference server
-        run: sudo apt-get update && sudo apt-get install -y redis-server
       - uses: Swatinem/rust-cache@v2
       - name: TLS dependency policy
         run: ./scripts/check-tls-dependency-policy.sh
