@@ -42,14 +42,14 @@ OpenSSL-backed Rustls provider.
 
 | Package | Version | License | Manifest |
 | --- | --- | --- | --- |
-| `shardcache-benchmarks` | `0.9.0` | Apache-2.0 | `benchmarks/Cargo.toml` |
-| `shardcache-c` | `0.9.0` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
-| `shardcache-client-rs` | `0.9.0` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
-| `shardcache-formal` | `0.9.0` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
-| `shardcache-py` | `0.9.0` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
-| `shardcache-runtime` | `0.9.0` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
-| `shardcache` | `0.9.0` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
-| `shardmap` | `0.9.0` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
+| `shardcache-benchmarks` | `0.9.1` | Apache-2.0 | `benchmarks/Cargo.toml` |
+| `shardcache-c` | `0.9.1` | Apache-2.0 | `crates/shardcache-c/Cargo.toml` |
+| `shardcache-client-rs` | `0.9.1` | Apache-2.0 | `crates/shardcache-client-rs/Cargo.toml` |
+| `shardcache-formal` | `0.9.1` | Apache-2.0 | `crates/shardcache-formal/Cargo.toml` |
+| `shardcache-py` | `0.9.1` | Apache-2.0 | `crates/shardcache-py/Cargo.toml` |
+| `shardcache-runtime` | `0.9.1` | Apache-2.0 | `crates/shardcache-runtime/Cargo.toml` |
+| `shardcache` | `0.9.1` | Apache-2.0 | `crates/shardcache/Cargo.toml` |
+| `shardmap` | `0.9.1` | Apache-2.0 | `crates/shardmap/Cargo.toml` |
 
 ## Third-Party Packages (377)
 
@@ -91,7 +91,7 @@ OpenSSL-backed Rustls provider.
 | `cc` | `1.2.62` | MIT OR Apache-2.0 | crates.io |
 | `cfg-if` | `1.0.4` | MIT OR Apache-2.0 | crates.io |
 | `cfg_aliases` | `0.2.1` | MIT | crates.io |
-| `chacha20` | `0.10.1` | MIT OR Apache-2.0 | crates.io |
+| `chacha20` | `0.10.2` | MIT OR Apache-2.0 | crates.io |
 | `chrono` | `0.4.45` | MIT OR Apache-2.0 | crates.io |
 | `clap_builder` | `4.6.0` | MIT OR Apache-2.0 | crates.io |
 | `clap_derive` | `4.6.1` | MIT OR Apache-2.0 | crates.io |
