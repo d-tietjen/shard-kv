@@ -60,6 +60,13 @@ release policy explicitly call for it.
 
 ## Publishing
 
+Choose an unpublished package version and require that version of the internal
+dependencies that provide the release's features. Before the registry handoff,
+`./scripts/check-publish-artifacts.sh` validates the archives and consumers with
+temporary local patches for both `shardmap` and `shardcache-client-rs`. These
+patches do not publish either dependency. Each ordinary publish dry run below
+requires its dependencies to have reached the crates.io index in this order.
+
 ```bash
 cargo publish -p shardcache-client-rs --dry-run
 cargo publish -p shardcache-client-rs
