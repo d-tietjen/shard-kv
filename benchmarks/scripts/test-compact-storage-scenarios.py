@@ -580,8 +580,12 @@ class RespContractTests(unittest.TestCase):
     def test_summary_cannot_accept_partial_or_duplicate_final_rows(self):
         with self.assertRaises(RuntimeError):
             gate.summarize([])
+        for member in ({'id': 'duplicate'},
+                       {'id': 'duplicate', 'scenario': small()['id']}):
+            with self.subTest(member=member), self.assertRaises(RuntimeError):
+                gate.summarize([{'member': member}] * 72)
         with self.assertRaises(RuntimeError):
-            gate.summarize([{'member': {'id': 'duplicate'}}] * 72)
+            gate.summarize([{'member': {'id': str(i)}} for i in range(72)])
 
     def test_owned_terminal_wait_preserves_true_nonzero_and_rejects_signal(self):
         r = gate.Runner.__new__(gate.Runner)

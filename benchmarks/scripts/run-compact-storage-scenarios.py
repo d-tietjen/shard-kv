@@ -895,6 +895,10 @@ class Peak:
         return {'interval_seconds': 0.2, 'samples': self.count, 'sampled_maximum_bytes': self.maximum, 'exact_peak': False, 'error': self.error, 'pid': self.pid, 'start_ticks': self.start_ticks, 'cgroup_path': str(self.cg)}
 
 def summarize(rows):
+    require(all(isinstance(r, dict) and isinstance(r.get('member'), dict)
+                and isinstance(r['member'].get('id'), str)
+                and isinstance(r['member'].get('scenario'), str) for r in rows),
+            'missing/invalid final row identity')
     if rows and all(r['member']['scenario'] in (HWM_ID,HWM_STEADY_ID) for r in rows):
         return summarize_hwm(rows)
     require(len(rows) == 72 and len({r['member']['id'] for r in rows}) == 72, 'missing/duplicate final rows')
