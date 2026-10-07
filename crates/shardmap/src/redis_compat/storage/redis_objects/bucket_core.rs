@@ -9,6 +9,13 @@ impl RedisObjectBucket {
             || self.zsets.contains_key(key)
     }
 
+    /// Returns the scalar absolute key expiry after the caller cleans expired
+    /// objects and empty hashes. Some(None) denotes a persistent live object.
+    pub(crate) fn entry_expire_at(&self, key: &[u8]) -> Option<Option<u64>> {
+        self.contains_object(key)
+            .then(|| self.expire_at_ms.get(key).copied())
+    }
+
     #[inline(always)]
     pub(crate) fn contains_live_object(&self, key: &[u8], now_ms: u64) -> bool {
         if self.object_is_expired(key, now_ms) {

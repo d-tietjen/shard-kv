@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.9.0"
+shardmap = "0.9.1"
 ```
 
 ## Quick Start
@@ -58,6 +58,21 @@ Run any example with:
 ```bash
 cargo run -p shardmap --example basic_map
 ```
+
+
+### SET KEEPTTL expiry
+
+For TTL-enabled builds, `SET ... KEEPTTL` retains the live key's absolute
+expiration at the storage write. A missing or already expired key is created
+without a TTL. An intervening write supplies the expiry retained by KEEPTTL;
+the existing NX/XX condition checks remain unchanged. Plain SET still clears
+the TTL and keeps its existing prehashed writer.
+
+The exact expiry regression tests run separately with the default server
+features and with `experimental-compact-point-storage`. The `no-ttl` feature,
+also enabled by `experimental-no-ttl-point-hot-path` and `--all-features`,
+intentionally opts out of TTL behavior; those builds exclude the TTL regression
+module and do not establish TTL correctness.
 
 ## Typed Map Operations
 
@@ -585,6 +600,26 @@ embedding the protocol layer, or wiring storage into a specialized runtime.
 | `kv-overflow` | No | Fixed-slot overflow into shardcache SCNP servers. |
 | `kv-overflow-redis` | No | Redis/Valkey-compatible endpoint adapter for fixed-slot KV overflow. |
 | `scnp-tls` | No | Rustls TLS 1.3 and mTLS for shard-owned SCNP overflow connections. |
+
+The internal `experimental-compact-point-storage` flag opts into an
+unqualified layout for plain byte keys up to 64 bytes and values up to 256
+bytes. Borrowed reads use fixed 4 KiB boxed payload chunks, with two-byte record
+size classes. Fixed list heads track available chunks without separate class
+allocations. Workloads with many distinct lengths can retain more partially
+filled chunks. Small RESP GET responses encode those slices directly;
+explicit shared/owned `Bytes` reads lazily copy
+one owner per value version. Supplied `Bytes` buffers without unique ownership
+use general storage; raw `value_mut_no_ttl` access rejects outstanding owned
+aliases in either layout. Deletes and length changes reuse records, and
+TTL/governance/semantic/overflow metadata migrates only the affected key into
+general storage. Both layouts remain visible to counts, scans, snapshots,
+recovery, and runtime memory policies. Payload allocations never relocate;
+compact payload capacity is capped at 64 MiB per shard, after which new records
+use general storage. Open read epochs retain replaced records and materialized
+owners, with at most 32 compact records reclaimed per allocator call once readers
+leave (at most 64 in a point mutation that falls back, and 32 in maintenance). See [SAFETY.md](SAFETY.md) and the
+[memory-density qualification plan](../../benchmarks/REDIS_MEMORY_DENSITY.md)
+before evaluating this feature for a workload.
 
 ## License
 

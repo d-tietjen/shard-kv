@@ -3288,8 +3288,10 @@ fn fp32_values(blob: &[u8]) -> Result<Vec<f64>, Frame> {
         return Err(error("ERR invalid FP32 vector length"));
     }
     let values: Vec<f64> = blob
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()) as f64)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk) as f64)
         .collect();
     if values.iter().any(|value| !value.is_finite()) {
         return Err(error("ERR value is not a float"));
@@ -4058,12 +4060,11 @@ fn read_f64_slice(raw: &[u8]) -> Result<Vec<f64>, ()> {
         return Err(());
     }
     let values: Vec<f64> = raw
-        .chunks_exact(8)
-        .map(|chunk| {
-            let bytes: [u8; 8] = chunk.try_into().map_err(|_| ())?;
-            Ok::<f64, ()>(f64::from_le_bytes(bytes))
-        })
-        .collect::<Result<_, ()>>()?;
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|chunk| f64::from_le_bytes(*chunk))
+        .collect();
     if values.iter().any(|value| !value.is_finite()) {
         return Err(());
     }

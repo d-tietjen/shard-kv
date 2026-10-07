@@ -408,6 +408,115 @@ impl EmbeddedStore {
         self.notify_point_set_slice(key, value, expire_at_ms);
     }
 
+    /// Replaces a value while retaining the live absolute expiry at the write.
+    /// This cold SET KEEPTTL path leaves the plain prehashed SET path unchanged.
+    #[cfg(any(feature = "server", feature = "redis"))]
+    pub(crate) fn set_slice_keep_ttl(&self, key: &[u8], value: &[u8], owned_replacement: bool) {
+        if !self.point_mutation_is_accepted(key, value.len(), None) {
+            return;
+        }
+        let route = self.route_key(key);
+        // Preserve the original raw prehash versus owned route-fallback writer.
+        let owned_replacement =
+            owned_replacement || !can_route_with_key_hash(self.route_mode, self.shards.len(), key);
+        #[cfg(feature = "redis")]
+        let mut bucket = self.objects.write_bucket(route.shard_id, route.key_hash);
+        // Match lifecycle's routed -> distinct pinned-vector lock order.
+        let mut shard = self.shards[route.shard_id].write();
+        #[cfg(feature = "redis")]
+        let vector_route = self.route_vector_key(key);
+        #[cfg(feature = "redis")]
+        let mut vector_shard = (route.shard_id != vector_route.shard_id)
+            .then(|| self.shards[vector_route.shard_id].write());
+        let now_ms = now_millis();
+        #[cfg(feature = "redis")]
+        let object_expiry = if bucket.delete_expired(key, now_ms)
+            || bucket.remove_expired_hash_if_empty(key, now_ms)
+        {
+            self.objects.note_deleted(route.shard_id);
+            // An expired object is missing, even if another physical tier has
+            // a shadow value. Match the existing PTTL object's precedence.
+            Some(None)
+        } else {
+            bucket.entry_expire_at(key)
+        };
+        #[cfg(not(feature = "redis"))]
+        let object_expiry: Option<Option<u64>> = None;
+        let expiry = object_expiry.or_else(|| {
+            if let Some(session_prefix) = derived_session_storage_prefix(key)
+                && shard
+                    .session_slots
+                    .get_ref_hashed(&session_prefix, route.key_hash, key)
+                    .is_some()
+            {
+                Some(None)
+            } else {
+                shard
+                    .map
+                    .entry_expire_at_for_keep_ttl_hashed(route.key_hash, key, now_ms)
+            }
+        });
+        #[cfg(feature = "redis")]
+        let expiry = expiry.or_else(|| {
+            vector_shard.as_mut().and_then(|vector| {
+                if vector
+                    .map
+                    .get_ref_hashed_shared(vector_route.key_hash, key, now_ms)
+                    .is_some_and(|bytes| bytes.starts_with(crate::storage::VECTOR_SET_PREFIX))
+                {
+                    vector.entry_expire_at_hashed(vector_route.key_hash, key, now_ms)
+                } else {
+                    None
+                }
+            })
+        });
+        let expire_at_ms = expiry.flatten();
+        #[cfg(feature = "redis")]
+        {
+            // The original raw prehashed writer retains a distinct vector;
+            // its owned route fallback and the native owned writer delete it.
+            if owned_replacement
+                && let Some(vector) = vector_shard.as_mut()
+                && vector
+                    .map
+                    .get_ref_hashed_shared(vector_route.key_hash, key, now_ms)
+                    .is_some_and(|bytes| bytes.starts_with(crate::storage::VECTOR_SET_PREFIX))
+            {
+                vector.map.delete_hashed(vector_route.key_hash, key, now_ms);
+                self.refresh_string_key_count(vector_route.shard_id, vector);
+            }
+            if bucket.delete_any(key) {
+                self.objects.note_deleted(route.shard_id);
+            }
+        }
+        if let Some(session_prefix) = point_write_session_storage_prefix(key) {
+            shard
+                .session_slots
+                .delete_hashed(&session_prefix, route.key_hash, key);
+        }
+        if owned_replacement {
+            shard.map.set_bytes_hashed_with_governance_option(
+                route.key_hash,
+                key,
+                bytes::Bytes::copy_from_slice(value),
+                None,
+                expire_at_ms,
+                now_ms,
+            );
+        } else {
+            shard
+                .map
+                .set_slice_hashed(route.key_hash, key, value, expire_at_ms, now_ms);
+        }
+        shard.enforce_memory_limit(now_ms);
+        #[cfg(feature = "redis")]
+        {
+            self.refresh_string_key_count(route.shard_id, &shard);
+            drop(vector_shard);
+        }
+        self.notify_point_set_slice(key, value, expire_at_ms);
+    }
+
     /// Zero-copy `GET` for the multi-direct hot path. Returns the stored
     /// `bytes::Bytes` directly (refcount-only clone of `FlatEntry.value`),
     /// avoiding the `Vec<u8>` allocation that `get` performs to materialize
@@ -520,6 +629,125 @@ impl EmbeddedStore {
         } else {
             Ok(false)
         }
+    }
+
+    #[cfg(all(
+        test,
+        feature = "experimental-compact-point-storage",
+        feature = "server"
+    ))]
+    pub(crate) fn compact_shared_owner_count(&self) -> usize {
+        self.shards
+            .iter()
+            .map(|shard| shard.read().map.compact_shared_owner_count())
+            .sum()
+    }
+
+    #[cfg(all(
+        test,
+        feature = "server",
+        feature = "redis",
+        target_os = "linux",
+        not(feature = "no-ttl")
+    ))]
+    pub(crate) fn storage_backend_counts(&self) -> (usize, usize) {
+        self.shards
+            .iter()
+            .fold((0, 0), |(general, compact), shard| {
+                let counts = shard.read().map.storage_backend_counts();
+                (general + counts.0, compact + counts.1)
+            })
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn try_with_response_value_bytes_route_hashed<F>(
+        &self,
+        route_hash: u64,
+        key: &[u8],
+        owner_min_len: usize,
+        mut write: F,
+    ) -> crate::Result<bool>
+    where
+        F: FnMut(&[u8], Option<&bytes::Bytes>),
+    {
+        let route = if can_use_route_hash_as_key_hash(self.route_mode, key) {
+            EmbeddedKeyRoute {
+                shard_id: self.route_hash(route_hash),
+                key_hash: route_hash,
+            }
+        } else {
+            self.route_key(key)
+        };
+        self.try_with_response_value_bytes_routed(route, key, owner_min_len, &mut write)
+    }
+
+    #[cfg(feature = "server")]
+    pub(crate) fn try_with_response_value_bytes_routed<F>(
+        &self,
+        route: EmbeddedKeyRoute,
+        key: &[u8],
+        owner_min_len: usize,
+        write: &mut F,
+    ) -> crate::Result<bool>
+    where
+        F: FnMut(&[u8], Option<&bytes::Bytes>),
+    {
+        if uses_flat_key_storage(self.route_mode, key) {
+            let shard = self.shards[route.shard_id].read();
+            if shard.map.with_response_value_bytes_hashed(
+                route.key_hash,
+                key,
+                now_millis(),
+                owner_min_len,
+                write,
+            ) {
+                return Ok(true);
+            }
+        }
+        if let Some(value) = self.try_get_value_bytes_routed(route, key, now_millis())? {
+            write(
+                value.as_ref(),
+                (value.len() >= owner_min_len).then_some(&value),
+            );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// # Safety
+    /// The caller guarantees that no other thread accesses this store.
+    #[cfg(all(feature = "unsafe", feature = "server"))]
+    pub(crate) unsafe fn try_with_response_value_bytes_route_hashed_single_threaded<F>(
+        &self,
+        route_hash: u64,
+        key: &[u8],
+        owner_min_len: usize,
+        mut write: F,
+    ) -> crate::Result<bool>
+    where
+        F: FnMut(&[u8], Option<&bytes::Bytes>),
+    {
+        if can_use_route_hash_as_key_hash(self.route_mode, key) {
+            let route = EmbeddedKeyRoute {
+                shard_id: self.route_hash(route_hash),
+                key_hash: route_hash,
+            };
+            // SAFETY: the caller's single-worker contract owns this shard.
+            let shard = unsafe { &*self.shards[route.shard_id].data_ptr() };
+            if uses_flat_key_storage(self.route_mode, key)
+                && shard.map.with_response_value_bytes_hashed(
+                    route.key_hash,
+                    key,
+                    now_millis(),
+                    owner_min_len,
+                    &mut write,
+                )
+            {
+                return Ok(true);
+            }
+        }
+        self.try_with_response_value_bytes_route_hashed(route_hash, key, owner_min_len, write)
     }
 
     /// Route-hashed GET path that exposes the stored `Bytes` object while the

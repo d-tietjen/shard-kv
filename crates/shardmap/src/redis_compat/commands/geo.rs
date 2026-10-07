@@ -245,7 +245,7 @@ fn geoadd_update(store: &EmbeddedStore, args: &[&[u8]]) -> Result<i64, Frame> {
     }
     let key = args[0];
     let mut entries = Vec::with_capacity((args.len() - 1) / 3);
-    for chunk in args[1..].chunks_exact(3) {
+    for chunk in args[1..].as_chunks::<3>().0 {
         let (Ok(lon), Ok(lat)) = (parse_f64(chunk[0]), parse_f64(chunk[1])) else {
             return Err(error("ERR invalid longitude,latitude pair"));
         };

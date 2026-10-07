@@ -42,7 +42,7 @@ Run bundle:
 `benchmarks/reference/server-embedded-getset-size-pinned-20260603T004901Z/`
 
 Remote source:
-`/home/dtietjen/shard-kv-bench-redis-cluster.TnRIzc/benchmarks/results/server-embedded-getset-size-pinned-20260603T004901Z`
+`benchmarks/results/server-embedded-getset-size-pinned-20260603T004901Z`
 
 Run settings:
 
@@ -119,3 +119,5 @@ The checked-in bundle includes:
 - `report.md`: generated suite report.
 - `embedded-core.csv`: raw embedded benchmark rows for all backends, value
   sizes, and GET/SET mixes.
+
+Historical capture paths are relative to their original checkout. CSV names in curated reports refer to the copies beside each report. Private capture roots are redacted.

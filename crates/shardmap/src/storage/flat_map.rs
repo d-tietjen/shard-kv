@@ -22,7 +22,6 @@ use bytes::Bytes as SharedBytes;
 struct FlatEntry {
     hash: u64,
     key_tag: u64,
-    key_len: usize,
     key: Box<[u8]>,
     /// Value held as `bytes::Bytes` for zero-copy `SET` from the read buffer.
     /// `as_ref()` gives `&[u8]`; storage size = `value.len()`.
@@ -135,7 +134,7 @@ impl FlatEntry {
 
     #[inline(always)]
     fn matches_hashed_key(&self, hash: u64, key: &[u8]) -> bool {
-        self.hash == hash && self.key_len == key.len() && bytes_equal_hot(self.key.as_ref(), key)
+        self.hash == hash && self.key.len() == key.len() && bytes_equal_hot(self.key.as_ref(), key)
     }
 
     #[inline(always)]
@@ -160,7 +159,7 @@ impl FlatEntry {
 
     #[inline(always)]
     fn matches_tagged(&self, hash: u64, key_tag: u64, key_len: usize) -> bool {
-        self.hash == hash && self.key_tag == key_tag && self.key_len == key_len
+        self.hash == hash && self.key_tag == key_tag && self.key.len() == key_len
     }
 
     #[inline(always)]
@@ -177,7 +176,8 @@ impl FlatEntry {
 
     #[inline(always)]
     fn stored_bytes(&self) -> usize {
-        self.key_len
+        self.key
+            .len()
             .saturating_add(self.value.len())
             .saturating_add(self.semantic_bytes())
     }
@@ -460,6 +460,10 @@ pub struct FlatMap {
     pending_object_faults: usize,
     pending_object_fault_bytes: usize,
     semantic_index: SemanticIndex,
+    #[cfg(feature = "experimental-compact-point-storage")]
+    compact_points: compact_point::CompactPointMap,
+    #[cfg(feature = "experimental-compact-point-storage")]
+    general_capacity_hint: usize,
     #[cfg(feature = "experimental-no-ttl-point-hot-path")]
     fast_points: FastPointMap,
     ttl_entries: usize,
@@ -641,6 +645,8 @@ enum ObjectOffloadAttempt {
 #[cfg(feature = "experimental-no-ttl-point-hot-path")]
 mod fast_point;
 
+#[cfg(feature = "experimental-compact-point-storage")]
+mod compact_point;
 mod core;
 mod lifecycle;
 mod read;
@@ -654,9 +660,9 @@ use fast_point::FastPointMap;
 
 #[cfg(test)]
 mod tests {
-    use super::FlatMap;
     #[cfg(feature = "embedded")]
     use super::hash_key_tag_from_hash;
+    use super::{FlatEntry, FlatMap};
     use super::{REUSABLE_VALUE_MIN_BYTES, hash_key};
     use crate::ShardCacheError;
     use crate::config::{
@@ -775,6 +781,176 @@ mod tests {
                 .expect("object values")
                 .remove(object_key);
             Ok(())
+        }
+    }
+
+    #[test]
+    fn general_entries_distinguish_colliding_binary_and_prefix_keys() {
+        let mut map = FlatMap::new();
+        map.configure_memory_policy(None, EvictionPolicy::Lru, 0);
+        let hash = 7;
+        let keys: [&[u8]; 6] = [b"", b"a", b"ab", b"ac", b"a\0", b"\0\xff"];
+        for (i, key) in keys.iter().enumerate() {
+            map.set_slice_hashed(hash, key, &[i as u8], None, 0);
+        }
+        let stored_bytes = keys.iter().map(|key| key.len() + 1).sum::<usize>();
+        assert_eq!(map.entries.len(), keys.len());
+        assert_eq!(map.stored_bytes(), stored_bytes);
+        for (i, key) in keys.iter().enumerate() {
+            assert_eq!(map.get_ref_hashed(hash, key, 0), Some([i as u8].as_slice()));
+        }
+        for missing in [b"ad".as_slice(), b"abc", b"a\0\0", b"\0\xfe"] {
+            assert!(map.get_ref_hashed(hash, missing, 0).is_none());
+        }
+        assert!(map.get_ref_hashed(hash + 1, b"ab", 0).is_none());
+
+        map.set_slice_hashed(hash, b"ab", b"replacement", None, 0);
+        assert_eq!(map.len(), keys.len());
+        assert_eq!(map.stored_bytes(), stored_bytes - 1 + b"replacement".len());
+        for (i, key) in keys.iter().enumerate() {
+            let original = [i as u8];
+            let expected = if *key == b"ab" {
+                b"replacement".as_slice()
+            } else {
+                original.as_slice()
+            };
+            assert_eq!(map.get_ref_hashed(hash, key, 0), Some(expected));
+        }
+        for key in keys {
+            assert!(map.delete_hashed(hash, key, 0));
+        }
+        assert!(map.is_empty());
+        assert_eq!(map.stored_bytes(), 0);
+    }
+
+    #[test]
+    fn general_entry_tagged_lookup_rejects_wrong_key_lengths() {
+        for key in [b"".as_slice(), b"a\0\xffb", &[0xff; 17]] {
+            let mut map = FlatMap::new();
+            map.configure_memory_policy(None, EvictionPolicy::Lru, 0);
+            let hash = hash_key(key);
+            let tag = super::hash_key_tag_from_hash(hash);
+            map.set_slice_hashed(hash, key, b"value", None, 0);
+            assert_eq!(map.entries.len(), 1);
+            assert_eq!(
+                map.get_shared_value_bytes_hashed_tagged_no_ttl(hash, tag, key.len())
+                    .map(|value| value.as_ref()),
+                Some(b"value".as_slice())
+            );
+            for wrong_len in [key.len() + 1, usize::MAX] {
+                assert!(
+                    map.get_shared_value_bytes_hashed_tagged_no_ttl(hash, tag, wrong_len)
+                        .is_none()
+                );
+            }
+            if !key.is_empty() {
+                assert!(
+                    map.get_shared_value_bytes_hashed_tagged_no_ttl(hash, tag, key.len() - 1)
+                        .is_none()
+                );
+            }
+            assert!(
+                map.get_shared_value_bytes_hashed_tagged_no_ttl(hash ^ 1, tag, key.len())
+                    .is_none()
+            );
+            assert!(
+                map.get_shared_value_bytes_hashed_tagged_no_ttl(hash, tag ^ 1, key.len())
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn general_entry_layout_and_table_capacity_diagnostic() {
+        let mut map = FlatMap::new();
+        map.configure_memory_policy(None, EvictionPolicy::Lru, 0);
+        for i in 0..64u64 {
+            map.set_slice(&i.to_le_bytes(), b"one", None, 0);
+        }
+        assert_eq!(map.entries.len(), 64);
+        assert_eq!(map.stored_bytes(), 64 * (8 + 3));
+        assert!(map.entries.capacity() >= map.entries.len());
+        println!(
+            "general entry layout: entry_size={} entry_align={} key_box_size={} usize_size={} len={} capacity={} kv_overflow={}",
+            std::mem::size_of::<FlatEntry>(),
+            std::mem::align_of::<FlatEntry>(),
+            std::mem::size_of::<Box<[u8]>>(),
+            std::mem::size_of::<usize>(),
+            map.entries.len(),
+            map.entries.capacity(),
+            cfg!(feature = "kv-overflow"),
+        );
+    }
+
+    #[cfg(feature = "experimental-compact-point-storage")]
+    #[test]
+    fn general_entry_compact_migration_preserves_binary_keys_and_accounting() {
+        let mut map = FlatMap::new();
+        let keys: [&[u8]; 5] = [b"", b"\0\xff", b"a\0", b"a\0\xff", &[0xff; 64]];
+        for key in keys {
+            map.set_slice(key, b"initial", None, 0);
+        }
+        assert_eq!(map.compact_points.len(), keys.len());
+        let value = SharedBytes::copy_from_slice(b"replacement");
+        for key in keys {
+            // The retained alias requires migration to a general entry.
+            map.set_bytes_hashed(hash_key(key), key, value.clone(), None, 0);
+        }
+        assert_eq!(map.compact_points.len(), 0);
+        assert_eq!(map.entries.len(), keys.len());
+        assert_eq!(
+            map.stored_bytes(),
+            keys.iter()
+                .map(|key| key.len() + value.len())
+                .sum::<usize>()
+        );
+        for key in keys {
+            assert_eq!(map.get_ref(key, 0), Some(value.as_ref()));
+            assert!(map.delete(key, 0));
+        }
+        assert_eq!(map.stored_bytes(), 0);
+    }
+
+    #[cfg(feature = "experimental-no-ttl-point-hot-path")]
+    #[test]
+    fn general_entry_fast_point_migration_preserves_binary_keys_and_accounting() {
+        let mut points = super::fast_point::FastPointMap::default();
+        let keys: [&[u8]; 5] = [b"", b"\0\xff", b"a\0", &[0xff; 16], &[0xff; 17]];
+        for key in keys {
+            let hash = hash_key(key);
+            // SAFETY: the test owns the map exclusively and retains no value aliases.
+            assert!(
+                unsafe {
+                    points.upsert_slice(
+                        hash,
+                        super::hash_key_tag_from_hash(hash),
+                        key,
+                        b"value",
+                        false,
+                    )
+                }
+                .is_some()
+            );
+        }
+        let entries = points
+            .take_entries_and_disable()
+            .into_iter()
+            .map(|entry| entry.into_flat_entry())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), keys.len());
+        assert_eq!(
+            entries.iter().map(FlatEntry::stored_bytes).sum::<usize>(),
+            keys.iter().map(|key| key.len() + 5).sum::<usize>()
+        );
+        for key in keys {
+            let hash = hash_key(key);
+            let entry = entries
+                .iter()
+                .find(|entry| entry.matches(hash, key))
+                .unwrap();
+            assert_eq!(entry.key.as_ref(), key);
+            assert_eq!(entry.value.as_ref(), b"value");
+            assert!(entry.matches_tagged(hash, super::hash_key_tag_from_hash(hash), key.len()));
         }
     }
 

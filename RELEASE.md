@@ -30,7 +30,9 @@ For the 0.6.0 overflow feature catalog and upgrade notes, see
 known limits, security requirements, and benchmark commands are in
 `docs/KV_OVERFLOW.md`.
 
-The release gate also includes:
+Release validation also requires the following checks. The release script runs
+some of them; run the remaining commands separately and retain their results for
+the final source revision:
 
 ```bash
 cargo fmt --check
@@ -57,6 +59,13 @@ Docker Hub or remote registry publish step until the compatibility surface and
 release policy explicitly call for it.
 
 ## Publishing
+
+Choose an unpublished package version and require that version of the internal
+dependencies that provide the release's features. Before the registry handoff,
+`./scripts/check-publish-artifacts.sh` validates the archives and consumers with
+temporary local patches for both `shardmap` and `shardcache-client-rs`. These
+patches do not publish either dependency. Each ordinary publish dry run below
+requires its dependencies to have reached the crates.io index in this order.
 
 ```bash
 cargo publish -p shardcache-client-rs --dry-run

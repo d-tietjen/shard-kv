@@ -112,6 +112,7 @@ scnp-tls = [
 # Internal/benchmark knobs. These are intentionally not part of the small public
 # feature story; use them only for measured deployments or local experiments.
 experimental-no-ttl-point-hot-path = ["no-ttl"]
+experimental-compact-point-storage = []
 no-ttl = []
 mutable-value-slices = []
 shared-parking-lot-lock = []

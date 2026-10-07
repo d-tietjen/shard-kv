@@ -57,7 +57,6 @@ impl FastPointEntry {
         FlatEntry {
             hash: self.hash,
             key_tag: self.key_tag,
-            key_len: self.key_len,
             key,
             value: self.value,
             expire_at_ms: None,

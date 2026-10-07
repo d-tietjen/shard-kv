@@ -1,0 +1,1788 @@
+{
+  "schema": "storage-optimization-redis-baseline-plan-v1",
+  "status": "planned",
+  "implemented_runner": false,
+  "execution_admission": null,
+  "actual_results": null,
+  "source": {
+    "reference_head": "016a521b12968f38b703b3e3e39a8eb0be745429",
+    "reference_tree": "16f855f045f44877d53d4ce5e840d20a555d31de",
+    "parent": "3c289897d7d070c41194a2f0c0c47dfd6191f98c",
+    "full713_closure_sha256": "c0439944b1ef4107e200265f072851afe3835c710aa6e832325dd7f7e3647e57",
+    "baseline_build_qualification": null,
+    "optimized_heads": "one proposal at a time; each head NULL until independent review"
+  },
+  "redis": {
+    "version": "7.4.11",
+    "image_digest": null,
+    "configuration_sha256": null,
+    "engine_image_id": null,
+    "config": {
+      "persistence": false,
+      "eviction": "none except matching META_POLICY; zero evictions mandatory",
+      "physical_memory_cap_bytes": 4294967296,
+      "swap_bytes": 0
+    },
+    "actual": null
+  },
+  "retained_suites": {
+    "original378": {
+      "core": 90,
+      "access": 72,
+      "stateful": 216,
+      "catalog": "benchmarks/COMPACT_RESP_SCENARIOS.md",
+      "changes": false
+    },
+    "resp243": {
+      "whole_sha256": "b99942c2b14acf5abe32ea2d03a9afba5956419f3c96cb62990ade232e14cac0",
+      "matrix_sha256": "860b493657e8356252868bfb2f4a94821cc771dd9f9a0334267981fb250b20f4",
+      "review_sha256": "7a63be388c90c7a83f025be498884ddd469e8b6619d5fbbc59fe7a1f94d792f1",
+      "changes": false
+    },
+    "reuse": "only independently accepted exact logical/feature/driver/resource/timing closure; no old source/result relabel"
+  },
+  "comparisons": {
+    "attribution": "optimization/current016",
+    "competitive_density": "optimization/Redis",
+    "no_unmeasured_percentages": true,
+    "conditional_embedded": "whole-deployment comparison with caller/transport cost; RESP core remains separate",
+    "semantic_api_only": "semantic/governance/read-epoch obligations compare current/candidate only and carry no Redis performance credit"
+  },
+  "phases": {
+    "baseline_diagnostic": {
+      "arms": [
+        "current016",
+        "redis"
+      ],
+      "rounds": 3,
+      "ordering": "alternate paired order by profile-index+round; odd three rounds cannot exactly balance two-arm first positions",
+      "matched_resp_rows": 66,
+      "conditional_deployment_rows": 12,
+      "total_rows": 78,
+      "packages_max": 13,
+      "suite_wall_cap_seconds": 109200,
+      "actual": null,
+      "gate": "current build/runtime/source and restored guard required; no optimization exists"
+    },
+    "initial_single_optimization_evaluation": {
+      "arms": [
+        "current016",
+        "optimization",
+        "redis"
+      ],
+      "rotations": [
+        [
+          "current016",
+          "optimization",
+          "redis"
+        ],
+        [
+          "optimization",
+          "redis",
+          "current016"
+        ],
+        [
+          "redis",
+          "current016",
+          "optimization"
+        ]
+      ],
+      "matched_resp_rows": 99,
+      "conditional_deployment_rows": 18,
+      "total_rows": 117,
+      "packages_max": 20,
+      "suite_wall_cap_seconds": 168000,
+      "actual": null,
+      "gate": "run only the selected independently reviewed proposal module; no requirement for six heads simultaneously"
+    },
+    "later_scale_subset": {
+      "selectors": [
+        "HWM_STR",
+        "META_GENERAL",
+        "ARENA_DENSE",
+        "HINT_API_1M",
+        "AGG_SMALL",
+        "COLD_TEXT"
+      ],
+      "cpu_budgets": [
+        4,
+        16
+      ],
+      "workers": 16,
+      "pipeline": 1,
+      "shard_count": "equals CPU budget for ShardCache; Redis standalone same cap with measured consumed CPU",
+      "retained_input": "global cardinality and exact keys unchanged from CPU1; do not multiply dataset by shards",
+      "resp_rows": 90,
+      "conditional_deployment_rows": 18,
+      "total_rows": 108,
+      "packages_max": 18,
+      "suite_wall_cap_seconds": 151200,
+      "actual": null,
+      "aggregate_selector_contract": "AGG_SMALL inherits aggregate_access_contract including counts/timing/canonical phase state; matching concrete driver qualification remains NULL",
+      "string_selector_contract": "string_access_contract; preserve original metadata subset and label any added window fresh. Actual cohort-aware mode driver qualification remains NULL."
+    },
+    "later_offered_load_p1": {
+      "selectors": [
+        "HWM_STR",
+        "META_GENERAL",
+        "ARENA_DENSE",
+        "HINT_RESP_CONTROL",
+        "AGG_SMALL",
+        "COLD_TEXT"
+      ],
+      "target_rates_ops_s": [
+        10000,
+        50000
+      ],
+      "workers": 16,
+      "pipeline": 1,
+      "server_cpu_budget": 1,
+      "warmup_seconds": 3,
+      "measure_seconds": 20,
+      "rows": 108,
+      "packages_max": 18,
+      "suite_wall_cap_seconds": 151200,
+      "existing_entrypoint": "curve",
+      "existing_metric": "client-call latency after pacing",
+      "scheduled_arrival_p99": null,
+      "miss_backlog_instrumentation": null,
+      "actual": null,
+      "aggregate_selector_contract": "AGG_SMALL inherits aggregate_access_contract including counts/timing/canonical phase state; matching concrete driver qualification remains NULL",
+      "string_selector_contract": "string_access_contract; preserve original metadata subset and label any added window fresh. Actual cohort-aware mode driver qualification remains NULL."
+    },
+    "later_inserted_capacity": {
+      "selectors": [
+        "HWM_STR",
+        "META_GENERAL",
+        "ARENA_DENSE",
+        "HINT_API_1M",
+        "AGG_SMALL",
+        "COLD_TEXT"
+      ],
+      "rows": 54,
+      "resp_rows": 45,
+      "conditional_deployment_rows": 9,
+      "server_cpu_budget": 1,
+      "packages_max": 9,
+      "suite_wall_cap_seconds": 75600,
+      "soft_pss_budget_bytes": 134217728,
+      "max_records": 2000000,
+      "insert_batch_records": 10000,
+      "max_batches": 200,
+      "collection_max_records": 200000,
+      "collection_batch_records": 1000,
+      "procedure": "fresh no-eviction/no-expiry store; sample then exhaustively validate each insertion checkpoint; stop on first budget crossing or record cap; last complete verified in-budget checkpoint is actual inserted capacity; keep crossing/timeout/censored rows",
+      "budget_scope": "RESP server total PSS; hinted deployment server+caller total or embedded whole process; report scopes separately",
+      "caveat": "not inverse PSS ratio; no OOM, eviction, expiry or removed records count as capacity",
+      "actual": null,
+      "aggregate_selector_contract": "AGG_SMALL inherits aggregate_access_contract including counts/timing/canonical phase state; matching concrete driver qualification remains NULL",
+      "string_selector_contract": "string_access_contract; preserve original metadata subset and label any added window fresh. Actual cohort-aware mode driver qualification remains NULL."
+    }
+  },
+  "modes": {
+    "resp": {
+      "status": "planned required matched transport",
+      "profile_ids": [
+        "HWM_STR",
+        "HWM_OBJECT",
+        "META_GENERAL",
+        "META_POLICY",
+        "ARENA_DENSE",
+        "ARENA_EDGE",
+        "HINT_RESP_CONTROL",
+        "AGG_SMALL",
+        "AGG_OSCILLATE",
+        "COLD_TEXT",
+        "COLD_ENTROPY"
+      ],
+      "row_id": "evaluation:PROFILE:r{1..3}:{current016|optimization|redis}"
+    },
+    "shared_embedded": {
+      "status": "planned conditional deployment, API-only transitions explicit",
+      "profile_ids": [
+        "HINT_API_NONE",
+        "HINT_API_1M"
+      ],
+      "row_id": "deployment:PROFILE:r{1..3}:ARM"
+    },
+    "scnp_direct": {
+      "status": "later conditional future view; not initial execution or RESP substitution",
+      "selectors": [
+        "HWM_STR",
+        "META_GENERAL",
+        "ARENA_DENSE",
+        "HINT_RESP_CONTROL",
+        "AGG_SMALL",
+        "COLD_TEXT"
+      ],
+      "rows_if_separately_admitted": 54,
+      "row_id": "scnp-direct:PROFILE:r{1..3}:ARM",
+      "redis_transport": "TCP RESP; cross-protocol deployment comparison",
+      "actual": null,
+      "aggregate_selector_contract": "AGG_SMALL inherits aggregate_access_contract; existing GET/SET worker is not a typed aggregate path",
+      "typed_aggregate_path_qualification": null,
+      "string_selector_contract": "string_access_contract; equivalent type/value/TTL/absence-safe cohort and checked-reply policy must be independently qualified; no inherited original metadata extension evidence.",
+      "ttl_safe_string_path_qualification": null
+    },
+    "scnp_shared": {
+      "status": "later conditional future view; not initial execution or RESP substitution",
+      "selectors": [
+        "HWM_STR",
+        "META_GENERAL",
+        "ARENA_DENSE",
+        "HINT_RESP_CONTROL",
+        "AGG_SMALL",
+        "COLD_TEXT"
+      ],
+      "rows_if_separately_admitted": 54,
+      "row_id": "scnp-shared:PROFILE:r{1..3}:ARM",
+      "redis_transport": "TCP RESP; cross-protocol deployment comparison",
+      "actual": null,
+      "aggregate_selector_contract": "AGG_SMALL inherits aggregate_access_contract; existing GET/SET worker is not a typed aggregate path",
+      "typed_aggregate_path_qualification": null,
+      "string_selector_contract": "string_access_contract; equivalent type/value/TTL/absence-safe cohort and checked-reply policy must be independently qualified; no inherited original metadata extension evidence.",
+      "ttl_safe_string_path_qualification": null
+    }
+  },
+  "dataset": {
+    "key_index": "collision-free binary eight-byte index suffix padded to declared key length",
+    "entropy_seed": 12648430,
+    "generation_seed_rule": "seed xor key-index xor generation in separately qualified deterministic generator",
+    "per_key_uniqueness": true,
+    "compressible": "fixed-size JSON/text with unique key-index and bounded padding",
+    "original_patterns": "old MD05 common payload and SplitMix64 patterns unchanged; new per-key-unique profiles not equivalent",
+    "common_trace_sha256": null,
+    "canonical_expected_state_sha256": null,
+    "logical_input_manifest_sha256": null,
+    "original_metadata_override": "HINT_RESP_CONTROL uses byte-identical original metadata phases/arguments/values; global per_key_uniqueness=true and new steady-window policy apply to new profiles, not this original subset. Added windows/generator/TTL changes are fresh extensions with no whole-row reuse inheritance."
+  },
+  "default_policies": {
+    "expiry": "none unless explicit; TTL two hours except META_GENERAL controlled expiry",
+    "eviction": "none",
+    "memory_limit": null,
+    "overflow": false,
+    "access": "New string windows: string_access_contract; four GET reads per persistent-key SET XX canonical-value touch where persistent keys exist, no steady writes to TTL keys, read-only/zero-write all-TTL phases, controlled-expiry cohort excluded from all access. HINT_RESP_CONTROL original metadata trace explicitly overrides global generator and new-window policy. HWM_OBJECT/AGG_SMALL/AGG_OSCILLATE: aggregate_access_contract; no GET/SET on collections.",
+    "base_features": "redis-server,experimental-compact-point-storage; selected proposal feature pin pending"
+  },
+  "latency": {
+    "pipeline1": "one request response completion for saturation; stateful mutation uses labeled record-transition completion",
+    "curve_pipeline1": "client-call histogram excludes scheduled-arrival/queue delay; require achieved/offered, missed/deferred targets, backlog, errors",
+    "pipeline16_64": "existing batch elapsed / successful operations, repeated per success; batch-amortized ns/op only",
+    "true_pipelined_request_p99": null,
+    "latency_sample_rate": 1,
+    "no_histogram_ceiling": "not scheduled; separately labeled future contract",
+    "typed_aggregate_pipeline1": "aggregate_access_contract: one checked single-command typed access completion in ns, distinct from a complete multi-command record-transition latency",
+    "ttl_safe_string_pipeline1": "string_access_contract: ns per checked command completion with actual read/write counts and explicit all-TTL read-only labels; separate TTL/lifecycle/validation denominators."
+  },
+  "correctness": {
+    "every_phase": [
+      "every reply checked",
+      "all keys/absence and DBSIZE",
+      "exact bytes and types",
+      "collection order/ranks/contents",
+      "logical TTL expiry at identical deadline/observation offsets relative to each declared arm anchor; retain each real absolute deadline and bracketed observation interval",
+      "canonical digest/counts per phase and worker"
+    ],
+    "ttl": "Serial arms use the same logical deadline/observation schedule relative to each declared arm anchor, not one shared wall-clock deadline. Store each real arm anchor/absolute deadline/bracketed query interval, normalize to its anchor for expected canonical comparison, and compare PTTL to its own deadline/query-time interval rather than byte-equal remaining time. Never equate different absolute Unix timestamps.",
+    "ttl_clock_admission": null,
+    "worker_vectors": "all N IDs 0..N-1 including zero-work/error workers; aggregate operations/errors/histograms must equal worker sums",
+    "required_data_loss": 0,
+    "semantic_api_only": [
+      "sparse governance/semantic identity",
+      "held shared owners/read epochs",
+      "snapshots and field TTL"
+    ],
+    "typed_aggregate_steady": "Check typed command-specific replies and exact retained bytes/scores/types/counts/ranks/order after every phase; preserve actual all-worker prefixes/counts and keep idempotent touches separate from prescribed generation-changing lifecycle traces.",
+    "steady_string_ttl_and_absence": "string_access_contract: TTL-bearing keys receive no steady write; controlled-expiry1000 excluded from all access through both observations. Check frozen bytes/type/absolute deadlines/persistent state/absence and actual worker prefixes; plain new lifecycle SET deliberately clears TTL in oracle. Original metadata override unchanged."
+  },
+  "measurements": {
+    "server": [
+      "full image/container ID and PID1/start/cgroup",
+      "5 verified idle and each settled phase PSS samples",
+      "total and idle-subtracted PSS",
+      "RSS and cgroup memory",
+      "0.2s observed peak; not exact maximum",
+      "post-delete/idle/refill PSS",
+      "actual server CPU/quota/throttle/affinity"
+    ],
+    "client": [
+      "whole client/controller PID identities, PSS and peak",
+      "CPU/quota/throttle/affinity",
+      "all worker count/error/latency vectors"
+    ],
+    "embedded": [
+      "whole process PSS including callers/owners/cache/scratch",
+      "idle delta with same caller threads",
+      "process CPU; no double-counted separate server"
+    ],
+    "auxiliary": [
+      "Redis allocator diagnostics",
+      "table capacities/compact occupancy/fallback/retired bytes",
+      "decode/cache/buffer peak and maintenance work"
+    ],
+    "ratios": [
+      "optimization/current016 and optimization/Redis at exact same cells",
+      "total ops and ops/actual CPU",
+      "median/range of three rounds; p99 medians not pooled percentile"
+    ],
+    "acceptance": "all correctness/zero loss/zero errors/resource/provenance mandatory; report every phase and arm, no best-arm selection; memory gain must be observed and retain matched 95% throughput/105% p99 screens; misses retained"
+  },
+  "resources": {
+    "status": "proposed, not reserved or executed",
+    "host_gates": {
+      "free_disk_bytes_min": 100000000000,
+      "global_guard_max_age_seconds": 90,
+      "STOP_required": false,
+      "whole_RUN_disk_bytes_max": 32212254720,
+      "watchdog_seconds": 5
+    },
+    "server": {
+      "cpu_budget": "1 initially, 4/16 later",
+      "memory_bytes": 4294967296,
+      "swap_bytes": 0,
+      "pids": 512
+    },
+    "initial_client": {
+      "cpu_budget": 4,
+      "memory_bytes": 2147483648,
+      "swap_bytes": 0,
+      "pids": 512
+    },
+    "scaling_client": {
+      "cpu_budget": 16,
+      "memory_bytes": 2147483648,
+      "swap_bytes": 0,
+      "pids": 512
+    },
+    "controller": {
+      "cpu_budget": 1,
+      "memory_bytes": 2147483648,
+      "swap_bytes": 0,
+      "pids": 64
+    },
+    "build": {
+      "cpu_budget": 4,
+      "memory_bytes": 17179869184,
+      "swap_bytes": 0,
+      "pids": 512,
+      "jobs": 4
+    },
+    "hierarchy": "controller/client/server are siblings under separately admitted aggregate parent; no inherited controller leaf ceiling; build and runtime exclusive",
+    "proposed_phase_maxima": {
+      "initial_runtime_cpu": 6,
+      "scaled_runtime_cpu_max": 33,
+      "runtime_memory_bytes": 8589934592,
+      "runtime_pids": 1088,
+      "build_with_controller_cpu": 5,
+      "build_with_controller_memory_bytes": 19327352832,
+      "build_with_controller_pids": 576
+    },
+    "aggregate_parent_max": {
+      "cpu": 33,
+      "memory_bytes": 19327352832,
+      "pids": 1088,
+      "swap_bytes": 0
+    },
+    "actual_hierarchy": null,
+    "actual_cpuset": null,
+    "placement": "disjoint server/client sets only with genuine host availability; else shared/unreserved and qualified headline held",
+    "finite_package": {
+      "max_rows": 6,
+      "row_lifecycle_seconds": 840,
+      "controller_seconds": 5400,
+      "build_seconds": 2700,
+      "cleanup_seconds": 300,
+      "total_lifecycle_seconds": 8400,
+      "max_file_bytes": 134217728,
+      "max_output_bytes": 1073741824,
+      "feasibility": "6*840=5040s leaves 360s controller overhead; 2700+5400+300=8400s; timeout fails without extending clocks"
+    },
+    "full_initial_evaluation_wall_cap_seconds": 168000,
+    "full_baseline_diagnostic_wall_cap_seconds": 109200,
+    "optional_three_later_subsets_wall_cap_seconds": 378000,
+    "optional_SCNP_views_additional_packages": 18,
+    "optional_SCNP_views_wall_cap_seconds": 151200,
+    "qualification": "actual leaf/ancestor caps, phase transitions/reaping and memory charges independently accepted; client saturation cannot prove server ceiling"
+  },
+  "prerequisites": {
+    "restored_guard125s": null,
+    "current_source17_complete": null,
+    "current_native_build": null,
+    "strict_early_api_pass": null,
+    "original378_qualification": null,
+    "resp243_qualification": null,
+    "common_driver_ELF": null,
+    "server_image_provenance": null,
+    "resources_and_ownership": null,
+    "new_targeted_driver_regressions": null,
+    "full_raw_copy": null,
+    "independent_review": null,
+    "typed_aggregate_driver_and_command_paths": null,
+    "ttl_safe_string_driver_and_mode_paths": null
+  },
+  "existing_entrypoints": {
+    "benchmarks/scripts/run-memory-density-benchmark.py": {
+      "sha256": "6537ef39b58ef63f4c918132efe236b7b8f2239c2989cb264dfc589583be1f19",
+      "bytes": 41573,
+      "qualified_build": null
+    },
+    "benchmarks/scripts/run-compact-storage-scenarios.py": {
+      "sha256": "37dd39458a5f23f49135d73ec694b830cf40801d8a448a144ee2dbe975279911",
+      "bytes": 51656,
+      "qualified_build": null
+    },
+    "benchmarks/src/bin/compact_resp_scenarios.rs": {
+      "sha256": "ff50eb4a2ecb4942acf8cc594cd42a048510ecf0a9715696aaed806612d7ea76",
+      "bytes": 38275,
+      "qualified_build": null
+    },
+    "benchmarks/src/bin/saturation.rs": {
+      "sha256": "bce4e68974e565beeebc966366ffcaeec6d2e4c899c13982580a65beee2a1330",
+      "bytes": 25776,
+      "qualified_build": null
+    },
+    "benchmarks/src/bin/curve.rs": {
+      "sha256": "e8293b1b81860df2692b4d2771d3df41794bb90bbc13107ad9e90d5785f973a7",
+      "bytes": 19725,
+      "qualified_build": null
+    },
+    "benchmarks/src/bin/compact_shared_read_cost.rs": {
+      "sha256": "4037c0c5d7d36183a57776f53b34b8460e1494e94d4be759a9722979a34733a9",
+      "bytes": 20841,
+      "qualified_build": null
+    },
+    "benchmarks/scripts/run-embedded-benchmark-suite.sh": {
+      "sha256": "617675459b52632fb74ae0ae798b403a4c823d5d3084f6a247e2e4ed61b2debf",
+      "bytes": 12881,
+      "qualified_build": null
+    },
+    "benchmarks/src/backends/resp.rs": {
+      "sha256": "d3b80352bed589845c87f23f0863071ccf516935af2be21e36b5b42153fe79fe",
+      "bytes": 6655,
+      "qualified_build": null
+    },
+    "benchmarks/src/backends/scnp.rs": {
+      "sha256": "4186ec4ac2a6e2723c2cf54047b6f505b6d6b9cd88134f7c559b5a4eeee716dd",
+      "bytes": 5843,
+      "qualified_build": null
+    },
+    "benchmarks/COMPACT_RESP_SCENARIOS.md": {
+      "sha256": "dbf9d7f89a3ac7ac0b6da2429cb988b7fa34ca11e4b47b9e3dc904cc77140647",
+      "bytes": 10565,
+      "qualified_build": null
+    },
+    "benchmarks/REDIS_MEMORY_DENSITY.md": {
+      "sha256": "4f20062c9d49db1341af788b246058f54ce71104e1d17b6368628eb48a529f2f",
+      "bytes": 33350,
+      "qualified_build": null
+    },
+    "benchmarks/embedded-suites/embedded-core.toml": {
+      "sha256": "7e011c8c55cb8ca50c2c0474697a9e09b1c85bef6450f008a03c194ab8e5a045",
+      "bytes": 335,
+      "qualified_build": null
+    }
+  },
+  "proposals": [
+    {
+      "id": "reclaim",
+      "name": "Bounded high-water reclamation",
+      "profiles": [
+        "HWM_STR",
+        "HWM_OBJECT"
+      ],
+      "mechanism": "Release retained tables, free-list/descriptors, slabs and eligible idle buffer pools in bounded maintenance.",
+      "falsified_if": "Post-delete/idle PSS does not decrease versus current016, or refill/maintenance CPU or p99 regresses beyond the prespecified screen.",
+      "gaps": [
+        "95% scattered survivor trace",
+        "maintenance and allocator-return telemetry",
+        "isolated read-epoch/held-owner correctness"
+      ],
+      "exclusions": [
+        "already released empty 4KiB payload chunks",
+        "default compact pool savings; pool requires memory limit plus eviction"
+      ],
+      "optimization_head": null,
+      "optimization_tree": null,
+      "reviewed_features": null,
+      "candidate_build": null,
+      "admission": null,
+      "actual_results": null,
+      "status": "planned"
+    },
+    {
+      "id": "metadata",
+      "name": "Slimmer optional general-entry metadata",
+      "profiles": [
+        "META_GENERAL",
+        "META_POLICY"
+      ],
+      "mechanism": "Remove absent general metadata allocation, net of side-index/table-capacity/lookup cost.",
+      "falsified_if": "Whole loaded PSS does not decrease versus current016 after side indexes, or TTL/identity/policy/ownership changes or matched latency regresses.",
+      "gaps": [
+        "absolute-time expiry oracle",
+        "policy-enabled zero-eviction binding",
+        "sparse semantic/governance API correctness"
+      ],
+      "exclusions": [
+        "compact TTL or demotion after PERSIST; separate follow-on",
+        "layout-size difference as measured PSS savings"
+      ],
+      "optimization_head": null,
+      "optimization_tree": null,
+      "reviewed_features": null,
+      "candidate_build": null,
+      "admission": null,
+      "actual_results": null,
+      "status": "planned"
+    },
+    {
+      "id": "arena",
+      "name": "Budget-aware compact arena growth",
+      "profiles": [
+        "ARENA_DENSE",
+        "ARENA_EDGE"
+      ],
+      "mechanism": "Avoid general fallback within a separately bounded aggregate arena budget; report occupancy/slack rather than infer packing.",
+      "falsified_if": "Fallback/PSS does not improve at the same retained dataset and total limits, or scratch/retired bytes, p99 or peak memory offsets the gain.",
+      "gaps": [
+        "configurable reviewed arena-budget input",
+        "fallback/class occupancy/retired-byte counters",
+        "edge cardinality lifecycle"
+      ],
+      "exclusions": [
+        "memory-limit admission; current compact path rejects it",
+        "moving live records during read epochs",
+        "802816 as an observed cliff"
+      ],
+      "optimization_head": null,
+      "optimization_tree": null,
+      "reviewed_features": null,
+      "candidate_build": null,
+      "admission": null,
+      "actual_results": null,
+      "status": "planned"
+    },
+    {
+      "id": "hint",
+      "name": "Conditional nonzero-hint shared-embedded general reservation",
+      "profiles": [
+        "HINT_RESP_CONTROL",
+        "HINT_API_NONE",
+        "HINT_API_1M"
+      ],
+      "mechanism": "Reserve general buckets for actual occupancy instead of the complete nonzero requested capacity.",
+      "falsified_if": "First-fallback peak/PSS or insertion p99 is not better versus identically hinted current016, or growth moves costs to later phases.",
+      "gaps": [
+        "explicit shared flat_map_capacity_hint driver",
+        "exact phase validation and whole caller accounting"
+      ],
+      "exclusions": [
+        "default RESP density gain: capacity_hint=None",
+        "shared API versus TCP as an engine-only comparison"
+      ],
+      "optimization_head": null,
+      "optimization_tree": null,
+      "reviewed_features": null,
+      "candidate_build": null,
+      "admission": null,
+      "actual_results": null,
+      "status": "planned"
+    },
+    {
+      "id": "aggregates",
+      "name": "Packed and demoted small Redis aggregates",
+      "profiles": [
+        "AGG_SMALL",
+        "AGG_OSCILLATE"
+      ],
+      "mechanism": "Reduce separate payload allocations/duplicate zset members and demote oversized containers with hysteresis.",
+      "falsified_if": "Whole PSS including indexes/scratch does not improve, or threshold oscillation/copy cost, rank, byte identity or p99 regresses.",
+      "gaps": [
+        "full multi-element collection lifecycle and validation",
+        "threshold timings/encoding counters",
+        "field-TTL and snapshot correctness"
+      ],
+      "exclusions": [
+        "existing <=4 hash/set/zset and Small8 lists as new savings"
+      ],
+      "optimization_head": null,
+      "optimization_tree": null,
+      "reviewed_features": null,
+      "candidate_build": null,
+      "admission": null,
+      "actual_results": null,
+      "status": "planned"
+    },
+    {
+      "id": "compression",
+      "name": "Later resident cold compression",
+      "profiles": [
+        "COLD_TEXT",
+        "COLD_ENTROPY"
+      ],
+      "mechanism": "Reduce resident cold allocation net of headers/indexes/decode cache and buffers; preserve hot values and exact replies.",
+      "falsified_if": "Incompressible/hot transition/burst peaks or CPU/p99 offset savings, or exact bytes/TTL/length/borrowed ownership change.",
+      "gaps": [
+        "resident cold codec/temperature implementation",
+        "per-key-unique payload generation",
+        "bounded decode/cache telemetry and transition driver"
+      ],
+      "exclusions": [
+        "existing overflow LZ4/Zstd as new resident savings",
+        "changing Redis input representation"
+      ],
+      "optimization_head": null,
+      "optimization_tree": null,
+      "reviewed_features": null,
+      "candidate_build": null,
+      "admission": null,
+      "actual_results": null,
+      "status": "planned"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "HWM_STR",
+      "claim_id": "reclaim",
+      "mode": "resp",
+      "records": 1000000,
+      "key_bytes": 18,
+      "value_bytes": 64,
+      "pattern": "per-key-unique-high-entropy",
+      "phases": [
+        "grow-1m",
+        "delete-95pct-deterministic-scattered",
+        "idle-10s",
+        "refill-1m",
+        "repeat-delete-idle-refill-twice"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "survivors": 50000,
+      "reader_epoch_obligation": "separate isolated ownership regression; RESP cannot hold a storage epoch",
+      "steady_string_access_contract": "string_access_contract"
+    },
+    {
+      "id": "HWM_OBJECT",
+      "claim_id": "reclaim",
+      "mode": "resp",
+      "records": 100000,
+      "key_bytes": 18,
+      "value_bytes": 16,
+      "pattern": "binary-and-integer-fields",
+      "phases": [
+        "grow-four-types-four-elements",
+        "delete-95pct-scattered",
+        "idle-10s",
+        "refill",
+        "repeat-twice"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "types": {
+        "hash": 25000,
+        "set": 25000,
+        "zset": 25000,
+        "list": 25000
+      },
+      "field_bytes": 16,
+      "survivors": 5000,
+      "steady_access_contract": "aggregate_access_contract",
+      "lifecycle_command_contract": "aggregate_access_contract.lifecycle"
+    },
+    {
+      "id": "META_GENERAL",
+      "claim_id": "metadata",
+      "mode": "resp",
+      "records": 100000,
+      "key_bytes": 65,
+      "value_bytes": 64,
+      "pattern": "per-key-unique-high-entropy",
+      "phases": [
+        "no-ttl",
+        "ttl-1pct-7200000ms",
+        "ttl-all-7200000ms",
+        "persist-all",
+        "overwrite-generation",
+        "absolute-expiry-1000-keys"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "expiry_observations_ms": [
+        -1000,
+        1000
+      ],
+      "clock_error_bound_ms": 10,
+      "ttl_absolute_deadline_unix_ms": null,
+      "general_admission": "65-byte keys; compact TTL/demotion is not this optimization",
+      "steady_string_access_contract": "string_access_contract"
+    },
+    {
+      "id": "META_POLICY",
+      "claim_id": "metadata",
+      "mode": "resp",
+      "records": 100000,
+      "key_bytes": 18,
+      "value_bytes": 1024,
+      "pattern": "per-key-unique-high-entropy",
+      "phases": [
+        "load-policy-enabled",
+        "ttl-1pct-7200000ms",
+        "overwrite-all",
+        "delete-half",
+        "idle-10s",
+        "refill"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "policies": {
+        "memory_limit_bytes": 2147483648,
+        "eviction": "lru",
+        "required_evicted_keys": 0
+      },
+      "source_configuration_binding": null,
+      "general_admission": "1024-byte values; no eviction may occur",
+      "steady_string_access_contract": "string_access_contract"
+    },
+    {
+      "id": "ARENA_DENSE",
+      "claim_id": "arena",
+      "mode": "resp",
+      "records": 802000,
+      "key_bytes": 18,
+      "value_bytes": 64,
+      "pattern": "per-key-unique-high-entropy",
+      "phases": [
+        "load-802000",
+        "grow-802816",
+        "grow-803000",
+        "grow-900000",
+        "delete-95pct-scattered",
+        "refill-900000"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "cardinality_steps": [
+        802000,
+        802816,
+        803000,
+        900000
+      ],
+      "theoretical_dense_boundary_per_shard": 802816,
+      "actual_fallback_boundary": null,
+      "policies": {
+        "memory_limit": null,
+        "eviction": "none"
+      },
+      "arena_budget_bytes": null,
+      "steady_string_access_contract": "string_access_contract"
+    },
+    {
+      "id": "ARENA_EDGE",
+      "claim_id": "arena",
+      "mode": "resp",
+      "records": 90000,
+      "key_bytes": [
+        63,
+        64,
+        65
+      ],
+      "value_bytes": [
+        255,
+        256,
+        257
+      ],
+      "pattern": "per-key-unique-high-entropy",
+      "phases": [
+        "load-nine-10000-key-cohorts",
+        "delete-95pct-scattered",
+        "refill-rotate-size-classes",
+        "repeat-twice"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "cohort_rule": "Cartesian key/value lengths, exactly 10000 records each",
+      "policies": {
+        "memory_limit": null,
+        "eviction": "none"
+      },
+      "arena_budget_bytes": null,
+      "steady_string_access_contract": "string_access_contract"
+    },
+    {
+      "id": "HINT_RESP_CONTROL",
+      "claim_id": "hint",
+      "mode": "resp",
+      "records": 100000,
+      "key_bytes": 18,
+      "value_bytes": 16,
+      "pattern": "original-metadata-trace",
+      "phases": [
+        "load",
+        "ttl-10pct-7200000ms",
+        "persist",
+        "delete",
+        "reinsert-changed-generation"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "general_capacity_hint": null,
+      "expected_effect": "negative applicability control; default RESP passes None",
+      "prescribed_reuse": {
+        "suite": "original378",
+        "selector": "metadata",
+        "arms": [
+          "current016",
+          "redis"
+        ],
+        "condition": "exact scenario/seed/generation/trace/argv/features/limits and complete independently accepted raw evidence; pending"
+      },
+      "steady_string_access_contract": "string_access_contract.original_metadata_override"
+    },
+    {
+      "id": "AGG_SMALL",
+      "claim_id": "aggregates",
+      "mode": "resp",
+      "records": 100000,
+      "key_bytes": 18,
+      "value_bytes": [
+        16,
+        256
+      ],
+      "pattern": "binary-integer-and-long-fields",
+      "phases": [
+        "load-one-element",
+        "grow-four",
+        "grow-five",
+        "grow-eight",
+        "shrink-one",
+        "idle-10s"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "types": {
+        "hash": 25000,
+        "set": 25000,
+        "zset": 25000,
+        "list": 25000
+      },
+      "encoding_checks": [
+        "leading-zero and signed integer bytes",
+        "binary NUL",
+        "zset equal-score lexicographic ties",
+        "list order"
+      ],
+      "field_length_rule": "even indexed objects 16 bytes; odd indexed objects 256 bytes",
+      "steady_access_contract": "aggregate_access_contract",
+      "lifecycle_command_contract": "aggregate_access_contract.lifecycle"
+    },
+    {
+      "id": "AGG_OSCILLATE",
+      "claim_id": "aggregates",
+      "mode": "resp",
+      "records": 100000,
+      "key_bytes": 18,
+      "value_bytes": 16,
+      "pattern": "binary-integer-fields",
+      "phases": [
+        "load-four-hash-set-zset-or-eight-list",
+        "oscillate-4-5-or-list-8-9-ten-times",
+        "grow-33",
+        "shrink-one",
+        "idle-10s"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "types": {
+        "hash": 25000,
+        "set": 25000,
+        "zset": 25000,
+        "list": 25000
+      },
+      "additional_correctness_obligations": [
+        "hash field TTL where supported",
+        "snapshot/persistence round-trip",
+        "binary formatting and zset rank"
+      ],
+      "steady_access_contract": "aggregate_access_contract",
+      "lifecycle_command_contract": "aggregate_access_contract.lifecycle"
+    },
+    {
+      "id": "COLD_TEXT",
+      "claim_id": "compression",
+      "mode": "resp",
+      "records": 100000,
+      "key_bytes": 18,
+      "value_bytes": 4096,
+      "pattern": "per-key-unique-compressible-json",
+      "phases": [
+        "load",
+        "hot1000-90pct-80-20",
+        "idle-10s",
+        "rotate-hotset",
+        "read-every-cold-key-burst",
+        "overwrite-generation",
+        "ttl-1pct-persist"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "cold_key_reads": 99000,
+      "codec": null,
+      "decode_buffer_cap_bytes": null,
+      "steady_string_access_contract": "string_access_contract"
+    },
+    {
+      "id": "COLD_ENTROPY",
+      "claim_id": "compression",
+      "mode": "resp",
+      "records": 100000,
+      "key_bytes": 18,
+      "value_bytes": 4096,
+      "pattern": "per-key-unique-high-entropy",
+      "phases": [
+        "load",
+        "hot1000-90pct-80-20",
+        "idle-10s",
+        "rotate-hotset",
+        "read-every-cold-key-burst",
+        "overwrite-generation",
+        "ttl-1pct-persist"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "cold_key_reads": 99000,
+      "codec": null,
+      "decode_buffer_cap_bytes": null,
+      "steady_string_access_contract": "string_access_contract"
+    },
+    {
+      "id": "HINT_API_NONE",
+      "claim_id": "hint",
+      "mode": "shared-embedded-vs-redis-tcp",
+      "records": 100000,
+      "key_bytes": 18,
+      "value_bytes": 64,
+      "pattern": "per-key-unique-high-entropy",
+      "phases": [
+        "load-compact",
+        "first-ttl-general-key",
+        "ttl-general-1pct",
+        "persist",
+        "first-257-byte-general-value",
+        "oversized-10pct"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "general_capacity_hint": null,
+      "read_modes": [
+        "borrowed",
+        "owned-shared"
+      ],
+      "held_owner_limit": 1024,
+      "transport": "current/candidate shared in-process API; Redis TCP common caller",
+      "latency_unit": "caller API completion vs TCP response completion; deployment comparison",
+      "steady_string_access_contract": "string_access_contract"
+    },
+    {
+      "id": "HINT_API_1M",
+      "claim_id": "hint",
+      "mode": "shared-embedded-vs-redis-tcp",
+      "records": 100000,
+      "key_bytes": 18,
+      "value_bytes": 64,
+      "pattern": "per-key-unique-high-entropy",
+      "phases": [
+        "load-compact",
+        "first-ttl-general-key",
+        "ttl-general-1pct",
+        "persist",
+        "first-257-byte-general-value",
+        "oversized-10pct"
+      ],
+      "server_cpu_budget": 1,
+      "workers": 16,
+      "pipeline": 1,
+      "general_capacity_hint": 1000000,
+      "read_modes": [
+        "borrowed",
+        "owned-shared"
+      ],
+      "held_owner_limit": 1024,
+      "transport": "current/candidate shared in-process API; Redis TCP common caller",
+      "latency_unit": "caller API completion vs TCP response completion; deployment comparison",
+      "steady_string_access_contract": "string_access_contract"
+    }
+  ],
+  "initial_evaluation_packages": [
+    {
+      "id": "initial-evaluation-01",
+      "triplets": [
+        {
+          "profile": "HWM_STR",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        },
+        {
+          "profile": "HWM_STR",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-02",
+      "triplets": [
+        {
+          "profile": "HWM_STR",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        },
+        {
+          "profile": "HWM_OBJECT",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-03",
+      "triplets": [
+        {
+          "profile": "HWM_OBJECT",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        },
+        {
+          "profile": "HWM_OBJECT",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-04",
+      "triplets": [
+        {
+          "profile": "META_GENERAL",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        },
+        {
+          "profile": "META_GENERAL",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-05",
+      "triplets": [
+        {
+          "profile": "META_GENERAL",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        },
+        {
+          "profile": "META_POLICY",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-06",
+      "triplets": [
+        {
+          "profile": "META_POLICY",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        },
+        {
+          "profile": "META_POLICY",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-07",
+      "triplets": [
+        {
+          "profile": "ARENA_DENSE",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        },
+        {
+          "profile": "ARENA_DENSE",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-08",
+      "triplets": [
+        {
+          "profile": "ARENA_DENSE",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        },
+        {
+          "profile": "ARENA_EDGE",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-09",
+      "triplets": [
+        {
+          "profile": "ARENA_EDGE",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        },
+        {
+          "profile": "ARENA_EDGE",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-10",
+      "triplets": [
+        {
+          "profile": "HINT_RESP_CONTROL",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        },
+        {
+          "profile": "HINT_RESP_CONTROL",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-11",
+      "triplets": [
+        {
+          "profile": "HINT_RESP_CONTROL",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        },
+        {
+          "profile": "AGG_SMALL",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-12",
+      "triplets": [
+        {
+          "profile": "AGG_SMALL",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        },
+        {
+          "profile": "AGG_SMALL",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-13",
+      "triplets": [
+        {
+          "profile": "AGG_OSCILLATE",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        },
+        {
+          "profile": "AGG_OSCILLATE",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-14",
+      "triplets": [
+        {
+          "profile": "AGG_OSCILLATE",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        },
+        {
+          "profile": "COLD_TEXT",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-15",
+      "triplets": [
+        {
+          "profile": "COLD_TEXT",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        },
+        {
+          "profile": "COLD_TEXT",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-16",
+      "triplets": [
+        {
+          "profile": "COLD_ENTROPY",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        },
+        {
+          "profile": "COLD_ENTROPY",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-17",
+      "triplets": [
+        {
+          "profile": "COLD_ENTROPY",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        },
+        {
+          "profile": "HINT_API_NONE",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-18",
+      "triplets": [
+        {
+          "profile": "HINT_API_NONE",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        },
+        {
+          "profile": "HINT_API_NONE",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-19",
+      "triplets": [
+        {
+          "profile": "HINT_API_1M",
+          "round": 1,
+          "arms": [
+            "current016",
+            "optimization",
+            "redis"
+          ]
+        },
+        {
+          "profile": "HINT_API_1M",
+          "round": 2,
+          "arms": [
+            "optimization",
+            "redis",
+            "current016"
+          ]
+        }
+      ],
+      "rows": 6,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    },
+    {
+      "id": "initial-evaluation-20",
+      "triplets": [
+        {
+          "profile": "HINT_API_1M",
+          "round": 3,
+          "arms": [
+            "redis",
+            "current016",
+            "optimization"
+          ]
+        }
+      ],
+      "rows": 3,
+      "status": "planned",
+      "resource_admission": null,
+      "actual": null
+    }
+  ],
+  "driver_gaps": [
+    "no generic runner accepts this plan",
+    "new lifecycle selectors/collection/hinted API/cold transitions",
+    "exact absolute-expiry oracle and per-key-unique generation",
+    "instrumentation for occupancy, reclaim, decode peaks and allN vectors",
+    "fixed offered-rate missed/backlog telemetry and scheduled-arrival timing if claimed",
+    "actual inserted-capacity checkpoint driver",
+    "mode-specific RESP/SCNP/embedded common executable and resource admissions",
+    "deterministic type-preserving aggregate access/lifecycle commands, checked replies, operation/command/transition counts and mode-specific timing/paths under aggregate_access_contract",
+    "Cohort-aware string access with persistent-key SET XX touches, TTL-write exclusion, labeled read-only all-TTL phases, controlled-expiry exclusion and checked mode-specific replies; common driver/API/SCNP qualification and actual admission NULL. Original metadata source trace remains unchanged; added windows are fresh extensions."
+  ],
+  "source_advisory_sha256": "80a4b4f319a4c90a616448a72e97b8c88a90ba59036e29fe1cf99c5658cc6539",
+  "aggregate_access_contract": {
+    "profile_ids": [
+      "HWM_OBJECT",
+      "AGG_SMALL",
+      "AGG_OSCILLATE"
+    ],
+    "scope": "Steady measured typed access between separately declared lifecycle transitions; original string GET/SET and all retained378/243 inputs unchanged.",
+    "mix_label": "80/20 typed reads/idempotent existing-element writes",
+    "selector": "Uniform selection from the frozen phase live object-key manifest, then one existing element label (list in-range index) from that object canonical manifest; never missing/deleted keys for this steady mix.",
+    "determinism": "Freeze seed/profile/phase/worker/local-sequence and exact binary field/member/value/score/index arguments before dispatch. Each worker repeats four reads then one touch write. All arms share each worker trace/arguments; completed timed prefixes may differ and are retained with actual read/write/command/error counts.",
+    "phase_state_invariant": "A steady write repeats the current canonical element bytes or score, preserving all retained types/cardinalities/memberships/order/ranks/ties. Idempotence makes the final expected state independent of concurrent interleaving and differing completed prefixes. No timed generation advance. This is touch-write throughput, not membership/value churn.",
+    "typed_commands": {
+      "hash": {
+        "read": [
+          "HGET",
+          "key",
+          "existing_field"
+        ],
+        "read_expected": "exact canonical value bytes, not nil",
+        "write": [
+          "HSET",
+          "key",
+          "existing_field",
+          "current_canonical_value"
+        ],
+        "write_expected": "integer0; existing field unchanged",
+        "growth_one_element": [
+          "HSET",
+          "key",
+          "new_field",
+          "canonical_value"
+        ],
+        "growth_expected": "integer1",
+        "shrink_one_element": [
+          "HDEL",
+          "key",
+          "prescribed_removed_field"
+        ],
+        "shrink_expected": "integer1"
+      },
+      "set": {
+        "read": [
+          "SISMEMBER",
+          "key",
+          "existing_member"
+        ],
+        "read_expected": "integer1",
+        "write": [
+          "SADD",
+          "key",
+          "existing_member"
+        ],
+        "write_expected": "integer0; no new member",
+        "growth_one_element": [
+          "SADD",
+          "key",
+          "new_canonical_member"
+        ],
+        "growth_expected": "integer1",
+        "shrink_one_element": [
+          "SREM",
+          "key",
+          "prescribed_removed_member"
+        ],
+        "shrink_expected": "integer1"
+      },
+      "zset": {
+        "read": [
+          "ZSCORE",
+          "key",
+          "existing_member"
+        ],
+        "read_expected": "exact canonical finite numeric score, not nil; validate numeric equality without assuming identical textual score formatting",
+        "write": [
+          "ZADD",
+          "key",
+          "current_canonical_score",
+          "existing_member"
+        ],
+        "write_expected": "integer0 with no CH option; score/member/ranks/ties unchanged",
+        "growth_one_element": [
+          "ZADD",
+          "key",
+          "canonical_score",
+          "new_canonical_member"
+        ],
+        "growth_expected": "integer1",
+        "shrink_one_element": [
+          "ZREM",
+          "key",
+          "prescribed_removed_member"
+        ],
+        "shrink_expected": "integer1"
+      },
+      "list": {
+        "read": [
+          "LINDEX",
+          "key",
+          "existing_in_range_index"
+        ],
+        "read_expected": "exact canonical value bytes at that index, not nil",
+        "write": [
+          "LSET",
+          "key",
+          "existing_in_range_index",
+          "current_canonical_value"
+        ],
+        "write_expected": "OK; length/order/bytes unchanged",
+        "growth_one_element": [
+          "RPUSH",
+          "key",
+          "new_canonical_tail_value"
+        ],
+        "growth_expected": "new exact list length",
+        "shrink_to_nonempty_prefix": [
+          "LTRIM",
+          "key",
+          "0",
+          "m-1"
+        ],
+        "shrink_expected": "OK with exact retained prefix length m"
+      }
+    },
+    "field_ttl_semantics": "No field TTL in these comparative steady states. Same-value HSET does not preserve field TTL; separate field-TTL/snapshot/semantic obligations remain isolated correctness coverage as originally declared.",
+    "lifecycle": {
+      "same_arm_trace": "All current016/optimization/Redis arms replay identical explicit growth/shrink/whole-key deletion/refill phase commands and exact expected state, independent of elapsed time. Only prescribed added/refilled element generations advance; retained prefixes keep canonical identities. Freeze every phase trace/payload and checksum before dispatch.",
+      "growth_or_creation": "One new element per HSET/SADD/ZADD/RPUSH, with checked reply. Retain binary/integer-like/long-field cases and zset score ties/list order. An m-element object is created with m commands and becomes one complete logical object.",
+      "shrink": "Remove exactly prescribed suffix element identities using one HDEL/SREM/ZREM per element; lists use one LTRIM key0 m-1 for nonempty canonical prefix m. Never remove the last element except an explicit whole-key delete phase.",
+      "whole_key_delete": [
+        "DEL",
+        "prescribed_live_key"
+      ],
+      "whole_key_delete_expected": "integer1, with exhaustive absence check",
+      "HWM_OBJECT_deletion": "Deterministically scattered95% deletion within each25k type cohort,1250 survivors/type and5000 total; each refill uses that same type creation trace and frozen generation bytes.",
+      "profile_phase_shapes": {
+        "HWM_OBJECT": "four elements/object; delete/refill three cycles with four-type counts retained",
+        "AGG_SMALL": "1->4->5->8->1 elements/object; binary field length16/256 follows original object-index rule",
+        "AGG_OSCILLATE": "ten4<->5 cycles for hash/set/zset or8<->9 for list, then33->1 elements/object"
+      },
+      "actual_trace_sha256": null,
+      "canonical_expected_states": null
+    },
+    "counting_and_timing": {
+      "steady_logical_operation": "one typed access command/request/checked reply; completed logical access ops equals completed steady data commands",
+      "steady_counts": "Report read/touch-write/offered/submitted/completed/error/missed/deferred counts and every worker prefix; a partial five-operation cycle has actual counts, not invented exact80/20.",
+      "transition_operation": "one complete logical record transition, possibly multiple sequential commands; record transitions, underlying command count and element/cardinality deltas separately",
+      "command_counts": "grow n->m:m-n element commands; create0->m:m commands; hash/set/zset shrink n->m:n-m deletion commands; list shrink n->m:one LTRIM; whole-key deletion:one DEL. Count all actual replies/errors and preserve incomplete transitions.",
+      "validation_control_commands": "separate commands/counts, excluded from steady access throughput and logical mutation counts",
+      "steady_latency_units": "nanoseconds per one checked single-command completion, pipeline1, sampling_rate1",
+      "transition_latency_units": "nanoseconds per complete logical record transition from first mutation request through its last checked reply; never divide by command count or pool with single-command p99",
+      "fixed_offered_target_units": "logical typed access ops/s, exactly one steady RESP command/access; growth/shrink/refill/validation are outside that offered-rate stream with distinct counts/timings",
+      "failure_rule": "Any wrong type, nil missing element, unexpected integer/reply, bytes/score/rank/order/cardinality drift, duplicate/missing worker, protocol error or incomplete transition fails qualification; partial records/retries do not become successes."
+    },
+    "later_applicability": {
+      "CPU4_16": "AGG_SMALL uses the same typed steady/lifecycle trace, global dataset, elements and timing units at each CPU budget; no per-shard input multiplication.",
+      "fixed_offered": "AGG_SMALL needs a separately implemented/qualified common typed paced driver; current curve/saturation GET/SET is not an aggregate adapter. No target rate or scheduled-arrival latency is inferred from existing closed-loop support.",
+      "inserted_capacity": "AGG_SMALL counts fully populated typed objects at the declared phase shape, not fields/commands. A1k-object batch records every element/byte/creation/transition command and validates only complete identical canonical objects at checkpoints; partial objects cannot inflate capacity.",
+      "SCNP_direct_shared": "Preserve AGG_SMALL logical typed operation/transition/count/timing/expected-state contract with typed RESP on Redis. Existing benchmark SCNP workers expose GET/SET only, not a qualified aggregate path. Actual typed protocol support, common mode driver and qualification/admission remain NULL; no string packing, type substitution or implicit support claim.",
+      "typed_RESP_driver_qualification": null,
+      "typed_paced_driver_qualification": null,
+      "typed_capacity_driver_qualification": null,
+      "SCNP_direct_typed_path_qualification": null,
+      "SCNP_shared_typed_path_qualification": null
+    },
+    "implementation": null,
+    "execution_admission": null,
+    "actuals": null
+  },
+  "string_access_contract": {
+    "status": "PLANNED_NOT_IMPLEMENTED_NOT_QUALIFIED",
+    "applies_to": "New string steady windows in initial and applicable CPU/offered-load/capacity/mode selectors; byte-identical original metadata trace is an explicit exception.",
+    "cohorts": "Freeze live-key, persistent-key, TTL-bearing-key and controlled-expiry exclusions before each window; reads select live keys uniformly or the declared hot/cold split, writes select only existing persistent keys. Freeze profile/phase/worker/sequence choices and use identical logical schedules and replies in all arms; retain actual differing timed prefixes.",
+    "read": {
+      "command": "GET key",
+      "expected_reply": "exact canonical bytes, never nil on an admitted live target"
+    },
+    "write": {
+      "command": "SET key canonical_value XX",
+      "expected_reply": "OK; nil/failed XX condition/error fails qualification",
+      "selection": "only existing persistent keys; every TTL-bearing or absent key excluded",
+      "state": "idempotent value touch; preserve type/value/persistent state; never recreate absent keys or change generation"
+    },
+    "mix": {
+      "persistent_keys_available": "four reads then one persistent-key touch per worker; label80/20 reads/persistent-key touches, not uniform writes across TTL-bearing keys",
+      "all_keys_have_ttl": "read-only GET window with zero writes, explicit actual phase mix/counts; never label80/20"
+    },
+    "controlled_expiry": {
+      "profile": "META_GENERAL",
+      "excluded_keys": 1000,
+      "interval": "exclude from all steady access from absolute-deadline installation through both prescribed observations",
+      "oracle": "separate checked canonical bytes/type before expiry and complete absence after expiry; preserve original observation offsets and verified clock bound"
+    },
+    "window_safety": "Other selected targets must remain live throughout the bounded window. Unplanned expiry, nil, failed condition, changed type/value/deadline/absence or error fails qualification. No steady TTL mutation or deadline reset.",
+    "lifecycle": "TTL installation/PERSIST, prescribed generation overwrite, deletion and refill are separate exact traces. New-profile ordinary overwrite/creation SET deliberately clears TTL and records persistent expected state unless a declared TTL-setting transition follows. Validate command-specific replies, frozen generation/bytes and matched per-arm expiry/absence schedule with each real absolute deadline recorded. Original metadata trace retains original semantics unchanged.",
+    "counting_and_latency": "One steady logical access is one checked command; report every worker prefix and actual reads/writes/errors. Pipeline1 latency is ns per command completion. Validation/TTL control/lifecycle counts and multi-command record-transition clocks stay separate; no partial or failed operations count as successful.",
+    "original_metadata_override": {
+      "profile": "HINT_RESP_CONTROL",
+      "authoritative": "original source016 metadata phases/arguments/values override global per-key uniqueness and new steady traffic policy",
+      "unchanged_scope": "byte-identical original phases/arguments/values remain candidate exact original378 subsets, subject to original full closure and independent acceptance",
+      "extensions": "Any added steady TTL-safe window, changed generator or TTL policy is a separately labeled fresh extension within existing planned row counts; cannot inherit whole-row evidence or claim byte-identical equivalence for the extension",
+      "changes_to_original378": false
+    },
+    "later_selector_contract": "Applicable CPU and offered-load string selectors inherit cohort/mix/deadline/absence rules. Capacity creation is a separate declared persistent-state transition, not steady traffic; report logical records and command counts. Future SCNP/API paths must implement the same logical policy and checked replies before qualification; current mode labels establish no support.",
+    "implementation": null,
+    "driver_qualification": null,
+    "mode_specific_api_scnp_qualification": null,
+    "execution_admission": null,
+    "actual_results": null,
+    "expiry_clock_contract": {
+      "schedule": "same logical deadline/observation offsets relative to each declared arm anchor; serial fresh arms do not share a wall-clock deadline",
+      "record": "each arm anchor, real absolute Unix deadline and bracketed observations/query intervals",
+      "comparison": "normalize only for canonical logical oracle; preserve every real timestamp, never equate different absolute deadlines",
+      "clock_and_actual_admission": null
+    }
+  }
+}

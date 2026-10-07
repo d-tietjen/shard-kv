@@ -43,7 +43,7 @@ impl crate::commands::redis::RedisCommand for ZAdd {
         }
         let mut total = 0_i64;
         let mut last_bulk = None;
-        for pair in args[index..].chunks_exact(2) {
+        for pair in args[index..].as_chunks::<2>().0 {
             let Ok(score) = parse_f64(pair[0]) else {
                 return error("ERR value is not a valid float");
             };
@@ -97,7 +97,7 @@ impl crate::commands::redis::RedisCommand for ZAdd {
         }
         let mut total = 0_i64;
         let mut last_bulk = None;
-        for pair in args[index..].chunks_exact(2) {
+        for pair in args[index..].as_chunks::<2>().0 {
             let Ok(score) = parse_f64(pair[0]) else {
                 ServerWire::write_resp_error(out, "ERR value is not a valid float");
                 return;

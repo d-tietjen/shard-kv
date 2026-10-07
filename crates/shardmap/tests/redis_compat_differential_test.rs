@@ -805,7 +805,9 @@ fn sorted_bulk_pairs(frame: Frame) -> Vec<(Vec<u8>, Vec<u8>)> {
         "expected even pair array length"
     );
     let mut pairs = items
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             let key = match &pair[0] {
                 Frame::BlobString(value) => value.clone(),

@@ -891,7 +891,7 @@ fn parse_sha1_hex(raw: &[u8]) -> Option<[u8; 20]> {
         return None;
     }
     let mut digest = [0_u8; 20];
-    for (index, chunk) in raw.chunks_exact(2).enumerate() {
+    for (index, chunk) in raw.as_chunks::<2>().0.iter().enumerate() {
         digest[index] = (hex_value(chunk[0])? << 4) | hex_value(chunk[1])?;
     }
     Some(digest)
@@ -924,12 +924,11 @@ fn sha1(input: &[u8]) -> [u8; 20] {
     ];
     let bit_len = (input.len() as u64).wrapping_mul(8);
 
-    let mut chunks = input.chunks_exact(64);
-    for chunk in &mut chunks {
+    let (chunks, remainder) = input.as_chunks::<64>();
+    for chunk in chunks {
         sha1_process_chunk(&mut state, chunk);
     }
 
-    let remainder = chunks.remainder();
     let mut block = [0_u8; 64];
     block[..remainder.len()].copy_from_slice(remainder);
     block[remainder.len()] = 0x80;

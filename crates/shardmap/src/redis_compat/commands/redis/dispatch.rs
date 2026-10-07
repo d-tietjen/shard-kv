@@ -556,15 +556,11 @@ fn native_set(store: &EmbeddedStore, args: &[&[u8]]) -> Frame {
     if !options.condition.matches(exists, current.as_deref()) {
         return Frame::Null;
     }
-    let ttl_ms = if options.keep_ttl {
-        match store.pttl_millis(key) {
-            ttl if ttl >= 0 => Some(ttl as u64),
-            _ => None,
-        }
+    if options.keep_ttl {
+        store.set_slice_keep_ttl(key, value, true);
     } else {
-        options.ttl_ms
-    };
-    store.set(key.to_vec(), value.to_vec(), ttl_ms);
+        store.set(key.to_vec(), value.to_vec(), options.ttl_ms);
+    }
     if options.get {
         current.map_or(Frame::Null, Frame::BlobString)
     } else {
@@ -939,4 +935,74 @@ fn command_has_no_route_key(name: &str) -> bool {
             | "XREADGROUP"
             | "SCRIPT"
     )
+}
+
+#[cfg(all(test, not(feature = "no-ttl")))]
+mod keepttl_native_apply_tests {
+    use super::*;
+
+    #[test]
+    fn native_keepttl_preserves_exact_absolute_deadline() {
+        let store = EmbeddedStore::new(1);
+        let key = b"native-keepttl-deadline".as_slice();
+        store.set(key.to_vec(), b"original".to_vec(), Some(60_000));
+        let before = store.try_entry_snapshot().expect("before snapshot");
+        let deadline = before
+            .iter()
+            .find(|entry| entry.key.as_slice() == key)
+            .expect("seeded entry")
+            .expire_at_ms;
+        assert!(deadline.is_some());
+        assert!(matches!(
+            native_set(&store, &[key, b"updated", b"KEEPTTL"]),
+            Frame::SimpleString(_)
+        ));
+        let after = store.try_entry_snapshot().expect("after snapshot");
+        let updated = after
+            .iter()
+            .find(|entry| entry.key.as_slice() == key)
+            .expect("updated entry");
+        assert_eq!(updated.value.as_slice(), b"updated");
+        assert_eq!(updated.expire_at_ms, deadline);
+    }
+
+    #[test]
+    fn native_keepttl_owned_replacement_clears_governance() {
+        let key = b"native-keepttl-governed".as_slice();
+        for keep in [false, true] {
+            let store = EmbeddedStore::new(4);
+            store.set_value_bytes_with_governance(
+                key,
+                bytes::Bytes::from_static(b"original"),
+                Some(60_000),
+                bytes::Bytes::from_static(b"policy"),
+            );
+            let before = store
+                .try_entry_snapshot()
+                .expect("governed before snapshot");
+            let deadline = before
+                .iter()
+                .find(|entry| entry.key.as_slice() == key)
+                .expect("governed seed")
+                .expire_at_ms;
+            if keep {
+                assert!(matches!(
+                    native_set(&store, &[key, b"updated", b"KEEPTTL"]),
+                    Frame::SimpleString(_)
+                ));
+            } else {
+                store.set(key.to_vec(), b"updated".to_vec(), Some(60_000));
+            }
+            let after = store.try_entry_snapshot().expect("governed after snapshot");
+            let updated = after
+                .iter()
+                .find(|entry| entry.key.as_slice() == key)
+                .expect("visible replacement");
+            assert_eq!(updated.governance, None);
+            assert_eq!(store.get(key), Some(b"updated".to_vec()));
+            if keep {
+                assert_eq!(updated.expire_at_ms, deadline);
+            }
+        }
+    }
 }

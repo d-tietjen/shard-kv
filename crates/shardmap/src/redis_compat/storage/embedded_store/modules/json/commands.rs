@@ -50,7 +50,7 @@ impl EmbeddedStore {
                 )
             }
             "JSON.MSET" if args.len() >= 3 && args.len().is_multiple_of(3) => {
-                for triple in args.chunks_exact(3) {
+                for triple in args.as_chunks::<3>().0 {
                     let result = self.json_api_execute("JSON.SET", triple);
                     if matches!(result, RedisModuleApiResult::Error(_)) {
                         return result;

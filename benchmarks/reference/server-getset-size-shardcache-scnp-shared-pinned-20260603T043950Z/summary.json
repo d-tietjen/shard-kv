@@ -1,8 +1,8 @@
 {
   "schema_version": 3,
   "label": "standardized server benchmark server-suite-20260603T043950Z",
-  "source_csv": "/home/dtietjen/shard-kv-bench-shared-scnp.kzgP5a/benchmarks/results/server-getset-size-shardcache-scnp-shared-pinned-20260603T043950Z/server-suite-20260603T043950Z/shardcache-scnp.csv",
-  "primary_csv": "/home/dtietjen/shard-kv-bench-shared-scnp.kzgP5a/benchmarks/results/server-getset-size-shardcache-scnp-shared-pinned-20260603T043950Z/server-suite-20260603T043950Z/shardcache-scnp.csv",
+  "source_csv": "shardcache-scnp.csv",
+  "primary_csv": "shardcache-scnp.csv",
   "reference_csvs": [
   ],
   "baseline": "shardcache-scnp",
@@ -24,5 +24,6 @@
     }
   ],
   "comparisons": [
-  ]
+  ],
+  "private_capture_roots_redacted": true
 }

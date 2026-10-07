@@ -16,11 +16,12 @@ package_crate() {
   cargo package -p "$package" --locked --allow-dirty "$@"
 }
 
-package_crate_with_local_shardmap_patch() {
+package_crate_with_local_dependency_patches() {
   local package="$1"
   shift
   cargo package -p "$package" --locked --allow-dirty \
     --config "patch.crates-io.shardmap.path=\"$root/crates/shardmap\"" \
+    --config "patch.crates-io.shardcache-client-rs.path=\"$root/crates/shardcache-client-rs\"" \
     "$@"
 }
 
@@ -32,7 +33,7 @@ package_shardmap_with_local_client_patch() {
 unpack_crate() {
   local package="$1"
   local version="$2"
-  local crate_file="$root/target/package/${package}-${version}.crate"
+  local crate_file="${CARGO_TARGET_DIR:-$root/target}/package/${package}-${version}.crate"
 
   if [[ ! -f "$crate_file" ]]; then
     echo "missing packaged crate: $crate_file" >&2
@@ -109,7 +110,7 @@ package_shardmap_with_local_client_patch
 # shardmap release, that exact version is not indexed on crates.io yet. Use a
 # temporary Cargo patch only while creating the dependent archive so CI can
 # still validate the packaged source before the publish-order handoff.
-package_crate_with_local_shardmap_patch shardcache --no-verify
+package_crate_with_local_dependency_patches shardcache --no-verify
 
 unpack_crate shardmap "$shardmap_version"
 unpack_crate shardcache "$shardcache_version"

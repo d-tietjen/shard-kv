@@ -19,6 +19,26 @@ impl EmbeddedStore {
         <Self as RedisStringStore>::get_string_value_into(self, key, write)
     }
 
+    /// Encodes a string response under the storage borrow. Small values do not
+    /// materialize a shared owner; large queued responses may retain one.
+    #[cfg(feature = "server")]
+    pub(crate) fn get_string_value_for_response_into<F>(
+        &self,
+        key: &[u8],
+        owner_min_len: usize,
+        write: F,
+    ) -> RedisStringLookup
+    where
+        F: FnMut(&[u8], Option<&bytes::Bytes>),
+    {
+        <Self as RedisStringStore>::get_string_value_for_response_into(
+            self,
+            key,
+            owner_min_len,
+            write,
+        )
+    }
+
     pub fn hset(&self, key: &[u8], field: &[u8], value: &[u8]) -> RedisObjectResult {
         <Self as RedisHashStore>::hset(self, key, field, value)
     }

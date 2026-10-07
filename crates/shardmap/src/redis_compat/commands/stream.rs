@@ -109,7 +109,9 @@ fn xadd_update(store: &EmbeddedStore, args: &[&[u8]]) -> Result<StreamId, Frame>
         return Err(wrong_arity("XADD"));
     }
     let fields = args[index..]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| (chunk[0], chunk[1]))
         .collect::<Vec<_>>();
     store.transform_string_value_no_ttl(

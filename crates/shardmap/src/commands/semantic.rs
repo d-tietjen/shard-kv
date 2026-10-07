@@ -108,8 +108,10 @@ fn parse_embedding_arg(raw: &[u8]) -> Result<Vec<f32>, String> {
         return Err("ERR semantic embedding must be non-empty little-endian f32 bytes".into());
     }
     Ok(raw
-        .chunks_exact(std::mem::size_of::<f32>())
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("chunk has four bytes")))
+        .as_chunks::<{ std::mem::size_of::<f32>() }>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
         .collect())
 }
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.9.1 - Unreleased
+
+### Added
+
+- Added feature-gated compact point storage and its correctness, fault, and
+  benchmark coverage. Production memory and performance qualification remains
+  pending; historical diagnostics retain their original source and scope.
+
+### Fixed
+
+- Preserved absolute SET KEEPTTL deadlines across delayed writes and cold
+  overflow values.
+- Restored strict CUDA feature builds and explicit rejection of incomplete
+  benchmark summary rows.
+- Aligned package versions and internal dependency minimums with the new
+  compact-storage features, including pre-publication archive validation.
+
 ## 0.9.0 - 2026-07-29
 
 ### Changed

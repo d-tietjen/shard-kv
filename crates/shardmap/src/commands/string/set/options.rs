@@ -1,5 +1,3 @@
-#[cfg(feature = "server")]
-use crate::storage::EmbeddedStore;
 use crate::{Result, ShardCacheError};
 
 #[cfg(feature = "server")]
@@ -122,14 +120,12 @@ impl SetOptions {
         }
     }
 
-    pub(super) fn ttl_ms(self, store: &EmbeddedStore, key: &[u8]) -> Option<u64> {
-        match self.keep_ttl {
-            true => match store.pttl_millis(key) {
-                ttl if ttl >= 0 => Some(ttl as u64),
-                _ => None,
-            },
-            false => self.ttl_ms,
-        }
+    pub(super) fn ttl_ms(self) -> Option<u64> {
+        self.ttl_ms
+    }
+
+    pub(super) fn keep_ttl(self) -> bool {
+        self.keep_ttl
     }
 }
 

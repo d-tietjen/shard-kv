@@ -184,7 +184,9 @@ fn parse_msetex_args<'a>(args: &'a [&'a [u8]]) -> Result<MSetExArgs<'a>, Frame> 
         return Err(wrong_arity("MSETEX"));
     }
     let pairs = tail[..pair_len]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| (pair[0], pair[1]))
         .collect::<Vec<_>>();
     let (condition, expiration) = parse_setlike_options(&tail[pair_len..])?;
