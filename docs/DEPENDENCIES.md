@@ -91,7 +91,7 @@ OpenSSL-backed Rustls provider.
 | `cc` | `1.2.62` | MIT OR Apache-2.0 | crates.io |
 | `cfg-if` | `1.0.4` | MIT OR Apache-2.0 | crates.io |
 | `cfg_aliases` | `0.2.1` | MIT | crates.io |
-| `chacha20` | `0.10.1` | MIT OR Apache-2.0 | crates.io |
+| `chacha20` | `0.10.2` | MIT OR Apache-2.0 | crates.io |
 | `chrono` | `0.4.45` | MIT OR Apache-2.0 | crates.io |
 | `clap_builder` | `4.6.0` | MIT OR Apache-2.0 | crates.io |
 | `clap_derive` | `4.6.1` | MIT OR Apache-2.0 | crates.io |
