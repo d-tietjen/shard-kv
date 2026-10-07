@@ -175,6 +175,8 @@ fn dataset_hash(maps: usize, keys: &[Vec<u8>], value: &[u8]) -> String {
     format!("{:x}", digest.finalize())
 }
 
+// Keep the fixed checkpoint protocol fields explicit at every phase boundary.
+#[allow(clippy::too_many_arguments)]
 fn checkpoint(
     batch: usize,
     phase: &str,
