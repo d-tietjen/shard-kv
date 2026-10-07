@@ -76,10 +76,11 @@ and bytes, and value length and bytes; empty states have the fixed header digest
 The eight-reader phase constructs threads before a Barrier and times each
 getter after it. It checks one winning owner identity and cloned content.
 Clone checking is outside getter timing; clones are released before the memory
-snapshot. Its warm phase remains single-threaded. A Barrier does not prove eight
-internal initializer copies: the candidate's forced-initializer regression must
-prove winner/loser-drop behavior separately. The driver uses safe public APIs and
-has no access to initializer or private allocation counters.
+snapshot. Its warm phase remains single-threaded. A Barrier does not prove
+concurrent initializer calls. Both sources use `OnceLock::get_or_init`; this
+diagnostic checks public owner identity and content without asserting initializer
+or discarded-initializer counts. The driver uses safe public APIs and has no
+access to private allocation counters.
 
 ## Timing, memory, and receipts
 
