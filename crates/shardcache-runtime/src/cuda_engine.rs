@@ -480,7 +480,10 @@ impl CudaTransferEngine {
         let aligned = aligned_host_range(ptr, len, HOST_PAGE_BYTES)?;
         let existing = self.registered_host_ranges();
         for uncovered in uncovered_host_ranges(aligned, &existing) {
-            crate::cuda_ffi::register_host_region(uncovered.start as *mut u8, uncovered.len())?;
+            crate::cuda_ffi::register_host_region(
+                uncovered.start as *mut u8,
+                uncovered.end - uncovered.start,
+            )?;
             self.temporary_registered_regions
                 .push(RegisteredHostRegion { range: uncovered });
         }
@@ -499,7 +502,10 @@ impl CudaTransferEngine {
         let mut existing = Vec::with_capacity(self.cached_session_views.len());
         for cached in &self.cached_session_views {
             for uncovered in uncovered_host_ranges(cached.range, &existing) {
-                crate::cuda_ffi::register_host_region(uncovered.start as *mut u8, uncovered.len())?;
+                crate::cuda_ffi::register_host_region(
+                    uncovered.start as *mut u8,
+                    uncovered.end - uncovered.start,
+                )?;
                 self.persistent_registered_regions
                     .push(RegisteredHostRegion { range: uncovered });
                 existing.push(uncovered);
@@ -576,26 +582,26 @@ impl CudaTransferEngine {
                 continue;
             }
 
-            if matches!(transfer.target(), RuntimeTransferTarget::Gpu(_)) {
-                if let Some(plan) = detect_strided_host_copy_plan(
+            if matches!(transfer.target(), RuntimeTransferTarget::Gpu(_))
+                && let Some(plan) = detect_strided_host_copy_plan(
                     &packed.offsets,
                     &packed.lengths,
                     &dst_offsets,
                     index,
-                ) {
-                    let src = unsafe { src_base.add(plan.src_offset) };
-                    self.submit_host_copy_2d(
-                        transfer.target(),
-                        &descriptors[index],
-                        src,
-                        plan.row_bytes,
-                        plan.row_count,
-                        plan.dst_pitch,
-                    )?;
-                    index += plan.row_count;
-                    self.advance_stream();
-                    continue;
-                }
+                )
+            {
+                let src = unsafe { src_base.add(plan.src_offset) };
+                self.submit_host_copy_2d(
+                    transfer.target(),
+                    &descriptors[index],
+                    src,
+                    plan.row_bytes,
+                    plan.row_count,
+                    plan.dst_pitch,
+                )?;
+                index += plan.row_count;
+                self.advance_stream();
+                continue;
             }
 
             let start_index = index;
@@ -669,23 +675,22 @@ impl CudaTransferEngine {
                 continue;
             }
 
-            if matches!(transfer.target(), RuntimeTransferTarget::Gpu(_)) {
-                if let Some(plan) =
+            if matches!(transfer.target(), RuntimeTransferTarget::Gpu(_))
+                && let Some(plan) =
                     detect_strided_host_copy_plan(offsets, lengths, &dst_offsets, index)
-                {
-                    let src = unsafe { src_base.add(plan.src_offset) };
-                    self.submit_host_copy_2d(
-                        transfer.target(),
-                        &descriptors[index],
-                        src,
-                        plan.row_bytes,
-                        plan.row_count,
-                        plan.dst_pitch,
-                    )?;
-                    index += plan.row_count;
-                    self.advance_stream();
-                    continue;
-                }
+            {
+                let src = unsafe { src_base.add(plan.src_offset) };
+                self.submit_host_copy_2d(
+                    transfer.target(),
+                    &descriptors[index],
+                    src,
+                    plan.row_bytes,
+                    plan.row_count,
+                    plan.dst_pitch,
+                )?;
+                index += plan.row_count;
+                self.advance_stream();
+                continue;
             }
 
             let start_index = index;

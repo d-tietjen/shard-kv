@@ -44,6 +44,8 @@ pub struct ConnectorTransferReport {
 }
 
 #[derive(Debug)]
+// Preserve the public handle shape and keep submission free of a new allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum ConnectorTransferHandle {
     Completed(ConnectorTransferReport),
     #[cfg(all(feature = "cuda", target_os = "linux"))]
@@ -690,7 +692,7 @@ mod tests {
                     device_ordinal: 0,
                     stream_ordinal: 0,
                     allocation_id: 9001,
-                    dst_device_ptr: device_buffer.as_device_ptr().as_raw() as u64,
+                    dst_device_ptr: device_buffer.as_device_ptr().as_raw(),
                     dst_base_offset_bytes: 0,
                 }),
                 &mut engine,
@@ -748,7 +750,7 @@ mod tests {
                 device_ordinal: 0,
                 stream_ordinal: 0,
                 allocation_id: 9002,
-                dst_device_ptr: device_buffer.as_device_ptr().as_raw() as u64,
+                dst_device_ptr: device_buffer.as_device_ptr().as_raw(),
                 dst_base_offset_bytes: 0,
             },
         );
@@ -820,7 +822,7 @@ mod tests {
                 device_ordinal: 0,
                 stream_ordinal: 0,
                 allocation_id: 9003,
-                dst_device_ptr: device_buffer.as_device_ptr().as_raw() as u64,
+                dst_device_ptr: device_buffer.as_device_ptr().as_raw(),
                 dst_base_offset_bytes: 0,
             },
         );
@@ -890,7 +892,7 @@ mod tests {
         let mut sorted = values.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = sorted.len() / 2;
-        if sorted.len() % 2 == 0 {
+        if sorted.len().is_multiple_of(2) {
             (sorted[mid - 1] + sorted[mid]) / 2.0
         } else {
             sorted[mid]
@@ -907,6 +909,8 @@ mod tests {
     }
 
     #[cfg(all(feature = "cuda", target_os = "linux"))]
+    // Keep the independent CUDA benchmark dimensions visible at each call site.
+    #[allow(clippy::too_many_arguments)]
     fn run_real_cuda_benchmark_case(
         case_name: &str,
         cuda: shardmap::cuda::CudaConfig,
@@ -959,7 +963,7 @@ mod tests {
                 device_ordinal: 0,
                 stream_ordinal: 0,
                 allocation_id: 9100,
-                dst_device_ptr: device_buffer.as_device_ptr().as_raw() as u64,
+                dst_device_ptr: device_buffer.as_device_ptr().as_raw(),
                 dst_base_offset_bytes: 0,
             },
         );
