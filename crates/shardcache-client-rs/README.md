@@ -374,6 +374,11 @@ base-128 varint count, then a varint byte length and raw bytes for each argument
 Keys and values are binary-safe. The encoded request must fit the header's
 `u32` body length.
 
+Owner-routed embedded listeners retain their restriction on the legacy RESP
+wrapper. Use native command-name requests on those listeners; the wrapper
+remains available on server modes that accept it, including thread-local
+embedded listeners.
+
 Simple replies retain existing SCNP statuses: OK `0`, null `1`, error `2`,
 integer `3`, blob `4`, boolean `5`, and float `7`. Recursive replies use status
 `8` with the normal `u32` body length and one native value:

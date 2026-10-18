@@ -499,6 +499,32 @@ async fn thread_local_embedded_store_can_be_exposed_as_tcp_server() {
             let get_embedded = send_command(&mut stream, &[b"GET", b"embedded-key"]).await;
             assert_eq!(get_embedded, Frame::BlobString(b"embedded-value".to_vec()));
 
+            let address = config.bind_addr.clone();
+            let native_result = tokio::task::spawn_blocking(move || {
+                use shardcache_client_rs::{RedisCommandKind, RedisResponse};
+
+                let timeout = Duration::from_secs(2);
+                let mut client =
+                    ShardCacheClient::connect_with_timeouts(&address, timeout, timeout).unwrap();
+                client
+                    .begin_pipeline_redis_command_by_name(b"GET", &[b"local-key"])
+                    .unwrap();
+                client
+                    .begin_pipeline_redis_command(RedisCommandKind::Get, &[b"local-key"])
+                    .unwrap();
+                client
+                    .begin_pipeline_redis_resp_command(b"GET", &[b"local-key"])
+                    .unwrap();
+                client.flush_pipeline().unwrap();
+                for _ in 0..3 {
+                    assert_eq!(
+                        client.finish_pipeline_redis_command().unwrap(),
+                        RedisResponse::Value(b"local-value".to_vec())
+                    );
+                }
+            })
+            .await;
+
             shutdown_tx.send(()).unwrap();
             join.await.unwrap().unwrap();
 
@@ -508,6 +534,7 @@ async fn thread_local_embedded_store_can_be_exposed_as_tcp_server() {
                 local_store.get(b"remote-key"),
                 Some(b"remote-value".to_vec())
             );
+            native_result.unwrap();
         })
         .await;
 }
@@ -665,19 +692,27 @@ async fn native_redis_client_round_trips_and_mixes_pipeline_representations() {
                     .begin_pipeline_redis_command_by_name(b"PING", &[])
                     .unwrap();
                 client.flush_pipeline().unwrap();
-                for _ in 0..3 {
+                for _ in 0..2 {
                     assert_eq!(
                         client.finish_pipeline_redis_command().unwrap(),
                         RedisResponse::Value(b"value\xff".to_vec())
                     );
                 }
+                assert!(
+                    client
+                        .finish_pipeline_redis_command()
+                        .expect_err("owner-routed workers retain their legacy RESP restriction")
+                        .to_string()
+                        .contains("requires a routed shard-local command")
+                );
                 assert!(client.finish_pipeline_redis_command().is_err());
                 assert_eq!(
                     client.finish_pipeline_redis_command().unwrap(),
                     RedisResponse::Value(b"PONG".to_vec())
                 );
+                assert!(client.redis_resp_command(b"GET", &[b"key\0"]).is_err());
                 assert_eq!(
-                    client.redis_resp_command(b"GET", &[b"key\0"]).unwrap(),
+                    client.redis_command_by_name(b"GET", &[b"key\0"]).unwrap(),
                     RedisResponse::Value(b"value\xff".to_vec())
                 );
 
