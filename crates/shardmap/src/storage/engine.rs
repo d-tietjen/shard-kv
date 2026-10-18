@@ -883,8 +883,7 @@ mod tests {
     use crate::config::ShardCacheConfig;
 
     #[tokio::test]
-    async fn native_command_names_use_engine_storage_and_recursive_responses() {
-        use shardcache_client_rs::RedisResponse;
+    async fn native_command_names_use_engine_storage_and_command_catalog() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = ShardCacheConfig::default();
         config.persistence.enabled = false;
@@ -912,19 +911,21 @@ mod tests {
                 .unwrap(),
             FastResponse::Value(b"v\0".to_vec())
         );
-        let response = engine
+        let error = engine
             .execute_fast(request(b"MGET", vec![b"engine-native", b"missing"]))
             .await
-            .unwrap();
-        let FastResponse::NativeFrame(body) = response else {
-            panic!("expected recursive MGET response")
-        };
+            .expect_err("native transport must retain the engine's command boundary");
+        assert!(
+            error
+                .to_string()
+                .contains("MGET requires embedded Redis compatibility storage")
+        );
         assert_eq!(
-            RedisResponse::from_native_bytes(&body).unwrap(),
-            RedisResponse::Array(vec![
-                RedisResponse::Value(b"v\0".to_vec()),
-                RedisResponse::Null
-            ])
+            engine
+                .execute_fast(request(b"GET", vec![b"missing"]))
+                .await
+                .unwrap(),
+            FastResponse::Null
         );
         engine.shutdown().await.unwrap();
     }

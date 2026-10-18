@@ -362,9 +362,10 @@ remain available through `redis_command` and direct shard clients.
 
 Command availability follows the selected server and storage mode. Native
 requests use the engine's normal command execution on engine-backed servers and
-the owning worker on routed embedded listeners. Routed embedded transactions
-remain on the public connection and wait for earlier worker requests before
-changing transaction state.
+the owning worker on routed embedded listeners. Commands such as `MGET` that
+require embedded Redis storage retain that requirement. Routed embedded
+transactions remain on the public connection and wait for earlier worker
+requests before changing transaction state.
 
 Native requests use the SCNP v2 header with opcode `244` and flag `0x08`.
 After any flagged routing fields, the body contains a little-endian `u32`
