@@ -501,27 +501,20 @@ async fn thread_local_embedded_store_can_be_exposed_as_tcp_server() {
 
             let address = config.bind_addr.clone();
             let native_result = tokio::task::spawn_blocking(move || {
-                use shardcache_client_rs::{RedisCommandKind, RedisResponse};
+                use shardcache_client_rs::RedisResponse;
 
                 let timeout = Duration::from_secs(2);
                 let mut client =
                     ShardCacheClient::connect_with_timeouts(&address, timeout, timeout).unwrap();
-                client
-                    .begin_pipeline_redis_command_by_name(b"GET", &[b"local-key"])
-                    .unwrap();
-                client
-                    .begin_pipeline_redis_command(RedisCommandKind::Get, &[b"local-key"])
-                    .unwrap();
-                client
-                    .begin_pipeline_redis_resp_command(b"GET", &[b"local-key"])
-                    .unwrap();
-                client.flush_pipeline().unwrap();
-                for _ in 0..3 {
-                    assert_eq!(
-                        client.finish_pipeline_redis_command().unwrap(),
-                        RedisResponse::Value(b"local-value".to_vec())
-                    );
-                }
+                assert_eq!(
+                    client
+                        .redis_command_by_name(b"GET", &[b"local-key"])
+                        .unwrap(),
+                    RedisResponse::Value(b"local-value".to_vec())
+                );
+                let mut value = Vec::new();
+                assert!(client.get_into(b"local-key", &mut value).unwrap());
+                assert_eq!(value, b"local-value");
             })
             .await;
 
@@ -614,140 +607,164 @@ async fn native_redis_client_round_trips_and_mixes_pipeline_representations() {
     use shardmap::config::TransactionMode;
 
     let _test_guard = SERVER_TEST_LOCK.lock().await;
-    tokio::task::LocalSet::new()
-        .run_until(async {
-            let temp = tempfile::TempDir::new().unwrap();
-            let mut config = test_config(temp.path().join("native-scnp"), false);
-            config.bind_addr = format!("127.0.0.1:{}", common::free_port());
-            config.transaction_mode = TransactionMode::ShardLocal;
-            let address = config.bind_addr.clone();
-            let store = Arc::new(EmbeddedStore::new(4));
-            let server = shardmap::server::ShardCacheServer::from_embedded_store(config, store);
-            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-            let server_task = tokio::task::spawn_local(async move {
-                server
-                    .run_with_shutdown(async {
-                        let _ = shutdown_rx.await;
-                    })
-                    .await
-            });
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-            loop {
-                if tokio::net::TcpStream::connect(&address).await.is_ok() {
-                    break;
+    for owner_routed in [false, true] {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let temp = tempfile::TempDir::new().unwrap();
+                let mut config = test_config(temp.path().join("native-scnp"), false);
+                config.bind_addr = format!("127.0.0.1:{}", common::free_port());
+                config.transaction_mode = TransactionMode::ShardLocal;
+                let address = config.bind_addr.clone();
+                let store = Arc::new(EmbeddedStore::new(4));
+                let server = if owner_routed {
+                    shardmap::server::ShardCacheServer::from_embedded_store(config, store)
+                } else {
+                    shardmap::server::ShardCacheServer::direct(config)
+                };
+                let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+                let server_task = tokio::task::spawn_local(async move {
+                    server
+                        .run_with_shutdown(async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                });
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                loop {
+                    if tokio::net::TcpStream::connect(&address).await.is_ok() {
+                        break;
+                    }
+                    assert!(
+                        !server_task.is_finished(),
+                        "server stopped before listening"
+                    );
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "server did not start"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                assert!(
-                    !server_task.is_finished(),
-                    "server stopped before listening"
-                );
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "server did not start"
-                );
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            let client_task = tokio::task::spawn_blocking(move || {
-                let timeout = Duration::from_secs(2);
-                let mut client =
-                    ShardCacheClient::connect_with_timeouts(&address, timeout, timeout).unwrap();
-                assert_eq!(
-                    client
-                        .redis_command_by_name(b"SET", &[b"key\0", b"value\xff"])
-                        .unwrap(),
-                    RedisResponse::Ok
-                );
-                assert_eq!(
-                    client.redis_command_by_name(b"GET", &[b"key\0"]).unwrap(),
-                    RedisResponse::Value(b"value\xff".to_vec())
-                );
-                assert_eq!(
-                    client
-                        .redis_command_by_name(b"HSET", &[b"hash", b"f", b"v"])
-                        .unwrap(),
-                    RedisResponse::Integer(1)
-                );
-                assert_eq!(
-                    client
-                        .redis_command_by_name(b"HGETALL", &[b"hash"])
-                        .unwrap(),
-                    RedisResponse::Array(vec![
-                        RedisResponse::Value(b"f".to_vec()),
-                        RedisResponse::Value(b"v".to_vec())
-                    ])
-                );
-
-                client
-                    .begin_pipeline_redis_command_by_name(b"GET", &[b"key\0"])
-                    .unwrap();
-                client
-                    .begin_pipeline_redis_command(RedisCommandKind::Get, &[b"key\0"])
-                    .unwrap();
-                client
-                    .begin_pipeline_redis_resp_command(b"GET", &[b"key\0"])
-                    .unwrap();
-                client
-                    .begin_pipeline_redis_command_by_name(b"UNKNOWN-NATIVE", &[])
-                    .unwrap();
-                client
-                    .begin_pipeline_redis_command_by_name(b"PING", &[])
-                    .unwrap();
-                client.flush_pipeline().unwrap();
-                for _ in 0..2 {
+                let client_task = tokio::task::spawn_blocking(move || {
+                    let timeout = Duration::from_secs(2);
+                    let mut client =
+                        ShardCacheClient::connect_with_timeouts(&address, timeout, timeout)
+                            .unwrap();
                     assert_eq!(
-                        client.finish_pipeline_redis_command().unwrap(),
+                        client
+                            .redis_command_by_name(b"SET", &[b"key\0", b"value\xff"])
+                            .unwrap(),
+                        RedisResponse::Ok
+                    );
+                    assert_eq!(
+                        client.redis_command_by_name(b"GET", &[b"key\0"]).unwrap(),
                         RedisResponse::Value(b"value\xff".to_vec())
                     );
-                }
-                assert!(
-                    client
-                        .finish_pipeline_redis_command()
-                        .expect_err("owner-routed workers retain their legacy RESP restriction")
-                        .to_string()
-                        .contains("requires a routed shard-local command")
-                );
-                assert!(client.finish_pipeline_redis_command().is_err());
-                assert_eq!(
-                    client.finish_pipeline_redis_command().unwrap(),
-                    RedisResponse::Value(b"PONG".to_vec())
-                );
-                assert!(client.redis_resp_command(b"GET", &[b"key\0"]).is_err());
-                assert_eq!(
-                    client.redis_command_by_name(b"GET", &[b"key\0"]).unwrap(),
-                    RedisResponse::Value(b"value\xff".to_vec())
-                );
+                    assert_eq!(
+                        client
+                            .redis_command_by_name(b"HSET", &[b"hash", b"f", b"v"])
+                            .unwrap(),
+                        RedisResponse::Integer(1)
+                    );
+                    assert_eq!(
+                        client
+                            .redis_command_by_name(b"HGETALL", &[b"hash"])
+                            .unwrap(),
+                        RedisResponse::Array(vec![
+                            RedisResponse::Value(b"f".to_vec()),
+                            RedisResponse::Value(b"v".to_vec())
+                        ])
+                    );
 
-                let transaction: &[(&[u8], &[&[u8]])] = &[
-                    (b"GET", &[b"key\0"]),
-                    (b"MULTI", &[]),
-                    (b"SET", &[b"txn", b"1"]),
-                    (b"GET", &[b"txn"]),
-                    (b"EXEC", &[]),
-                    (b"GET", &[b"txn"]),
-                ];
-                for (command, args) in transaction {
                     client
-                        .begin_pipeline_redis_command_by_name(command, args)
+                        .begin_pipeline_redis_command_by_name(b"GET", &[b"key\0"])
                         .unwrap();
-                }
-                client.flush_pipeline().unwrap();
-                for expected in [
-                    RedisResponse::Value(b"value\xff".to_vec()),
-                    RedisResponse::Ok,
-                    RedisResponse::Value(b"QUEUED".to_vec()),
-                    RedisResponse::Value(b"QUEUED".to_vec()),
-                    RedisResponse::Array(vec![
+                    client
+                        .begin_pipeline_redis_command(RedisCommandKind::Get, &[b"key\0"])
+                        .unwrap();
+                    client
+                        .begin_pipeline_redis_resp_command(b"GET", &[b"key\0"])
+                        .unwrap();
+                    client
+                        .begin_pipeline_redis_command_by_name(b"UNKNOWN-NATIVE", &[])
+                        .unwrap();
+                    client
+                        .begin_pipeline_redis_command_by_name(b"PING", &[])
+                        .unwrap();
+                    client.flush_pipeline().unwrap();
+                    for _ in 0..2 {
+                        assert_eq!(
+                            client.finish_pipeline_redis_command().unwrap(),
+                            RedisResponse::Value(b"value\xff".to_vec())
+                        );
+                    }
+                    let legacy_reply = client.finish_pipeline_redis_command();
+                    if owner_routed {
+                        assert!(
+                            legacy_reply
+                                .expect_err(
+                                    "owner-routed workers retain their legacy RESP restriction"
+                                )
+                                .to_string()
+                                .contains("requires a routed shard-local command")
+                        );
+                    } else {
+                        assert_eq!(
+                            legacy_reply.unwrap(),
+                            RedisResponse::Value(b"value\xff".to_vec())
+                        );
+                    }
+                    assert!(client.finish_pipeline_redis_command().is_err());
+                    assert_eq!(
+                        client.finish_pipeline_redis_command().unwrap(),
+                        RedisResponse::Value(b"PONG".to_vec())
+                    );
+                    let legacy_reply = client.redis_resp_command(b"GET", &[b"key\0"]);
+                    if owner_routed {
+                        assert!(legacy_reply.is_err());
+                    } else {
+                        assert_eq!(
+                            legacy_reply.unwrap(),
+                            RedisResponse::Value(b"value\xff".to_vec())
+                        );
+                    }
+                    assert_eq!(
+                        client.redis_command_by_name(b"GET", &[b"key\0"]).unwrap(),
+                        RedisResponse::Value(b"value\xff".to_vec())
+                    );
+
+                    let transaction: &[(&[u8], &[&[u8]])] = &[
+                        (b"GET", &[b"key\0"]),
+                        (b"MULTI", &[]),
+                        (b"SET", &[b"txn", b"1"]),
+                        (b"GET", &[b"txn"]),
+                        (b"EXEC", &[]),
+                        (b"GET", &[b"txn"]),
+                    ];
+                    for (command, args) in transaction {
+                        client
+                            .begin_pipeline_redis_command_by_name(command, args)
+                            .unwrap();
+                    }
+                    client.flush_pipeline().unwrap();
+                    for expected in [
+                        RedisResponse::Value(b"value\xff".to_vec()),
                         RedisResponse::Ok,
+                        RedisResponse::Value(b"QUEUED".to_vec()),
+                        RedisResponse::Value(b"QUEUED".to_vec()),
+                        RedisResponse::Array(vec![
+                            RedisResponse::Ok,
+                            RedisResponse::Value(b"1".to_vec()),
+                        ]),
                         RedisResponse::Value(b"1".to_vec()),
-                    ]),
-                    RedisResponse::Value(b"1".to_vec()),
-                ] {
-                    assert_eq!(client.finish_pipeline_redis_command().unwrap(), expected);
-                }
-            });
-            let client_result = client_task.await;
-            let _ = shutdown_tx.send(());
-            server_task.await.unwrap().unwrap();
-            client_result.unwrap();
-        })
-        .await;
+                    ] {
+                        assert_eq!(client.finish_pipeline_redis_command().unwrap(), expected);
+                    }
+                });
+                let client_result = client_task.await;
+                let _ = shutdown_tx.send(());
+                server_task.await.unwrap().unwrap();
+                client_result.unwrap();
+            })
+            .await;
+    }
 }

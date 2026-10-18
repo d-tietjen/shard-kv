@@ -376,7 +376,7 @@ Keys and values are binary-safe. The encoded request must fit the header's
 
 Owner-routed embedded listeners retain their restriction on the legacy RESP
 wrapper. Use native command-name requests on those listeners; the wrapper
-remains available on server modes that accept it, including thread-local
+remains available on server modes that accept it, including ordinary multiworker
 embedded listeners.
 
 Simple replies retain existing SCNP statuses: OK `0`, null `1`, error `2`,
