@@ -7,7 +7,7 @@ use smallvec::SmallVec;
 
 use crate::config::TransactionMode;
 use crate::protocol::{
-    BorrowedCommandParts, FastCommand, FastCommandKind, FastRedisRouteKeys, FastRequest,
+    BorrowedCommandParts, FastCommand, FastCommandKind, FastRedisRouteKeys, FastRequest, RespCodec,
 };
 use crate::storage::{BorrowedCommand, EmbeddedRouteMode, EmbeddedStore};
 #[cfg(feature = "redis")]
@@ -207,6 +207,32 @@ pub(super) struct TransactionState {
 }
 
 impl TransactionState {
+    pub(super) fn handle_native_command(
+        &mut self,
+        coordinator: Option<&TransactionCoordinator>,
+        store: &EmbeddedStore,
+        parts: &[&[u8]],
+        out: &mut BytesMut,
+    ) -> bool {
+        let mut response = BytesMut::new();
+        if !self.handle_resp_command(
+            coordinator,
+            store,
+            parts,
+            &mut response,
+            RespProtocolVersion::Resp3,
+        ) {
+            return false;
+        }
+        match RespCodec::decode(&response) {
+            Ok(Some((frame, consumed))) if consumed == response.len() => {
+                ServerWire::write_fast_redis_frame(out, &frame);
+            }
+            _ => ServerWire::write_fast_error(out, "ERR invalid native transaction response"),
+        }
+        true
+    }
+
     pub(super) fn is_active(&self) -> bool {
         self.active
     }
@@ -512,6 +538,12 @@ pub(super) fn fast_request_shards(store: &EmbeddedStore, request: &FastRequest<'
         #[cfg(feature = "redis")]
         FastCommand::RedisCommand { kind, .. } if kind.uses_vector_shard() => {
             vec![store.vector_shard_id()]
+        }
+        FastCommand::NativeRedisCommand { command, args } => {
+            let mut parts = Vec::with_capacity(args.len() + 1);
+            parts.push(*command);
+            parts.extend(args.iter().copied());
+            command_shards(store, &parts)
         }
         command => route_keys_to_shards(store, command.route_keys()),
     }

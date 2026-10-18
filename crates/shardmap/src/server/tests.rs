@@ -362,6 +362,36 @@ fn exec_scnp_redis_opcode_on_owned_shard(
     FastCodec::decode_response(&out).unwrap().unwrap().0
 }
 
+fn exec_scnp_native_redis_command(
+    store: &EmbeddedStore,
+    command: &[u8],
+    args: Vec<&[u8]>,
+) -> FastResponse {
+    let mut frame = Vec::new();
+    FastCodec::encode_request(
+        &FastRequest {
+            key_hash: None,
+            route_shard: None,
+            key_tag: None,
+            command: FastCommand::NativeRedisCommand { command, args },
+        },
+        &mut frame,
+    );
+    let mut out = BytesMut::new();
+    let consumed = DirectProtocol::process_shared_request_buffer(
+        &frame,
+        store,
+        &mut out,
+        None,
+        false,
+        None,
+        Instant::now(),
+    )
+    .expect("native SCNP Redis command should process");
+    assert_eq!(consumed, frame.len());
+    FastCodec::decode_response(&out).unwrap().unwrap().0
+}
+
 fn decode_resp_stream(mut raw: &[u8]) -> Vec<Frame> {
     let mut frames = Vec::new();
     while !raw.is_empty() {
@@ -616,6 +646,19 @@ fn transaction_command_shards_use_shared_redis_key_specs() {
             key_b.as_slice(),
         ]),
         BTreeSet::from([1, 3])
+    );
+    let native_eval = FastRequest {
+        key_hash: None,
+        route_shard: None,
+        key_tag: None,
+        command: FastCommand::NativeRedisCommand {
+            command: b"EVAL",
+            args: vec![b"return 1", b"2", key_a.as_slice(), key_b.as_slice()],
+        },
+    };
+    assert_eq!(
+        super::transactions::fast_request_shards(&store, &native_eval),
+        vec![1, 3]
     );
     assert_eq!(shards(&[b"EVAL", b"return 1", b"0"]), BTreeSet::new());
     assert_eq!(
@@ -2064,10 +2107,12 @@ fn resp2_redis_module_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
             module_commands!([b"R64.SETBIT", b"rb64", b"7", b"1"], [b"R64.MIN", b"rb64"])
         }
         "R64.OPTIMIZE" => module_commands!([b"R64.OPTIMIZE", b"rb64"]),
-        "R64.RANGEINTARRAY" => module_commands!(
-            [b"R64.SETINTARRAY", b"rb64", b"1", b"3", b"5"],
-            [b"R64.RANGEINTARRAY", b"rb64", b"1", b"4"]
-        ),
+        "R64.RANGEINTARRAY" => {
+            module_commands!(
+                [b"R64.SETINTARRAY", b"rb64", b"1", b"3", b"5"],
+                [b"R64.RANGEINTARRAY", b"rb64", b"1", b"4"]
+            )
+        }
         "R64.SETBIT" => module_commands!([b"R64.SETBIT", b"rb64", b"7", b"1"]),
         "R64.SETBITARRAY" => module_commands!([b"R64.SETBITARRAY", b"rb64", b"1", b"2"]),
         "R64.SETFULL" => module_commands!([b"R64.SETFULL", b"rb64"]),
@@ -2102,16 +2147,20 @@ fn resp2_redis_module_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
             [b"TDIGEST.CREATE", b"td"],
             [b"TDIGEST.ADD", b"td", b"1", b"2"]
         ),
-        "TDIGEST.BYRANK" => module_commands!(
-            [b"TDIGEST.CREATE", b"td"],
-            [b"TDIGEST.ADD", b"td", b"1", b"2"],
-            [b"TDIGEST.BYRANK", b"td", b"0"]
-        ),
-        "TDIGEST.BYREVRANK" => module_commands!(
-            [b"TDIGEST.CREATE", b"td"],
-            [b"TDIGEST.ADD", b"td", b"1", b"2"],
-            [b"TDIGEST.BYREVRANK", b"td", b"0"]
-        ),
+        "TDIGEST.BYRANK" => {
+            module_commands!(
+                [b"TDIGEST.CREATE", b"td"],
+                [b"TDIGEST.ADD", b"td", b"1", b"2"],
+                [b"TDIGEST.BYRANK", b"td", b"0"]
+            )
+        }
+        "TDIGEST.BYREVRANK" => {
+            module_commands!(
+                [b"TDIGEST.CREATE", b"td"],
+                [b"TDIGEST.ADD", b"td", b"1", b"2"],
+                [b"TDIGEST.BYREVRANK", b"td", b"0"]
+            )
+        }
         "TDIGEST.CDF" => module_commands!(
             [b"TDIGEST.CREATE", b"td"],
             [b"TDIGEST.ADD", b"td", b"1", b"2"],
@@ -2145,11 +2194,13 @@ fn resp2_redis_module_smoke_commands(name: &str) -> Option<Vec<Vec<Vec<u8>>>> {
             [b"TDIGEST.RANK", b"td", b"1"]
         ),
         "TDIGEST.RESET" => module_commands!([b"TDIGEST.CREATE", b"td"], [b"TDIGEST.RESET", b"td"]),
-        "TDIGEST.REVRANK" => module_commands!(
-            [b"TDIGEST.CREATE", b"td"],
-            [b"TDIGEST.ADD", b"td", b"1", b"2"],
-            [b"TDIGEST.REVRANK", b"td", b"1"]
-        ),
+        "TDIGEST.REVRANK" => {
+            module_commands!(
+                [b"TDIGEST.CREATE", b"td"],
+                [b"TDIGEST.ADD", b"td", b"1", b"2"],
+                [b"TDIGEST.REVRANK", b"td", b"1"]
+            )
+        }
         "TDIGEST.TRIMMED_MEAN" => module_commands!(
             [b"TDIGEST.CREATE", b"td"],
             [b"TDIGEST.ADD", b"td", b"1", b"2"],
@@ -4628,6 +4679,129 @@ fn scnp_resp_command_wraps_redis_reply_bytes() {
 
 #[test]
 #[cfg(feature = "redis")]
+fn native_scnp_redis_command_name_uses_recursive_response_frame() {
+    let store = EmbeddedStore::new(4);
+    assert_eq!(
+        exec_scnp_native_redis_command(&store, b"HSET", vec![b"native-hash", b"field", b"value"],),
+        FastResponse::Integer(1)
+    );
+
+    let response = exec_scnp_native_redis_command(&store, b"HGETALL", vec![b"native-hash"]);
+    let FastResponse::NativeFrame(body) = response else {
+        panic!("HGETALL should use a native recursive response frame");
+    };
+    assert_eq!(body.first(), Some(&3));
+    assert_eq!(u32::from_le_bytes(body[1..5].try_into().unwrap()), 2);
+}
+
+#[test]
+fn native_scnp_plain_commands_preserve_binary_values() {
+    let store = EmbeddedStore::new(4);
+    let key = b"native\0key";
+    let value = b"v\0\r\n\xff";
+    assert_eq!(
+        exec_scnp_native_redis_command(&store, b"SET", vec![key, value]),
+        FastResponse::Ok
+    );
+    assert_eq!(
+        exec_scnp_native_redis_command(&store, b"GET", vec![key]),
+        FastResponse::Value(value.to_vec())
+    );
+    assert_eq!(
+        exec_scnp_native_redis_command(&store, b"GET", vec![b"missing"]),
+        FastResponse::Null
+    );
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn native_scnp_transactions_keep_nested_errors_and_execute_in_order() {
+    use shardcache_client_rs::RedisResponse;
+
+    let store = EmbeddedStore::new(4);
+    let commands: &[(&[u8], Vec<&[u8]>)] = &[
+        (b"MULTI", vec![]),
+        (b"SET", vec![b"native-txn", b"value"]),
+        (b"INCR", vec![b"native-txn"]),
+        (b"GET", vec![b"native-txn"]),
+        (b"EXEC", vec![]),
+        (b"GET", vec![b"native-txn"]),
+    ];
+    let mut input = Vec::new();
+    for (command, args) in commands {
+        FastCodec::encode_request(
+            &FastRequest {
+                key_hash: None,
+                route_shard: None,
+                key_tag: None,
+                command: FastCommand::NativeRedisCommand {
+                    command,
+                    args: args.clone(),
+                },
+            },
+            &mut input,
+        );
+    }
+    let responses =
+        RespTestHarness::process_scnp_input(&store, &input, TransactionMode::ShardLocal);
+    assert_eq!(responses.len(), commands.len());
+    assert_eq!(responses[0], FastResponse::Ok);
+    for response in &responses[1..4] {
+        let FastResponse::NativeFrame(body) = response else {
+            panic!("expected native QUEUED value")
+        };
+        assert_eq!(
+            RedisResponse::from_native_bytes(body).unwrap(),
+            RedisResponse::Value(b"QUEUED".to_vec())
+        );
+    }
+    let FastResponse::NativeFrame(body) = &responses[4] else {
+        panic!("expected native EXEC array")
+    };
+    let RedisResponse::Array(values) = RedisResponse::from_native_bytes(body).unwrap() else {
+        panic!("expected EXEC array")
+    };
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0], RedisResponse::Ok);
+    assert!(matches!(&values[1], RedisResponse::Error(message) if message.starts_with(b"ERR")));
+    assert_eq!(values[2], RedisResponse::Value(b"value".to_vec()));
+    assert_eq!(responses[5], FastResponse::Value(b"value".to_vec()));
+}
+
+#[test]
+#[cfg(feature = "redis")]
+fn native_scnp_collection_replies_decode_in_the_rust_client() {
+    use shardcache_client_rs::RedisResponse;
+    let store = EmbeddedStore::new(4);
+    assert_eq!(
+        exec_scnp_native_redis_command(&store, b"HSET", vec![b"native-map", b"f", b"v"]),
+        FastResponse::Integer(1)
+    );
+    let FastResponse::NativeFrame(body) =
+        exec_scnp_native_redis_command(&store, b"HGETALL", vec![b"native-map"])
+    else {
+        panic!("expected native HGETALL")
+    };
+    assert_eq!(
+        RedisResponse::from_native_bytes(&body).unwrap(),
+        RedisResponse::Array(vec![
+            RedisResponse::Value(b"f".to_vec()),
+            RedisResponse::Value(b"v".to_vec())
+        ])
+    );
+    let FastResponse::NativeFrame(body) =
+        exec_scnp_native_redis_command(&store, b"MGET", vec![b"missing", b"native-map"])
+    else {
+        panic!("expected native MGET")
+    };
+    assert_eq!(
+        RedisResponse::from_native_bytes(&body).unwrap(),
+        RedisResponse::Array(vec![RedisResponse::Null, RedisResponse::Null])
+    );
+}
+
+#[test]
+#[cfg(feature = "redis")]
 fn raw_resp_scan_walks_with_cursor_and_count() {
     let store = EmbeddedStore::new(4);
     for key in [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()] {
@@ -6478,6 +6652,19 @@ fn redis8_vector_sets_are_pinned_to_vector_shard() {
         .expect("non-vector shard");
     let key = key_for_shard(&store, normal_shard);
     assert_eq!(store.route_key(&key).shard_id, normal_shard);
+    let native_request = FastRequest {
+        key_hash: None,
+        route_shard: None,
+        key_tag: None,
+        command: FastCommand::NativeRedisCommand {
+            command: b"VADD",
+            args: vec![key.as_slice(), b"VALUES", b"2", b"1", b"0", b"alpha"],
+        },
+    };
+    assert_eq!(
+        super::transactions::fast_request_shards(&store, &native_request),
+        vec![vector_shard]
+    );
 
     let responses = RespTestHarness::exec_resp_sequence_on_owned_shard(
         &store,
@@ -7260,4 +7447,173 @@ fn resp_flushdb_clears_compact_general_and_object_keys_together() {
     );
     assert_eq!(store.stored_bytes(), 0);
     assert!(store.key_snapshot().is_empty());
+}
+
+fn native_public_input(parts: &[&[u8]]) -> Vec<u8> {
+    let (command, args) = parts.split_first().expect("command name");
+    let mut input = Vec::new();
+    FastCodec::encode_request(
+        &FastRequest {
+            key_hash: None,
+            route_shard: None,
+            key_tag: None,
+            command: FastCommand::NativeRedisCommand {
+                command,
+                args: args.to_vec(),
+            },
+        },
+        &mut input,
+    );
+    input
+}
+
+#[test]
+fn native_public_commands_route_and_owned_workers_reject_other_shards() {
+    let store = EmbeddedStore::new(4);
+    let key = key_for_shard(&store, 3);
+    store.set(key.clone(), b"value".to_vec(), None);
+    let input = native_public_input(&[b"GET", &key]);
+    let frame = parse_public_routed_frame(&input, &store);
+    assert!(matches!(
+        frame.destination,
+        super::transport::PublicRoutedDestination::Worker { shard_id: 3 }
+    ));
+    for (owner, expected) in [(3, true), (2, false)] {
+        let mut out = BytesMut::new();
+        assert_eq!(
+            DirectProtocol::process_shared_request_buffer(
+                &input,
+                &store,
+                &mut out,
+                None,
+                false,
+                Some(owner),
+                Instant::now()
+            )
+            .unwrap(),
+            input.len()
+        );
+        let response = FastCodec::decode_response(&out).unwrap().unwrap().0;
+        if expected {
+            assert_eq!(response, FastResponse::Value(b"value".to_vec()));
+        } else {
+            assert!(matches!(response, FastResponse::Error(_)));
+        }
+    }
+}
+
+#[test]
+fn native_public_transactions_queue_once_and_use_connection_state() {
+    use super::transport::{PublicRoutedDestination, PublicRoutedFrame};
+    use shardcache_client_rs::RedisResponse;
+    let store = EmbeddedStore::new(4);
+    let coordinator = TransactionCoordinator::new(4, TransactionMode::ShardLocal).unwrap();
+    let mut state = TransactionState::default();
+    let commands: &[&[&[u8]]] = &[
+        &[b"MULTI"],
+        &[b"SET", b"routed-native-txn", b"value"],
+        &[b"GET", b"routed-native-txn"],
+        &[b"EXEC"],
+    ];
+    for (index, parts) in commands.iter().enumerate() {
+        let input = native_public_input(parts);
+        assert!(PublicRoutedFrame::fast_transaction_barrier(&input, &state).unwrap());
+        assert_eq!(state.is_active(), index > 0);
+        if index < 3 {
+            assert!(store.get(b"routed-native-txn").is_none());
+        }
+        let frame = PublicRoutedFrame::parse(
+            &input,
+            &store,
+            Some(&coordinator),
+            &mut state,
+            RespProtocolVersion::Resp2,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(frame.barrier);
+        let PublicRoutedDestination::Error { payload } = frame.destination else {
+            panic!("transaction response must stay on the connection")
+        };
+        let response = FastCodec::decode_response(&payload).unwrap().unwrap().0;
+        match index {
+            0 => assert_eq!(response, FastResponse::Ok),
+            1 | 2 => {
+                let FastResponse::NativeFrame(body) = response else {
+                    panic!("expected queued reply")
+                };
+                assert_eq!(
+                    RedisResponse::from_native_bytes(&body).unwrap(),
+                    RedisResponse::Value(b"QUEUED".to_vec())
+                );
+            }
+            _ => {
+                let FastResponse::NativeFrame(body) = response else {
+                    panic!("expected EXEC array")
+                };
+                assert_eq!(
+                    RedisResponse::from_native_bytes(&body).unwrap(),
+                    RedisResponse::Array(vec![
+                        RedisResponse::Ok,
+                        RedisResponse::Value(b"value".to_vec())
+                    ])
+                );
+            }
+        }
+    }
+    assert!(!state.is_active());
+    assert!(!coordinator.has_active_transactions());
+    assert_eq!(store.get(b"routed-native-txn"), Some(b"value".to_vec()));
+}
+
+#[test]
+fn native_public_transaction_rejects_typed_mutation_and_aborts_exec() {
+    use super::transport::{PublicRoutedDestination, PublicRoutedFrame};
+    let store = EmbeddedStore::new(4);
+    let coordinator = TransactionCoordinator::new(4, TransactionMode::ShardLocal).unwrap();
+    let mut state = TransactionState::default();
+    let mut typed = Vec::new();
+    FastCodec::encode_request(
+        &FastRequest {
+            key_hash: None,
+            route_shard: None,
+            key_tag: None,
+            command: FastCommand::Set {
+                key: b"typed-native-txn",
+                value: b"forbidden",
+            },
+        },
+        &mut typed,
+    );
+    let inputs = [
+        native_public_input(&[b"MULTI"]),
+        typed,
+        native_public_input(&[b"EXEC"]),
+    ];
+    for (index, input) in inputs.iter().enumerate() {
+        let frame = PublicRoutedFrame::parse(
+            input,
+            &store,
+            Some(&coordinator),
+            &mut state,
+            RespProtocolVersion::Resp2,
+        )
+        .unwrap()
+        .unwrap();
+        let PublicRoutedDestination::Error { payload } = frame.destination else {
+            panic!("transaction input must not route to a worker")
+        };
+        let response = FastCodec::decode_response(&payload).unwrap().unwrap().0;
+        match index {
+            0 => assert_eq!(response, FastResponse::Ok),
+            1 => assert!(
+                matches!(response, FastResponse::Error(message) if message.starts_with(b"ERR typed SCNP"))
+            ),
+            _ => assert!(
+                matches!(response, FastResponse::Error(message) if message.starts_with(b"EXECABORT"))
+            ),
+        }
+    }
+    assert!(store.get(b"typed-native-txn").is_none());
+    assert!(!coordinator.has_active_transactions());
 }

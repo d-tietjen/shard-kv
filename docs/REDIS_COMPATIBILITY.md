@@ -50,7 +50,7 @@ Explicit Redis 5.0.14 exclusions: none.
 - Scripting uses a constrained evaluator for return values, KEYS/ARGV, tonumber, and redis.call/pcall over supported commands. It is not a general Lua VM.
 - HyperLogLog commands return compatible cardinalities for the covered operations, but shardcache stores exact sets in its own representation rather than Redis' binary HLL encoding.
 - Blocking list and sorted-set commands wait on the owning shard for shard-local key sets. Ready, timeout, and cross-client wakeup paths are covered; empty multi-key waits that span shards report CROSSSLOT instead of using a global waiter.
-- SCNP one-byte opcodes cover the hot command set. Commands outside that compact opcode table use the RESP/SCNP command-name fallback path so the server can still route and execute them.
+- SCNP keeps compact opcodes for hot commands and provides a native command-name wrapper for the full Redis-compatible command catalog. Redis command-name requests carry compact argv and return recursive native SCNP values; the RESP wrapper remains available only for raw RESP compatibility tools.
 
 ## Commands
 

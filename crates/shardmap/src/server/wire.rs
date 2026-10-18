@@ -430,6 +430,72 @@ impl ServerWire {
         }
     }
 
+    /// Writes a complete Redis response as a recursive native SCNP value.
+    ///
+    /// The compact status codes remain the fast path for scalar responses. The
+    /// native-frame status carries the full RESP value shape for nested arrays,
+    /// maps, sets, pushes, attributes, and RESP3 scalar types without putting
+    /// RESP bytes on the wire.
+    #[cfg(feature = "embedded")]
+    pub(crate) fn write_fast_redis_frame(out: &mut BytesMut, frame: &Frame) {
+        match frame {
+            Frame::SimpleString(value) if value == "OK" => ServerWire::write_fast_ok(out),
+            Frame::SimpleString(_) => {
+                ServerWire::write_fast_native_frame(out, frame);
+            }
+            Frame::BlobString(value) if value.len() <= 256 * 1024 * 1024 => {
+                ServerWire::write_fast_value(out, value);
+            }
+            Frame::BlobString(_) => {
+                ServerWire::write_fast_error(out, "ERR native Redis response exceeds body limit")
+            }
+            Frame::Integer(value) => ServerWire::write_fast_integer(out, *value),
+            Frame::Null => ServerWire::write_fast_null(out),
+            Frame::Boolean(value) => {
+                out.extend_from_slice(&[
+                    FAST_RESPONSE_MAGIC,
+                    FAST_PROTOCOL_VERSION,
+                    FAST_STATUS_BOOLEAN,
+                    0,
+                    1,
+                    0,
+                    0,
+                    0,
+                    *value as u8,
+                ]);
+            }
+            Frame::Double(value) => match value.parse::<f64>() {
+                Ok(value) => ServerWire::write_fast_float(out, value),
+                Err(_) => ServerWire::write_fast_error(out, "ERR invalid native Redis double"),
+            },
+            Frame::Error(message) => ServerWire::write_fast_error(out, message),
+            _ => ServerWire::write_fast_native_frame(out, frame),
+        }
+    }
+
+    #[cfg(feature = "embedded")]
+    fn write_fast_native_frame(out: &mut BytesMut, frame: &Frame) {
+        let body = match crate::protocol::encode_native_redis_frame(frame) {
+            Ok(body) => body,
+            Err(error) => {
+                ServerWire::write_fast_error(out, error);
+                return;
+            }
+        };
+        let len = (body.len() as u32).to_le_bytes();
+        out.extend_from_slice(&[
+            FAST_RESPONSE_MAGIC,
+            FAST_PROTOCOL_VERSION,
+            FAST_STATUS_NATIVE_FRAME,
+            0,
+            len[0],
+            len[1],
+            len[2],
+            len[3],
+        ]);
+        out.extend_from_slice(&body);
+    }
+
     pub(crate) fn write_resp_blob_string(out: &mut BytesMut, payload: &[u8]) {
         if payload.len() < 10 {
             let header = [b'$', b'0' + payload.len() as u8, b'\r', b'\n'];
@@ -831,5 +897,100 @@ mod tests {
             ]
         );
         assert_eq!(&encoded[8..], b"short");
+    }
+}
+
+#[cfg(all(test, feature = "embedded"))]
+mod native_redis_tests {
+    use super::*;
+    use shardcache_client_rs::RedisResponse;
+
+    #[test]
+    fn server_native_shapes_decode_in_the_rust_client() {
+        let cases = [
+            (
+                Frame::SimpleString("QUEUED".into()),
+                RedisResponse::Value(b"QUEUED".to_vec()),
+            ),
+            (
+                Frame::Array(vec![Frame::Null, Frame::Error("ERR nested".into())]),
+                RedisResponse::Array(vec![
+                    RedisResponse::Null,
+                    RedisResponse::Error(b"ERR nested".to_vec()),
+                ]),
+            ),
+            (
+                Frame::Map(vec![(Frame::Integer(1), Frame::Boolean(true))]),
+                RedisResponse::Map(vec![(
+                    RedisResponse::Integer(1),
+                    RedisResponse::Boolean(true),
+                )]),
+            ),
+            (
+                Frame::Set(vec![Frame::Integer(-7)]),
+                RedisResponse::Set(vec![RedisResponse::Integer(-7)]),
+            ),
+            (
+                Frame::Push(vec![Frame::BlobString(b"message".to_vec())]),
+                RedisResponse::Push(vec![RedisResponse::Value(b"message".to_vec())]),
+            ),
+            (
+                Frame::BigNumber("12345678901234567890".into()),
+                RedisResponse::BigNumber(b"12345678901234567890".to_vec()),
+            ),
+            (
+                Frame::VerbatimString {
+                    format: "txt".into(),
+                    value: b"hello\0".to_vec(),
+                },
+                RedisResponse::Verbatim {
+                    format: b"txt".to_vec(),
+                    value: b"hello\0".to_vec(),
+                },
+            ),
+            (
+                Frame::Attribute {
+                    attributes: vec![(Frame::Integer(1), Frame::Integer(2))],
+                    data: Box::new(Frame::Double("1.5".into())),
+                },
+                RedisResponse::Attribute {
+                    attributes: vec![(RedisResponse::Integer(1), RedisResponse::Integer(2))],
+                    data: Box::new(RedisResponse::Float(1.5)),
+                },
+            ),
+        ];
+        for (frame, expected) in cases {
+            let mut out = BytesMut::new();
+            ServerWire::write_fast_redis_frame(&mut out, &frame);
+            let Some((FastResponse::NativeFrame(body), consumed)) =
+                FastCodec::decode_response(&out).unwrap()
+            else {
+                panic!("expected complete native frame")
+            };
+            assert_eq!(consumed, out.len());
+            assert_eq!(RedisResponse::from_native_bytes(&body).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn native_encoder_rejects_invalid_values_without_partial_frames() {
+        let mut nested = Frame::Null;
+        for _ in 0..129 {
+            nested = Frame::Array(vec![nested]);
+        }
+        for frame in [
+            nested,
+            Frame::Double("invalid".into()),
+            Frame::Array(vec![Frame::Null; 65_537]),
+        ] {
+            let mut out = BytesMut::new();
+            ServerWire::write_fast_redis_frame(&mut out, &frame);
+            let Some((FastResponse::Error(_), consumed)) =
+                FastCodec::decode_response(&out).unwrap()
+            else {
+                panic!("expected bounded encoding error")
+            };
+            assert_eq!(consumed, out.len());
+        }
     }
 }

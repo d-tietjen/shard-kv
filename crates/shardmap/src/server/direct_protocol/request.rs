@@ -141,6 +141,9 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
         if let Some(step) = self.process_owned_redis_opcode_scnp(slice)? {
             return Ok(step);
         }
+        if let Some(step) = self.process_owned_native_redis_scnp(slice)? {
+            return Ok(step);
+        }
         if let Some(step) = self.process_owned_decoded_fast_scnp(slice)? {
             return Ok(step);
         }
@@ -228,6 +231,46 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
             owned_shard_id,
         );
         if !route_matches {
+            ServerWire::write_fast_error(self.write_buffer, "ERR SCNP route shard mismatch");
+            return Ok(Some(RequestBufferStep::Consumed(consumed)));
+        }
+        self.materialize_on_mutation(DirectProtocol::fast_command_mutates_value(&request.command));
+        let _transaction_guard = self
+            .transaction_coordinator
+            .map(|coordinator| coordinator.read_guard_for_fast_request(self.store, &request));
+        DirectProtocol::shared_execute_fast_into(
+            self.store,
+            request,
+            self.write_buffer,
+            self.fast_write_queue.as_deref_mut(),
+            self.single_threaded,
+            self.started_at,
+        );
+        Ok(Some(RequestBufferStep::Consumed(consumed)))
+    }
+
+    fn process_owned_native_redis_scnp(
+        &mut self,
+        slice: &'buf [u8],
+    ) -> Result<Option<RequestBufferStep>> {
+        let Some(owned_shard_id) = self.owned_shard_id else {
+            return Ok(None);
+        };
+        let Some((request, consumed)) = FastCodec::decode_request(slice)? else {
+            return Ok(Some(RequestBufferStep::Pending));
+        };
+        let FastCommand::NativeRedisCommand { command, .. } = &request.command else {
+            return Ok(None);
+        };
+        let is_transaction_control =
+            super::super::transactions::RespTransactionCommand::from_name(command).is_some();
+        let route_matches = request
+            .route_shard
+            .is_none_or(|shard| shard as usize == owned_shard_id)
+            && super::super::transactions::fast_request_shards(self.store, &request)
+                .into_iter()
+                .all(|shard| shard == owned_shard_id);
+        if is_transaction_control || !route_matches {
             ServerWire::write_fast_error(self.write_buffer, "ERR SCNP route shard mismatch");
             return Ok(Some(RequestBufferStep::Consumed(consumed)));
         }
@@ -339,7 +382,9 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
         };
         if matches!(
             request.command,
-            FastCommand::RespCommand { .. } | FastCommand::RedisCommand { .. }
+            FastCommand::RespCommand { .. }
+                | FastCommand::RedisCommand { .. }
+                | FastCommand::NativeRedisCommand { .. }
         ) {
             return Ok(None);
         }
@@ -382,7 +427,7 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
                     self.transaction_state.mark_dirty();
                     ServerWire::write_fast_error(
                         self.write_buffer,
-                        "ERR typed SCNP commands are not supported inside MULTI; use RESP command frames",
+                        "ERR typed SCNP commands are not supported inside MULTI; use command-name frames",
                     );
                     return Ok(RequestBufferStep::Consumed(consumed));
                 }
@@ -408,21 +453,35 @@ impl<'buf> SharedRequestBufferProcessor<'buf, '_, '_, '_, '_> {
 
     fn process_fast_resp_transaction(&mut self, request: &FastRequest<'buf>) -> bool {
         match &request.command {
-            FastCommand::RespCommand { parts } => self.process_fast_transaction_parts(parts),
+            FastCommand::RespCommand { parts } => self.process_fast_transaction_parts(parts, false),
             FastCommand::RedisCommand { kind, args } => match kind.redis_name() {
                 Some(command) => {
                     let mut parts = Vec::with_capacity(args.len() + 1);
                     parts.push(command.as_bytes());
                     parts.extend(args.iter().copied());
-                    self.process_fast_transaction_parts(&parts)
+                    self.process_fast_transaction_parts(&parts, false)
                 }
                 None => false,
             },
+            FastCommand::NativeRedisCommand { command, args } => {
+                let mut parts = Vec::with_capacity(args.len() + 1);
+                parts.push(*command);
+                parts.extend(args.iter().copied());
+                self.process_fast_transaction_parts(&parts, true)
+            }
             _ => false,
         }
     }
 
-    fn process_fast_transaction_parts(&mut self, parts: &[&[u8]]) -> bool {
+    fn process_fast_transaction_parts(&mut self, parts: &[&[u8]], native: bool) -> bool {
+        if native {
+            return self.transaction_state.handle_native_command(
+                self.transaction_coordinator,
+                self.store,
+                parts,
+                self.write_buffer,
+            );
+        }
         let start = ServerWire::begin_fast_value(self.write_buffer);
         if !self.transaction_state.handle_resp_command(
             self.transaction_coordinator,
