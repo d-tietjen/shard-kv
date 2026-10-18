@@ -911,15 +911,19 @@ mod tests {
                 .unwrap(),
             FastResponse::Value(b"v\0".to_vec())
         );
+        let parts: &[&[u8]] = &[b"MGET", b"engine-native", b"missing"];
+        let expected_error = match BorrowedCommand::from_parts(parts) {
+            Ok(command) => engine
+                .execute_borrowed(command)
+                .await
+                .expect_err("MGET retains the engine's existing storage restriction"),
+            Err(error) => error,
+        };
         let error = engine
             .execute_fast(request(b"MGET", vec![b"engine-native", b"missing"]))
             .await
             .expect_err("native transport must retain the engine's command boundary");
-        assert!(
-            error
-                .to_string()
-                .contains("MGET requires embedded Redis compatibility storage")
-        );
+        assert_eq!(error.to_string(), expected_error.to_string());
         assert_eq!(
             engine
                 .execute_fast(request(b"GET", vec![b"missing"]))
