@@ -152,7 +152,7 @@ mod tests {
                 std::thread::yield_now();
                 Ok(7)
             },
-            |value| Ok(value),
+            Ok,
         )
         .unwrap();
         assert_eq!(calls.get(), 3);
