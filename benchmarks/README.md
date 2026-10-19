@@ -21,6 +21,61 @@ The throughput drivers share the same backend list, the same workload axes, and
 the same CSV schema. Python harnesses for `fc-py` and `shardcache-lmcache`
 emit rows in the same schema.
 
+## WAL and Large-Value Diagnostics
+
+`population_decode_cost` restores the public WAL, routing, fast-engine, and
+entry-population probes. Its default `--cases all` runs eleven public cases
+plus eight fixed-header read probes; `--cases` accepts a comma-separated
+selection and rejects empty, duplicate, or unknown names. Run a bounded sample
+with:
+
+```bash
+cargo run --release -p shardcache-benchmarks --bin population_decode_cost -- \
+  --records 50000 --value-size 512 --shards 16 --iterations 5
+```
+
+`wal_decode_owned` includes copying the encoded segment into the decoder's
+owned `Bytes` input. `wal_decode_then_restore` includes that input copy, record
+decode, conversion to owned entries, restore, and the returned snapshot.
+Encoder, decoder, and restore outputs are checked after each timed iteration
+for record count, operation, binary keys and values, timestamp, TTL, and
+governance metadata. The current WAL wire format does not encode recovery
+sequence or shard fields, so the decoder's zero defaults for those fields are
+checked explicitly. EXISTS and EXPIRE rows require the exact integer success
+response, then checks that stored values still match and EXPIRE leaves a live
+TTL.
+The 9-byte framed WAL header and 25-byte legacy record header come from the
+current public encoder. Their native and typed rows, plus 4-byte and 8-byte
+scalar reads, are isolated prefix-read experiments; they do not call or replace
+the production decoder.
+
+`large_value_copy_cost` compares twelve embedded and engine APIs over binary
+values. Its default size set includes 4 KiB, 64 KiB, and 1 MiB; zero-byte values
+are also valid controls. For example:
+
+```bash
+cargo run --release -p shardcache-benchmarks --bin large_value_copy_cost -- \
+  --value-sizes 0,4096,65536 --ops 512 --keys 32 --shards 16 \
+  --iterations 3 --warmup-iterations 1
+```
+
+Both harnesses validate positive counts, power-of-two shard topology, selected
+case names, and size arithmetic before allocating their corpus. Bounded
+all-case smoke tests exercise all modes, including empty values, binary data,
+and the large owned-RESP path. Full value and metadata comparisons run outside
+the timer after every warmup and measured iteration. The short checksum printed
+for a row is a repeated-operation witness; it is not the content verifier.
+
+The copy harness reports process-wide allocator calls and requested bytes
+observed during each timed interval. Its global allocator adds atomic counter
+work to allocations, and other process threads can contribute to those counts.
+The `modeled copy lower-bound B/op` column is a static estimate of known
+full-payload copies for each API shape, not an allocation measurement or proof
+that a zero entry performs no copies. No historical PR17 timing is a current
+result, and running these diagnostics does not qualify production performance.
+Private replication benchmark rows from the inherited PR17 are outside the
+public OSS boundary and are intentionally absent.
+
 ## Docker Server Suite
 
 For reproducible Redis-compatible server comparisons, use the standardized

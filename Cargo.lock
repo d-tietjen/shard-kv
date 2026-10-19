@@ -2430,6 +2430,7 @@ dependencies = [
  "shardmap",
  "tokio",
  "xxhash-rust",
+ "zerocopy",
 ]
 
 [[package]]
