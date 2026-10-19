@@ -38,8 +38,10 @@ cargo run --release -p shardcache-benchmarks --bin population_decode_cost -- \
 owned `Bytes` input. `wal_decode_then_restore` includes that input copy, record
 decode, conversion to owned entries, restore, and the returned snapshot.
 Encoder, decoder, and restore outputs are checked after each timed iteration
-for record count, binary keys and values, sequence, timestamp, shard, TTL, and
-governance metadata. EXISTS and EXPIRE rows require the exact integer success
+for record count, operation, binary keys and values, timestamp, TTL, and
+governance metadata. The current WAL wire format does not encode recovery
+sequence or shard fields, so the decoder's zero defaults for those fields are
+checked explicitly. EXISTS and EXPIRE rows require the exact integer success
 response, and the harness checks that stored values still match afterward.
 The 9-byte framed WAL header and 25-byte legacy record header come from the
 current public encoder. Their native and typed rows, plus 4-byte and 8-byte

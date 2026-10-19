@@ -523,9 +523,12 @@ fn verify_mutation_records(
             (&actual.op, &expected.op),
             (MutationOp::Set, MutationOp::Set)
         );
+        // The public WAL wire format stores the operation timestamp and record
+        // payload, but not the recovery sequence or shard. The current decoder
+        // deliberately supplies zero for those contextual fields.
         if !same_op
-            || actual.shard_id != expected.shard_id
-            || actual.sequence != expected.sequence
+            || actual.shard_id != 0
+            || actual.sequence != 0
             || actual.timestamp_ms != expected.timestamp_ms
             || actual.key != expected.key
             || actual.value != expected.value
@@ -887,7 +890,11 @@ mod tests {
         corrupted[0] ^= 1;
         assert!(decode_wal_records(SharedBytes::from(corrupted)).is_err());
 
-        let mut changed = corpus.records.clone();
+        let decoded = decode_wal_records(SharedBytes::from(segment.clone()))
+            .expect("valid test WAL should decode");
+        verify_mutation_records(&decoded, &corpus.records)
+            .expect("encoded fields should match the public WAL semantics");
+        let mut changed = decoded;
         changed[0].value = SharedBytes::copy_from_slice(b"different");
         assert!(verify_mutation_records(&changed, &corpus.records).is_err());
         let mut changed_entries = corpus.sorted_entries.clone();
