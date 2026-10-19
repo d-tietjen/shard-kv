@@ -40,7 +40,7 @@ pub(crate) fn write_owned_arg_list<W: Write>(w: &mut W, args: &[Vec<u8>]) -> Res
     Ok(())
 }
 
-fn var_u32_len(mut value: u32) -> usize {
+pub(crate) fn var_u32_len(mut value: u32) -> usize {
     let mut len = 1;
     while value >= 0x80 {
         value >>= 7;

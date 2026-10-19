@@ -84,8 +84,8 @@ macro_rules! raw_redis_methods {
 ///
 /// Construct this with [`ShardCacheClient::redis`],
 /// [`ShardCacheDirectClient::redis`], or [`ShardCacheDirectShardClient::redis`].
-/// Fanout clients can fall back to the SCNP command-name path for commands
-/// without compact opcodes. Direct shard clients support compact-opcode Redis
+/// Fanout clients use native SCNP command-name requests and recursive replies.
+/// Direct shard clients support compact-opcode Redis
 /// commands only, because shard-owned SCNP listeners require pre-routed frames.
 #[derive(Debug)]
 pub struct Redis<'client, C: RedisCommandExecutor + ?Sized> {
