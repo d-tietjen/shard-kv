@@ -321,6 +321,37 @@ fn exercise_reused_direct_routes(
     assert!(!client.get_into(key, &mut out).unwrap());
 }
 
+fn exercise_reused_session_routes(address: &str, keys: &[Vec<u8>]) {
+    use shardcache_client_rs::{ShardCacheDirectClient, ShardCacheRouteMode};
+
+    let mode = ShardCacheRouteMode::SessionPrefix;
+    let router = ShardCacheDirectRouter::new(address, 4)
+        .unwrap()
+        .with_route_mode(mode);
+    let mut client = ShardCacheDirectClient::connect_with_route_mode(address, 4, mode).unwrap();
+    let first = client.route_key(&keys[0]);
+    let second = client.route_key(&keys[1]);
+    assert_eq!(first.shard_id, 1);
+    assert_eq!(second.shard_id, first.shard_id);
+    assert_ne!(first.key_hash, second.key_hash);
+    client.set_routed(first, &keys[0], b"first").unwrap();
+    client.set(&keys[1], b"second").unwrap();
+    let mut pinned = router.connect_shard(1).unwrap();
+    let mut out = Vec::new();
+    assert!(pinned.get_routed_into(first, &keys[0], &mut out).unwrap());
+    assert_eq!(out, b"first");
+    assert!(pinned.get_routed_into(second, &keys[1], &mut out).unwrap());
+    assert_eq!(out, b"second");
+    assert_eq!(pinned.ttl_routed(first, &keys[0]).unwrap(), -1);
+    assert!(!pinned.expire_routed(first, &keys[0], 60_000).unwrap());
+    assert!(!client.expire(&keys[1], 60_000).unwrap());
+    assert_eq!(client.ttl_routed(second, &keys[1]).unwrap(), -1);
+    assert!(pinned.get_routed_into(first, &keys[0], &mut out).unwrap());
+    assert_eq!(out, b"first");
+    assert!(client.del_routed(first, &keys[0]).unwrap());
+    assert!(client.del(&keys[1]).unwrap());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn reused_direct_routes_preserve_operations_and_pipeline_order() {
     use shardcache_client_rs::ShardCacheRouteMode;
@@ -354,12 +385,21 @@ async fn reused_direct_routes_preserve_operations_and_pipeline_order() {
                 } else {
                     (0..10_000)
                         .find_map(|index| {
-                            let key = format!("s:reused-{index}:c:0\0").into_bytes();
+                            let key = format!("reused-{index}\0").into_bytes();
                             (store.route_key(&key).shard_id == 1).then_some(key)
                         })
                         .expect("key for shard one")
                 };
                 assert_eq!(store.route_key(&key).shard_id, 1);
+                let session_keys = (client_mode == ShardCacheRouteMode::SessionPrefix).then(|| {
+                    (0..10_000)
+                        .find_map(|index| {
+                            let first = format!("s:reused-{index}:c:0").into_bytes();
+                            (store.route_key(&first).shard_id == 1)
+                                .then(|| vec![first, format!("s:reused-{index}:c:1").into_bytes()])
+                        })
+                        .expect("session keys for shard one")
+                });
                 let check_key = key.clone();
                 let server =
                     shardmap::server::ShardCacheServer::from_embedded_store(config, store.clone());
@@ -395,6 +435,9 @@ async fn reused_direct_routes_preserve_operations_and_pipeline_order() {
                         client_mode,
                         &key,
                     );
+                    if let Some(keys) = session_keys {
+                        exercise_reused_session_routes(&format!("127.0.0.1:{direct_port}"), &keys);
+                    }
                 });
                 let result = tokio::time::timeout(Duration::from_secs(10), client_task).await;
                 let _ = shutdown_tx.send(());
