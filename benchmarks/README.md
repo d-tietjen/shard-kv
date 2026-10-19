@@ -42,7 +42,8 @@ for record count, operation, binary keys and values, timestamp, TTL, and
 governance metadata. The current WAL wire format does not encode recovery
 sequence or shard fields, so the decoder's zero defaults for those fields are
 checked explicitly. EXISTS and EXPIRE rows require the exact integer success
-response, and the harness checks that stored values still match afterward.
+response, then checks that stored values still match and EXPIRE leaves a live
+TTL.
 The 9-byte framed WAL header and 25-byte legacy record header come from the
 current public encoder. Their native and typed rows, plus 4-byte and 8-byte
 scalar reads, are isolated prefix-read experiments; they do not call or replace

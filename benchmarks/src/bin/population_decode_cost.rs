@@ -167,6 +167,16 @@ struct Corpus {
     sorted_entries: Vec<StoredEntry>,
 }
 
+struct PublicContext<'a> {
+    args: &'a Args,
+    corpus: &'a Corpus,
+    router: &'a ShardCacheDirectRouter,
+    expected_routes: &'a [ShardCacheRoute],
+    wal_plain: &'a [u8],
+    runtime: &'a Runtime,
+    engine: &'a EngineHandle,
+}
+
 impl Corpus {
     fn build(count: usize, value_size: usize, shards: usize) -> Result<Self, BoxError> {
         let mut records = Vec::new();
@@ -267,6 +277,15 @@ fn main() -> Result<(), BoxError> {
     let u64_header = 0x1234_5678_9abc_def0_u64.to_le_bytes().to_vec();
     let runtime = Builder::new_current_thread().enable_all().build()?;
     let engine = open_engine(args.shards)?;
+    let public = PublicContext {
+        args: &args,
+        corpus: &corpus,
+        router: &router,
+        expected_routes: &expected_routes,
+        wal_plain: &wal_plain,
+        runtime: &runtime,
+        engine: &engine,
+    };
 
     let work = (|| {
         populate_engine(&runtime, &engine, &corpus)?;
@@ -303,16 +322,7 @@ fn main() -> Result<(), BoxError> {
                     args.iterations,
                 )?
             } else {
-                run_public_case(
-                    case,
-                    &args,
-                    &corpus,
-                    &router,
-                    &expected_routes,
-                    &wal_plain,
-                    &runtime,
-                    &engine,
-                )?
+                run_public_case(case, &public)?
             };
             report(case.label(), &measurement, args.records);
         }
@@ -325,16 +335,16 @@ fn main() -> Result<(), BoxError> {
     Ok(())
 }
 
-fn run_public_case(
-    case: Case,
-    args: &Args,
-    corpus: &Corpus,
-    router: &ShardCacheDirectRouter,
-    expected_routes: &[ShardCacheRoute],
-    wal_plain: &[u8],
-    runtime: &Runtime,
-    engine: &EngineHandle,
-) -> Result<Measurement, BoxError> {
+fn run_public_case(case: Case, context: &PublicContext<'_>) -> Result<Measurement, BoxError> {
+    let PublicContext {
+        args,
+        corpus,
+        router,
+        expected_routes,
+        wal_plain,
+        runtime,
+        engine,
+    } = context;
     match case {
         Case::WalEncodeUncompressed | Case::WalEncodeCompressed => {
             let compressed = case == Case::WalEncodeCompressed;
@@ -392,6 +402,12 @@ fn run_public_case(
             |count| {
                 let count = verify_engine_count(count, corpus.records.len())?;
                 verify_engine_contents(runtime, engine, corpus)?;
+                if matches!(
+                    case,
+                    Case::EngineFastExpireNoHash | Case::EngineFastExpirePrehashed
+                ) {
+                    verify_engine_expirations(runtime, engine, corpus)?;
+                }
                 Ok(count)
             },
         ),
@@ -409,6 +425,7 @@ fn run_public_case(
             |count| {
                 let count = verify_engine_count(count, corpus.records.len())?;
                 verify_engine_contents(runtime, engine, corpus)?;
+                verify_engine_expirations(runtime, engine, corpus)?;
                 Ok(count)
             },
         ),
@@ -781,6 +798,31 @@ fn verify_engine_contents(
     })
 }
 
+fn verify_engine_expirations(
+    runtime: &Runtime,
+    engine: &EngineHandle,
+    corpus: &Corpus,
+) -> Result<(), BoxError> {
+    runtime.block_on(async {
+        for record in &corpus.records {
+            let response = engine
+                .execute_fast(FastRequest {
+                    key_hash: Some(hash_key(record.key.as_ref())),
+                    route_shard: None,
+                    key_tag: None,
+                    command: FastCommand::Ttl {
+                        key: record.key.as_ref(),
+                    },
+                })
+                .await?;
+            if !matches!(response, FastResponse::Integer(0..=60)) {
+                return Err(format!("EXPIRE did not retain a live TTL: {response:?}").into());
+            }
+        }
+        Ok(())
+    })
+}
+
 fn value_bytes(index: usize, len: usize) -> Result<Vec<u8>, BoxError> {
     let mut value = Vec::new();
     value.try_reserve_exact(len)?;
@@ -841,6 +883,15 @@ mod tests {
                     warmup_iterations: 0,
                     cases: "all".to_owned(),
                 };
+                let public = PublicContext {
+                    args: &args,
+                    corpus: &corpus,
+                    router: &router,
+                    expected_routes: &expected_routes,
+                    wal_plain: &wal_plain,
+                    runtime: &runtime,
+                    engine: &engine,
+                };
                 populate_engine(&runtime, &engine, &corpus)?;
                 verify_engine_contents(&runtime, &engine, &corpus)?;
                 for case in Case::ALL {
@@ -857,16 +908,7 @@ mod tests {
                         };
                         run_header_case(kind, typed, bytes, 3, 0, 1)?;
                     } else {
-                        run_public_case(
-                            case,
-                            &args,
-                            &corpus,
-                            &router,
-                            &expected_routes,
-                            &wal_plain,
-                            &runtime,
-                            &engine,
-                        )?;
+                        run_public_case(case, &public)?;
                     }
                 }
             }
@@ -883,12 +925,16 @@ mod tests {
     fn corruption_truncation_and_full_field_mismatch_are_errors() {
         let corpus = Corpus::build(2, 9, 2).expect("test corpus should build");
         let segment = corpus.wal_segment(false).expect("test WAL should encode");
-        assert!(
-            decode_wal_records(SharedBytes::from(segment[..segment.len() - 1].to_vec())).is_err()
-        );
+        let truncated =
+            decode_wal_records(SharedBytes::from(segment[..segment.len() - 1].to_vec()))
+                .expect("the public decoder may stop at an incomplete trailing frame");
+        assert!(verify_mutation_records(&truncated, &corpus.records).is_err());
         let mut corrupted = segment.clone();
-        corrupted[0] ^= 1;
-        assert!(decode_wal_records(SharedBytes::from(corrupted)).is_err());
+        let first_frame_len = encode_wal_record_frame(&corpus.records[0], false).len();
+        corrupted[first_frame_len - 1] ^= 1;
+        let decoded = decode_wal_records(SharedBytes::from(corrupted))
+            .expect("the public decoder may skip a frame with a bad checksum");
+        assert!(verify_mutation_records(&decoded, &corpus.records).is_err());
 
         let decoded = decode_wal_records(SharedBytes::from(segment.clone()))
             .expect("valid test WAL should decode");
