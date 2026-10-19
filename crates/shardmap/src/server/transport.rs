@@ -844,6 +844,14 @@ impl MultiDirectConnection {
                     let available = frame_buffer.peek();
 
                     while consumed_total < available.len() {
+                        if (!pending.is_empty() || batch.is_some())
+                            && PublicRoutedFrame::fast_transaction_barrier(
+                                &available[consumed_total..],
+                                &transaction_state,
+                            )?
+                        {
+                            break;
+                        }
                         let Some(frame) = PublicRoutedFrame::parse(
                             &available[consumed_total..],
                             &store,
@@ -1042,9 +1050,13 @@ impl PublicRoutedFrame {
         resp_protocol: RespProtocolVersion,
     ) -> Result<Option<Self>> {
         match buf.first().copied() {
-            Some(first_byte) if FastCodec::is_fast_request_prefix(first_byte) => {
-                Self::parse_fast(buf, store)
-            }
+            Some(first_byte) if FastCodec::is_fast_request_prefix(first_byte) => Self::parse_fast(
+                buf,
+                store,
+                transaction_coordinator,
+                transaction_state,
+                resp_protocol,
+            ),
             Some(_) => Self::parse_resp(
                 buf,
                 store,
@@ -1056,10 +1068,94 @@ impl PublicRoutedFrame {
         }
     }
 
-    fn parse_fast(buf: &[u8], store: &EmbeddedStore) -> Result<Option<Self>> {
+    pub(super) fn fast_transaction_barrier(buf: &[u8], state: &TransactionState) -> Result<bool> {
+        if buf.first().copied() != Some(FAST_REQUEST_MAGIC) {
+            return Ok(false);
+        }
+        if state.is_active() {
+            return Ok(true);
+        }
+        if buf.get(2).copied() != Some(crate::protocol::FastCommandKind::NativeRedisCommand as u8) {
+            return Ok(false);
+        }
+        let Some((request, _)) = FastCodec::decode_request(buf)? else {
+            return Ok(false);
+        };
+        let command = match &request.command {
+            FastCommand::NativeRedisCommand { command, .. } => Some(*command),
+            FastCommand::RespCommand { parts } => parts.first().copied(),
+            FastCommand::RedisCommand { kind, .. } => kind.redis_name().map(str::as_bytes),
+            _ => None,
+        };
+        Ok(command
+            .and_then(super::transactions::RespTransactionCommand::from_name)
+            .is_some())
+    }
+
+    fn parse_fast(
+        buf: &[u8],
+        store: &EmbeddedStore,
+        coordinator: Option<&TransactionCoordinator>,
+        state: &mut TransactionState,
+        resp_protocol: RespProtocolVersion,
+    ) -> Result<Option<Self>> {
         let Some((request, consumed)) = FastCodec::decode_request(buf)? else {
             return Ok(None);
         };
+        if let FastCommand::NativeRedisCommand { command, args } = &request.command {
+            let mut parts = Vec::with_capacity(args.len() + 1);
+            parts.push(*command);
+            parts.extend(args.iter().copied());
+            let mut payload = BytesMut::new();
+            if state.handle_native_command(coordinator, store, &parts, &mut payload) {
+                return Ok(Some(Self {
+                    consumed,
+                    destination: PublicRoutedDestination::Error {
+                        payload: payload.freeze(),
+                    },
+                    barrier: true,
+                }));
+            }
+        }
+        let legacy_parts = match &request.command {
+            FastCommand::RespCommand { parts } if state.is_active() => Some(parts.clone()),
+            FastCommand::RedisCommand { kind, args } if state.is_active() => {
+                kind.redis_name().map(|command| {
+                    let mut parts = Vec::with_capacity(args.len() + 1);
+                    parts.push(command.as_bytes());
+                    parts.extend(args.iter().copied());
+                    parts
+                })
+            }
+            _ => None,
+        };
+        if let Some(parts) = legacy_parts {
+            let mut payload = BytesMut::new();
+            let start = ServerWire::begin_fast_value(&mut payload);
+            if state.handle_resp_command(coordinator, store, &parts, &mut payload, resp_protocol) {
+                ServerWire::finish_fast_value(&mut payload, start);
+                return Ok(Some(Self {
+                    consumed,
+                    destination: PublicRoutedDestination::Error {
+                        payload: payload.freeze(),
+                    },
+                    barrier: true,
+                }));
+            }
+        }
+        if state.is_active() {
+            state.mark_dirty();
+            return Ok(Some(Self {
+                consumed,
+                destination: PublicRoutedDestination::Error {
+                    payload: Self::route_error(
+                        true,
+                        "ERR typed SCNP commands are not supported inside MULTI; use command-name frames",
+                    ),
+                },
+                barrier: true,
+            }));
+        }
         let shards = super::transactions::fast_request_shards(store, &request);
         Ok(Some(Self::from_shards(consumed, shards, false, true)))
     }

@@ -14,6 +14,8 @@ use crate::protocol::{
     FAST_PROTOCOL_VERSION, FAST_REQUEST_MAGIC, FAST_RESPONSE_MAGIC, STATUS_ERROR, STATUS_INTEGER,
     STATUS_NULL, STATUS_OK, STATUS_VALUE,
 };
+#[cfg(feature = "redis")]
+use crate::protocol::{STATUS_BOOLEAN, STATUS_NATIVE_FRAME};
 #[cfg(feature = "tls")]
 use crate::tls::ScnpTlsClientConfig;
 
@@ -199,6 +201,11 @@ impl ScnpConnection {
     }
 
     pub(crate) fn flush(&mut self) -> Result<()> {
+        if !self.response_aligned {
+            return Err(ShardCacheClientError::Protocol(
+                "SCNP connection is unusable after an invalid response frame".into(),
+            ));
+        }
         if !self.w.is_empty() {
             self.r.get_mut().write_all(&self.w)?;
             if self.w.capacity() > SCNP_WRITE_BUFFER_BYTES * 2 {
@@ -328,7 +335,22 @@ impl ScnpConnection {
 
     #[cfg(feature = "redis")]
     pub(crate) fn read_native_redis_response(&mut self, op: &str) -> Result<RedisResponse> {
+        let result = self.read_native_redis_response_inner(op);
+        if matches!(&result, Err(ShardCacheClientError::Io(_))) {
+            self.response_aligned = false;
+        }
+        result
+    }
+
+    #[cfg(feature = "redis")]
+    fn read_native_redis_response_inner(&mut self, op: &str) -> Result<RedisResponse> {
         let (status, body_len) = self.read_response_header()?;
+        if body_len > SCNP_MAX_RESPONSE_BODY_BYTES {
+            self.response_aligned = false;
+            return Err(ShardCacheClientError::Protocol(format!(
+                "{op} response body length {body_len} exceeds maximum {SCNP_MAX_RESPONSE_BODY_BYTES}"
+            )));
+        }
         match status {
             STATUS_OK => {
                 self.discard(body_len)?;
@@ -351,9 +373,25 @@ impl ScnpConnection {
                 Ok(RedisResponse::Integer(i64::from_le_bytes(value)))
             }
             STATUS_VALUE => {
-                let mut value = vec![0; body_len];
-                self.r.read_exact(value.as_mut_slice())?;
-                Ok(RedisResponse::Value(value))
+                let body = self.read_limited_body(op, body_len, SCNP_MAX_RESPONSE_BODY_BYTES)?;
+                Ok(RedisResponse::Value(body.to_vec()))
+            }
+            STATUS_BOOLEAN => {
+                if body_len != 1 {
+                    self.discard(body_len)?;
+                    return Err(ShardCacheClientError::Protocol(format!(
+                        "{op} boolean response body length was {body_len}, expected 1"
+                    )));
+                }
+                let mut value = [0u8; 1];
+                self.r.read_exact(&mut value)?;
+                match value[0] {
+                    0 => Ok(RedisResponse::Boolean(false)),
+                    1 => Ok(RedisResponse::Boolean(true)),
+                    other => Err(ShardCacheClientError::Protocol(format!(
+                        "{op} invalid boolean response value {other}"
+                    ))),
+                }
             }
             STATUS_ARRAY => self.read_array_response(op, body_len),
             STATUS_FLOAT => {
@@ -367,9 +405,11 @@ impl ScnpConnection {
                 self.r.read_exact(&mut value)?;
                 Ok(RedisResponse::Float(f64::from_le_bytes(value)))
             }
-            other => Err(ShardCacheClientError::Protocol(format!(
-                "{op} unexpected response status: {other}"
-            ))),
+            STATUS_NATIVE_FRAME => {
+                let body = self.read_limited_body(op, body_len, SCNP_MAX_RESPONSE_BODY_BYTES)?;
+                RedisResponse::from_native_bytes(body)
+            }
+            other => self.unexpected_status(op, other, body_len),
         }
     }
 
@@ -431,6 +471,11 @@ impl ScnpConnection {
     }
 
     pub(crate) fn write_header(&mut self, cmd: u8, flags: u8, body_len: u32) -> Result<()> {
+        if !self.response_aligned {
+            return Err(ShardCacheClientError::Protocol(
+                "SCNP connection is unusable after an invalid response frame".into(),
+            ));
+        }
         let header = [
             FAST_REQUEST_MAGIC,
             FAST_PROTOCOL_VERSION,
@@ -446,6 +491,12 @@ impl ScnpConnection {
     }
 
     fn read_response_header(&mut self) -> Result<(u8, usize)> {
+        if !self.response_aligned {
+            return Err(ShardCacheClientError::Protocol(
+                "SCNP connection is unusable after an invalid response frame".into(),
+            ));
+        }
+        self.response_aligned = false;
         let mut header = [0u8; 8];
         self.r.read_exact(&mut header)?;
         if header[0] != FAST_RESPONSE_MAGIC {
@@ -462,6 +513,7 @@ impl ScnpConnection {
         }
         let status = header[2];
         let body_len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        self.response_aligned = true;
         Ok((status, body_len))
     }
 
@@ -498,6 +550,8 @@ impl ScnpConnection {
                 "{op} array response body length {body_len} exceeds maximum {effective_max}"
             )));
         }
+        self.response_aligned = false;
+        self.scratch.clear();
         self.scratch.try_reserve_exact(body_len).map_err(|_| {
             ShardCacheClientError::Protocol(format!(
                 "{op} array response allocation of {body_len} bytes failed"
@@ -505,6 +559,7 @@ impl ScnpConnection {
         })?;
         self.scratch.resize(body_len, 0);
         self.r.read_exact(&mut self.scratch[..body_len])?;
+        self.response_aligned = true;
         if body_len < 4 {
             return Err(ShardCacheClientError::Protocol(format!(
                 "{op} array response body length was {body_len}, expected at least 4"
@@ -566,7 +621,7 @@ impl ScnpConnection {
         Ok(i64::from_le_bytes(value))
     }
 
-    #[cfg(feature = "vector")]
+    #[cfg(any(feature = "redis", feature = "vector"))]
     fn read_limited_body(
         &mut self,
         op: &str,
@@ -580,6 +635,8 @@ impl ScnpConnection {
                 "{op} response body length {body_len} exceeds configured maximum {effective_max}"
             )));
         }
+        self.response_aligned = false;
+        self.scratch.clear();
         self.scratch.try_reserve_exact(body_len).map_err(|_| {
             ShardCacheClientError::Protocol(format!(
                 "{op} response allocation of {body_len} bytes failed"
@@ -587,6 +644,7 @@ impl ScnpConnection {
         })?;
         self.scratch.resize(body_len, 0);
         self.r.read_exact(&mut self.scratch[..body_len])?;
+        self.response_aligned = true;
         Ok(&self.scratch[..body_len])
     }
 
@@ -614,6 +672,8 @@ impl ScnpConnection {
 
     fn read_error(&mut self, body_len: usize) -> Result<String> {
         let retained = body_len.min(SCNP_MAX_ERROR_BODY_BYTES);
+        self.response_aligned = false;
+        self.scratch.clear();
         self.scratch.try_reserve_exact(retained).map_err(|_| {
             ShardCacheClientError::Protocol("SCNP error response allocation failed".into())
         })?;
@@ -621,6 +681,7 @@ impl ScnpConnection {
         self.r.read_exact(&mut self.scratch[..retained])?;
         let message = String::from_utf8_lossy(&self.scratch[..retained]).into_owned();
         self.discard(body_len - retained)?;
+        self.response_aligned = true;
         if body_len > retained {
             Ok(format!("{message} [truncated from {body_len} bytes]"))
         } else {
@@ -861,6 +922,127 @@ mod tests {
     use crate::commands::vector::Ping;
     use std::net::TcpListener;
     use std::thread;
+
+    #[cfg(feature = "redis")]
+    fn native_test_connection(response: Vec<u8>) -> (ScnpConnection, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(&response).unwrap();
+        });
+        let timeout = Duration::from_secs(2);
+        (
+            ScnpConnection::connect_with_timeouts(address, timeout, timeout).unwrap(),
+            server,
+        )
+    }
+
+    #[cfg(feature = "redis")]
+    fn native_test_frame(status: u8, body: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![FAST_RESPONSE_MAGIC, FAST_PROTOCOL_VERSION, status, 0];
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn native_malformed_consumed_body_preserves_next_response_alignment() {
+        for (status, body) in [
+            (STATUS_NATIVE_FRAME, vec![3, 255, 255, 255, 255]),
+            (STATUS_NATIVE_FRAME, vec![7, 7]),
+            (STATUS_BOOLEAN, vec![2]),
+            (STATUS_INTEGER, vec![0]),
+            (STATUS_ERROR, b"ERR expected".to_vec()),
+        ] {
+            let mut response = native_test_frame(status, &body);
+            response.extend_from_slice(&native_test_frame(STATUS_BOOLEAN, &[1]));
+            let (mut connection, server) = native_test_connection(response);
+            assert!(connection.read_native_redis_response("TEST").is_err());
+            assert!(connection.response_aligned);
+            assert_eq!(
+                connection.read_native_redis_response("TEST").unwrap(),
+                RedisResponse::Boolean(true)
+            );
+            server.join().unwrap();
+        }
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn native_oversized_unread_bodies_poison_reads_and_pipeline_writes() {
+        for status in [
+            STATUS_VALUE,
+            STATUS_NATIVE_FRAME,
+            STATUS_ARRAY,
+            STATUS_ERROR,
+        ] {
+            let mut response = native_test_frame(status, &[]);
+            response[4..8]
+                .copy_from_slice(&((SCNP_MAX_RESPONSE_BODY_BYTES + 1) as u32).to_le_bytes());
+            let (mut connection, server) = native_test_connection(response);
+            connection.w.extend_from_slice(b"already buffered request");
+            let buffered = connection.w.clone();
+            assert!(
+                connection
+                    .read_native_redis_response("TEST")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("exceeds")
+            );
+            assert!(connection.scratch.capacity() < SCNP_MAX_RESPONSE_BODY_BYTES);
+            assert!(
+                connection
+                    .flush()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unusable")
+            );
+            assert_eq!(connection.w, buffered);
+            assert!(
+                connection
+                    .read_native_redis_response("TEST")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unusable")
+            );
+            assert!(
+                connection
+                    .write_header(244, crate::protocol::FAST_FLAG_REDIS_COMMAND_ARGS, 0)
+                    .is_err()
+            );
+            assert_eq!(connection.w, buffered);
+            server.join().unwrap();
+        }
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn native_truncated_and_unknown_frames_poison_the_connection() {
+        let mut truncated = native_test_frame(STATUS_NATIVE_FRAME, &[3]);
+        truncated[4..8].copy_from_slice(&5u32.to_le_bytes());
+        let mut bad_magic = native_test_frame(STATUS_OK, &[]);
+        bad_magic[0] = 0;
+        let mut bad_version = native_test_frame(STATUS_OK, &[]);
+        bad_version[1] = FAST_PROTOCOL_VERSION + 1;
+        for response in [
+            truncated,
+            bad_magic,
+            bad_version,
+            native_test_frame(255, &[7]),
+        ] {
+            let (mut connection, server) = native_test_connection(response);
+            assert!(connection.read_native_redis_response("TEST").is_err());
+            assert!(!connection.response_aligned);
+            assert!(
+                connection
+                    .write_header(244, crate::protocol::FAST_FLAG_REDIS_COMMAND_ARGS, 0)
+                    .is_err()
+            );
+            server.join().unwrap();
+        }
+    }
 
     #[test]
     fn limited_value_rejects_advertised_body_before_allocation() {

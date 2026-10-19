@@ -364,18 +364,78 @@ fn main() -> shardcache_client_rs::Result<()> {
 ```
 
 Use `redis_command`, `redis_command_by_name`, `client.redis().query_command(...)`,
-or `client.redis().execute(...)` as lower-level escape hatches when you
-explicitly want the compact-opcode path or already have borrowed command and
-argv bytes.
+or `client.redis().execute(...)` as lower-level escape hatches when you need
+borrowed command and argv bytes. `redis_command_by_name` and the first-party
+Redis namespace use the native command-name SCNP wrapper; `redis_command` is
+the explicit compact-opcode API.
 
-`RedisResponse` decodes RESP2/RESP3 payloads returned by the command-name
-wrapper into nested Rust values. Compact opcode commands return native SCNP
-statuses directly; if a less-common compact command returns an embedded RESP
-payload as `RedisResponse::Value`, call `decode_resp_value()` to decode it.
+`RedisResponse` decodes recursive native SCNP values, including RESP2/RESP3
+arrays, maps, sets, pushes, attributes, and scalar types. The raw RESP command
+wrapper remains available through `redis_resp_command` for compatibility tools.
 
 Direct shard clients route keyed compact-opcode commands to their owning shard
-when all keys belong to one shard. Commands without compact opcodes, or commands
-that require all shards, should use `ShardCacheClient` on the fanout listener.
+when all keys belong to one shard. Command-name native routing and commands
+that require all shards should use `ShardCacheClient` on the fanout listener.
+
+### Native Redis wire format
+
+Command-name APIs require a server revision that supports opcode `244`. For
+older servers, select `redis_resp_command` explicitly. Compact-opcode APIs
+remain available through `redis_command` and direct shard clients.
+
+Command availability follows the selected server and storage mode. Native
+requests use the engine's normal command execution on engine-backed servers and
+the owning worker on routed embedded listeners. Commands such as `MGET` that
+require embedded Redis storage retain that requirement. Routed embedded
+transactions remain on the public connection and wait for earlier worker
+requests before changing transaction state.
+
+Native requests use the SCNP v2 header with opcode `244` and flag `0x08`.
+After any flagged routing fields, the body contains a little-endian `u32`
+command-name length, the command bytes, and compact argv: an unsigned `u32`
+base-128 varint count, then a varint byte length and raw bytes for each argument.
+Keys and values are binary-safe. The encoded request must fit the header's
+`u32` body length.
+
+Owner-routed embedded listeners retain their restriction on the legacy RESP
+wrapper. Use native command-name requests on those listeners; the wrapper
+remains available on server modes that accept it, including ordinary multiworker
+embedded listeners.
+
+Simple replies retain existing SCNP statuses: OK `0`, null `1`, error `2`,
+integer `3`, blob `4`, boolean `5`, and float `7`. Recursive replies use status
+`8` with the normal `u32` body length and one native value:
+
+| Tag | Value and following bytes |
+| --- | --- |
+| 0 | Simple string: `u32le` byte length and bytes; `OK` becomes `RedisResponse::Ok`. |
+| 1 | Blob string: `u32le` byte length and bytes. |
+| 2 | Signed integer: `i64le`. |
+| 3 | Array: `u32le` count and recursive values. |
+| 4 | Map: `u32le` pair count and recursive key/value pairs. |
+| 5 | Set: `u32le` count and recursive values. |
+| 6 | Push: `u32le` count and recursive values. |
+| 7 | Null: no following bytes. |
+| 8 | Boolean: one byte, exactly `0` or `1`. |
+| 9 | Double: IEEE 754 `f64le`. |
+| 10 | Big number: `u32le` byte length and decimal bytes. |
+| 11 | Verbatim: length-prefixed format bytes, then length-prefixed value bytes. |
+| 12 | Attribute: `u32le` pair count, recursive pairs, then one data value. |
+| 13 | Error: `u32le` byte length and message bytes. |
+
+`MULTI`, queued commands, `EXEC`, `DISCARD`, and watch controls use the same
+transaction state and shard checks as RESP. An error inside an `EXEC` array
+remains `RedisResponse::Error`; a top-level error returns `Err`. Pipelines may
+mix native command-name, compact-opcode, and explicit RESP wrappers when the
+matching begin/finish APIs are used.
+
+The client and server bound native bodies to 256 MiB, each collection to
+65,536 entries, nesting to 128 levels, and each recursive response to 1,048,576
+values. The decoder rejects truncated fields, invalid tags/booleans, impossible
+counts, and trailing bytes before accepting a value. A fully consumed invalid
+body leaves the next response aligned. An oversized unread body, invalid
+header, or truncated response makes the connection unusable; reconnect before
+sending more commands.
 
 ## Routing Helpers
 

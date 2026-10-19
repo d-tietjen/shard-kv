@@ -14,7 +14,7 @@ use tokio::sync::oneshot;
 use crate::commands::EngineCommandCatalog;
 use crate::config::ShardCacheConfig;
 use crate::persistence::{PersistenceRuntime, load_recovery_state};
-use crate::protocol::{CommandSpanFrame, FastRequest, FastResponse, Frame, RespCodec};
+use crate::protocol::{CommandSpanFrame, FastCommand, FastRequest, FastResponse, Frame, RespCodec};
 #[cfg(feature = "parent-telemetry-runtime")]
 use crate::storage::TelemetryRuntime;
 use crate::storage::command::{BorrowedCommand, Command};
@@ -357,6 +357,14 @@ impl EngineHandle {
     }
 
     pub async fn execute_fast<'a>(&'a self, request: FastRequest<'a>) -> Result<FastResponse> {
+        if let FastCommand::NativeRedisCommand { command, args } = &request.command {
+            let mut parts = Vec::with_capacity(args.len() + 1);
+            parts.push(*command);
+            parts.extend(args.iter().copied());
+            let command = BorrowedCommand::from_parts(&parts)?;
+            let frame = self.execute_borrowed(command).await?;
+            return FastResponse::from_redis_frame(frame);
+        }
         EngineCommandCatalog::execute_fast(EngineCommandContext::new(self), request)
             .await
             .unwrap_or_else(|| Ok(FastResponse::Error(b"ERR unsupported command".to_vec())))
@@ -902,6 +910,58 @@ impl ShardState {
 mod tests {
     use super::*;
     use crate::config::ShardCacheConfig;
+
+    #[tokio::test]
+    async fn native_command_names_use_engine_storage_and_command_catalog() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = ShardCacheConfig::default();
+        config.persistence.enabled = false;
+        config.persistence.data_dir = temp.path().to_path_buf();
+        let engine = EngineHandle::open(config).unwrap();
+        fn request<'a>(command: &'a [u8], args: Vec<&'a [u8]>) -> FastRequest<'a> {
+            FastRequest {
+                key_hash: None,
+                route_shard: None,
+                key_tag: None,
+                command: FastCommand::NativeRedisCommand { command, args },
+            }
+        }
+        assert_eq!(
+            engine
+                .execute_fast(request(b"SET", vec![b"engine-native", b"v\0"]))
+                .await
+                .unwrap(),
+            FastResponse::Ok
+        );
+        assert_eq!(
+            engine
+                .execute_fast(request(b"GET", vec![b"engine-native"]))
+                .await
+                .unwrap(),
+            FastResponse::Value(b"v\0".to_vec())
+        );
+        let parts: &[&[u8]] = &[b"MGET", b"engine-native", b"missing"];
+        let expected_error = match BorrowedCommand::from_parts(parts) {
+            Ok(command) => engine
+                .execute_borrowed(command)
+                .await
+                .expect_err("MGET retains the engine's existing storage restriction"),
+            Err(error) => error,
+        };
+        let error = engine
+            .execute_fast(request(b"MGET", vec![b"engine-native", b"missing"]))
+            .await
+            .expect_err("native transport must retain the engine's command boundary");
+        assert_eq!(error.to_string(), expected_error.to_string());
+        assert_eq!(
+            engine
+                .execute_fast(request(b"GET", vec![b"missing"]))
+                .await
+                .unwrap(),
+            FastResponse::Null
+        );
+        engine.shutdown().await.unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn large_resp_set_uses_spanned_owner_path() {
