@@ -121,6 +121,29 @@ fn main() -> shardcache_client_rs::Result<()> {
 Direct mode requires the client shard count to match the server shard count.
 The shard count must be a non-zero power of two.
 
+For repeated operations on a fixed key, compute its route once with
+`client.route_key(key)` and pass it to `set_routed`, `get_routed_into`, or the
+corresponding routed TTL, existence and delete methods. Pinned shard clients
+also provide `begin_pipeline_*_routed` methods. Reused metadata must come from
+the same key, shard count and route mode; these methods check connection bounds
+and pinned ownership without recomputing the key hash. Recompute the route if
+the key or topology changes.
+
+```rust,no_run
+use shardcache_client_rs::ShardCacheDirectClient;
+
+fn main() -> shardcache_client_rs::Result<()> {
+    let mut client = ShardCacheDirectClient::connect("127.0.0.1:6501", 4)?;
+    let key = b"user:42";
+    let route = client.route_key(key);
+    client.set_routed(route, key, b"ready")?;
+    let mut value = Vec::new();
+    assert!(client.get_routed_into(route, key, &mut value)?);
+    assert_eq!(value, b"ready");
+    Ok(())
+}
+```
+
 ## Thread-Per-Shard Client
 
 Use `ShardCacheDirectRouter` and `ShardCacheDirectShardClient` when your application already
