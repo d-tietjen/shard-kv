@@ -140,6 +140,10 @@ fn overflow_slot_shard(key: &[u8], shard_count: usize) -> Option<usize> {
 }
 
 /// Precomputed routed SCNP metadata for a key.
+///
+/// Reuse this metadata only with the same key, shard count and route mode that
+/// produced it. Route-aware client methods check connection bounds and pinned
+/// shard ownership without recomputing the key hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShardCacheRoute {
     /// Primary key hash.

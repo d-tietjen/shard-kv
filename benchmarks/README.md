@@ -691,6 +691,7 @@ CSV artifact from this bench before changing the storage value movement path.
 | `fc-server-resp` | `shardcache` over RESP/TCP |
 | `fc-server-scnp` | `shardcache` over native binary (SCNP v2) |
 | `fc-server-scnp-direct` | `shardcache` over SCNP with client-side routing to shard-owned ports |
+| `fc-server-scnp-direct-precomputed` | The same direct SCNP workload with key routes prepared before the timed window |
 | `fc-py` | `shardcache.Store` from Python (separate harness) |
 | `shardcache-lmcache` | LMCache with shardcache storage plugin (separate harness) |
 | `dashmap` | `dashmap::DashMap` |
@@ -792,6 +793,13 @@ cargo run --release -p shardcache-benchmarks --bin saturation -- \
   --vcpu-budget 16 --clients 64 --pipeline-depth 16 \
   --key-count 100000 --duration 10 --latency-sample-rate 0
 ```
+
+Use `--backends fc-server-scnp-direct-precomputed` to measure saved route
+metadata with the same direct-port configuration. This backend prepares each
+worker's keys and routes before the timed window, including for pipelined
+operations. The ordinary `fc-server-scnp-direct` backend still computes routes
+for each request. Preparation time and client-side prepared-key memory are
+outside the timed window, so label comparisons as steady-state request costs.
 
 Repeat the same shape with each backend's address, for example RESP on
 `127.0.0.1:6383` and Redis on `127.0.0.1:6379`. When comparing Redis and

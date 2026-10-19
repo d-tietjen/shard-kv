@@ -197,6 +197,258 @@ async fn embedded_store_can_be_exposed_as_tcp_server() {
         .await;
 }
 
+fn exercise_reused_direct_routes(
+    address: &str,
+    route_mode: shardcache_client_rs::ShardCacheRouteMode,
+    key: &[u8],
+) {
+    use shardcache_client_rs::{ShardCacheClientError, ShardCacheDirectClient, ShardCacheRoute};
+
+    fn config_error<T>(result: shardcache_client_rs::Result<T>) {
+        let error = result.err().expect("invalid route must be rejected");
+        assert!(
+            matches!(&error, ShardCacheClientError::Config(_)),
+            "{error}"
+        );
+    }
+
+    let timeout = Duration::from_secs(2);
+    let router = ShardCacheDirectRouter::new(address, 4)
+        .unwrap()
+        .with_route_mode(route_mode);
+    let mut client =
+        ShardCacheDirectClient::connect_with_route_mode(address, 4, route_mode).unwrap();
+    let route = client.route_key(key);
+    assert_eq!(route.shard_id, 1);
+    let invalid = ShardCacheRoute {
+        shard_id: usize::MAX,
+        ..route
+    };
+    let value = b"value\0\xff";
+    let mut out = Vec::new();
+    config_error(client.get_routed_into(invalid, key, &mut out));
+    config_error(client.set_routed(invalid, key, value));
+    config_error(client.set_ex_routed(invalid, key, value, 60_000));
+    config_error(client.get_ex_routed_into(invalid, key, 60_000, &mut out));
+    config_error(client.del_routed(invalid, key));
+    config_error(client.exists_routed(invalid, key));
+    config_error(client.ttl_routed(invalid, key));
+    config_error(client.expire_routed(invalid, key, 60_000));
+
+    client.set_routed(route, key, value).unwrap();
+    assert!(client.get_routed_into(route, key, &mut out).unwrap());
+    assert_eq!(out, value);
+    assert!(client.exists_routed(route, key).unwrap());
+    assert_eq!(client.ttl_routed(route, key).unwrap(), -1);
+    assert!(client.expire_routed(route, key, 60_000).unwrap());
+    assert!(client.ttl_routed(route, key).unwrap() >= 0);
+    assert!(
+        client
+            .get_ex_routed_into(route, key, 60_000, &mut out)
+            .unwrap()
+    );
+    assert_eq!(out, value);
+    client.set_ex_routed(route, key, value, 60_000).unwrap();
+    assert!(client.del_routed(route, key).unwrap());
+    assert!(!client.exists_routed(route, key).unwrap());
+    assert_eq!(client.ttl_routed(route, key).unwrap(), -2);
+
+    client.set(key, value).unwrap();
+    let mut pinned = router
+        .connect_shard_with_timeouts(1, timeout, timeout)
+        .unwrap();
+    assert_eq!(pinned.route_key(key).unwrap(), route);
+    let wrong_shard = ShardCacheRoute {
+        shard_id: 0,
+        ..route
+    };
+    config_error(pinned.get_routed_into(wrong_shard, key, &mut out));
+    config_error(pinned.set_routed(wrong_shard, key, value));
+    config_error(pinned.set_ex_routed(wrong_shard, key, value, 60_000));
+    config_error(pinned.get_ex_routed_into(wrong_shard, key, 60_000, &mut out));
+    config_error(pinned.del_routed(wrong_shard, key));
+    config_error(pinned.exists_routed(wrong_shard, key));
+    config_error(pinned.ttl_routed(wrong_shard, key));
+    config_error(pinned.expire_routed(wrong_shard, key, 60_000));
+    assert!(pinned.get_routed_into(route, key, &mut out).unwrap());
+    assert_eq!(out, value);
+    pinned.set_routed(route, key, b"pinned").unwrap();
+    assert!(pinned.exists_routed(route, key).unwrap());
+    assert_eq!(pinned.ttl_routed(route, key).unwrap(), -1);
+    assert!(pinned.expire_routed(route, key, 60_000).unwrap());
+    assert!(
+        pinned
+            .get_ex_routed_into(route, key, 60_000, &mut out)
+            .unwrap()
+    );
+    assert_eq!(out, b"pinned");
+    pinned.set_ex_routed(route, key, value, 60_000).unwrap();
+    assert!(pinned.del_routed(route, key).unwrap());
+
+    config_error(pinned.begin_pipeline_get_routed(invalid, key));
+    config_error(pinned.begin_pipeline_set_routed(invalid, key, value));
+    config_error(pinned.begin_pipeline_set_ex_routed(invalid, key, value, 60_000));
+    config_error(pinned.begin_pipeline_get_ex_routed(invalid, key, 60_000));
+    config_error(pinned.begin_pipeline_del_routed(invalid, key));
+    config_error(pinned.begin_pipeline_exists_routed(invalid, key));
+    config_error(pinned.begin_pipeline_ttl_routed(invalid, key));
+    config_error(pinned.begin_pipeline_expire_routed(invalid, key, 60_000));
+    pinned.begin_pipeline_set_routed(route, key, value).unwrap();
+    pinned.begin_pipeline_get_routed(route, key).unwrap();
+    pinned.begin_pipeline_exists_routed(route, key).unwrap();
+    pinned.begin_pipeline_ttl_routed(route, key).unwrap();
+    pinned
+        .begin_pipeline_set_ex_routed(route, key, b"ttl", 60_000)
+        .unwrap();
+    pinned
+        .begin_pipeline_get_ex_routed(route, key, 60_000)
+        .unwrap();
+    pinned
+        .begin_pipeline_expire_routed(route, key, 60_000)
+        .unwrap();
+    pinned.begin_pipeline_del_routed(route, key).unwrap();
+    pinned.flush_pipeline().unwrap();
+    pinned.finish_pipeline_set().unwrap();
+    assert!(pinned.finish_pipeline_get_into(&mut out).unwrap());
+    assert_eq!(out, value);
+    assert!(pinned.finish_pipeline_exists().unwrap());
+    assert_eq!(pinned.finish_pipeline_ttl().unwrap(), -1);
+    pinned.finish_pipeline_set_ex().unwrap();
+    assert!(pinned.finish_pipeline_get_ex_into(&mut out).unwrap());
+    assert_eq!(out, b"ttl");
+    assert!(pinned.finish_pipeline_expire().unwrap());
+    assert!(pinned.finish_pipeline_del().unwrap());
+    assert!(!client.get_into(key, &mut out).unwrap());
+}
+
+fn exercise_reused_session_routes(address: &str, keys: &[Vec<u8>]) {
+    use shardcache_client_rs::{ShardCacheDirectClient, ShardCacheRouteMode};
+
+    let mode = ShardCacheRouteMode::SessionPrefix;
+    let router = ShardCacheDirectRouter::new(address, 4)
+        .unwrap()
+        .with_route_mode(mode);
+    let mut client = ShardCacheDirectClient::connect_with_route_mode(address, 4, mode).unwrap();
+    let first = client.route_key(&keys[0]);
+    let second = client.route_key(&keys[1]);
+    assert_eq!(first.shard_id, 1);
+    assert_eq!(second.shard_id, first.shard_id);
+    assert_ne!(first.key_hash, second.key_hash);
+    client.set_routed(first, &keys[0], b"first").unwrap();
+    client.set(&keys[1], b"second").unwrap();
+    let mut pinned = router.connect_shard(1).unwrap();
+    let mut out = Vec::new();
+    assert!(pinned.get_routed_into(first, &keys[0], &mut out).unwrap());
+    assert_eq!(out, b"first");
+    assert!(pinned.get_routed_into(second, &keys[1], &mut out).unwrap());
+    assert_eq!(out, b"second");
+    assert_eq!(pinned.ttl_routed(first, &keys[0]).unwrap(), -1);
+    assert!(!pinned.expire_routed(first, &keys[0], 60_000).unwrap());
+    assert!(!client.expire(&keys[1], 60_000).unwrap());
+    assert_eq!(client.ttl_routed(second, &keys[1]).unwrap(), -1);
+    assert!(pinned.get_routed_into(first, &keys[0], &mut out).unwrap());
+    assert_eq!(out, b"first");
+    assert!(client.del_routed(first, &keys[0]).unwrap());
+    assert!(client.del(&keys[1]).unwrap());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reused_direct_routes_preserve_operations_and_pipeline_order() {
+    use shardcache_client_rs::ShardCacheRouteMode;
+    use shardmap::storage::EmbeddedRouteMode;
+
+    let _test_guard = SERVER_TEST_LOCK.lock().await;
+    for (client_mode, store_mode) in [
+        (ShardCacheRouteMode::FullKey, EmbeddedRouteMode::FullKey),
+        (
+            ShardCacheRouteMode::SessionPrefix,
+            EmbeddedRouteMode::SessionPrefix,
+        ),
+        (
+            ShardCacheRouteMode::OverflowSlot,
+            EmbeddedRouteMode::OverflowSlot,
+        ),
+    ] {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let temp = tempfile::TempDir::new().unwrap();
+                let (fanout_port, direct_port) = free_consecutive_ports_for_shards(4);
+                let mut config = test_config(temp.path().join("reused-routes"), false);
+                config.bind_addr = format!("127.0.0.1:{fanout_port}");
+                config.server_endpoint_mode = ServerEndpointMode::DirectShard;
+                let store = Arc::new(EmbeddedStore::with_route_mode(4, store_mode));
+                let key = if client_mode == ShardCacheRouteMode::OverflowSlot {
+                    let mut key = b"SCKVKEY1".to_vec();
+                    key.extend_from_slice(&1u32.to_le_bytes());
+                    key.extend_from_slice(b"\0\0\0\0\0\0binary\xff");
+                    key
+                } else {
+                    (0..10_000)
+                        .find_map(|index| {
+                            let key = format!("reused-{index}\0").into_bytes();
+                            (store.route_key(&key).shard_id == 1).then_some(key)
+                        })
+                        .expect("key for shard one")
+                };
+                assert_eq!(store.route_key(&key).shard_id, 1);
+                let session_keys = (client_mode == ShardCacheRouteMode::SessionPrefix).then(|| {
+                    (0..10_000)
+                        .find_map(|index| {
+                            let first = format!("s:reused-{index}:c:0").into_bytes();
+                            (store.route_key(&first).shard_id == 1)
+                                .then(|| vec![first, format!("s:reused-{index}:c:1").into_bytes()])
+                        })
+                        .expect("session keys for shard one")
+                });
+                let check_key = key.clone();
+                let server =
+                    shardmap::server::ShardCacheServer::from_embedded_store(config, store.clone());
+                let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+                let server_task = tokio::task::spawn_local(async move {
+                    server
+                        .run_with_shutdown(async {
+                            let _ = shutdown_rx.await;
+                        })
+                        .await
+                });
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+                loop {
+                    if tokio::net::TcpStream::connect(("127.0.0.1", fanout_port))
+                        .await
+                        .is_ok()
+                    {
+                        break;
+                    }
+                    assert!(
+                        !server_task.is_finished(),
+                        "server stopped before listening"
+                    );
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "server did not start"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                let client_task = tokio::task::spawn_blocking(move || {
+                    exercise_reused_direct_routes(
+                        &format!("127.0.0.1:{direct_port}"),
+                        client_mode,
+                        &key,
+                    );
+                    if let Some(keys) = session_keys {
+                        exercise_reused_session_routes(&format!("127.0.0.1:{direct_port}"), &keys);
+                    }
+                });
+                let result = tokio::time::timeout(Duration::from_secs(10), client_task).await;
+                let _ = shutdown_tx.send(());
+                server_task.await.unwrap().unwrap();
+                result.unwrap().unwrap();
+                assert!(store.get(&check_key).is_none());
+            })
+            .await;
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn embedded_server_direct_shard_endpoint_shares_store_memory() {
     let _test_guard = SERVER_TEST_LOCK.lock().await;

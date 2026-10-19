@@ -397,6 +397,7 @@ fn routing_mode_label(backend_id: &str) -> &'static str {
         id if id.starts_with("fc-embed") => "embedded-direct",
         id if id.starts_with("fc-shared") => "shared-handle",
         "fc-server-scnp-direct" => "tcp-shard-direct",
+        "fc-server-scnp-direct-precomputed" => "tcp-shard-direct-precomputed",
         "fc-server-scnp" | "fc-server-resp" => "tcp-fanout",
         "redis" | "valkey" | "dragonfly" => "tcp-baseline",
         _ => "competitor-shared",
@@ -546,13 +547,20 @@ fn run_one(
 
                     for _ in 0..pipeline_depth {
                         let (op, local_idx) = stream.next_op();
-                        let idx = key_indices
-                            .as_ref()
-                            .map_or(local_idx, |indices| indices[local_idx]);
-                        let key = keys[idx].as_slice();
-                        let res = match op {
-                            Op::Get => worker.begin_pipeline_get(key),
-                            Op::Set => worker.begin_pipeline_set(key, value),
+                        let res = if indexed_keys {
+                            match op {
+                                Op::Get => worker.begin_pipeline_get_index(local_idx),
+                                Op::Set => worker.begin_pipeline_set_index(local_idx, value),
+                            }
+                        } else {
+                            let idx = key_indices
+                                .as_ref()
+                                .map_or(local_idx, |indices| indices[local_idx]);
+                            let key = keys[idx].as_slice();
+                            match op {
+                                Op::Get => worker.begin_pipeline_get(key),
+                                Op::Set => worker.begin_pipeline_set(key, value),
+                            }
                         };
                         match res {
                             Ok(()) => pipeline_ops.push(op),

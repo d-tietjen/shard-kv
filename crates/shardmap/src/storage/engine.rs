@@ -1026,4 +1026,103 @@ mod tests {
         );
         recovered.shutdown().await.expect("recovered shutdown");
     }
+
+    #[tokio::test]
+    async fn optional_hashes_preserve_fast_existence_and_ttl_operations() {
+        use crate::protocol::FastCommand;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = ShardCacheConfig::default();
+        config.persistence.enabled = false;
+        config.persistence.data_dir = temp.path().to_path_buf();
+        let engine = EngineHandle::open(config).unwrap();
+        let key = b"reused-engine\0";
+        for key_hash in [None, Some(hash_key(key))] {
+            let request = |command| FastRequest {
+                command,
+                key_hash,
+                route_shard: None,
+                key_tag: None,
+            };
+            assert_eq!(
+                engine
+                    .execute_fast(request(FastCommand::SetEx {
+                        key,
+                        value: b"value",
+                        ttl_ms: 60_000,
+                    }))
+                    .await
+                    .unwrap(),
+                FastResponse::Ok
+            );
+            assert_eq!(
+                engine
+                    .execute_fast(request(FastCommand::Exists { key }))
+                    .await
+                    .unwrap(),
+                FastResponse::Integer(1)
+            );
+            let ttl = engine
+                .execute_fast(request(FastCommand::Ttl { key }))
+                .await
+                .unwrap();
+            assert!(matches!(ttl, FastResponse::Integer(0..=60)));
+            assert_eq!(
+                engine
+                    .execute_fast(request(FastCommand::GetEx {
+                        key,
+                        ttl_ms: 60_000
+                    }))
+                    .await
+                    .unwrap(),
+                FastResponse::Value(b"value".to_vec())
+            );
+            assert_eq!(
+                engine
+                    .execute_fast(request(FastCommand::Expire {
+                        key,
+                        ttl_ms: 60_000
+                    }))
+                    .await
+                    .unwrap(),
+                FastResponse::Integer(1)
+            );
+            let parts: &[&[u8]] = &[b"EXISTS", key];
+            assert_eq!(
+                engine
+                    .execute_borrowed(BorrowedCommand::from_parts(parts).unwrap())
+                    .await
+                    .unwrap(),
+                Frame::Integer(1)
+            );
+            let parts: &[&[u8]] = &[b"PTTL", key];
+            let ttl = engine
+                .execute_borrowed(BorrowedCommand::from_parts(parts).unwrap())
+                .await
+                .unwrap();
+            assert!(matches!(ttl, Frame::Integer(0..=60_000)));
+            assert_eq!(
+                engine
+                    .execute_fast(request(FastCommand::Delete { key }))
+                    .await
+                    .unwrap(),
+                FastResponse::Integer(1)
+            );
+            assert_eq!(
+                engine
+                    .execute_fast(request(FastCommand::Exists { key }))
+                    .await
+                    .unwrap(),
+                FastResponse::Integer(0)
+            );
+            assert_eq!(
+                engine
+                    .execute_fast(request(FastCommand::Ttl { key }))
+                    .await
+                    .unwrap(),
+                FastResponse::Integer(-2)
+            );
+        }
+        engine.shutdown().await.unwrap();
+    }
 }

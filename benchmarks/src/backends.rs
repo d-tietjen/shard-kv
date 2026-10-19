@@ -61,6 +61,7 @@ pub const BACKEND_IDS: &[&str] = &[
     "fc-server-resp",
     "fc-server-scnp",
     "fc-server-scnp-direct",
+    "fc-server-scnp-direct-precomputed",
     "memcached",
     "redis",
     "valkey",
@@ -474,14 +475,21 @@ pub fn make(
             })?;
             Arc::new(scnp::ScnpBackend::new(addr)?)
         }
-        "fc-server-scnp-direct" => {
+        "fc-server-scnp-direct" | "fc-server-scnp-direct-precomputed" => {
             let addr = addr.ok_or_else(|| {
                 format!("backend `{id}` requires --addr host:port (shardcache direct shard port 0)")
             })?;
-            Arc::new(scnp::ScnpBackend::new_direct_shards(
-                addr,
-                scnp_shard_count,
-            )?)
+            if id == "fc-server-scnp-direct-precomputed" {
+                Arc::new(scnp::ScnpBackend::new_direct_shards_precomputed(
+                    addr,
+                    scnp_shard_count,
+                )?)
+            } else {
+                Arc::new(scnp::ScnpBackend::new_direct_shards(
+                    addr,
+                    scnp_shard_count,
+                )?)
+            }
         }
         other => return Err(format!("unknown backend id: {other}").into()),
     })
