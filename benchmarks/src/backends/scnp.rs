@@ -353,12 +353,11 @@ mod tests {
                     assert_eq!(consumed, bytes.len());
                     let index = if step < 2 { 1 } else { 0 };
                     let expected_key = peer_keys[index].as_slice();
-                    let hash = shardcache_client_rs::hash_key(expected_key);
-                    assert_eq!(request.key_hash, Some(hash));
-                    assert_eq!(
-                        request.key_tag,
-                        Some(shardcache_client_rs::hash_key_tag_from_hash(hash))
-                    );
+                    let expected_route = ShardCacheDirectRouter::new("127.0.0.1:1", 1)
+                        .unwrap()
+                        .route_key(expected_key);
+                    assert_eq!(request.key_hash, Some(expected_route.key_hash));
+                    assert_eq!(request.key_tag, Some(expected_route.key_tag));
                     assert_eq!(request.route_shard, Some(0));
                     let response = match (step % 2, request.command) {
                         (0, FastCommand::Set { key, value }) => {

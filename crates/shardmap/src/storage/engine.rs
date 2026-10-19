@@ -969,6 +969,8 @@ mod tests {
 
     #[tokio::test]
     async fn optional_hashes_preserve_fast_existence_and_ttl_operations() {
+        use crate::protocol::FastCommand;
+
         let temp = tempfile::tempdir().unwrap();
         let mut config = ShardCacheConfig::default();
         config.persistence.enabled = false;
