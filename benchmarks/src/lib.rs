@@ -3,6 +3,8 @@ pub mod backends;
 pub mod clock;
 pub mod cpu;
 pub mod csv;
+pub mod diagnostic;
+pub mod diagnostic_headers;
 pub mod histogram;
 pub mod redis_command_cases;
 pub mod workload;

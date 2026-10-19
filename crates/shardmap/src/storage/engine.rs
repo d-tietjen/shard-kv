@@ -382,6 +382,35 @@ impl EngineHandle {
         command.supports_spanned_resp()
     }
 
+    /// Executes an owned RESP frame through the engine's spanned command path.
+    ///
+    /// Obtain `frame` from [`RespCodec::decode_command_spans`] over the same
+    /// bytes held by `owner`. Large SET values can retain slices of that owner
+    /// instead of copying the payload. Stored values remain valid after the
+    /// caller releases its owner handle.
+    ///
+    /// Argument spans must be ordered, non-overlapping and inside `owner`.
+    /// Invalid spans are rejected before execution or response output. Empty
+    /// frames, unsupported commands and invalid options return the existing
+    /// engine command errors. The spanned engine catalog currently supports SET.
+    pub async fn execute_resp_owned_into(
+        &self,
+        frame: CommandSpanFrame,
+        owner: SharedBytes,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
+        let mut previous_end = 0;
+        for span in &frame.parts {
+            if span.start < previous_end || span.start > span.end || span.end > owner.len() {
+                return Err(ShardCacheError::Protocol(
+                    "invalid owned RESP argument span".into(),
+                ));
+            }
+            previous_end = span.end;
+        }
+        self.execute_resp_spanned_into(frame, owner, out).await
+    }
+
     pub(crate) async fn execute_resp_spanned_into(
         &self,
         frame: CommandSpanFrame,
@@ -965,6 +994,123 @@ mod tests {
             Frame::BlobString(b"durable".to_vec())
         );
         recovered.shutdown().await.expect("recovered shutdown");
+    }
+
+    #[tokio::test]
+    async fn owned_resp_execution_checks_ranges_and_retains_binary_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = ShardCacheConfig::default();
+        config.persistence.enabled = false;
+        config.persistence.data_dir = temp.path().to_path_buf();
+        let engine = EngineHandle::open(config).unwrap();
+        let key: &[u8] = b"owned\0";
+        let parts: &[&[u8]] = &[b"SET", key, b"before"];
+        engine
+            .execute_borrowed(BorrowedCommand::from_parts(parts).unwrap())
+            .await
+            .unwrap();
+        let mut value = vec![0xff; RESP_SPANNED_VALUE_MIN + 1];
+        value[0] = 0;
+        let mut encoded = Vec::new();
+        RespCodec::encode(
+            &Frame::Array(vec![
+                Frame::BlobString(b"SET".to_vec()),
+                Frame::BlobString(key.to_vec()),
+                Frame::BlobString(value.clone()),
+                Frame::BlobString(b"PX".to_vec()),
+                Frame::BlobString(b"60000".to_vec()),
+            ]),
+            &mut encoded,
+        );
+        let (frame, consumed) = RespCodec::decode_command_spans(&encoded).unwrap().unwrap();
+        assert_eq!(consumed, encoded.len());
+        let owner = SharedBytes::from(encoded);
+        let mut invalid_frames = vec![CommandSpanFrame {
+            parts: Default::default(),
+        }];
+        for index in 0..frame.parts.len() {
+            for range in [
+                owner.len()..owner.len() + 1,
+                owner.len()..owner.len() - 1,
+                usize::MAX..usize::MAX,
+            ] {
+                let mut invalid = frame.clone();
+                invalid.parts[index] = range;
+                invalid_frames.push(invalid);
+            }
+        }
+        let mut overlapping = frame.clone();
+        overlapping.parts[1] = overlapping.parts[0].clone();
+        invalid_frames.push(overlapping);
+        let mut reordered = frame.clone();
+        reordered.parts.swap(1, 2);
+        invalid_frames.push(reordered);
+        for invalid in invalid_frames {
+            let mut out = b"prefix".to_vec();
+            assert!(
+                engine
+                    .execute_resp_owned_into(invalid, owner.clone(), &mut out)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(out, b"prefix");
+        }
+        for parts in [
+            vec![b"GET".as_slice(), key],
+            vec![b"SET".as_slice(), key, b"changed", b"NX"],
+            vec![b"SET".as_slice(), key, b"changed", b"PX", b"invalid"],
+        ] {
+            let mut bytes = Vec::new();
+            RespCodec::encode(
+                &Frame::Array(
+                    parts
+                        .iter()
+                        .map(|p| Frame::BlobString(p.to_vec()))
+                        .collect(),
+                ),
+                &mut bytes,
+            );
+            let (invalid, _) = RespCodec::decode_command_spans(&bytes).unwrap().unwrap();
+            let mut out = b"prefix".to_vec();
+            assert!(
+                engine
+                    .execute_resp_owned_into(invalid, SharedBytes::from(bytes), &mut out)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(out, b"prefix");
+        }
+        let get_parts: &[&[u8]] = &[b"GET", key];
+        assert_eq!(
+            engine
+                .execute_borrowed(BorrowedCommand::from_parts(get_parts).unwrap())
+                .await
+                .unwrap(),
+            Frame::BlobString(b"before".to_vec())
+        );
+        let mut out = Vec::new();
+        engine
+            .execute_resp_owned_into(frame, owner.clone(), &mut out)
+            .await
+            .unwrap();
+        assert_eq!(out, b"+OK\r\n");
+        drop(owner);
+        assert_eq!(
+            engine
+                .execute_borrowed(BorrowedCommand::from_parts(get_parts).unwrap())
+                .await
+                .unwrap(),
+            Frame::BlobString(value)
+        );
+        let ttl_parts: &[&[u8]] = &[b"PTTL", key];
+        assert!(matches!(
+            engine
+                .execute_borrowed(BorrowedCommand::from_parts(ttl_parts).unwrap())
+                .await
+                .unwrap(),
+            Frame::Integer(0..=60_000)
+        ));
+        engine.shutdown().await.unwrap();
     }
 
     #[tokio::test]

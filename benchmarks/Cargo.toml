@@ -71,6 +71,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true }
 xxhash-rust = { workspace = true }
+zerocopy = { version = "0.8", features = ["derive"] }
 
 [[bin]]
 name = "saturation"
@@ -87,6 +88,14 @@ path = "src/bin/wal_tcp_export_cost.rs"
 [[bin]]
 name = "memory_write_cost"
 path = "src/bin/memory_write_cost.rs"
+
+[[bin]]
+name = "population_decode_cost"
+path = "src/bin/population_decode_cost.rs"
+
+[[bin]]
+name = "large_value_copy_cost"
+path = "src/bin/large_value_copy_cost.rs"
 
 [[bin]]
 name = "object_overflow_fs_cost"
