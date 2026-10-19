@@ -74,10 +74,12 @@ const FAST_STATUS_ERROR: u8 = 2;
 #[allow(dead_code)]
 const FAST_STATUS_INTEGER: u8 = 3;
 const FAST_STATUS_VALUE: u8 = 4;
+const FAST_STATUS_BOOLEAN: u8 = 5;
 #[allow(dead_code)]
 const FAST_STATUS_ARRAY: u8 = 6;
 #[allow(dead_code)]
 const FAST_STATUS_FLOAT: u8 = 7;
+const FAST_STATUS_NATIVE_FRAME: u8 = 8;
 
 // SCNP GET response size classes:
 // - 64 B values are common enough to get a dedicated inline copy path.

@@ -14,7 +14,11 @@ pub(crate) const STATUS_NULL: u8 = 1;
 pub(crate) const STATUS_ERROR: u8 = 2;
 pub(crate) const STATUS_INTEGER: u8 = 3;
 pub(crate) const STATUS_VALUE: u8 = 4;
+#[cfg(feature = "redis")]
+pub(crate) const STATUS_BOOLEAN: u8 = 5;
 #[cfg(any(feature = "redis", feature = "vector"))]
 pub(crate) const STATUS_ARRAY: u8 = 6;
 #[cfg(feature = "redis")]
 pub(crate) const STATUS_FLOAT: u8 = 7;
+#[cfg(feature = "redis")]
+pub(crate) const STATUS_NATIVE_FRAME: u8 = 8;

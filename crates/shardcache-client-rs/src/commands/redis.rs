@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use crate::commands::ScnpCommand;
-use crate::commands::compact::{arg_list_len, write_arg_list};
+use crate::commands::compact::{arg_list_len, var_u32_len, write_arg_list};
 use crate::connection::ScnpConnection;
 use crate::error::{Result, ShardCacheClientError};
 use crate::protocol::{FAST_FLAG_REDIS_COMMAND_ARGS, ROUTED_FLAGS};
@@ -11,22 +11,11 @@ const RESP_MAX_CONTAINER_ITEMS: usize = 65_536;
 const RESP_MAX_NESTING_DEPTH: usize = 128;
 const RESP_MIN_FRAME_BYTES: usize = 3;
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum RedisResponse {
-    Ok,
-    Null,
-    Integer(i64),
-    Value(Vec<u8>),
-    Array(Vec<RedisResponse>),
-    Map(Vec<(RedisResponse, RedisResponse)>),
-    Set(Vec<RedisResponse>),
-    Push(Vec<RedisResponse>),
-    Float(f64),
-    Boolean(bool),
-}
+mod native;
+pub use native::RedisResponse;
 
 impl RedisResponse {
-    /// Decodes a RESP2/RESP3 payload returned by the generic SCNP Redis wrapper.
+    /// Decodes a RESP2/RESP3 payload returned by the raw RESP compatibility wrapper.
     pub fn from_resp_bytes(bytes: &[u8]) -> Result<Self> {
         let mut cursor = 0usize;
         let response = parse_resp_value(bytes, &mut cursor, 0)?;
@@ -48,6 +37,15 @@ impl RedisResponse {
             Self::Value(bytes) => Self::from_resp_bytes(&bytes),
             other => Ok(other),
         }
+    }
+
+    /// Decodes a recursive native SCNP Redis response body (without its header).
+    ///
+    /// Rejects trailing bytes, collections over 65,536 entries, nesting beyond
+    /// 128 levels, and more than 1,048,576 total values. A top-level error is
+    /// returned as a protocol error; nested errors remain [`Self::Error`] values.
+    pub fn from_native_bytes(bytes: &[u8]) -> Result<Self> {
+        native::decode(bytes).map_err(|error| ShardCacheClientError::Protocol(error.0))
     }
 }
 
@@ -342,6 +340,73 @@ pub(crate) struct RedisRespCommand<'args> {
     args: &'args [&'args [u8]],
 }
 
+pub(crate) struct RedisNativeCommand<'command, 'args> {
+    command: &'command [u8],
+    args: &'args [&'args [u8]],
+    body_len: usize,
+}
+
+impl<'command, 'args> RedisNativeCommand<'command, 'args> {
+    pub(crate) fn new(command: &'command [u8], args: &'args [&'args [u8]]) -> Result<Self> {
+        let limit_error = || {
+            ShardCacheClientError::Protocol("native Redis request exceeds protocol limits".into())
+        };
+        u32::try_from(command.len()).map_err(|_| limit_error())?;
+        let count = u32::try_from(args.len()).map_err(|_| limit_error())?;
+        if args.len() > RESP_MAX_CONTAINER_ITEMS {
+            return Err(limit_error());
+        }
+        let mut body_len = 4usize
+            .checked_add(command.len())
+            .and_then(|len| len.checked_add(var_u32_len(count)))
+            .ok_or_else(limit_error)?;
+        for arg in args {
+            let len = u32::try_from(arg.len()).map_err(|_| limit_error())?;
+            body_len = body_len
+                .checked_add(var_u32_len(len))
+                .and_then(|total| total.checked_add(arg.len()))
+                .ok_or_else(limit_error)?;
+        }
+        u32::try_from(body_len).map_err(|_| limit_error())?;
+        Ok(Self {
+            command,
+            args,
+            body_len,
+        })
+    }
+}
+
+impl ScnpCommand for RedisNativeCommand<'_, '_> {
+    type Output = RedisResponse;
+
+    const NAME: &'static str = "REDIS";
+    const OPCODE: u8 = 244;
+
+    fn flags(&self) -> u8 {
+        FAST_FLAG_REDIS_COMMAND_ARGS
+    }
+
+    fn body_len(&self) -> usize {
+        self.body_len
+    }
+
+    fn write_body<W: Write>(&self, w: &mut W) -> Result<()> {
+        w.write_all(&(self.command.len() as u32).to_le_bytes())?;
+        w.write_all(self.command)?;
+        write_arg_list(w, self.args)
+    }
+
+    fn read_response(self, conn: &mut ScnpConnection) -> Result<Self::Output> {
+        conn.read_native_redis_response(self.command_name())
+    }
+}
+
+impl RedisNativeCommand<'_, '_> {
+    fn command_name(&self) -> &str {
+        std::str::from_utf8(self.command).unwrap_or("REDIS")
+    }
+}
+
 impl<'args> RedisRespCommand<'args> {
     pub(crate) fn new(command: &'args [u8], args: &'args [&'args [u8]]) -> Self {
         Self { command, args }
@@ -430,6 +495,16 @@ pub(crate) fn write_request(
         route.write_to(&mut conn.w)?;
     }
     write_arg_list(&mut conn.w, args)
+}
+
+pub(crate) fn write_native_request(
+    conn: &mut ScnpConnection,
+    command: &[u8],
+    args: &[&[u8]],
+) -> Result<()> {
+    let command = RedisNativeCommand::new(command, args)?;
+    conn.write_header(command.opcode(), command.flags(), command.body_len as u32)?;
+    command.write_body(&mut conn.w)
 }
 
 pub(crate) fn write_resp_request(
@@ -847,6 +922,44 @@ mod tests {
                     RedisResponse::Integer(1),
                 ]),
             )])
+        );
+    }
+
+    #[test]
+    fn native_request_body_preserves_binary_argv_and_checked_length() {
+        let args = [b"key\0".as_slice(), b"value\xff".as_slice()];
+        let command = RedisNativeCommand::new(b"SET", &args).unwrap();
+        let mut body = Vec::new();
+        command.write_body(&mut body).unwrap();
+        assert_eq!(body, b"\x03\0\0\0SET\x02\x04key\0\x06value\xff");
+        assert_eq!(body.len(), command.body_len());
+        assert_eq!(command.opcode(), 244);
+        assert_eq!(command.flags(), FAST_FLAG_REDIS_COMMAND_ARGS);
+        let args = vec![b"".as_slice(); 130];
+        let command = RedisNativeCommand::new(b"MGET", &args).unwrap();
+        let mut body = Vec::new();
+        command.write_body(&mut body).unwrap();
+        assert_eq!(&body[8..10], &[0x82, 0x01]);
+        assert_eq!(body.len(), command.body_len());
+        let too_many = vec![b"".as_slice(); RESP_MAX_CONTAINER_ITEMS + 1];
+        assert!(RedisNativeCommand::new(b"MGET", &too_many).is_err());
+    }
+
+    #[test]
+    fn parses_native_nested_values() {
+        let mut encoded = vec![3, 3, 0, 0, 0];
+        encoded.extend_from_slice(&[1, 5, 0, 0, 0]);
+        encoded.extend_from_slice(b"alpha");
+        encoded.push(7);
+        encoded.extend_from_slice(&[2, 7, 0, 0, 0, 0, 0, 0, 0]);
+
+        assert_eq!(
+            RedisResponse::from_native_bytes(&encoded).unwrap(),
+            RedisResponse::Array(vec![
+                RedisResponse::Value(b"alpha".to_vec()),
+                RedisResponse::Null,
+                RedisResponse::Integer(7),
+            ])
         );
     }
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::protocol::FastCommandKind;
 use crate::server::commands::BorrowedCommandContext;
-use crate::storage::BorrowedCommand;
+use crate::storage::{BorrowedCommand, now_millis};
 
 impl DirectProtocol {
     #[cfg(feature = "embedded")]
@@ -14,6 +14,9 @@ impl DirectProtocol {
             FastCommand::RedisCommand { kind, .. } => kind
                 .redis_name()
                 .is_some_and(|command| RawCommandDispatcher::mutates_value(command.as_bytes())),
+            FastCommand::NativeRedisCommand { command, .. } => {
+                RawCommandDispatcher::mutates_value(command)
+            }
             other => FastCommandDispatcher::mutates_value(other),
         }
     }
@@ -49,6 +52,9 @@ impl DirectProtocol {
                     started_at,
                 )
             }
+            FastCommand::NativeRedisCommand { command, args } => {
+                DirectProtocol::execute_fast_native_redis_command(store, command, args, out)
+            }
             _ => {
                 let request_for_fallback = request.clone();
                 match FastCommandDispatcher::execute(store, request, out, single_threaded) {
@@ -66,6 +72,26 @@ impl DirectProtocol {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(feature = "embedded")]
+    #[inline(always)]
+    fn execute_fast_native_redis_command(
+        store: &EmbeddedStore,
+        command: &[u8],
+        args: Vec<&[u8]>,
+        out: &mut BytesMut,
+    ) {
+        let mut parts = Vec::with_capacity(args.len() + 1);
+        parts.push(command);
+        parts.extend(args.iter().copied());
+        match BorrowedCommand::from_parts(&parts) {
+            Ok(command) => {
+                let frame = command.execute_borrowed_frame(store, now_millis());
+                ServerWire::write_fast_redis_frame(out, &frame);
+            }
+            Err(error) => ServerWire::write_fast_error(out, &format!("ERR {error}")),
         }
     }
 
@@ -464,7 +490,9 @@ impl DecodedFastRedisCommand {
                 args.push(stop.to_string().into_bytes());
                 b"ZRANGE"
             }
-            FastCommand::RespCommand { .. } | FastCommand::RedisCommand { .. } => return None,
+            FastCommand::RespCommand { .. }
+            | FastCommand::RedisCommand { .. }
+            | FastCommand::NativeRedisCommand { .. } => return None,
         };
         Some(Self {
             command: name,

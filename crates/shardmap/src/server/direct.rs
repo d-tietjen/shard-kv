@@ -328,6 +328,18 @@ impl DirectServer {
 
     fn execute_fast(request: FastRequest<'_>) -> FastResponse {
         let now_ms = now_millis();
+        if let FastCommand::NativeRedisCommand { command, args } = &request.command {
+            let mut parts = Vec::with_capacity(args.len() + 1);
+            parts.push(*command);
+            parts.extend(args.iter().copied());
+            return BorrowedCommand::from_parts(&parts)
+                .and_then(|command| {
+                    FastResponse::from_redis_frame(
+                        command.execute_direct_borrowed(DirectCommandContext::new(now_ms)),
+                    )
+                })
+                .unwrap_or_else(|error| FastResponse::Error(format!("ERR {error}").into_bytes()));
+        }
         DirectFastCommandDispatcher::execute(DirectCommandContext::new(now_ms), request)
             .unwrap_or_else(|| FastResponse::Error(b"ERR unsupported command".to_vec()))
     }

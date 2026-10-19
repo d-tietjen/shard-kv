@@ -349,7 +349,7 @@ fn render_semantic_notes(out: &mut String) {
     .unwrap();
     writeln!(
         out,
-        "- SCNP one-byte opcodes cover the hot command set. Commands outside that compact opcode table use the RESP/SCNP command-name fallback path so the server can still route and execute them."
+        "- SCNP keeps compact opcodes for hot commands and provides a native command-name wrapper for the full Redis-compatible command catalog. Redis command-name requests carry compact argv and return recursive native SCNP values; the RESP wrapper remains available only for raw RESP compatibility tools."
     )
     .unwrap();
 }

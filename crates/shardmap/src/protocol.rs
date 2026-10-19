@@ -5,6 +5,7 @@
 //! shardcache clients that want lower framing overhead.
 
 mod fast;
+mod native_redis;
 mod resp;
 
 pub use fast::{
@@ -17,3 +18,6 @@ pub use resp::{
     BorrowedCommandFrame, BorrowedCommandParts, CommandFrame, CommandSpanFrame, Frame, RespCodec,
     RespCommandDecodeResult, RespCommandSpanDecodeResult, RespDecodeResult,
 };
+
+#[cfg(feature = "server")]
+pub(crate) use native_redis::encode_native_redis_frame;

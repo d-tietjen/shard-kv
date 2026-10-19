@@ -206,6 +206,9 @@ pub enum FastCommandKind {
     VRem = 241,
     VSetAttr = 242,
     VSim = 243,
+    /// Native command-name SCNP wrapper for the complete Redis compatibility
+    /// surface. The body carries the command name followed by compact argv.
+    NativeRedisCommand = 244,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1134,6 +1137,7 @@ impl FastCommandKind {
             241 => Some(Self::VRem),
             242 => Some(Self::VSetAttr),
             243 => Some(Self::VSim),
+            244 => Some(Self::NativeRedisCommand),
             _ => None,
         }
     }
@@ -1320,6 +1324,7 @@ impl FastCommandKind {
             Self::VSetAttr => Some("VSETATTR"),
             Self::VSim => Some("VSIM"),
             Self::RespCommand
+            | Self::NativeRedisCommand
             | Self::CommandDocs
             | Self::ConfigGet
             | Self::ClientGetName
@@ -1673,12 +1678,11 @@ pub enum FastCommand<'a> {
         start: i64,
         stop: i64,
     },
-    /// Generic SCNP wrapper for the Redis command surface.
+    /// Raw RESP compatibility wrapper for a Redis command.
     ///
     /// The request body is a length-prefixed list of command parts, starting
     /// with the command name. The server returns the RESP reply bytes as an
-    /// SCNP value so clients can use one native ingress path for the complete
-    /// compatibility surface while hot commands keep their typed opcodes.
+    /// SCNP value for callers that explicitly need the legacy representation.
     RespCommand {
         parts: Vec<&'a [u8]>,
     },
@@ -1690,6 +1694,13 @@ pub enum FastCommand<'a> {
     /// binary bodies to hot commands.
     RedisCommand {
         kind: FastCommandKind,
+        args: Vec<&'a [u8]>,
+    },
+    /// Native SCNP command-name wrapper for Redis-compatible commands that do
+    /// not have a dedicated compact opcode. The response is a native SCNP
+    /// value tree rather than an embedded RESP payload.
+    NativeRedisCommand {
+        command: &'a [u8],
         args: Vec<&'a [u8]>,
     },
 }
@@ -1748,6 +1759,7 @@ impl<'a> FastCommand<'a> {
             Self::ZRange { .. } => FastCommandKind::ZRange,
             Self::RespCommand { .. } => FastCommandKind::RespCommand,
             Self::RedisCommand { kind, .. } => *kind,
+            Self::NativeRedisCommand { .. } => FastCommandKind::NativeRedisCommand,
         }
     }
 
@@ -1779,6 +1791,9 @@ impl<'a> FastCommand<'a> {
                     .unwrap_or(FastRedisRouteKeys::None)
             }
             Self::RedisCommand { kind, args } => kind.redis_route_keys(args),
+            Self::NativeRedisCommand { command, args } => FastCommandKind::from_redis_name(command)
+                .map(|kind| kind.redis_route_keys(args))
+                .unwrap_or(FastRedisRouteKeys::None),
             Self::Get { key }
             | Self::Set { key, .. }
             | Self::SetEx { key, .. }
@@ -1839,6 +1854,7 @@ pub enum FastResponse {
     Boolean(bool),
     Array(Vec<Option<Vec<u8>>>),
     Float(f64),
+    NativeFrame(Vec<u8>),
 }
 
 pub type FastRequestDecodeResult<'a> = Option<(FastRequest<'a>, usize)>;
@@ -1913,19 +1929,34 @@ impl FastCodec {
         };
 
         if flags & FAST_FLAG_REDIS_COMMAND_ARGS != 0 {
-            if kind.redis_name().is_none() {
+            if kind.redis_name().is_none() && kind != FastCommandKind::NativeRedisCommand {
                 return Err(ShardCacheError::Protocol(format!(
                     "fast command id {} is not a Redis command opcode",
                     kind as u8
                 )));
             }
-            let command = FastCommand::RedisCommand {
-                kind,
-                args: take_compact_len_prefixed_list(
-                    body,
-                    &mut cursor,
-                    "fast Redis command arguments",
-                )?,
+            let command = if kind == FastCommandKind::NativeRedisCommand {
+                FastCommand::NativeRedisCommand {
+                    command: take_len_prefixed_slice(
+                        body,
+                        &mut cursor,
+                        "fast native Redis command name",
+                    )?,
+                    args: take_compact_len_prefixed_list(
+                        body,
+                        &mut cursor,
+                        "fast native Redis command arguments",
+                    )?,
+                }
+            } else {
+                FastCommand::RedisCommand {
+                    kind,
+                    args: take_compact_len_prefixed_list(
+                        body,
+                        &mut cursor,
+                        "fast Redis command arguments",
+                    )?,
+                }
             };
             ensure_finished(body, cursor, "fast request")?;
             return Ok(Some((
@@ -2156,7 +2187,10 @@ impl FastCodec {
         if request.key_tag.is_some() {
             flags |= FAST_FLAG_KEY_TAG;
         }
-        if matches!(request.command, FastCommand::RedisCommand { .. }) {
+        if matches!(
+            request.command,
+            FastCommand::RedisCommand { .. } | FastCommand::NativeRedisCommand { .. }
+        ) {
             flags |= FAST_FLAG_REDIS_COMMAND_ARGS;
         }
 
@@ -2261,6 +2295,10 @@ impl FastCodec {
             }
             FastCommand::RespCommand { parts } => encode_len_prefixed_list(parts, out),
             FastCommand::RedisCommand { args, .. } => encode_compact_len_prefixed_list(args, out),
+            FastCommand::NativeRedisCommand { command, args } => {
+                encode_len_prefixed(command, out);
+                encode_compact_len_prefixed_list(args, out);
+            }
         }
 
         let body_len = (out.len() - body_start) as u32;
@@ -2320,6 +2358,12 @@ impl FastCodec {
                 out.push(0);
                 out.extend_from_slice(&8_u32.to_le_bytes());
                 out.extend_from_slice(&value.to_le_bytes());
+            }
+            FastResponse::NativeFrame(bytes) => {
+                out.push(8);
+                out.push(0);
+                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                out.extend_from_slice(bytes);
             }
         }
     }
@@ -2385,6 +2429,7 @@ impl FastCodec {
                 }
                 FastResponse::Float(f64::from_le_bytes(body.try_into().unwrap()))
             }
+            8 => FastResponse::NativeFrame(body.to_vec()),
             other => {
                 return Err(ShardCacheError::Protocol(format!(
                     "unsupported fast response status: {other}"
@@ -3055,6 +3100,25 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_native_redis_command_name_request() {
+        let request = FastRequest {
+            key_hash: None,
+            route_shard: None,
+            key_tag: None,
+            command: FastCommand::NativeRedisCommand {
+                command: b"HGETEX",
+                args: vec![b"hash".as_slice(), b"FIELDS".as_slice(), b"1".as_slice()],
+            },
+        };
+        let mut encoded = Vec::new();
+        FastCodec::encode_request(&request, &mut encoded);
+        assert_eq!(encoded[2], FastCommandKind::NativeRedisCommand as u8);
+        assert_ne!(encoded[3] & FAST_FLAG_REDIS_COMMAND_ARGS, 0);
+        let decoded = FastCodec::decode_request(&encoded).unwrap().unwrap().0;
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
     fn redis_command_flag_disambiguates_typed_opcodes() {
         let request = FastRequest {
             key_hash: None,
@@ -3134,6 +3198,61 @@ mod tests {
             FastCodec::encode_response(&response, &mut encoded);
             let decoded = FastCodec::decode_response(&encoded).unwrap().unwrap().0;
             assert_eq!(decoded, response);
+        }
+    }
+
+    #[test]
+    fn round_trips_native_frame_response() {
+        let native_frame = vec![3, 2, 0, 0, 0, 0, 2, 0, 0, 0, b'O', b'K', 7];
+        let response = FastResponse::NativeFrame(native_frame);
+        let mut encoded = Vec::new();
+        FastCodec::encode_response(&response, &mut encoded);
+        let decoded = FastCodec::decode_response(&encoded).unwrap().unwrap().0;
+        assert_eq!(decoded, response);
+    }
+}
+
+#[cfg(test)]
+mod native_redis_request_tests {
+    use super::*;
+
+    #[test]
+    fn native_request_requires_its_flag_and_complete_binary_body() {
+        let request = FastRequest {
+            key_hash: None,
+            route_shard: None,
+            key_tag: None,
+            command: FastCommand::NativeRedisCommand {
+                command: b"SET",
+                args: vec![b"key\0", b"value\xff"],
+            },
+        };
+        let mut encoded = Vec::new();
+        FastCodec::encode_request(&request, &mut encoded);
+        for end in 0..encoded.len() {
+            assert!(
+                FastCodec::decode_request(&encoded[..end])
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(
+            FastCodec::decode_request(&encoded).unwrap().unwrap().0,
+            request
+        );
+        let mut invalid = encoded.clone();
+        invalid[3] &= !FAST_FLAG_REDIS_COMMAND_ARGS;
+        assert!(FastCodec::decode_request(&invalid).is_err());
+        for body in [
+            vec![],
+            vec![255; 4],
+            vec![1, 0, 0, 0, b'S', 2],
+            vec![1, 0, 0, 0, b'S', 0, 7],
+        ] {
+            let mut invalid = encoded[..8].to_vec();
+            invalid[4..8].copy_from_slice(&(body.len() as u32).to_le_bytes());
+            invalid.extend_from_slice(&body);
+            assert!(FastCodec::decode_request(&invalid).is_err());
         }
     }
 }

@@ -13,7 +13,7 @@ use crate::commands::getex::{self, GetEx};
 #[cfg(feature = "redis")]
 use crate::commands::redis::{
     self, RedisCommand as OptimizedRedisCommand, RedisCommandKind, RedisCommandRouteKeys,
-    RedisRespCommand, RedisResponse,
+    RedisNativeCommand, RedisRespCommand, RedisResponse,
 };
 use crate::commands::resp::RespCommand;
 use crate::commands::set::{self, Set};
@@ -229,26 +229,33 @@ impl ShardCacheClient {
         self.conn.execute(OptimizedRedisCommand::new(command, args))
     }
 
-    /// Executes a Redis-compatible command by name through native SCNP.
-    ///
-    /// Commands with compact opcodes use the optimized Redis wrapper. Other
-    /// names use the SCNP command-name wrapper and return decoded RESP.
+    /// Executes a Redis-compatible command by name through the native command-name
+    /// SCNP wrapper. The request carries the command name and compact argv, and
+    /// the response is a recursive native SCNP value.
     #[cfg(feature = "redis")]
     pub fn redis_command_by_name(
         &mut self,
         command: &[u8],
         args: &[&[u8]],
     ) -> Result<RedisResponse> {
-        match RedisCommandKind::from_name(command) {
-            Some(command) => self.redis_command(command, args),
-            None => self.redis_resp_command(command, args),
-        }
+        self.redis_native_command(command, args)
     }
 
-    /// Executes a Redis-compatible command through the SCNP command-name wrapper.
-    ///
-    /// This path is still native SCNP, but it carries the Redis command name in
-    /// the body so it can cover commands that do not have a compact opcode.
+    /// Executes any Redis-compatible command through the native command-name
+    /// SCNP wrapper.
+    #[cfg(feature = "redis")]
+    pub fn redis_native_command(
+        &mut self,
+        command: &[u8],
+        args: &[&[u8]],
+    ) -> Result<RedisResponse> {
+        validate_redis_command_name(command)?;
+        self.conn.execute(RedisNativeCommand::new(command, args)?)
+    }
+
+    /// Executes a Redis-compatible command through the raw RESP compatibility
+    /// wrapper. Prefer [`redis_command_by_name`](Self::redis_command_by_name)
+    /// for the native recursive SCNP response path.
     #[cfg(feature = "redis")]
     pub fn redis_resp_command(&mut self, command: &[u8], args: &[&[u8]]) -> Result<RedisResponse> {
         validate_redis_command_name(command)?;
@@ -361,22 +368,30 @@ impl ShardCacheClient {
         Ok(())
     }
 
-    /// Writes a Redis command request by name without flushing or reading its response.
-    ///
-    /// Compact-opcode commands use the optimized Redis wrapper. Other command
-    /// names use the SCNP command-name wrapper and decode the RESP payload when
-    /// [`finish_pipeline_redis_command`](Self::finish_pipeline_redis_command)
-    /// is called.
+    /// Writes a Redis command-name request through the native SCNP wrapper
+    /// without flushing or reading its response.
     #[cfg(feature = "redis")]
     pub fn begin_pipeline_redis_command_by_name(
         &mut self,
         command: &[u8],
         args: &[&[u8]],
     ) -> Result<()> {
-        match RedisCommandKind::from_name(command) {
-            Some(command) => self.begin_pipeline_redis_command(command, args),
-            None => self.begin_pipeline_redis_resp_command(command, args),
-        }
+        self.begin_pipeline_redis_native_command(command, args)
+    }
+
+    /// Writes any Redis-compatible command through the native command-name
+    /// SCNP wrapper without flushing or reading its response.
+    #[cfg(feature = "redis")]
+    pub fn begin_pipeline_redis_native_command(
+        &mut self,
+        command: &[u8],
+        args: &[&[u8]],
+    ) -> Result<()> {
+        validate_redis_command_name(command)?;
+        redis::write_native_request(&mut self.conn, command, args)?;
+        self.redis_pipeline_responses
+            .push_back(RedisPipelineResponse::Native);
+        Ok(())
     }
 
     /// Writes a Redis command-name wrapper request without flushing or reading its response.
@@ -449,7 +464,8 @@ impl ShardCacheClient {
             .map(|changed| changed != 0)
     }
 
-    /// Reads the next pipelined compact Redis command response.
+    /// Reads the next pipelined Redis response, using the representation queued
+    /// by its matching begin method.
     #[cfg(feature = "redis")]
     pub fn finish_pipeline_redis_command(&mut self) -> Result<RedisResponse> {
         match self
@@ -1137,7 +1153,7 @@ impl ShardCacheDirectShardClient {
 fn redis_command_kind_from_name(command: &[u8]) -> Result<RedisCommandKind> {
     RedisCommandKind::from_name(command).ok_or_else(|| {
         ShardCacheClientError::Config(format!(
-            "Redis command `{}` is not available on direct SCNP shard clients; use ShardCacheClient on the fanout listener for command-name fallback",
+            "Redis command `{}` is not available on direct SCNP shard clients; use ShardCacheClient on the fanout listener for native command-name routing",
             String::from_utf8_lossy(command)
         ))
     })
