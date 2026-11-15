@@ -552,11 +552,8 @@ impl Cache {
         if h.state.load(Ordering::Acquire) != active {
             return Err(Error::Inactive);
         }
-        for (word, bytes) in h.authorization.iter().zip(hash.chunks_exact(8)) {
-            word.store(
-                u64::from_le_bytes(bytes.try_into().map_err(|_| Error::Profile)?),
-                Ordering::Relaxed,
-            );
+        for (word, bytes) in h.authorization.iter().zip(hash.as_chunks::<8>().0) {
+            word.store(u64::from_le_bytes(*bytes), Ordering::Relaxed);
         }
         h.state
             .compare_exchange(active, prepared, Ordering::Release, Ordering::Acquire)
@@ -707,9 +704,8 @@ impl Staged {
         }
         let hash = authorization(credential, &receipt)?;
         let mut mismatch = 0;
-        for (word, bytes) in h.authorization.iter().zip(hash.chunks_exact(8)) {
-            mismatch |= word.load(Ordering::Relaxed)
-                ^ u64::from_le_bytes(bytes.try_into().map_err(|_| Error::Profile)?);
+        for (word, bytes) in h.authorization.iter().zip(hash.as_chunks::<8>().0) {
+            mismatch |= word.load(Ordering::Relaxed) ^ u64::from_le_bytes(*bytes);
         }
         if mismatch != 0 {
             return Err(Error::Unauthorized);

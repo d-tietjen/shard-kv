@@ -34,12 +34,9 @@ fn candidate(p: &Prepared) -> (OwnedFd, Readiness) {
         .header()
         .authorization
         .iter()
-        .zip(hash.chunks_exact(8))
+        .zip(hash.as_chunks::<8>().0)
     {
-        word.store(
-            u64::from_le_bytes(bytes.try_into().expect("word")),
-            Ordering::Relaxed,
-        );
+        word.store(u64::from_le_bytes(*bytes), Ordering::Relaxed);
     }
     (p.inner.mapping.file.try_clone().expect("fd").into(), r)
 }
