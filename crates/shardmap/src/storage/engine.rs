@@ -452,9 +452,9 @@ impl EngineHandle {
     pub async fn snapshot(&self) -> Result<std::path::PathBuf> {
         let now_ms = now_millis();
         let mut entries = Vec::new();
-        for shard in 0..self.inner.shard_senders.len() {
+        for sender in &self.inner.shard_senders {
             let (tx, rx) = oneshot::channel();
-            self.inner.shard_senders[shard]
+            sender
                 .send(ShardMessage::Snapshot { reply: tx })
                 .map_err(|_| ShardCacheError::ChannelClosed("snapshot request"))?;
             entries.extend(
@@ -467,9 +467,9 @@ impl EngineHandle {
 
     pub async fn stats_snapshot(&self) -> Result<GlobalStatsSnapshot> {
         let mut shards = Vec::with_capacity(self.inner.shard_senders.len());
-        for shard in 0..self.inner.shard_senders.len() {
+        for sender in &self.inner.shard_senders {
             let (tx, rx) = oneshot::channel();
-            self.inner.shard_senders[shard]
+            sender
                 .send(ShardMessage::Stats { reply: tx })
                 .map_err(|_| ShardCacheError::ChannelClosed("stats request"))?;
             shards.push(

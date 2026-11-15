@@ -211,7 +211,14 @@ impl Mapping {
         if ptr == libc::MAP_FAILED {
             return Err(io::Error::last_os_error().into());
         }
-        let ptr = NonNull::new(ptr.cast()).ok_or(Error::Profile)?;
+        let Some(ptr) = NonNull::new(ptr.cast()) else {
+            // SAFETY: even a successful zero-address mapping must be released;
+            // the Rust representation intentionally requires a non-null base.
+            unsafe {
+                libc::munmap(ptr, len);
+            }
+            return Err(Error::Profile);
+        };
         Ok(Self { ptr, len, file })
     }
     fn header(&self) -> &Header {
@@ -767,6 +774,7 @@ fn authorization(credential: &[u8; 32], receipt: &Readiness) -> Result<[u8; 32],
     hash.update(serde_json::to_vec(receipt).map_err(io::Error::other)?);
     Ok(hash.finalize().into())
 }
+// Participants must share the host time namespace as well as PID namespace.
 fn now_ms() -> Result<u64, Error> {
     let mut time = libc::timespec {
         tv_sec: 0,

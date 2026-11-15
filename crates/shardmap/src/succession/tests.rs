@@ -275,3 +275,38 @@ fn activation_abort_race_has_exactly_one_winner() {
         assert_eq!(a.get(b"key").is_ok(), aborted);
     }
 }
+
+#[test]
+fn concurrent_public_writes_drain_without_losing_last_acknowledged_value() {
+    let a = Cache::create(options(2)).expect("create");
+    a.insert(b"sequence", &0u64.to_le_bytes(), None)
+        .expect("initial value");
+    let acknowledged = Arc::new(AtomicU64::new(0));
+    let worker_cache = a.clone();
+    let worker_ack = acknowledged.clone();
+    let writer = thread::spawn(move || {
+        for sequence in 1u64..=1_000_000 {
+            match worker_cache.insert(b"sequence", &sequence.to_le_bytes(), None) {
+                Ok(()) => worker_ack.store(sequence, Ordering::Release),
+                Err(Error::Inactive) => return,
+                Err(error) => panic!("unexpected write failure: {error}"),
+            }
+        }
+    });
+    while acknowledged.load(Ordering::Acquire) == 0 {
+        thread::yield_now();
+    }
+    let p = prepare(&a);
+    writer.join().expect("old writer stopped");
+    let last = acknowledged.load(Ordering::Acquire);
+    let b = staged(&p).activate(p.receipt.operation).expect("commit");
+    let value = b
+        .get(b"sequence")
+        .expect("get")
+        .expect("last acknowledged write");
+    assert_eq!(&*value, &last.to_le_bytes());
+    assert!(matches!(
+        a.insert(b"sequence", &0u64.to_le_bytes(), None),
+        Err(Error::Inactive)
+    ));
+}

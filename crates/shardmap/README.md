@@ -674,7 +674,7 @@ slot/payload offsets and generation instead of absolute pointer numbers.
 
 The transfer requires both the memfd and a random one-time credential, bound to
 the full readiness receipt. SO_PEERCRED checks the supervisor-selected PID/UID at
-both ends. Use a private bounded-time Unix channel and supervisor-owned child
+both ends. Participants must share PID and time namespaces. Use a private bounded-time Unix channel and supervisor-owned child
 custody; PIDs supplied by an untrusted requester are insufficient. A descriptor
 is sent at most once, including failed/partial sends. Do not log the credential.
 `Staged::receive` is unsafe because both admitted native processes must obey the
@@ -708,6 +708,7 @@ Run `cargo test -p shardmap --features succession` for focused regressions and
 `python3 scripts/prove-cache-succession.py /path/to/evidence` for separate A/B
 release builds with different interfaces. The native component proof checks
 retained arena bytes/backing/offsets under different mapping bases, B operations
-after A exits, TTL/capacity, abort and an ambiguous decision. It records exact
+after A exits, TTL, abort and an ambiguous decision; focused regressions cover
+capacity enforcement and reuse. It records exact
 artifact/source hashes, direct read/write timing, process CPU/RSS and pause timing;
 its control fixture does not establish real TLS or encrypted embedded SQL succession.
