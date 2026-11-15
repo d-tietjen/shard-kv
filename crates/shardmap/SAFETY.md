@@ -149,3 +149,12 @@ must additionally coordinate service admission, TLS/socket and embedded SQL stat
 The native example uses raw arena hashing only after quiescence, to show that
 attachment retains every arena byte. This is observation code, not a production
 snapshot/import path. No normal cache operation uses a socket or coordinator RPC.
+
+The succession profile additionally requires explicit non-dumpability before
+creation or import and throughout descriptor/mapping custody. `protect_current_process`
+sets Linux PR_SET_DUMPABLE to zero as an explicit process-wide action; creation,
+preparation, transfer and activation query/refuse an insecure setting. These are
+control-path calls, not per-operation checks. Import rejects older experimental
+format/permission profiles. Descriptor mode 0600 is defense in depth; same-UID
+isolation depends on non-dumpability, not mode bits alone. Privileged host access
+and trusted in-process code remain outside this boundary.

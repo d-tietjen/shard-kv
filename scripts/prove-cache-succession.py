@@ -48,6 +48,9 @@ def run(output):
             shutil.copy2(target / "release/examples/cache_succession", scratch / name)
             manifest["artifacts"][name] = {"sha256": hashlib.sha256((scratch / name).read_bytes()).hexdigest(), "bytes": (scratch / name).stat().st_size}
         assert manifest["artifacts"]["A"]["sha256"] != manifest["artifacts"]["B"]["sha256"]
+        # Each exec must explicitly protect itself before holding shared backing.
+        subprocess.run([str(scratch / "A"), "unprotected"], check=True)
+        subprocess.run([str(scratch / "B"), "unprotected"], check=True)
         for mode in ("commit", "abort", "ambiguous"):
             case = scratch / mode
             case.mkdir(mode=0o700)
@@ -55,6 +58,14 @@ def run(output):
             try:
                 a = subprocess.Popen([str(scratch / "A"), "owner", str(case), mode], stdin=subprocess.PIPE, text=True)
                 wait_ready(case / "owner-ready.json", a)
+                # This supervisor is intentionally not admitted to cache custody.
+                # Non-dumpability must prevent even same-UID descriptor inspection.
+                try:
+                    os.listdir(f"/proc/{a.pid}/fd")
+                except PermissionError:
+                    pass
+                else:
+                    raise AssertionError("unregistered supervisor could inspect cache descriptors")
                 b = subprocess.Popen([str(scratch / "B"), "successor", str(case), str(a.pid)])
                 a.stdin.write(json.dumps({"pid": b.pid, "uid": os.geteuid()}) + "\n")
                 a.stdin.close()

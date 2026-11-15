@@ -634,12 +634,15 @@ index and fixed key/value allocations in an anonymous, size-sealed memfd. A/B us
 the same implementation and backing through borrowed `get`, `insert` and `remove`.
 Attachment maps that backing without scanning/rebuilding the index, copying the
 cache, or relocating existing keys/values. Reads borrow directly from the mapping.
-Normal inserts copy application input; they are not cache transfer.
+Normal inserts copy application input; they are not cache transfer. Non-expiring
+point reads skip the clock; expiring matches still check the absolute deadline.
 
 ```rust,ignore
-use shardmap::succession::{Cache, Operation, Options, Peer, Staged};
+use shardmap::succession::{protect_current_process, Cache, Operation, Options, Peer, Staged};
 use std::time::Duration;
 
+// Explicit process policy: disables core dumps and restricts debugger/proc access.
+protect_current_process()?;
 let cache = Cache::create(Options {
     capacity: 4096, max_key_bytes: 32, max_value_bytes: 256,
     default_ttl_ms: None,
@@ -671,6 +674,16 @@ new local gate; the shared ABI contains offsets, lengths, immutable configuratio
 and atomic control words, with no Rust pointers, locks, vtables or ownership graphs.
 Mapping addresses can differ. Compare store UUID, kernel device/inode, size,
 slot/payload offsets and generation instead of absolute pointer numbers.
+
+Both service processes must explicitly call `protect_current_process()` after
+final credential changes and before holding any cache backing. Creation/import
+refuse while Linux dumpability is enabled; backing permissions are restricted to
+0600. This process-wide policy disables core dumps and restricts debuggers and
+unprivileged `/proc` descriptor access, closing an access route that a transfer
+token alone cannot protect. Keep this policy for the entire mapping/descriptor
+lifetime. It does not isolate against privileged host administrators or hostile
+code already admitted inside the service. The new format rejects the earlier
+unreleased experimental backing. Ordinary heap-backed APIs require no such policy.
 
 The transfer requires both the memfd and a random one-time credential, bound to
 the full readiness receipt. SO_PEERCRED checks the supervisor-selected PID/UID at

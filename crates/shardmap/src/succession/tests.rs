@@ -3,6 +3,7 @@ use std::sync::mpsc;
 use std::thread;
 
 fn options(capacity: u32) -> Options {
+    protect_current_process().expect("protect test process");
     Options {
         capacity,
         max_key_bytes: 32,
@@ -306,4 +307,134 @@ fn concurrent_public_writes_drain_without_losing_last_acknowledged_value() {
         a.insert(b"sequence", &0u64.to_le_bytes(), None),
         Err(Error::Inactive)
     ));
+}
+
+#[test]
+fn nonexpiring_operations_do_not_read_clock_and_keep_original_slot_routing() {
+    let a = Cache::create(options(13)).expect("create non power of two");
+    a.insert(b"key", b"value", None).expect("write");
+    let mut now = None;
+    let Search { found, hash, .. } = a.inner.find::<false>(b"key", &mut now).expect("lookup");
+    assert!(found.is_some());
+    assert!(now.is_none());
+    assert_eq!(found.expect("slot").0, (hash % 13) as usize);
+    a.insert(b"ttl", b"expiring", Some(Duration::from_secs(60)))
+        .expect("ttl write");
+    let mut now = None;
+    assert!(
+        a.inner
+            .find::<false>(b"ttl", &mut now)
+            .expect("lookup")
+            .found
+            .is_some()
+    );
+    assert!(now.is_some());
+}
+
+#[test]
+fn format_permissions_and_generation_changes_refuse_import() {
+    use std::os::unix::fs::PermissionsExt;
+    let a = Cache::create(options(4)).expect("create");
+    assert_eq!(
+        a.inner
+            .mapping
+            .file
+            .metadata()
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let p = prepare(&a);
+    let (fd, r) = candidate(&p);
+    // A trusted malformed-format fixture: no entries/borrowed views are active.
+    // SAFETY: gate is parked and no header reference is held during this write.
+    unsafe {
+        std::ptr::addr_of_mut!((*a.inner.mapping.ptr.as_ptr().cast::<Header>()).layout).write(1);
+    }
+    assert!(matches!(
+        Staged::attach(fd, r, &p.credential),
+        Err(Error::Profile)
+    ));
+}
+
+#[test]
+fn malformed_control_frames_close_every_received_descriptor() {
+    use std::io::Write;
+    use std::net::Shutdown;
+    use std::os::unix::fs::MetadataExt;
+    protect_current_process().expect("protect");
+    let file = tempfile::tempfile().expect("file");
+    let identity = file.metadata().expect("metadata");
+    let references = || {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("fds")
+            .filter_map(|p| {
+                let metadata = std::fs::metadata(p.ok()?.path()).ok()?;
+                Some(usize::from(
+                    metadata.dev() == identity.dev() && metadata.ino() == identity.ino(),
+                ))
+            })
+            .sum::<usize>()
+    };
+    let before = references();
+    let a = Cache::create(options(2)).expect("create");
+    let prepared = prepare(&a);
+    let bytes = serde_json::to_vec(&prepared.receipt).expect("receipt");
+    let mut short = (bytes.len() as u32).to_le_bytes().to_vec();
+    short.extend(bytes);
+    short.extend([0; 7]);
+    let mut invalid = 3u32.to_le_bytes().to_vec();
+    invalid.extend(b"{!}");
+    for (count, payload) in [
+        (0, vec![]),
+        (16, vec![]),
+        (1, 2050u32.to_le_bytes().to_vec()),
+        (1, invalid),
+        (1, short),
+    ] {
+        let (mut left, mut right) = UnixStream::pair().expect("pair");
+        let mut tag = [1u8];
+        let mut iov = libc::iovec {
+            iov_base: tag.as_mut_ptr().cast(),
+            iov_len: 1,
+        };
+        let mut control = [0u64; 16];
+        // SAFETY: initialized with live aligned buffers; test deliberately sends
+        // bounded invalid payloads/descriptor counts, not forged kernel cmsgs.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        if count != 0 {
+            msg.msg_control = control.as_mut_ptr().cast();
+            // SAFETY: at most 16 valid descriptors fit this aligned buffer.
+            unsafe {
+                msg.msg_controllen = libc::CMSG_SPACE(count * 4) as usize;
+                let c = libc::CMSG_FIRSTHDR(&msg);
+                (*c).cmsg_level = libc::SOL_SOCKET;
+                (*c).cmsg_type = libc::SCM_RIGHTS;
+                (*c).cmsg_len = libc::CMSG_LEN(count * 4) as usize;
+                for i in 0..count as usize {
+                    libc::CMSG_DATA(c)
+                        .cast::<i32>()
+                        .add(i)
+                        .write(file.as_raw_fd());
+                }
+            }
+        }
+        // SAFETY: synchronous call; borrowed test buffers and descriptor are live.
+        assert_eq!(
+            unsafe { libc::sendmsg(right.as_raw_fd(), &msg, libc::MSG_NOSIGNAL) },
+            1
+        );
+        right.write_all(&payload).expect("payload");
+        right.shutdown(Shutdown::Write).expect("eof");
+        assert!(transport::receive(&mut left).is_err());
+        assert_eq!(
+            references(),
+            before,
+            "received descriptor leaked on rejected frame"
+        );
+    }
 }

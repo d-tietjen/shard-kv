@@ -272,6 +272,19 @@ fn successor(dir: &Path, old: Peer) -> Result<()> {
     Ok(())
 }
 fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("unprotected") {
+        assert!(matches!(
+            Cache::create(Options {
+                capacity: 1,
+                max_key_bytes: 8,
+                max_value_bytes: 64,
+                default_ttl_ms: None
+            }),
+            Err(CacheError::ProcessProtection)
+        ));
+        return Ok(());
+    }
+    shardmap::succession::protect_current_process()?;
     let args: Vec<_> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("owner") => owner(

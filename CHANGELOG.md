@@ -9,6 +9,16 @@
   explicit abort and operation-bound activation (EDEN-3839). Existing private
   heap caches cannot be adopted; TLS/SQL coordination remains caller-owned.
 
+### Security
+
+- Require explicit protected process custody and private descriptor permissions
+  for native cache succession; reject the earlier experimental format.
+
+### Changed
+
+- Keep transfer/activation checks on the control path. Non-expiring point reads
+  avoid clock work and preserve slot routing with cheaper probing (EDEN-3839).
+
 ## 0.9.1 - Unreleased
 
 ### Added

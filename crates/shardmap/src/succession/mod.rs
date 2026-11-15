@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 const MAGIC: u64 = 0x534d_4150_5355_4331;
-const LAYOUT: u64 = 1;
+const LAYOUT: u64 = 2;
 const ARENA: usize = 4096;
 const SLOT_HEADER: usize = 32;
 const MAX_BACKING: usize = 1 << 30;
@@ -39,6 +39,11 @@ pub enum Error {
     /// The bounded point-cache profile or backing format is invalid.
     #[error("unsupported or malformed succession profile")]
     Profile,
+    /// The process permits unprivileged descriptor inspection/core dumps.
+    #[error(
+        "succession requires a non-dumpable process; call protect_current_process before creating or receiving backing"
+    )]
+    ProcessProtection,
     /// This handle is parked, staged, stale, or has lost ownership.
     #[error("cache admission is closed or ownership has changed")]
     Inactive,
@@ -54,6 +59,52 @@ pub enum Error {
     /// A key, value, deadline, or generation exceeds the supported bounds.
     #[error("succession cache limit exceeded")]
     Limit,
+}
+
+/// Explicitly disable core dumps and unprivileged process/descriptor inspection
+/// for this entire process, before creating or receiving cache backing.
+///
+/// This process-wide Linux policy also restricts debuggers and crash handlers.
+/// Call it after final credential changes in each independently executed service;
+/// never restore dumpability while cache mappings or descriptors are alive.
+/// It does not sandbox privileged host administrators or trusted native code.
+/// Cache creation/import refuse without this protection; ordinary cache operations
+/// do not make a protection system call.
+pub fn protect_current_process() -> Result<(), Error> {
+    // SAFETY: integer-only process policy call; no pointers or borrowed buffers.
+    if unsafe {
+        libc::prctl(
+            libc::PR_SET_DUMPABLE,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error().into());
+    }
+    require_protected_process()
+}
+
+fn require_protected_process() -> Result<(), Error> {
+    // SAFETY: query-only prctl call with no pointer arguments.
+    let state = unsafe {
+        libc::prctl(
+            libc::PR_GET_DUMPABLE,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    };
+    if state < 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    if state != 0 {
+        return Err(Error::ProcessProtection);
+    }
+    Ok(())
 }
 
 /// Explicit fixed-capacity profile. No Redis, vector, overflow, persistence,
@@ -263,6 +314,12 @@ impl Drop for AdmissionPause<'_> {
     }
 }
 
+struct Search {
+    found: Option<(usize, Slot)>,
+    free: Option<usize>,
+    hash: u64,
+}
+
 struct Inner {
     mapping: Mapping,
     options: Options,
@@ -310,31 +367,54 @@ impl Inner {
         // the caller retains the gate and active ownership for the borrow.
         unsafe { std::slice::from_raw_parts(self.mapping.ptr.as_ptr().add(offset), len) }
     }
-    fn find(&self, key: &[u8], now: u64) -> Result<(Option<usize>, Option<usize>), Error> {
+    // INSERT scans may reclaim expired slots; reads only consult the matched
+    // entry's deadline. Non-expiring point operations never read the clock.
+    #[inline]
+    fn find<const INSERT: bool>(&self, key: &[u8], now: &mut Option<u64>) -> Result<Search, Error> {
         if key.len() > self.options.max_key_bytes as usize {
             return Err(Error::Limit);
         }
         let hash = xxh3_64_with_seed(key, self.mapping.header().seed);
         let n = self.options.capacity as usize;
+        let mut index = if n.is_power_of_two() {
+            hash as usize & (n - 1)
+        } else {
+            (hash % n as u64) as usize
+        };
         let mut free = None;
-        for i in 0..n {
-            let index = ((hash % n as u64) as usize + i) % n;
+        for _ in 0..n {
             let s = self.slot(index)?;
-            let expired = s.deadline_ms != 0 && s.deadline_ms <= now;
-            if s.occupied != 1 || expired {
-                free = free.or(Some(index));
-            }
             if s.occupied == 0 {
-                break;
+                return Ok(Search {
+                    found: None,
+                    free: free.or(Some(index)),
+                    hash,
+                });
             }
             if s.occupied == 1
                 && s.hash == hash
                 && self.bytes(self.offset(index) + SLOT_HEADER, s.key_len as usize) == key
             {
-                return Ok(((!expired).then_some(index), Some(index)));
+                let found = INSERT || !expired(s.deadline_ms, now)?;
+                return Ok(Search {
+                    found: found.then_some((index, s)),
+                    free: Some(index),
+                    hash,
+                });
+            }
+            if INSERT && (s.occupied == 2 || expired(s.deadline_ms, now)?) {
+                free = free.or(Some(index));
+            }
+            index += 1;
+            if index == n {
+                index = 0;
             }
         }
-        Ok((None, free))
+        Ok(Search {
+            found: None,
+            free,
+            hash,
+        })
     }
 }
 
@@ -349,6 +429,7 @@ impl Cache {
     /// Create sealed, anonymous retained backing. No path or named shared-memory
     /// object is published. This must be used before warming the old service.
     pub fn create(options: Options) -> Result<Self, Error> {
+        require_protected_process()?;
         let (stride, len) = options.geometry()?;
         let name = CString::new("shardmap-succession").map_err(|_| Error::Profile)?;
         // SAFETY: valid NUL-terminated name and supported flags; fd checked below.
@@ -360,6 +441,10 @@ impl Cache {
         }
         // SAFETY: memfd_create returned a fresh owned descriptor.
         let file = unsafe { File::from_raw_fd(fd) };
+        // No ambient filesystem permissions are needed: authorized successors
+        // receive the already-open descriptor over the authenticated channel.
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.set_len(len as u64)?;
         // SAFETY: fd is valid, integer seals protect size for every mapping.
         if unsafe {
@@ -424,11 +509,10 @@ impl Cache {
     pub fn get(&self, key: &[u8]) -> Result<Option<Value<'_>>, Error> {
         let guard = self.inner.gate.read();
         self.inner.admit()?;
-        let (found, _) = self.inner.find(key, now_ms()?)?;
-        let Some(slot) = found else {
+        let Search { found, .. } = self.inner.find::<false>(key, &mut None)?;
+        let Some((slot, s)) = found else {
             return Ok(None);
         };
-        let s = self.inner.slot(slot)?;
         let offset =
             self.inner.offset(slot) + SLOT_HEADER + self.inner.options.max_key_bytes as usize;
         Ok(Some(Value {
@@ -448,20 +532,22 @@ impl Cache {
         if value.len() > self.inner.options.max_value_bytes as usize {
             return Err(Error::Limit);
         }
-        let now = now_ms()?;
         let ttl = ttl
             .map(|n| u64::try_from(n.as_millis()).map_err(|_| Error::Limit))
             .transpose()?
             .or(self.inner.options.default_ttl_ms);
+        let mut now = None;
         let deadline = ttl
-            .map(|n| now.checked_add(n).ok_or(Error::Limit))
+            .map(|n| current_time(&mut now)?.checked_add(n).ok_or(Error::Limit))
             .transpose()?
             .map(|n| n.max(1))
             .unwrap_or(0);
-        let (found, free) = self.inner.find(key, now)?;
-        let index = found.or(free).ok_or(Error::Capacity)?;
+        let Search { found, free, hash } = self.inner.find::<true>(key, &mut now)?;
+        let index = found
+            .map(|(index, _)| index)
+            .or(free)
+            .ok_or(Error::Capacity)?;
         let offset = self.inner.offset(index);
-        let hash = xxh3_64_with_seed(key, self.inner.mapping.header().seed);
         // SAFETY: exclusive gate and active ownership, key/value sizes checked,
         // fixed disjoint slot ranges. Input cannot alias mutable arena bytes:
         // any Value borrow would hold a read guard and prevent this write gate.
@@ -489,8 +575,8 @@ impl Cache {
     pub fn remove(&self, key: &[u8]) -> Result<bool, Error> {
         let _guard = self.inner.gate.write();
         self.inner.admit()?;
-        let (found, _) = self.inner.find(key, now_ms()?)?;
-        let Some(index) = found else {
+        let Search { found, .. } = self.inner.find::<false>(key, &mut None)?;
+        let Some((index, _)) = found else {
             return Ok(false);
         };
         // SAFETY: exclusive gate and active ownership, bounded aligned slot.
@@ -518,6 +604,7 @@ impl Cache {
         recipient: Peer,
         timeout: Duration,
     ) -> Result<Prepared, Error> {
+        require_protected_process()?;
         if recipient.pid == 0 || recipient.pid == std::process::id() {
             return Err(Error::Unauthorized);
         }
@@ -600,6 +687,7 @@ impl Prepared {
     /// Send one descriptor and a one-use credential to exactly the kernel peer
     /// named during prepare. A private supervisor-controlled channel is required.
     pub fn send(&mut self, stream: &mut UnixStream) -> Result<(), Error> {
+        require_protected_process()?;
         if self.sent {
             return Err(Error::Unauthorized);
         }
@@ -660,6 +748,7 @@ impl Staged {
     /// be revoked by withdrawing a credential. A crash during mutation is not
     /// recoverable by this API. The old process must obey prepare/drain/retirement.
     pub unsafe fn receive(stream: &mut UnixStream, owner: Peer) -> Result<Self, Error> {
+        require_protected_process()?;
         transport::authenticate(stream, owner)?;
         let (fd, receipt, mut credential) = transport::receive(stream)?;
         let result = Self::attach(fd, receipt, &credential);
@@ -667,11 +756,16 @@ impl Staged {
         result
     }
     fn attach(fd: OwnedFd, receipt: Readiness, credential: &[u8; 32]) -> Result<Self, Error> {
+        require_protected_process()?;
         if receipt.recipient != Peer::current() {
             return Err(Error::Unauthorized);
         }
         let (stride, len) = receipt.options.geometry()?;
         let file = File::from(fd);
+        use std::os::unix::fs::PermissionsExt;
+        if file.metadata()?.permissions().mode() & 0o777 != 0o600 {
+            return Err(Error::Profile);
+        }
         if file.metadata()?.len() != len as u64 {
             return Err(Error::Profile);
         }
@@ -743,7 +837,10 @@ impl Staged {
     /// decision; never infer abort from timeout. Once this succeeds, A cannot abort.
     /// Forward recovery or a fresh reverse handoff must use B's latest state.
     pub fn activate(self, committed_operation: Operation) -> Result<Cache, Error> {
-        if committed_operation != self.receipt.operation {
+        require_protected_process()?;
+        if self.receipt.recipient != Peer::current()
+            || committed_operation != self.receipt.operation
+        {
             return Err(Error::Unauthorized);
         }
         let active = self.receipt.generation << 2;
@@ -765,10 +862,23 @@ impl Staged {
 
 fn authorization(credential: &[u8; 32], receipt: &Readiness) -> Result<[u8; 32], Error> {
     let mut hash = Sha256::new();
-    hash.update(b"shardmap-succession-v1");
+    hash.update(b"shardmap-succession-v2");
     hash.update(credential);
     hash.update(serde_json::to_vec(receipt).map_err(io::Error::other)?);
     Ok(hash.finalize().into())
+}
+#[inline]
+fn current_time(now: &mut Option<u64>) -> Result<u64, Error> {
+    if let Some(value) = *now {
+        return Ok(value);
+    }
+    let value = now_ms()?;
+    *now = Some(value);
+    Ok(value)
+}
+#[inline]
+fn expired(deadline: u64, now: &mut Option<u64>) -> Result<bool, Error> {
+    Ok(deadline != 0 && deadline <= current_time(now)?)
 }
 // Participants must share the host time namespace as well as PID namespace.
 fn now_ms() -> Result<u64, Error> {
