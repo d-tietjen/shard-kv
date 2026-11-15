@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.9.1"
+shardmap = "0.10.0"
 ```
 
 ## Quick Start
@@ -624,3 +624,90 @@ before evaluating this feature for a workload.
 ## License
 
 Licensed under Apache-2.0.
+
+## Same-host service succession (opt-in)
+
+Enable `succession` on 64-bit Linux and create a
+[`succession::Cache`](https://docs.rs/shardmap/latest/shardmap/succession/struct.Cache.html)
+**before warming the service**. This bounded profile keeps a fixed open-addressed
+index and fixed key/value allocations in an anonymous, size-sealed memfd. A/B use
+the same implementation and backing through borrowed `get`, `insert` and `remove`.
+Attachment maps that backing without scanning/rebuilding the index, copying the
+cache, or relocating existing keys/values. Reads borrow directly from the mapping.
+Normal inserts copy application input; they are not cache transfer.
+
+```rust,ignore
+use shardmap::succession::{Cache, Operation, Options, Peer, Staged};
+use std::time::Duration;
+
+let cache = Cache::create(Options {
+    capacity: 4096, max_key_bytes: 32, max_value_bytes: 256,
+    default_ttl_ms: None,
+})?;
+cache.insert(b"key", b"value", None)?;
+// Supervisor knows the exact child PID/UID and owns a private Unix channel.
+let mut participant = cache.prepare(operation, successor_peer, Duration::from_secs(2))?;
+participant.send(&mut private_channel)?;
+// In B: unsafe Staged::receive authenticates A, validates the descriptor/profile
+// and one-use capability, and exposes readiness without entry access.
+// The external coordinator then decides ALL participants, as described below.
+```
+
+The supported profile has explicit entry/key/value limits, a fixed backing budget
+(at most 1 GiB), lazy host-wide BOOTTIME TTL deadlines, randomized hash routing,
+and refusal at capacity. Deletes/expired slots are reused; live entries are not
+automatically evicted. Default TTL is applied when insert's TTL is `None`; zero
+TTL expires immediately. `no-ttl` does not disable this profile's TTL semantics.
+Slots do not resize. Choose the actual service's limits explicitly: there is no
+`CacheOptions` conversion that silently discards an eviction or governance policy.
+Typed objects, Redis commands, semantic/governance metadata, overflow, persistence
+and ordinary heap-backed `SharedCache` adoption are unsupported. This feature does
+not make the existing server binary handoff-capable or qualify an Eden deployment.
+
+A local reader/writer gate protects all operations and borrowed guards. Prepare
+closes admission on every clone, drains the gate within the bound, then parks A.
+There is one active process, not a cross-process concurrent-client cache. B gets a
+new local gate; the shared ABI contains offsets, lengths, immutable configuration
+and atomic control words, with no Rust pointers, locks, vtables or ownership graphs.
+Mapping addresses can differ. Compare store UUID, kernel device/inode, size,
+slot/payload offsets and generation instead of absolute pointer numbers.
+
+The transfer requires both the memfd and a random one-time credential, bound to
+the full readiness receipt. SO_PEERCRED checks the supervisor-selected PID/UID at
+both ends. Use a private bounded-time Unix channel and supervisor-owned child
+custody; PIDs supplied by an untrusted requester are insufficient. A descriptor
+is sent at most once, including failed/partial sends. Do not log the credential.
+`Staged::receive` is unsafe because both admitted native processes must obey the
+protocol and never make raw competing writes, fork active handles or keep
+untracked aliases. A writable mapping holder is trusted, not sandboxed. Credential
+withdrawal cannot revoke it; quiescence and process retirement enforce custody.
+This is same-host, same-layout native code, not a durable format or cross-kernel ABI.
+
+The caller owns one common request/I/O admission gate and one recorded upgrade
+decision covering this cache, **both TLS/socket legs and embedded relational SQL
+when present**. Stop whole logical requests, background mutations and I/O; prepare
+all participants with B inactive; keep A alive and recoverable while B validates;
+then compare operation/generation-bound readiness receipts. Failed readiness before
+COMMIT calls `Prepared::abort` for the cache and aborts the other participants,
+resuming A. Drain timeout restores local admission. Dropping `Prepared` after
+readiness deliberately leaves A parked. No destructor guesses the global decision.
+
+Only after recording global COMMIT may B call `Staged::activate(operation)`, with
+common admission still closed. Activate the whole bundle, retire A, then report
+the upgrade effective/open B admission. The cache CAS prevents A abort racing B
+activation from producing two owners; it is **not** the cross-resource coordinator.
+After activation A's handles refuse operations and abort. An interrupted/ambiguous
+decision keeps common admission closed until reconciled; a missing ACK never
+implies permission to abort. If B has advanced cache/TLS/SQL state, forward recovery
+or a newly qualified reverse handoff uses the latest state and security floor.
+Never restore stale TLS counters or SQL snapshots, retry an uncertain write, or
+promise recovery of a crash during a cache mutation. A must not be retained as a
+permanent relay. Losing the last descriptor/mapping loses this anonymous cache.
+
+Run `cargo test -p shardmap --features succession` for focused regressions and
+`python3 scripts/prove-cache-succession.py /path/to/evidence` for separate A/B
+release builds with different interfaces. The native component proof checks
+retained arena bytes/backing/offsets under different mapping bases, B operations
+after A exits, TTL/capacity, abort and an ambiguous decision. It records exact
+artifact/source hashes, direct read/write timing, process CPU/RSS and pause timing;
+its control fixture does not establish real TLS or encrypted embedded SQL succession.

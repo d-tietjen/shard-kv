@@ -117,3 +117,35 @@ yet a complete machine proof of memory safety. The Rust safety argument is
 still the explicit invariant: every production call site checks the frame or
 field length before entering the unsafe reader, and the default build keeps a
 checked slice-copy implementation available for differential testing.
+
+## Opt-in Linux succession backing
+
+`succession` necessarily uses mmap/munmap, memfd size seals, monotonic clock and
+Unix peer-credential/descriptor system calls. There is no safe standard-library
+shared-mapping equivalent. These calls are behind the dedicated feature rather
+than the default `unsafe` hot-path toggle; both feature combinations are tested.
+The ordinary heap-backed APIs remain the safe fallback when succession is not
+required. This profile is limited to 64-bit Linux and one active process.
+
+The mapping is page-aligned and initialized once before descriptor publication.
+Header configuration is immutable; generation and authorization words are atomic.
+Fixed slot geometry is checked against a bounded backing length before access.
+All slot headers are plain integer fields with validated lengths. A borrowed value
+retains a process-local read guard; writers hold the exclusive gate. Prepare first
+closes admission and then obtains the exclusive gate before publishing readiness,
+so no value reference or mutation survives into B activation. The retained bytes
+contain no process-local synchronization or pointers. Mapping Drop only unmaps the
+local view and closes its descriptor; it never clears another process's cache.
+
+`Staged::receive` is an explicit unsafe trust boundary. SO_PEERCRED, capability
+binding, immutable layout checks and size seals do not make malicious descriptor
+holders memory-safe. Both processes/supervisor must exclusively obey the protocol,
+with no competing raw writes, forked active handles or other mmap aliases. B has
+no entry APIs before the generation CAS. A abort advances the generation, so stale
+candidates cannot activate; B activation prevents A abort. Lost decisions fail
+closed. A crash in an in-place write is not a recoverable transaction. The caller
+must additionally coordinate service admission, TLS/socket and embedded SQL state.
+
+The native example uses raw arena hashing only after quiescence, to show that
+attachment retains every arena byte. This is observation code, not a production
+snapshot/import path. No normal cache operation uses a socket or coordinator RPC.

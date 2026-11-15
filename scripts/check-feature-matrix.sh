@@ -6,6 +6,7 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
+cargo check -p shardmap --no-default-features --features succession
 cargo check -p shardmap --no-default-features --features embedded
 cargo check -p shardmap --no-default-features --features sharded
 cargo check -p shardmap --no-default-features --features redis

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0 - Unreleased
+
+### Added
+
+- Opt-in Linux `succession` point-cache profile with retained index/payload
+  backing, borrowed reads, authenticated descriptor transfer, bounded drain,
+  explicit abort and operation-bound activation (EDEN-3839). Existing private
+  heap caches cannot be adopted; TLS/SQL coordination remains caller-owned.
+
 ## 0.9.1 - Unreleased
 
 ### Added

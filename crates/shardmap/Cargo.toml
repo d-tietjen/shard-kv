@@ -89,6 +89,8 @@ server = [
 ]
 redis-server = ["server", "redis", "redis-functions", "redis-modules"]
 codec = ["embedded"]
+# Fixed-layout, one-owner same-host native cache handoff.
+succession = ["embedded"]
 
 # Runtime and platform integrations.
 monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
@@ -216,3 +218,7 @@ required-features = ["redis"]
 name = "redis_compat_differential_test"
 path = "tests/redis_compat_differential_test.rs"
 required-features = ["redis-server"]
+
+[[example]]
+name = "cache_succession"
+required-features = ["succession"]

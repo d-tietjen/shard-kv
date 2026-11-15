@@ -5,6 +5,17 @@
 pub mod cache;
 #[cfg(feature = "codec")]
 pub mod codec;
+#[cfg(all(
+    feature = "succession",
+    target_os = "linux",
+    target_pointer_width = "64"
+))]
+pub mod succession;
+#[cfg(all(
+    feature = "succession",
+    not(all(target_os = "linux", target_pointer_width = "64"))
+))]
+compile_error!("succession requires 64-bit Linux");
 #[cfg(not(feature = "embedded"))]
 compile_error!(
     "shardmap currently requires the `embedded` feature; build with default features enabled or enable `embedded`/`sharded` explicitly"

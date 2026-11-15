@@ -118,6 +118,10 @@ unpack_crate shardcache-client-rs "$client_version"
 
 check_shardcache_binary
 
+# Compile the public retained-cache API from its actual packaged archive.
+cargo check --manifest-path "$unpacked/shardmap-$shardmap_version/Cargo.toml" --no-default-features --features succession \
+  --config "patch.crates-io.shardcache-client-rs.path=\"$unpacked/shardcache-client-rs-$client_version\""
+
 default_consumer="$tmp/default-consumer"
 mkdir -p "$default_consumer"
 write_consumer_main "$default_consumer"
