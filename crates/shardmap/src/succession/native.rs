@@ -7,7 +7,6 @@ use crossbeam_utils::CachePadded;
 use hashbrown::HashTable;
 use rblock::{RwLock, RwLockReadGuard};
 use std::alloc::Layout;
-use std::hash::BuildHasher;
 use std::mem::{ManuallyDrop, align_of, size_of};
 use std::ptr::NonNull;
 use std::sync::atomic::AtomicBool;
@@ -383,8 +382,8 @@ impl Cache {
                 used: AtomicBool::new(false),
             };
             let mut table = Table::new_in(region);
-            let quota = options.capacity as usize / geometry.shards
-                + usize::from(shard < options.capacity as usize % geometry.shards);
+            let remainder = options.capacity as usize % geometry.shards;
+            let quota = geometry.quota - usize::from(remainder != 0 && shard >= remainder);
             table
                 .try_reserve(quota * 2, |row| row.hash)
                 .map_err(|_| Error::Limit)?;
@@ -474,9 +473,10 @@ impl Cache {
         let guard = self.inner.locks[shard].read();
         // SAFETY: locked native metadata, active Cache only exists in one process.
         let state = unsafe { &*guard.0 };
-        let row = state.table.find(self.inner.hash.hash_one(hash), |row| {
-            row.hash == hash && self.inner.mapping.bytes(row.key, row.key_len) == key
-        });
+        let row = state.table.find(
+            std::hash::BuildHasher::hash_one(&self.inner.hash, hash),
+            |row| row.hash == hash && self.inner.mapping.bytes(row.key, row.key_len) == key,
+        );
         let Some(row) = row else {
             return Ok(None);
         };
@@ -516,7 +516,7 @@ impl Cache {
         let mut guard = self.inner.locks[shard].write();
         // SAFETY: unique local writer of this shard under active process custody.
         let state = unsafe { &mut *guard.0 };
-        let table_hash = self.inner.hash.hash_one(hash);
+        let table_hash = std::hash::BuildHasher::hash_one(&self.inner.hash, hash);
         if let Some(row) = state.table.find_mut(table_hash, |row| {
             row.hash == hash && self.inner.mapping.bytes(row.key, row.key_len) == key
         }) {
@@ -594,7 +594,7 @@ impl Cache {
                 deadline,
                 slot,
             },
-            |row| self.inner.hash.hash_one(row.hash),
+            |row| std::hash::BuildHasher::hash_one(&self.inner.hash, row.hash),
         );
         Ok(())
     }
@@ -608,12 +608,10 @@ impl Cache {
         let mut guard = self.inner.locks[shard].write();
         // SAFETY: unique shard writer in the active process.
         let state = unsafe { &mut *guard.0 };
-        let Ok(entry) = state
-            .table
-            .find_entry(self.inner.hash.hash_one(hash), |row| {
-                row.hash == hash && self.inner.mapping.bytes(row.key, row.key_len) == key
-            })
-        else {
+        let Ok(entry) = state.table.find_entry(
+            std::hash::BuildHasher::hash_one(&self.inner.hash, hash),
+            |row| row.hash == hash && self.inner.mapping.bytes(row.key, row.key_len) == key,
+        ) else {
             return Ok(false);
         };
         let (row, _) = entry.remove();
