@@ -16,8 +16,12 @@
 
 ### Changed
 
-- Keep transfer/activation checks on the control path. Non-expiring point reads
-  avoid clock work and preserve slot routing with cheaper probing (EDEN-3839).
+- Replace the experimental global operation gate/linear-probing cache with native
+  hashbrown tables, padded reader-biased shard locks and consuming preparation.
+  Ordinary operations have no handoff checks; abort returns the original cache.
+  Format 3 requires exact engine identity and the same free virtual range, and
+  uses the ordinary cached TTL clock. Fixed shard quotas and reserved index
+  headroom are explicit; different-base handoff remains unqualified (EDEN-3839).
 
 ## 0.9.1 - Unreleased
 

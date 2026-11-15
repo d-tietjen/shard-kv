@@ -40,10 +40,10 @@ def run(output):
     manifest["source_sha256"] = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths}
     with tempfile.TemporaryDirectory(prefix="shardmap-succession-") as scratch:
         scratch = Path(scratch)
-        for name in ("A", "B"):
+        for name in ("A", "B", "C"):
             env = os.environ.copy()
             env["SHARDMAP_DEMO_INTERFACE"] = "old-interface" if name == "A" else "new-interface"
-            subprocess.run(["cargo", "build", "--locked", "--release", "-p", "shardmap", "--features", "succession", "--example", "cache_succession"], cwd=ROOT, env=env, check=True)
+            subprocess.run(["cargo", "build", "--locked", "--release", "-p", "shardmap", "--features", ("succession,unsafe" if name == "C" else "succession"), "--example", "cache_succession"], cwd=ROOT, env=env, check=True)
             target = Path(env.get("CARGO_TARGET_DIR", str(ROOT / "target")))
             shutil.copy2(target / "release/examples/cache_succession", scratch / name)
             manifest["artifacts"][name] = {"sha256": hashlib.sha256((scratch / name).read_bytes()).hexdigest(), "bytes": (scratch / name).stat().st_size}
@@ -51,7 +51,7 @@ def run(output):
         # Each exec must explicitly protect itself before holding shared backing.
         subprocess.run([str(scratch / "A"), "unprotected"], check=True)
         subprocess.run([str(scratch / "B"), "unprotected"], check=True)
-        for mode in ("commit", "abort", "ambiguous"):
+        for mode in ("commit", "abort", "ambiguous", "collision", "abi", "precommit-crash", "postcommit-crash"):
             case = scratch / mode
             case.mkdir(mode=0o700)
             a = b = None
@@ -66,16 +66,21 @@ def run(output):
                     pass
                 else:
                     raise AssertionError("unregistered supervisor could inspect cache descriptors")
-                b = subprocess.Popen([str(scratch / "B"), "successor", str(case), str(a.pid)])
+                b = subprocess.Popen([str(scratch / ("C" if mode == "abi" else "B")), "successor", str(case), str(a.pid), mode])
                 a.stdin.write(json.dumps({"pid": b.pid, "uid": os.geteuid()}) + "\n")
                 a.stdin.close()
                 assert a.wait(timeout=30) == 0
-                assert b.wait(timeout=30) == 0
+                assert b.wait(timeout=30) == (77 if mode == "precommit-crash" else 78 if mode == "postcommit-crash" else 0)
                 old = json.loads((case / "owner.json").read_text())
                 new = json.loads((case / "successor.json").read_text())
+                if mode in ("collision", "abi", "precommit-crash", "postcommit-crash"):
+                    if mode in ("collision", "abi"):
+                        assert new["refused"] == mode
+                    (output / (mode + ".json")).write_text(json.dumps({"A": old, "B": new}, indent=2) + "\n")
+                    continue
                 assert old["receipt"] == new["receipt"]
                 assert old["arena_sha256_before_attach"] == new["arena_sha256_after_attach"]
-                assert old["mapping_base"] != new["mapping_base"]
+                assert old["mapping_base"] == new["mapping_base"]
                 if mode == "commit":
                     assert new["result"]["old_process_exited"]
                     assert old["slot_offset"] == new["result"]["slot_offset"]
@@ -91,7 +96,7 @@ def run(output):
                             proc.kill()
                             proc.wait(timeout=5)
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print("PASS: distinct A/B artifacts; same arena/backing/offsets; A exit; abort; ambiguous decision")
+    print("PASS: distinct A/B artifacts; same native table/backing/pointers; A exit; abort; ambiguous decision; fixed-address profile")
 
 
 if __name__ == "__main__":

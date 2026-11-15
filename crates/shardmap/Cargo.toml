@@ -17,6 +17,7 @@ autotests = false
 autobenches = false
 include = [
     "Cargo.toml",
+    "build.rs",
     "LICENSE",
     "README.md",
     "SAFETY.md",
@@ -90,7 +91,7 @@ server = [
 redis-server = ["server", "redis", "redis-functions", "redis-modules"]
 codec = ["embedded"]
 # Fixed-layout, one-owner same-host native cache handoff.
-succession = ["embedded"]
+succession = ["embedded", "dep:allocator-api2"]
 
 # Runtime and platform integrations.
 monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
@@ -122,6 +123,7 @@ embedded-read-biased-lock = []
 unsafe = []
 
 [dependencies]
+allocator-api2 = { version = "=0.2.21", optional = true }
 ahash = { workspace = true }
 bytes = "1"
 bytes-handoff = { version = "1.2.0", optional = true }
@@ -160,6 +162,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, optional = true }
 xxhash-rust = { workspace = true }
 zstd = { workspace = true }
+
+[build-dependencies]
+sha2 = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.14"
@@ -221,4 +226,8 @@ required-features = ["redis-server"]
 
 [[example]]
 name = "cache_succession"
+required-features = ["succession"]
+
+[[example]]
+name = "cache_succession_bench"
 required-features = ["succession"]

@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::mpsc;
 use std::thread;
 
 fn options(capacity: u32) -> Options {
@@ -11,7 +10,7 @@ fn options(capacity: u32) -> Options {
         default_ttl_ms: None,
     }
 }
-fn prepare(cache: &Cache) -> Prepared {
+fn prepare(cache: Cache) -> Prepared {
     cache
         .prepare(
             Operation([3; 16]),
@@ -23,14 +22,13 @@ fn prepare(cache: &Cache) -> Prepared {
         )
         .expect("prepare")
 }
-// Unit-only simulation of an authenticated recipient in this process. Production
-// receive uses SO_PEERCRED and the actual recipient PID; the exec example covers it.
-fn candidate(p: &Prepared) -> (OwnedFd, Readiness) {
-    let mut r = p.receipt;
-    r.recipient = Peer::current();
-    let hash = authorization(&p.credential, &r).expect("digest");
+// Unit-only recipient simulation reuses this process's mapping. Independent
+// mmap/exec custody, collisions and old process exit are proved by the A/B runner.
+fn candidate(p: &Prepared) -> Readiness {
+    let mut receipt = p.receipt;
+    receipt.recipient = Peer::current();
+    let hash = authorization(&p.credential, &receipt).expect("digest");
     for (word, bytes) in p
-        .inner
         .mapping
         .header()
         .authorization
@@ -39,128 +37,151 @@ fn candidate(p: &Prepared) -> (OwnedFd, Readiness) {
     {
         word.store(u64::from_le_bytes(*bytes), Ordering::Relaxed);
     }
-    (p.inner.mapping.file.try_clone().expect("fd").into(), r)
+    receipt
 }
 fn staged(p: &Prepared) -> Staged {
-    let (fd, r) = candidate(p);
-    Staged::attach(fd, r, &p.credential).expect("stage")
+    let receipt = candidate(p);
+    Staged::validate(p.mapping.clone(), receipt, &p.credential).expect("stage exact engine")
 }
 
 #[test]
-fn preserves_slots_borrowed_payload_and_latest_writes_across_successions() {
+fn retains_table_slots_payload_and_latest_writes_across_successions() {
     let a = Cache::create(options(8)).expect("create");
     a.insert(b"key", b"old", None).expect("write");
     let identity = a.identity().expect("identity");
-    let v = a.get(b"key").expect("get").expect("value");
-    let slot = v.slot_offset;
-    let payload = v.value_offset;
-    assert_eq!(v.as_ptr() as usize, a.mapping_address() + payload as usize);
-    drop(v);
-    let p = prepare(&a);
-    let b = staged(&p);
-    assert_ne!(b.mapping_address(), a.mapping_address());
-    assert!(matches!(
-        a.insert(b"key", b"bad", None),
-        Err(Error::Inactive)
-    ));
-    let b = b
-        .activate(p.receipt.operation)
-        .expect("global commit cache participant");
+    let base = a.mapping_address();
+    let value = a.get(b"key").expect("get").expect("value");
+    let offsets = a.value_offsets(&value).expect("offset diagnostics");
+    let pointer = value.as_ptr() as usize;
+    drop(value);
+    let p = prepare(a);
+    let b = staged(&p).activate(p.receipt.operation).expect("activate");
     assert!(matches!(p.abort(), Err(Error::Inactive)));
-    assert!(matches!(a.get(b"key"), Err(Error::Inactive)));
-    drop(a);
-    let v = b.get(b"key").expect("get").expect("value");
-    assert_eq!(&*v, b"old");
-    assert_eq!((v.slot_offset, v.value_offset), (slot, payload));
-    assert_eq!(v.as_ptr() as usize, b.mapping_address() + payload as usize);
-    drop(v);
-    assert_eq!(b.identity().expect("identity"), identity);
-    b.insert(b"key", b"latest", None).expect("new write");
-    let p = prepare(&b);
+    let value = b.get(b"key").expect("get").expect("retained");
+    assert_eq!(&*value, b"old");
+    assert_eq!(
+        b.value_offsets(&value).expect("offset diagnostics"),
+        offsets
+    );
+    assert_eq!(value.as_ptr() as usize, pointer);
+    assert_eq!(b.mapping_address(), base);
+    drop(value);
+    b.insert(b"key", b"latest", None).expect("update");
+    let p = prepare(b);
     let c = staged(&p)
         .activate(p.receipt.operation)
-        .expect("reverse/new handoff");
+        .expect("second handoff");
     drop(p);
-    drop(b);
     assert_eq!(&*c.get(b"key").expect("get").expect("value"), b"latest");
     assert_eq!(c.identity().expect("identity"), identity);
 }
 
 #[test]
-fn failed_other_participant_aborts_without_rewinding_or_rebuilding() {
+fn offset_diagnostics_are_explicit_and_refuse_another_cache() {
+    let a = Cache::create(options(2)).expect("create");
+    let other = Cache::create(options(2)).expect("create another");
+    a.insert(b"key", b"value", None).expect("write");
+    let value = a.get(b"key").expect("get").expect("value");
+    let (slot, payload) = a.value_offsets(&value).expect("diagnostic");
+    assert_eq!(
+        value.as_ptr() as usize,
+        a.mapping_address() + payload as usize
+    );
+    assert!(slot < payload);
+    assert!(matches!(other.value_offsets(&value), Err(Error::Profile)));
+}
+
+#[test]
+fn abort_restores_original_handle_and_refuses_stale_activation() {
     let a = Cache::create(options(8)).expect("create");
     a.insert(b"key", b"committed", None).expect("write");
-    let slot = a.get(b"key").expect("get").expect("value").slot_offset;
-    let p = prepare(&a);
+    let pointer = a.get(b"key").expect("get").expect("value").as_ptr() as usize;
+    let p = prepare(a);
     let b = staged(&p);
-    p.abort()
-        .expect("SQL/TLS fixture refused readiness before global commit");
+    let a = p.abort().expect("other participant failed before commit");
     assert!(matches!(
         b.activate(Operation([3; 16])),
         Err(Error::Inactive)
     ));
-    let v = a.get(b"key").expect("get").expect("value");
-    assert_eq!(&*v, b"committed");
-    assert_eq!(v.slot_offset, slot);
-    drop(v);
-    let p = prepare(&a);
-    let _b = staged(&p);
-    drop(p); // Ambiguous coordinator outcome must not implicitly reopen A.
-    assert!(matches!(a.get(b"key"), Err(Error::Inactive)));
+    let value = a.get(b"key").expect("get").expect("value");
+    assert_eq!(&*value, b"committed");
+    assert_eq!(value.as_ptr() as usize, pointer);
+    drop(value);
+    a.insert(b"key", b"after-abort", None)
+        .expect("resumed write");
+    let p = prepare(a);
+    let b = staged(&p);
+    drop(p); // Uncertain outcome must not implicitly abort.
+    let b = b
+        .activate(Operation([3; 16]))
+        .expect("recorded global commit");
+    assert_eq!(
+        &*b.get(b"key").expect("get").expect("value"),
+        b"after-abort"
+    );
 }
 
 #[test]
-fn guard_and_inflight_mutation_drain_are_bounded() {
+fn live_worker_borrow_refuses_prepare_and_timeout_returns_active_cache() {
     let a = Cache::create(options(8)).expect("create");
     a.insert(b"key", b"value", None).expect("write");
-    let value = a.get(b"key").expect("get").expect("value");
-    let err = a.prepare(
-        Operation([4; 16]),
-        Peer {
-            pid: std::process::id() + 1,
-            uid: Peer::current().uid,
-        },
-        Duration::from_millis(10),
-    );
-    assert!(matches!(err, Err(Error::DrainTimeout)));
-    assert_eq!(&*value, b"value");
-    drop(value);
-    a.insert(b"key", b"after-timeout", None)
-        .expect("admission restored");
-    // Hold the exact mutation gate to exercise prepare while a mutation is in flight.
-    let gate = a.inner.gate.write();
-    let clone = a.clone();
-    let (tx, rx) = mpsc::channel();
-    let worker = thread::spawn(move || {
-        let result = clone.prepare(
-            Operation([5; 16]),
+    let worker = a.clone();
+    let value = worker.get(b"key").expect("get").expect("value");
+    let failed = a
+        .prepare(
+            Operation([4; 16]),
             Peer {
                 pid: std::process::id() + 1,
                 uid: Peer::current().uid,
             },
-            Duration::from_secs(1),
-        );
-        tx.send(result).expect("send");
-    });
-    while a.inner.accepting.load(Ordering::Acquire) {
-        thread::yield_now();
-    }
-    assert!(rx.try_recv().is_err());
-    drop(gate);
-    let p = rx
-        .recv_timeout(Duration::from_secs(2))
-        .expect("drained")
-        .expect("prepare");
-    worker.join().expect("thread");
-    let b = staged(&p).activate(p.receipt.operation).expect("commit");
+            Duration::from_millis(5),
+        )
+        .expect_err("live worker must drain");
+    assert!(matches!(failed.error, Error::DrainTimeout));
+    assert_eq!(&*value, b"value");
+    drop(value);
+    drop(worker);
+    let a = failed.cache;
+    a.insert(b"key", b"after-timeout", None)
+        .expect("still active");
+    let p = prepare(a);
+    let a = p.abort().expect("abort");
     assert_eq!(
-        &*b.get(b"key").expect("get").expect("value"),
+        &*a.get(b"key").expect("get").expect("value"),
         b"after-timeout"
     );
 }
 
 #[test]
-fn capacity_ttl_limits_and_expired_slot_reuse_survive_attach() {
+fn preparation_waits_for_last_acknowledged_worker_write() {
+    let a = Cache::create(options(8)).expect("create");
+    let worker = a.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let writer = thread::spawn(move || {
+        worker
+            .insert(b"sequence", &1u64.to_le_bytes(), None)
+            .expect("write");
+        ready_tx.send(()).expect("ready");
+        stop_rx.recv().expect("close application admission");
+        worker
+            .insert(b"sequence", &2u64.to_le_bytes(), None)
+            .expect("last admitted write");
+    });
+    ready_rx.recv().expect("ready");
+    let waiter = thread::spawn(move || prepare(a));
+    stop_tx.send(()).expect("stop");
+    writer.join().expect("writer");
+    let p = waiter.join().expect("drained");
+    let b = staged(&p).activate(p.receipt.operation).expect("activate");
+    assert_eq!(
+        &*b.get(b"sequence").expect("get").expect("value"),
+        &2u64.to_le_bytes()
+    );
+}
+
+#[test]
+fn capacity_ttl_defaults_limits_and_expired_slot_reuse_survive_attach() {
     let a = Cache::create(options(2)).expect("create");
     a.insert(b"live", b"one", None).expect("write");
     a.insert(b"expires", b"two", Some(Duration::from_millis(15)))
@@ -169,194 +190,186 @@ fn capacity_ttl_limits_and_expired_slot_reuse_survive_attach() {
         a.insert(b"full", b"three", None),
         Err(Error::Capacity)
     ));
-    let p = prepare(&a);
-    let b = staged(&p).activate(p.receipt.operation).expect("commit");
+    let p = prepare(a);
+    let b = staged(&p).activate(p.receipt.operation).expect("activate");
     thread::sleep(Duration::from_millis(25));
     assert!(b.get(b"expires").expect("get").is_none());
-    b.insert(b"new", b"three", None)
-        .expect("reclaimed expired slot");
+    b.insert(b"new", b"three", None).expect("reclaim expired");
     assert_eq!(&*b.get(b"live").expect("get").expect("value"), b"one");
     assert!(matches!(b.insert(&[0; 33], b"v", None), Err(Error::Limit)));
     assert!(matches!(b.insert(b"v", &[0; 129], None), Err(Error::Limit)));
-    assert!(b.remove(b"live").expect("delete"));
-    assert!(!b.remove(b"live").expect("delete"));
-    b.insert(b"", b"", None).expect("empty key and value");
+    assert!(matches!(b.get(&[0; 33]), Err(Error::Limit)));
+    assert!(b.remove(b"live").expect("remove"));
+    assert!(!b.remove(b"live").expect("remove"));
+    b.insert(b"", b"", None).expect("empty key/value");
     assert!(b.get(b"").expect("get").is_some());
+    let a = Cache::create(Options {
+        default_ttl_ms: Some(0),
+        ..options(2)
+    })
+    .expect("default ttl");
+    a.insert(b"key", b"value", None).expect("write");
+    assert!(a.get(b"key").expect("get").is_none());
+    assert!(!a.remove(b"key").expect("remove expired"));
 }
 
 #[test]
-fn rejects_wrong_credential_recipient_profile_stale_and_replayed_transfer() {
+fn fixed_shard_quota_refuses_skew_without_spilling_or_evicting() {
+    let a = Cache::create(options(256)).expect("create");
+    assert_eq!(a.shard_count(), 64);
+    assert_eq!(a.shard_capacity(0), Some(4));
+    assert_eq!(a.shard_capacity(64), None);
+    let keys: Vec<_> = (0..10000u64)
+        .map(u64::to_le_bytes)
+        .filter(|key| {
+            crate::storage::stripe_index(
+                crate::storage::hash_key(key),
+                crate::storage::shift_for(64),
+            ) == 0
+        })
+        .take(5)
+        .collect();
+    assert_eq!(keys.len(), 5);
+    for key in &keys[..4] {
+        a.insert(key, b"value", None).expect("within quota");
+    }
+    assert!(matches!(
+        a.insert(&keys[4], b"value", None),
+        Err(Error::Capacity)
+    ));
+    assert!(a.remove(&keys[0]).expect("remove"));
+    a.insert(&keys[4], b"replacement", None)
+        .expect("reuse same shard");
+    for key in &keys[1..4] {
+        assert_eq!(&*a.get(key).expect("get").expect("value"), b"value");
+    }
+}
+
+#[test]
+fn deletion_churn_never_requires_another_table_allocation() {
+    let a = Cache::create(options(32)).expect("create");
+    for i in 0..32u64 {
+        a.insert(&i.to_le_bytes(), b"value", None).expect("fill");
+    }
+    for i in 32..20000u64 {
+        assert!(a.remove(&(i - 32).to_le_bytes()).expect("remove"));
+        a.insert(&i.to_le_bytes(), b"new", None)
+            .expect("no allocation growth");
+    }
+    let p = prepare(a);
+    let b = staged(&p)
+        .activate(p.receipt.operation)
+        .expect("attach after churn");
+    for i in 19968..20000u64 {
+        assert_eq!(
+            &*b.get(&i.to_le_bytes()).expect("get").expect("value"),
+            b"new"
+        );
+    }
+}
+
+#[test]
+fn credentials_recipient_operation_engine_profile_and_replay_are_checked() {
     let a = Cache::create(options(4)).expect("create");
-    let p = prepare(&a);
-    let (fd, r) = candidate(&p);
+    let p = prepare(a);
+    let receipt = candidate(&p);
     assert!(matches!(
-        Staged::attach(fd, r, &[0; 32]),
+        Staged::validate(p.mapping.clone(), receipt, &[0; 32]),
         Err(Error::Unauthorized)
     ));
-    let (fd, mut r) = candidate(&p);
-    r.recipient.pid += 1;
+    let fd = || p.mapping.file.try_clone().expect("fd").into();
+    let mut wrong = receipt;
+    wrong.recipient.pid += 1;
     assert!(matches!(
-        Staged::attach(fd, r, &p.credential),
+        Staged::attach(fd(), wrong, &p.credential),
         Err(Error::Unauthorized)
     ));
-    let (fd, mut r) = candidate(&p);
-    r.options.capacity += 1;
+    let mut wrong = receipt;
+    wrong.engine_abi[0] ^= 1;
     assert!(matches!(
-        Staged::attach(fd, r, &p.credential),
+        Staged::attach(fd(), wrong, &p.credential),
         Err(Error::Profile)
     ));
-    let first = staged(&p);
+    let mut wrong = receipt;
+    wrong.options.capacity += 1;
     assert!(matches!(
-        first.activate(Operation([9; 16])),
+        Staged::validate(p.mapping.clone(), wrong, &p.credential),
+        Err(Error::Profile)
+    ));
+    assert!(matches!(
+        staged(&p).activate(Operation([9; 16])),
         Err(Error::Unauthorized)
     ));
     let stale = staged(&p);
-    let b = staged(&p).activate(p.receipt.operation).expect("commit");
+    let b = staged(&p).activate(p.receipt.operation).expect("activate");
     assert!(matches!(
         stale.activate(p.receipt.operation),
         Err(Error::Inactive)
     ));
-    let (fd, r) = candidate(&p);
     assert!(matches!(
-        Staged::attach(fd, r, &p.credential),
+        Staged::validate(p.mapping.clone(), receipt, &p.credential),
         Err(Error::Inactive)
     ));
-    assert!(matches!(p.abort(), Err(Error::Inactive)));
-    b.insert(b"still-active", b"ok", None).expect("active");
+    drop(b);
 }
 
 #[test]
-fn rejects_unsealed_malformed_backing_and_wrong_kernel_peer() {
-    let a = Cache::create(options(2)).expect("create");
-    let p = prepare(&a);
-    let (_, r) = candidate(&p);
-    let file = tempfile::tempfile().expect("file");
-    file.set_len(r.backing.bytes).expect("size");
-    assert!(matches!(
-        Staged::attach(file.into(), r, &p.credential),
-        Err(Error::Profile)
-    ));
-    let (left, mut right) = UnixStream::pair().expect("socket");
-    assert!(matches!(
-        transport::authenticate(
-            &left,
-            Peer {
-                pid: Peer::current().pid + 1,
-                uid: Peer::current().uid
-            }
-        ),
-        Err(Error::Unauthorized)
-    ));
-    let (fd, r) = candidate(&p);
-    let mut bad = r;
-    bad.backing.store[0] ^= 1;
-    transport::send(&mut right, fd.as_raw_fd(), &bad, &p.credential).expect("send");
-    let mut left = left;
-    // SAFETY: unit fixture owns both endpoints/backing and obeys the exclusive protocol.
-    assert!(matches!(
-        unsafe { Staged::receive(&mut left, Peer::current()) },
-        Err(Error::Profile)
-    ));
-}
-
-#[test]
-fn activation_abort_race_has_exactly_one_winner() {
-    for _ in 0..40 {
-        let a = Cache::create(options(2)).expect("create");
-        a.insert(b"key", b"value", None).expect("write");
-        let p = prepare(&a);
-        let b = staged(&p);
-        let activate = thread::spawn(move || b.activate(Operation([3; 16])));
-        let aborted = p.abort().is_ok();
-        let activated = activate.join().expect("thread");
-        assert_ne!(aborted, activated.is_ok());
-        assert_eq!(a.get(b"key").is_ok(), aborted);
-    }
-}
-
-#[test]
-fn concurrent_public_writes_drain_without_losing_last_acknowledged_value() {
-    let a = Cache::create(options(2)).expect("create");
-    a.insert(b"sequence", &0u64.to_le_bytes(), None)
-        .expect("initial value");
-    let acknowledged = Arc::new(AtomicU64::new(0));
-    let worker_cache = a.clone();
-    let worker_ack = acknowledged.clone();
-    let writer = thread::spawn(move || {
-        for sequence in 1u64..=1_000_000 {
-            match worker_cache.insert(b"sequence", &sequence.to_le_bytes(), None) {
-                Ok(()) => worker_ack.store(sequence, Ordering::Release),
-                Err(Error::Inactive) => return,
-                Err(error) => panic!("unexpected write failure: {error}"),
-            }
-        }
-    });
-    while acknowledged.load(Ordering::Acquire) == 0 {
-        thread::yield_now();
-    }
-    let p = prepare(&a);
-    writer.join().expect("old writer stopped");
-    let last = acknowledged.load(Ordering::Acquire);
-    let b = staged(&p).activate(p.receipt.operation).expect("commit");
-    let value = b
-        .get(b"sequence")
-        .expect("get")
-        .expect("last acknowledged write");
-    assert_eq!(&*value, &last.to_le_bytes());
-    assert!(matches!(
-        a.insert(b"sequence", &0u64.to_le_bytes(), None),
-        Err(Error::Inactive)
-    ));
-}
-
-#[test]
-fn nonexpiring_operations_do_not_read_clock_and_keep_original_slot_routing() {
-    let a = Cache::create(options(13)).expect("create non power of two");
-    a.insert(b"key", b"value", None).expect("write");
-    let mut now = None;
-    let Search { found, hash, .. } = a.inner.find::<false>(b"key", &mut now).expect("lookup");
-    assert!(found.is_some());
-    assert!(now.is_none());
-    assert_eq!(found.expect("slot").0, (hash % 13) as usize);
-    a.insert(b"ttl", b"expiring", Some(Duration::from_secs(60)))
-        .expect("ttl write");
-    let mut now = None;
-    assert!(
-        a.inner
-            .find::<false>(b"ttl", &mut now)
-            .expect("lookup")
-            .found
-            .is_some()
-    );
-    assert!(now.is_some());
-}
-
-#[test]
-fn format_permissions_and_generation_changes_refuse_import() {
-    use std::os::unix::fs::PermissionsExt;
+fn occupied_virtual_range_is_refused_without_overwriting_it() {
     let a = Cache::create(options(4)).expect("create");
-    assert_eq!(
-        a.inner
-            .mapping
-            .file
-            .metadata()
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
+    a.insert(b"key", b"value", None).expect("write");
+    let p = prepare(a);
+    let receipt = candidate(&p);
+    let fd = p.mapping.file.try_clone().expect("fd").into();
+    assert!(
+        matches!(Staged::attach(fd, receipt, &p.credential), Err(Error::Io(error)) if error.raw_os_error() == Some(libc::EEXIST))
     );
-    let p = prepare(&a);
-    let (fd, r) = candidate(&p);
-    // A trusted malformed-format fixture: no entries/borrowed views are active.
-    // SAFETY: gate is parked and no header reference is held during this write.
+    let a = p.abort().expect("original mapping unchanged");
+    assert_eq!(&*a.get(b"key").expect("get").expect("value"), b"value");
+}
+
+#[test]
+fn format_and_descriptor_policy_refuse_import() {
+    let a = Cache::create(options(4)).expect("create");
+    let p = prepare(a);
+    let receipt = candidate(&p);
+    // SAFETY: parked cache, prefix only, no outstanding reference during write.
     unsafe {
-        std::ptr::addr_of_mut!((*a.inner.mapping.ptr.as_ptr().cast::<Header>()).layout).write(1);
+        std::ptr::addr_of_mut!((*p.mapping.ptr.as_ptr().cast::<Header>()).layout).write(2);
     }
     assert!(matches!(
-        Staged::attach(fd, r, &p.credential),
+        Staged::validate(p.mapping.clone(), receipt, &p.credential),
         Err(Error::Profile)
     ));
+    use std::os::unix::fs::PermissionsExt;
+    let file = tempfile::tempfile().expect("file");
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))
+        .expect("mode");
+    assert!(matches!(
+        Staged::attach(file.into(), receipt, &p.credential),
+        Err(Error::Profile)
+    ));
+}
+
+#[test]
+fn abort_racing_activation_never_exposes_two_active_caches() {
+    for _ in 0..8 {
+        let a = Cache::create(options(4)).expect("create");
+        a.insert(b"key", b"value", None).expect("write");
+        let p = prepare(a);
+        let b = staged(&p);
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let other = ready.clone();
+        let worker = thread::spawn(move || {
+            other.wait();
+            p.abort()
+        });
+        ready.wait();
+        let successor = b.activate(Operation([3; 16]));
+        let old = worker.join().expect("race");
+        assert_ne!(old.is_ok(), successor.is_ok());
+        let active = old.or(successor).expect("one owner");
+        assert_eq!(&*active.get(b"key").expect("get").expect("value"), b"value");
+    }
 }
 
 #[test]
@@ -380,7 +393,7 @@ fn malformed_control_frames_close_every_received_descriptor() {
     };
     let before = references();
     let a = Cache::create(options(2)).expect("create");
-    let prepared = prepare(&a);
+    let prepared = prepare(a);
     let bytes = serde_json::to_vec(&prepared.receipt).expect("receipt");
     let mut short = (bytes.len() as u32).to_le_bytes().to_vec();
     short.extend(bytes);

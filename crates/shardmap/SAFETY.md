@@ -120,41 +120,48 @@ checked slice-copy implementation available for differential testing.
 
 ## Opt-in Linux succession backing
 
-`succession` necessarily uses mmap/munmap, memfd size seals, monotonic clock and
-Unix peer-credential/descriptor system calls. There is no safe standard-library
-shared-mapping equivalent. These calls are behind the dedicated feature rather
-than the default `unsafe` hot-path toggle; both feature combinations are tested.
-The ordinary heap-backed APIs remain the safe fallback when succession is not
-required. This profile is limited to 64-bit Linux and one active process.
+The experimental `succession` feature uses mmap/munmap, memfd size seals and Unix
+peer/descriptor calls independently of the default `unsafe` performance toggle.
+It is limited to 64-bit Linux, exact qualified engine builds, a fixed available
+virtual range and one active process. Ordinary heap-backed APIs are unchanged.
 
-The mapping is page-aligned and initialized once before descriptor publication.
-Header configuration is immutable; generation and authorization words are atomic.
-Fixed slot geometry is checked against a bounded backing length before access.
-All slot headers are plain integer fields with validated lengths. A borrowed value
-retains a process-local read guard; writers hold the exclusive gate. Prepare first
-closes admission and then obtains the exclusive gate before publishing readiness,
-so no value reference or mutation survives into B activation. The retained bytes
-contain no process-local synchronization or pointers. Mapping Drop only unmaps the
-local view and closes its descriptor; it never clears another process's cache.
+The integer-only control prefix is checked for format, geometry, build identity,
+profile, backing identity and recipient/capability before native table access.
+The remaining mapping contains Rust/hashbrown tables, a single-allocation region
+allocator and bounded payload slots. Native metadata is not an untrusted-byte
+format. `Staged::receive` requires trusted exact producer/consumer builds and no
+competing raw writes or aliases. The build fingerprint is conservative refusal,
+not an ABI standard or proof that hostile native structures are valid.
+`MAP_FIXED_NOREPLACE` never overwrites existing mappings; there is no relocation.
 
-`Staged::receive` is an explicit unsafe trust boundary. SO_PEERCRED, capability
-binding, immutable layout checks and size seals do not make malicious descriptor
-holders memory-safe. Both processes/supervisor must exclusively obey the protocol,
-with no competing raw writes, forked active handles or other mmap aliases. B has
-no entry APIs before the generation CAS. A abort advances the generation, so stale
-candidates cannot activate; B activation prevents A abort. Lost decisions fail
-closed. A crash in an in-place write is not a recoverable transaction. The caller
-must additionally coordinate service admission, TLS/socket and embedded SQL state.
+Each region honors hashbrown's requested allocation size/alignment. Capacity is
+reserved before exposure, with live quota at most half the table's insertion
+capacity, allowing tombstone cleanup in place during deletion churn. Payload/free
+list offsets stay within disjoint geometry checked against the 1 GiB bound. Safe
+writes enforce key/value limits. One local reader-biased shard lock protects each
+native table; a Value guard excludes mutation of its borrowed bytes. No shared
+Rust lock, arbitrary object graph, vtable or global heap allocator is imported.
 
-The native example uses raw arena hashing only after quiescence, to show that
-attachment retains every arena byte. This is observation code, not a production
-snapshot/import path. No normal cache operation uses a socket or coordinator RPC.
+Cache preparation consumes the last active handle. The private Arc cannot become
+unique until every other Cache and its borrows/mutations has dropped. The caller
+first closes admission and returns workers; timeout returns the active handle.
+Only then can prepare publish readiness. There is no stale Cache left to fence
+on each point operation. Candidates expose no entry API before the generation
+CAS. Abort racing activation has one winner; no Drop infers a global decision.
+Native table storage is ManuallyDrop: final Mapping Drop only unmaps/closes its
+local resources and never runs a destructor that could free another owner's data.
 
-The succession profile additionally requires explicit non-dumpability before
-creation or import and throughout descriptor/mapping custody. `protect_current_process`
-sets Linux PR_SET_DUMPABLE to zero as an explicit process-wide action; creation,
-preparation, transfer and activation query/refuse an insecure setting. These are
-control-path calls, not per-operation checks. Import rejects older experimental
-format/permission profiles. Descriptor mode 0600 is defense in depth; same-UID
-isolation depends on non-dumpability, not mode bits alone. Privileged host access
-and trusted in-process code remain outside this boundary.
+Protected process custody is explicit before creation/import and maintained
+throughout backing lifetime. SO_PEERCRED, token binding and mode 0600 supplement
+PR_SET_DUMPABLE=0; none sandboxes privileged host administrators or admitted native
+code with writable access. Credential withdrawal cannot revoke a mapping. PIDs
+come from supervisor child custody, and both services share the relevant host/PID/
+time namespaces. Never fork active handles or read backing outside its lifecycle.
+
+The caller must coordinate common admission and the single TLS/socket/cache/SQL
+decision. After B can advance state, lost ACKs never authorize stale A to resume.
+The API fails closed on ambiguous ownership; it does not recover torn in-place
+writes, implement durable custody, or prove full TLS/encrypted-SQL handoff.
+Proof-only arena hashing runs while quiescent and is not an import or snapshot
+algorithm. See the README for exact limits and reproducible component/performance
+checks. Different-base attachment remains unqualified.

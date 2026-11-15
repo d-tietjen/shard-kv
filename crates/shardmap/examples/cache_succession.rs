@@ -98,7 +98,7 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
     let timings = bench(&cache)?;
     let heap_baseline = baseline();
     let value = cache.get(b"key")?.ok_or("value")?;
-    let (slot, payload) = (value.slot_offset, value.value_offset);
+    let (slot, payload) = cache.value_offsets(&value)?;
     assert_eq!(
         value.as_ptr() as usize,
         cache.mapping_address() + payload as usize
@@ -117,14 +117,22 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
     let recipient: Peer = serde_json::from_str(&line)?;
     let (mut stream, _) = listener.accept()?;
     socket(&stream)?;
+    let mapping_base = cache.mapping_address();
     let start = Instant::now();
     let mut prepared = cache.prepare(OPERATION, recipient, Duration::from_secs(2))?;
     let prepare_ns = start.elapsed().as_nanos();
-    let hash = arena_hash(cache.mapping_address(), backing.bytes, backing.arena_offset);
+    let hash = arena_hash(mapping_base, backing.bytes, backing.arena_offset);
     prepared.send(&mut stream)?;
     let mut ready = [0];
     stream.read_exact(&mut ready)?;
-    assert_eq!(ready, [1]);
+    assert_eq!(
+        ready,
+        [if matches!(mode, "collision" | "abi") {
+            4
+        } else {
+            1
+        }]
+    );
     let receipt = prepared.readiness();
     let prepared_ns = start.elapsed().as_nanos();
     match mode {
@@ -135,23 +143,37 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
             stream.read_exact(&mut ready)?;
             assert_eq!(ready, [2]);
             assert!(matches!(prepared.abort(), Err(CacheError::Inactive)));
-            assert!(matches!(cache.get(b"key"), Err(CacheError::Inactive)));
         }
         "abort" => {
             // Represents another participant rejecting readiness before COMMIT.
-            prepared.abort()?;
+            let cache = prepared.abort()?;
             stream.write_all(&[0])?;
             assert_eq!(&*cache.get(b"key")?.ok_or("value after abort")?, &[42; 64]);
             cache.insert(b"after-abort", b"still A", None)?;
         }
+        "collision" | "abi" => {
+            let cache = prepared.abort()?;
+            assert_eq!(
+                &*cache.get(b"key")?.ok_or("retained after import refusal")?,
+                &[42; 64]
+            );
+        }
+        "precommit-crash" => {
+            assert_eq!(stream.read(&mut ready)?, 0);
+            let cache = prepared.abort()?;
+            assert_eq!(
+                &*cache.get(b"key")?.ok_or("retained after crash")?,
+                &[42; 64]
+            );
+        }
+        "postcommit-crash" => {
+            stream.write_all(&[1])?;
+            assert_eq!(stream.read(&mut ready)?, 0);
+            assert!(matches!(prepared.abort(), Err(CacheError::Inactive)));
+        }
         "ambiguous" => {
             drop(prepared);
             stream.write_all(&[3])?;
-            assert!(matches!(cache.get(b"key"), Err(CacheError::Inactive)));
-            assert!(matches!(
-                cache.insert(b"bad", b"write", None),
-                Err(CacheError::Inactive)
-            ));
         }
         _ => return Err("unknown decision".into()),
     }
@@ -159,7 +181,7 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
         dir.join("owner.json"),
         serde_json::to_vec_pretty(&json!({
             "interface": INTERFACE, "peer": Peer::current(), "backing": backing, "receipt": receipt,
-            "mapping_base": cache.mapping_address(), "slot_offset": slot, "value_offset": payload,
+            "mapping_base": mapping_base, "slot_offset": slot, "value_offset": payload,
             "arena_sha256_before_attach": hash, "prepare_ns": prepare_ns, "ready_pause_ns": prepared_ns,
             "decision_pause_ns": start.elapsed().as_nanos(), "operations": timings, "heap_baseline": heap_baseline,
             "rss_kib": rss_kib()?, "mode": mode, "old_access_closed": mode != "abort"
@@ -168,56 +190,91 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
     // A exits completely. No cache relay, worker, helper, or runtime remains.
     Ok(())
 }
-fn successor(dir: &Path, old: Peer) -> Result<()> {
+fn successor(dir: &Path, old: Peer, mode: &str) -> Result<()> {
     let mut stream = UnixStream::connect(dir.join("control.sock"))?;
     socket(&stream)?;
-    // Reserve A's virtual range so the retained payload must resolve at a
-    // different address in this independently executed process.
     let old_mapping: Value = serde_json::from_slice(&std::fs::read(dir.join("owner-ready.json"))?)?;
     let address = old_mapping["mapping_base"]
         .as_u64()
         .ok_or("old mapping base")? as usize;
-    let bytes = old_mapping["bytes"].as_u64().ok_or("old mapping size")? as usize;
-    // SAFETY: NOREPLACE never overwrites existing mappings; anonymous PROT_NONE
-    // reservation is released after the new mapping has been established.
-    let reservation = unsafe {
-        libc::mmap(
-            address as *mut _,
-            bytes,
-            libc::PROT_NONE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
-            -1,
-            0,
-        )
-    };
-    if reservation == libc::MAP_FAILED
-        && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
-    {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let start = Instant::now();
-    // SAFETY: supervisor owns both exact A/B artifacts and the private 0700
-    // directory/channel. A has drained, and no raw writes/other owners exist.
-    let staged = unsafe { Staged::receive(&mut stream, old) }?;
-    let attach_ns = start.elapsed().as_nanos();
-    if reservation != libc::MAP_FAILED {
-        // SAFETY: the reservation is owned by this proof and has no references.
-        unsafe {
-            libc::munmap(reservation, bytes);
+    let bytes = old_mapping["bytes"].as_u64().ok_or("mapping size")? as usize;
+    let collision = if mode == "collision" {
+        // SAFETY: NOREPLACE never overwrites an existing mapping. This optional
+        // reservation makes the intended address unavailable to the importer.
+        let ptr = unsafe {
+            libc::mmap(
+                address as *mut _,
+                bytes,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE,
+                -1,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED
+            && std::io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST)
+        {
+            return Err(std::io::Error::last_os_error().into());
         }
+        ptr
+    } else {
+        libc::MAP_FAILED
+    };
+    let start = Instant::now();
+    // SAFETY: exact supervisor-owned builds, parked A, private channel and no raw aliases.
+    let received = unsafe { Staged::receive(&mut stream, old) };
+    if matches!(mode, "collision" | "abi") {
+        match (&received, mode) {
+            (Err(CacheError::Profile), "abi") => {}
+            (Err(CacheError::Io(error)), "collision")
+                if error.raw_os_error() == Some(libc::EEXIST) => {}
+            _ => return Err("import failed with unexpected outcome".into()),
+        }
+        if collision != libc::MAP_FAILED {
+            // SAFETY: only releases the reservation created by this fixture.
+            unsafe {
+                libc::munmap(collision, bytes);
+            }
+        }
+        stream.write_all(&[4])?;
+        std::fs::write(
+            dir.join("successor.json"),
+            serde_json::to_vec_pretty(&json!({"interface": INTERFACE, "refused": mode}))?,
+        )?;
+        return Ok(());
     }
-    assert_ne!(staged.mapping_address(), address);
+    let staged = received?;
+    let attach_ns = start.elapsed().as_nanos();
+    assert_eq!(staged.mapping_address(), address);
     let receipt = staged.readiness();
     let base = staged.mapping_address();
     let hash = arena_hash(base, receipt.backing.bytes, receipt.backing.arena_offset);
     let overlap_rss = rss_kib()?;
     stream.write_all(&[1])?;
+    if mode == "precommit-crash" {
+        std::fs::write(dir.join("successor.json"), b"{\"exit_before_commit\":true}")?;
+        // SAFETY: deliberate process-exit injection, no caller resumes this process.
+        unsafe {
+            libc::_exit(77);
+        }
+    }
     let mut decision = [0];
     stream.read_exact(&mut decision)?;
     let mut extra = json!({});
     match decision[0] {
         1 => {
             let cache = staged.activate(OPERATION)?;
+            if mode == "postcommit-crash" {
+                cache.insert(b"key", b"advanced before acknowledgement", None)?;
+                std::fs::write(
+                    dir.join("successor.json"),
+                    b"{\"exit_after_advance_before_ack\":true}",
+                )?;
+                // SAFETY: deliberate exit after mutation and before the acknowledgement.
+                unsafe {
+                    libc::_exit(78);
+                }
+            }
             stream.write_all(&[2])?;
             // The supervisor reaps A while waiting for us. Wait for actual exit,
             // not just EOF or a logical epoch change.
@@ -236,9 +293,8 @@ fn successor(dir: &Path, old: Peer) -> Result<()> {
             }
             let v = cache.get(b"key")?.ok_or("retained value")?;
             assert_eq!(&*v, &[42; 64]);
-            assert_eq!(v.as_ptr() as usize, base + v.value_offset as usize);
-            let slot = v.slot_offset;
-            let payload = v.value_offset;
+            let (slot, payload) = cache.value_offsets(&v)?;
+            assert_eq!(v.as_ptr() as usize, base + payload as usize);
             drop(v);
             cache.insert(b"new-interface", INTERFACE.as_bytes(), None)?;
             assert_eq!(
@@ -297,6 +353,7 @@ fn main() -> Result<()> {
                 pid: args.get(3).ok_or("owner PID")?.parse()?,
                 uid: Peer::current().uid,
             },
+            args.get(4).ok_or("mode")?,
         ),
         _ => Err("use scripts/prove-cache-succession.py".into()),
     }

@@ -2497,6 +2497,7 @@ name = "shardmap"
 version = "0.10.0"
 dependencies = [
  "ahash",
+ "allocator-api2",
  "bytes",
  "bytes-handoff",
  "clap",
