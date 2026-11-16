@@ -12,7 +12,7 @@ Use `shardmap` when you want an embedded Rust cache. Use the repository's
 
 ```toml
 [dependencies]
-shardmap = "0.9.1"
+shardmap = "0.10.0"
 ```
 
 ## Quick Start
@@ -624,3 +624,188 @@ before evaluating this feature for a workload.
 ## License
 
 Licensed under Apache-2.0.
+
+## Same-host service succession (opt-in)
+
+Enable `succession` on 64-bit Linux and create `succession::Cache` **before
+warming the service**. This experimental bounded point-cache profile retains
+native `hashbrown::HashTable` indexes and fixed key/value allocations in a
+size-sealed anonymous memfd. It uses the same hash-table family, randomized local
+bucket hashing, XXH3 shard routing, cached TTL clock and cache-padded reader-biased
+shard locks as the ordinary engine. It does not import an existing private-heap
+`SharedCache`, or support the full engine's object, governance or overflow state.
+
+A/B call the same public `get`, `insert` and `remove` implementation. Attachment
+maps the existing native tables and payloads without traversing/rebuilding the
+index or moving/copying cached bytes. Reads borrow from the mapping under one
+shard lock. Ordinary operations perform no handoff admission/generation checks,
+global cache lock or coordinator IPC. Inserts copy application input as usual.
+
+```rust,ignore
+use shardmap::succession::{protect_current_process, Cache, Options};
+use std::time::Duration;
+
+protect_current_process()?; // Explicit process-wide protection, described below.
+let cache = Cache::create(Options {
+    capacity: 4096, max_key_bytes: 32, max_value_bytes: 256,
+    default_ttl_ms: None,
+})?;
+cache.insert(b"key", b"value", None)?;
+// Check the supervisor-owned PID/UID before closing admission or preparing.
+shardmap::succession::authenticate_peer(&private_channel, successor_peer)?;
+// Workers may clone handles. First close service admission and return/drop all
+// worker handles, borrowed views and mutations. Preparation consumes the cache.
+let mut participant = match cache.prepare(operation, successor_peer, Duration::from_secs(2)) {
+    Ok(participant) => participant,
+    Err(failure) => {
+        let still_active_cache = failure.cache;
+        // Resume with this handle or return remaining workers and retry.
+        return handle_prepare_failure(failure.error, still_active_cache);
+    }
+};
+participant.send(&mut private_channel)?;
+// cache is moved: stale entry access is unavailable, with no check on every GET.
+// A recorded ABORT returns the original backing as participant.abort()?;
+// B has no entry APIs until unsafe Staged::receive(...)? and activate(operation).
+```
+
+Preparation waits within the configured bound for every other active Cache handle
+to drop. Borrowed guards cannot outlive their handle or be moved past prepare.
+There is no implicit worker cancellation; the caller owns common request admission
+and worker shutdown. A timeout returns `PrepareError { error, cache }` with the
+original active handle and acknowledged writes. Dropping that error also drops
+its handle, so recover it explicitly when resuming. On successful prepare, only
+`Prepared` remains in A. `Prepared::abort` returns a new active Cache on the same
+backing; dropping Prepared never guesses that the global decision was ABORT.
+
+Entry/key/value bounds reserve at most 1 GiB. Small profiles have one shard;
+profiles with at least 256 slots have 64. `capacity` is a total slot budget divided
+into fixed shard quotas, exposed by `shard_count`/`shard_capacity`. A full routed
+shard refuses insertion even if another shard has spare slots. There is no spill,
+implicit eviction or cache growth. Deletes and expired entries release slots.
+Indexes reserve at least twice each shard's quota so deletion churn can clean
+hash-table tombstones in place without allocating another bucket array. This
+headroom is part of the reserved memory budget and benchmark comparison.
+
+TTL uses the ordinary engine's cached Unix milliseconds (approximately 1 ms
+resolution, exact-clock fallback if its updater cannot start). Absolute deadlines
+remain unchanged across custody transfer. Wall-clock adjustments have the same
+effect as in the ordinary cache. `None` selects the configured default TTL; zero
+expires immediately. `no-ttl` does not disable this profile's TTL checks. Expiring
+matches check the clock; non-expiring reads skip it. Typed objects, Redis commands,
+semantic/governance metadata, persistence and overflow are unsupported. This
+feature does not make the existing server or an Eden deployment handoff-capable.
+
+### Native compatibility and address requirements
+
+Format 4 contains native Rust/hashbrown/allocator metadata and pointers. Only
+qualified **exact engine builds** may share it. A conservative fingerprint covers
+engine Rust sources, compiler identity, target/features/build flags and locked
+inputs; native type geometry is checked too. Different executable interfaces may
+embed that same engine, as the A/B example demonstrates. This is not a stable
+serialized Rust ABI, cross-version compatibility promise or hostile-byte importer.
+A changed build/profile is refused before native-table access.
+
+A/B must map the **same available virtual range** so native index pointers and
+payload addresses remain valid. `MAP_FIXED_NOREPLACE` refuses a conflict and never
+overwrites another mapping. A can abort and resume its original cache after an
+import refusal. There is no relocation fallback. This candidate does **not**
+support different mapping bases; EDEN-3839 qualifies this fixed-address profile.
+Compare store UUID, kernel device/inode, mapped size, offsets and generation as
+well as addresses. Format 1/2/3 experimental backing is rejected without conversion.
+
+### Protected custody and coordinated decisions
+
+Both independently executed services must call `protect_current_process()` after
+final credential changes and before holding backing, then retain non-dumpability
+for the entire descriptor/mapping lifetime. Creation, prepare, send and activation
+refuse an insecure setting. This explicit Linux process policy disables core dumps
+and restricts debuggers/unprivileged `/proc` descriptor access; file mode 0600 and
+a transfer token alone do not isolate same-UID processes. Privileged host
+administrators and admitted native code remain trusted.
+
+Every created/imported mapping also requires `MADV_DONTDUMP` and
+`MADV_DONTFORK`; a failed protection call releases the local mapping and
+descriptor. The cache mapping is excluded from ordinary core dumps and fork
+inheritance. Descriptors are close-on-exec. Forked trusted helpers can still
+inherit a descriptor until exec/close; do not fork active Cache handles or let
+untrusted native helpers into this process. These controls do not sandbox root
+or code already admitted to the service.
+
+`Cache::create(options)` selects `MemoryPolicy::Pageable`. For caches that must
+stay out of normal swap, use
+`Cache::create_with_memory_policy(options, MemoryPolicy::Locked)`. Every owner
+must successfully `mlock` the entire mapping before creation/readiness succeeds;
+the authenticated receipt binds this policy, with no pageable fallback. Budget
+RAM and `RLIMIT_MEMLOCK` for the full reserved backing rounded to kernel pages.
+Locking applies to this
+mapping, not input buffers, other application copies or hibernation images. No
+process-wide `mlockall` or per-operation security syscall is used.
+
+Before announcing readiness, B may explicitly call `staged.prefault()?` to
+populate its read page tables. This optional Linux 5.14+ preparation leaves the
+backing bytes unchanged; it is off unless called, and locked backing is already
+populated. Unsupported kernels and other failures return an I/O error so the
+caller can abort before commit. Budget its preparation time separately from the
+first read batch: it moves page-fault work into preparation and adds no logic to
+ordinary reads or writes.
+
+Transfer requires the memfd and a random one-use credential bound to the complete
+readiness receipt, including exact operation, recipient, generation, profile,
+engine identity, mapping address and residency policy. HMAC-SHA256 binds that
+receipt; verification uses the HMAC crate's constant-time comparison. Credential
+buffers are RAII-zeroized, including partial-frame failures; never log them.
+SO_PEERCRED authenticates the supervisor-owned child PID/UID at both ends.
+Call `authenticate_peer` on each accepted connection **before** quiescing A;
+reject/close wrong peers with a bounded accept deadline. Send/import recheck
+identity. Use a private supervisor-controlled Unix channel with
+bounded I/O. PIDs from an untrusted registration request are insufficient. A send
+right is consumed even on partial I/O. Do not log credentials. Admitted writable
+mapping holders must obey exclusive custody: `Staged::receive` is unsafe and
+requires trusted exact builds, with no raw competing writes, forked active handles
+or untracked aliases. Withdrawing a credential cannot revoke an admitted mapping.
+
+The caller owns one common request/I/O admission gate and one recorded decision
+covering the cache, **both TLS/socket legs and an embedded relational DB when
+present**. Stop requests/background mutations/I/O, return all cache workers, and
+prepare every participant while B stays inactive. Keep A recoverable until all
+readiness receipts agree. Failed readiness before COMMIT aborts every participant;
+`Prepared::abort` returns A's cache without an index rebuild or payload movement.
+
+After recording global COMMIT, keep admission closed while B activates the entire
+bundle, then retire A before reporting the upgrade effective. The cache CAS
+prevents abort racing activation from exposing two owners; it is not the
+cross-resource coordinator. Lost acknowledgements never permit stale A to resume.
+Reconcile an uncertain decision; once B advances state, forward recovery or a
+qualified reverse handoff must use its latest cache/TLS/SQL state and security
+floor. Do not rewind TLS counters/SQL effects or retry ambiguous writes. In-place
+mutation crashes and recovery after losing every descriptor/mapping are not
+supported. A must not remain as a permanent cache relay.
+
+### Reproduction
+
+Run `cargo test --locked -p shardmap --features succession` for the public API,
+borrow/worker drain, capacity/TTL/churn and authorization/ownership regressions.
+`python3 scripts/prove-cache-succession.py /path/to/evidence` builds distinct
+interface executables and an incompatible-feature artifact. It checks retained
+index/payload bytes, same pointers, B after A exit, explicit/ambiguous decisions,
+address/ABI refusal and crashes on both sides of activation. It deliberately does
+not claim different-base attachment or full TLS/SQL atomicity.
+`python3 scripts/prove-cache-security.py /path/to/evidence` separately checks
+default heap behavior, mapping flags, fork/exec inheritance, pageable behavior
+under a zero locking limit, and cleanup after required protection/locking fails.
+
+`python3 scripts/benchmark-cache-succession.py /path/to/evidence` measures the
+actual public implementation on matched physical-core affinity. Controls include
+ordinary heap reservation, matched native bucket reservation, local native access
+and a separately executed successor timed only after the old owner exits. Raw
+trials, source/artifact identities, reserved backing and per-process resource
+measurements are saved. Aggregate ns/op is a throughput reciprocal, not tail
+latency or the cost of a complete application request. The bounded profile is
+experimental; consuming services must qualify their exact engine/profile and
+coordinated cache/TLS/SQL decision.
+Use `--cold` to compare the first 8,192 reads with optional prefaulting after A
+exits, before B warms or hashes any cache entry. This records preparation cost,
+first-batch time and minor faults separately. `--binary` accepts an exact
+prebuilt artifact, allowing compilation and target-host measurement to be
+separated; preserve its source/compiler/hash manifest with the results.

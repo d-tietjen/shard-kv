@@ -52,7 +52,7 @@ Embedded `shardmap`:
 
 ```toml
 [dependencies]
-shardmap = "0.9.1"
+shardmap = "0.10.0"
 ```
 
 ```rust
@@ -180,3 +180,10 @@ optional metadata argument.
 - `crates/shardcache-py`: source-only PyO3 bindings for Python integrations.
 - `integrations`: LMCache and model-serving integration adapters.
 - `benchmarks`: benchmark and compatibility harnesses.
+
+### Native cache succession
+
+The opt-in Linux `shardmap/succession` profile retains one bounded byte cache
+across a coordinated process replacement. It requires handoff-capable backing
+from startup; it does not import an existing heap cache or independently transfer
+TLS/SQL state. See [the API and coordinator contract](crates/shardmap/README.md#same-host-service-succession-opt-in).

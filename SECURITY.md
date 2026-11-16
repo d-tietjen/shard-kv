@@ -57,3 +57,14 @@ build, development, optional, and target-specific packages, is published in
 [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md). CI regenerates the inventory
 from Cargo metadata and fails when the checked-in document is stale. The same
 release gate enforces the Rustls-only TLS dependency policy.
+
+## Native cache succession
+
+The opt-in succession profile requires protected process custody before backing
+exists. Call `succession::protect_current_process()` after final credential changes
+in both independently executed services; maintain non-dumpability throughout the
+mapping/descriptor lifetime. This explicitly disables core dumps and restricts
+debugger/proc access. Creation/import refuse otherwise. Transfer tokens and Unix
+peer credentials alone do not replace OS protection for retained writable backing.
+Privileged host administrators and admitted native code remain trusted. See the
+[cache lifecycle and safety contract](crates/shardmap/README.md#same-host-service-succession-opt-in).

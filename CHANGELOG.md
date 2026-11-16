@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.10.0 - Unreleased
+
+### Added
+
+- Opt-in Linux `succession` point-cache profile with retained index/payload
+  backing, borrowed reads, authenticated descriptor transfer, bounded drain,
+  explicit abort and operation-bound activation (EDEN-3839). Existing private
+  heap caches cannot be adopted; TLS/SQL coordination remains caller-owned.
+- Optional `Staged::prefault` preparation to populate the successor's read page
+  tables before readiness, without copying retained data or adding point-path
+  checks (EDEN-3839).
+
+### Security
+
+- Require explicit protected process custody and private descriptor permissions
+  for native cache succession; reject the earlier experimental format.
+- Require dump/fork mapping protections, authenticate peers before quiescing,
+  bind readiness with HMAC-SHA256 and erase credential buffers on drop. Optional
+  locked residency fails closed on every owner; pageable remains default
+  (EDEN-3839).
+
+### Changed
+
+- Replace the experimental global operation gate/linear-probing cache with native
+  hashbrown tables, padded reader-biased shard locks and consuming preparation.
+  Ordinary operations have no handoff checks; abort returns the original cache.
+  Format 4 requires exact engine identity and the same free virtual range, and
+  uses the ordinary cached TTL clock. Fixed shard quotas and reserved index
+  headroom are explicit; different-base handoff remains unqualified (EDEN-3839).
+
 ## 0.9.1 - Unreleased
 
 ### Added

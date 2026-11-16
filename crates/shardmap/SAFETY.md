@@ -117,3 +117,67 @@ yet a complete machine proof of memory safety. The Rust safety argument is
 still the explicit invariant: every production call site checks the frame or
 field length before entering the unsafe reader, and the default build keeps a
 checked slice-copy implementation available for differential testing.
+
+## Opt-in Linux succession backing
+
+The experimental `succession` feature uses mmap/munmap, memfd size seals and Unix
+peer/descriptor calls independently of the default `unsafe` performance toggle.
+It is limited to 64-bit Linux, exact qualified engine builds, a fixed available
+virtual range and one active process. Ordinary heap-backed APIs are unchanged.
+
+The integer-only control prefix is checked for format, geometry, build identity,
+profile, backing identity and recipient/capability before native table access.
+The remaining mapping contains Rust/hashbrown tables, a single-allocation region
+allocator and bounded payload slots. Native metadata is not an untrusted-byte
+format. `Staged::receive` requires trusted exact producer/consumer builds and no
+competing raw writes or aliases. The build fingerprint is conservative refusal,
+not an ABI standard or proof that hostile native structures are valid.
+`MAP_FIXED_NOREPLACE` never overwrites existing mappings; there is no relocation.
+
+Each region honors hashbrown's requested allocation size/alignment. Capacity is
+reserved before exposure, with live quota at most half the table's insertion
+capacity, allowing tombstone cleanup in place during deletion churn. Payload/free
+list offsets stay within disjoint geometry checked against the 1 GiB bound. Safe
+writes enforce key/value limits. One local reader-biased shard lock protects each
+native table; a Value guard excludes mutation of its borrowed bytes. No shared
+Rust lock, arbitrary object graph, vtable or global heap allocator is imported.
+
+Cache preparation consumes the last active handle. The private Arc cannot become
+unique until every other Cache and its borrows/mutations has dropped. The caller
+first closes admission and returns workers; timeout returns the active handle.
+Only then can prepare publish readiness. There is no stale Cache left to fence
+on each point operation. Candidates expose no entry API before the generation
+CAS. Abort racing activation has one winner; no Drop infers a global decision.
+Native table storage is ManuallyDrop: final Mapping Drop only unmaps/closes its
+local resources and never runs a destructor that could free another owner's data.
+
+Protected process custody is explicit before creation/import and maintained
+throughout backing lifetime. SO_PEERCRED, token binding and mode 0600 supplement
+PR_SET_DUMPABLE=0; none sandboxes privileged host administrators or admitted native
+code with writable access. Credential withdrawal cannot revoke a mapping. PIDs
+come from supervisor child custody, and both services share the relevant host/PID/
+time namespaces. Never fork active handles or read backing outside its lifecycle.
+
+Format 4 requires MADV_DONTDUMP and MADV_DONTFORK on every local mapping before
+exposure; the owned mapping is constructed before these calls so failures unmap
+and close it. Close-on-exec protects created and received descriptors. DONTFORK
+does not close inherited descriptors: trusted forked helpers remain in the
+service's custody boundary until exec/close. Reject wrong kernel peers before
+closing admission, retaining authentication again at transfer/import.
+
+The full readiness receipt is HMAC-SHA256 authenticated, including the optional
+MemoryPolicy::Locked contract. Verification uses constant-time verify_slice.
+Credential storage is allocated before secret reads and zeroized by RAII on every
+success/error path; this does not promise erasure of cryptographic library state
+or unrelated application copies. Explicit Locked calls mlock for the full backing
+at creation and after authenticated import, before readiness; failure releases
+only that local mapping and permits pre-commit abort. Pageable remains default.
+The protections and residency policy add no checks to ordinary point operations.
+
+The caller must coordinate common admission and the single TLS/socket/cache/SQL
+decision. After B can advance state, lost ACKs never authorize stale A to resume.
+The API fails closed on ambiguous ownership; it does not recover torn in-place
+writes, implement durable custody, or prove full TLS/encrypted-SQL handoff.
+Proof-only arena hashing runs while quiescent and is not an import or snapshot
+algorithm. See the README for exact limits and reproducible component/performance
+checks. Different-base attachment remains unqualified.

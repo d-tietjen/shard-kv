@@ -174,15 +174,13 @@ impl EmbeddedStore {
                 }
             }
         }
-        if self.get_ref_routed(route, key).is_some() {
-            return true;
-        }
+        let point_exists = self.get_ref_routed(route, key).is_some();
         #[cfg(feature = "redis")]
         {
-            self.pinned_vector_value_exists(key)
+            point_exists || self.pinned_vector_value_exists(key)
         }
         #[cfg(not(feature = "redis"))]
-        false
+        point_exists
     }
 
     /// Returns Redis-style TTL in seconds: `-2` for missing, `-1` for no TTL.
