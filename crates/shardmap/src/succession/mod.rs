@@ -22,11 +22,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+use zeroize::Zeroizing;
 
 const MAGIC: u64 = 0x534d_4150_5355_4331;
-const LAYOUT: u64 = 3;
+const LAYOUT: u64 = 4;
 const ARENA: usize = 4096;
 const SLOT_HEADER: usize = 8;
 const MAX_BACKING: usize = 1 << 30;
@@ -46,6 +48,9 @@ pub enum Error {
         "succession requires a non-dumpable process; call protect_current_process before creating or receiving backing"
     )]
     ProcessProtection,
+    /// Requested cache residency could not be established; never downgraded.
+    #[error("unable to lock succession backing in RAM: {0}")]
+    MemoryLock(#[source] io::Error),
     /// A lifecycle operation refers to a parked, stale or changed ownership state.
     #[error("cache admission is closed or ownership has changed")]
     Inactive,
@@ -107,6 +112,45 @@ fn require_protected_process() -> Result<(), Error> {
         return Err(Error::ProcessProtection);
     }
     Ok(())
+}
+
+/// Residency policy authenticated as part of the cache's custody contract.
+/// Locked applies only to this mapping, not application buffers or the process.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u64)]
+pub enum MemoryPolicy {
+    /// Normal pageable memory. Dump/fork mapping protections still apply.
+    #[default]
+    Pageable = 0,
+    /// Every owner must successfully mlock the complete backing before readiness.
+    /// Requires sufficient RAM and RLIMIT_MEMLOCK; failure never falls back.
+    Locked = 1,
+}
+
+/// Verify kernel PID/UID on a connected Unix channel before pausing service
+/// admission. Obtain the expected peer from supervisor-owned child custody.
+/// This does not send backing, issue a credential or replace send/import checks.
+/// Reject/close unregistered connections while A remains active.
+pub fn authenticate_peer(stream: &UnixStream, expected: Peer) -> Result<(), Error> {
+    transport::authenticate(stream, expected)
+}
+
+/// Fixed-length, heap-owned capability. Allocated before receiving secret bytes,
+/// never resized, cloned or formatted; every success/error path erases its buffer.
+struct Credential(Zeroizing<Vec<u8>>);
+impl Credential {
+    fn new() -> Self {
+        Self(Zeroizing::new(vec![0; 32]))
+    }
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+impl Deref for Credential {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 /// Explicit fixed-capacity profile. No Redis, vector, overflow, persistence,
@@ -184,6 +228,8 @@ pub struct Readiness {
     pub mapping_address: u64,
     /// Exact engine-build fingerprint, not a stable serialized Rust ABI.
     pub engine_abi: [u8; 32],
+    /// Both owners must establish this exact residency policy before readiness.
+    pub memory_policy: MemoryPolicy,
 }
 
 /// Cloneable active cache handle. Cloning shares the same cache. Preparation
@@ -213,12 +259,21 @@ pub struct PrepareError {
     pub cache: Cache,
 }
 
-fn authorization(credential: &[u8; 32], receipt: &Readiness) -> Result<[u8; 32], Error> {
-    let mut hash = Sha256::new();
-    hash.update(b"shardmap-succession-v3");
-    hash.update(credential);
-    hash.update(serde_json::to_vec(receipt).map_err(io::Error::other)?);
-    Ok(hash.finalize().into())
+fn authorization_mac(credential: &[u8], receipt: &Readiness) -> Result<Hmac<Sha256>, Error> {
+    if credential.len() != 32 {
+        return Err(Error::Unauthorized);
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(credential).map_err(|_| Error::Unauthorized)?;
+    mac.update(b"shardmap-succession-v4");
+    mac.update(&serde_json::to_vec(receipt).map_err(io::Error::other)?);
+    Ok(mac)
+}
+
+fn authorization(credential: &[u8], receipt: &Readiness) -> Result<[u8; 32], Error> {
+    Ok(authorization_mac(credential, receipt)?
+        .finalize()
+        .into_bytes()
+        .into())
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 use std::error::Error;
 use std::hint::black_box;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -10,7 +11,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use shardmap::SharedCache;
-use shardmap::succession::{Cache, Error as CacheError, Operation, Options, Peer, Staged};
+use shardmap::succession::{
+    Cache, Error as CacheError, MemoryPolicy, Operation, Options, Peer, Staged, authenticate_peer,
+};
 
 const INTERFACE: &str = match option_env!("SHARDMAP_DEMO_INTERFACE") {
     Some(s) => s,
@@ -85,14 +88,62 @@ fn socket(stream: &UnixStream) -> Result<()> {
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     Ok(())
 }
+
+// Reject unregistered connectors before pausing A. A production supervisor owns
+// the private listener and deadline; no registration request supplies peer IDs.
+fn accept_peer(listener: &UnixListener, expected: Peer) -> Result<(UnixStream, usize)> {
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut rejected = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("successor connection timed out before prepare".into());
+        }
+        match listener.accept() {
+            Ok((stream, _)) => match authenticate_peer(&stream, expected) {
+                Ok(()) => return Ok((stream, rejected)),
+                Err(CacheError::Unauthorized) => {
+                    rejected += 1;
+                }
+                Err(error) => return Err(error.into()),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let mut fd = libc::pollfd {
+                    fd: listener.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: live writable pollfd; bounded timeout, no cache access.
+                let ready = unsafe {
+                    libc::poll(&mut fd, 1, remaining.as_millis().clamp(1, 10_000) as i32)
+                };
+                if ready < 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
 fn owner(dir: &Path, mode: &str) -> Result<()> {
     let listener = UnixListener::bind(dir.join("control.sock"))?;
-    let cache = Cache::create(Options {
-        capacity: 4096,
-        max_key_bytes: 32,
-        max_value_bytes: 128,
-        default_ttl_ms: None,
-    })?;
+    let memory_policy = if matches!(mode, "locked" | "lock-denied") {
+        MemoryPolicy::Locked
+    } else {
+        MemoryPolicy::Pageable
+    };
+    let cache = Cache::create_with_memory_policy(
+        Options {
+            capacity: 4096,
+            max_key_bytes: 32,
+            max_value_bytes: 128,
+            default_ttl_ms: None,
+        },
+        memory_policy,
+    )?;
     cache.insert(b"key", &[42; 64], None)?;
     cache.insert(b"expires", b"ttl", Some(Duration::from_secs(1)))?;
     let timings = bench(&cache)?;
@@ -115,7 +166,14 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let recipient: Peer = serde_json::from_str(&line)?;
-    let (mut stream, _) = listener.accept()?;
+    let (mut stream, rejected) = accept_peer(&listener, recipient)?;
+    assert_eq!(
+        &*cache.get(b"key")?.ok_or("still active before prepare")?,
+        &[42; 64]
+    );
+    if mode == "stray" {
+        assert!(rejected > 0);
+    }
     socket(&stream)?;
     let mapping_base = cache.mapping_address();
     let start = Instant::now();
@@ -127,7 +185,7 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
     stream.read_exact(&mut ready)?;
     assert_eq!(
         ready,
-        [if matches!(mode, "collision" | "abi") {
+        [if matches!(mode, "collision" | "abi" | "lock-denied") {
             4
         } else {
             1
@@ -136,7 +194,7 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
     let receipt = prepared.readiness();
     let prepared_ns = start.elapsed().as_nanos();
     match mode {
-        "commit" => {
+        "commit" | "stray" | "locked" => {
             // Component fixture's recorded decision. Production must use the one
             // durable cache+TLS/socket+SQL decision, under common admission.
             stream.write_all(&[1])?;
@@ -151,7 +209,7 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
             assert_eq!(&*cache.get(b"key")?.ok_or("value after abort")?, &[42; 64]);
             cache.insert(b"after-abort", b"still A", None)?;
         }
-        "collision" | "abi" => {
+        "collision" | "abi" | "lock-denied" => {
             let cache = prepared.abort()?;
             assert_eq!(
                 &*cache.get(b"key")?.ok_or("retained after import refusal")?,
@@ -185,12 +243,23 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
             "arena_sha256_before_attach": hash, "prepare_ns": prepare_ns, "ready_pause_ns": prepared_ns,
             "decision_pause_ns": start.elapsed().as_nanos(), "operations": timings, "heap_baseline": heap_baseline,
             "rss_kib": rss_kib()?, "mode": mode, "old_access_closed": mode != "abort"
+            , "unregistered_peers_rejected_before_prepare": rejected
         }))?,
     )?;
     // A exits completely. No cache relay, worker, helper, or runtime remains.
     Ok(())
 }
 fn successor(dir: &Path, old: Peer, mode: &str) -> Result<()> {
+    if mode == "lock-denied" {
+        let limit = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: isolated test process only; never changes the old owner's allowance.
+        if unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
     let mut stream = UnixStream::connect(dir.join("control.sock"))?;
     socket(&stream)?;
     let old_mapping: Value = serde_json::from_slice(&std::fs::read(dir.join("owner-ready.json"))?)?;
@@ -223,13 +292,20 @@ fn successor(dir: &Path, old: Peer, mode: &str) -> Result<()> {
     let start = Instant::now();
     // SAFETY: exact supervisor-owned builds, parked A, private channel and no raw aliases.
     let received = unsafe { Staged::receive(&mut stream, old) };
-    if matches!(mode, "collision" | "abi") {
+    if matches!(mode, "collision" | "abi" | "lock-denied") {
         match (&received, mode) {
             (Err(CacheError::Profile), "abi") => {}
+            (Err(CacheError::MemoryLock(_)), "lock-denied") => {}
             (Err(CacheError::Io(error)), "collision")
                 if error.raw_os_error() == Some(libc::EEXIST) => {}
             _ => return Err("import failed with unexpected outcome".into()),
         }
+        assert!(!std::fs::read_to_string("/proc/self/maps")?.contains("memfd:shardmap-succession"));
+        assert!(
+            std::fs::read_dir("/proc/self/fd")?
+                .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+                .all(|p| !p.to_string_lossy().contains("memfd:shardmap-succession"))
+        );
         if collision != libc::MAP_FAILED {
             // SAFETY: only releases the reservation created by this fixture.
             unsafe {

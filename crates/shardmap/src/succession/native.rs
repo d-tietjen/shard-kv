@@ -84,6 +84,7 @@ pub(super) struct Header {
     pub layout: u64,
     pub store: [u8; 16],
     pub options: OptionsRaw,
+    pub memory_policy: u64,
     pub base: u64,
     pub engine_abi: [u8; 32],
     pub table_size: u64,
@@ -174,6 +175,7 @@ pub(super) struct Mapping {
     pub ptr: NonNull<u8>,
     pub len: usize,
     pub file: File,
+    pub memory_policy: MemoryPolicy,
 }
 // SAFETY: native pointers are valid only at the fixed base. Active access needs
 // the process-local shard lock; consumed Cache ownership gates succession.
@@ -181,7 +183,12 @@ unsafe impl Send for Mapping {}
 // SAFETY: the same unique-owner and stripe-lock invariant protects shared use.
 unsafe impl Sync for Mapping {}
 impl Mapping {
-    pub fn map(file: File, len: usize, address: usize) -> Result<Self, Error> {
+    pub fn map(
+        file: File,
+        len: usize,
+        address: usize,
+        memory_policy: MemoryPolicy,
+    ) -> Result<Self, Error> {
         let flags = libc::MAP_SHARED
             | if address == 0 {
                 0
@@ -209,11 +216,32 @@ impl Mapping {
             }
             return Err(Error::Profile);
         }
-        Ok(Self {
+        let mapping = Self {
             ptr: NonNull::new(raw.cast()).ok_or(Error::Profile)?,
             len,
             file,
-        })
+            memory_policy,
+        };
+        // Construct the owner first so either protection failure unmaps/closes
+        // everything. No caller sees a mapping without both required flags.
+        for advice in [libc::MADV_DONTDUMP, libc::MADV_DONTFORK] {
+            // SAFETY: this complete owned mmap range is page-aligned and live.
+            if unsafe { libc::madvise(mapping.ptr.as_ptr().cast(), mapping.len, advice) } != 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+        }
+        Ok(mapping)
+    }
+    /// Establish requested residency before exposure/readiness. Called only on
+    /// creation or after authenticated import, never by point operations.
+    pub fn lock_if_required(&self) -> Result<(), Error> {
+        if self.memory_policy == MemoryPolicy::Locked {
+            // SAFETY: entire owned mapping; no process-wide memory-policy change.
+            if unsafe { libc::mlock(self.ptr.as_ptr().cast(), self.len) } != 0 {
+                return Err(Error::MemoryLock(io::Error::last_os_error()));
+            }
+        }
+        Ok(())
     }
     pub fn header(&self) -> &Header {
         // SAFETY: validated length/alignment. Prefix fields are integer values;
@@ -318,6 +346,15 @@ impl Cache {
     /// custody is required. Attachment supports only the exact engine build and
     /// the same available virtual range; private heap caches cannot be imported.
     pub fn create(options: Options) -> Result<Self, Error> {
+        Self::create_with_memory_policy(options, MemoryPolicy::Pageable)
+    }
+
+    /// Create protected backing with explicit residency. Locked must succeed
+    /// before any cache data can be written; no silent pageable fallback occurs.
+    pub fn create_with_memory_policy(
+        options: Options,
+        memory_policy: MemoryPolicy,
+    ) -> Result<Self, Error> {
         require_protected_process()?;
         let geometry = options.geometry()?;
         // SAFETY: static C name and supported flags, descriptor checked below.
@@ -346,7 +383,8 @@ impl Cache {
         {
             return Err(io::Error::last_os_error().into());
         }
-        let mapping = Arc::new(Mapping::map(file, geometry.len, 0)?);
+        let mapping = Arc::new(Mapping::map(file, geometry.len, 0, memory_policy)?);
+        mapping.lock_if_required()?;
         let mut random = [0; 48];
         getrandom::fill(&mut random).map_err(|e| io::Error::other(e.to_string()))?;
         let header = Header {
@@ -354,6 +392,7 @@ impl Cache {
             layout: LAYOUT,
             store: random[..16].try_into().map_err(|_| Error::Profile)?,
             options: options.into(),
+            memory_policy: memory_policy as u64,
             base: mapping.ptr.as_ptr() as u64,
             engine_abi: ENGINE_ABI,
             table_size: size_of::<Table>() as u64,
@@ -423,6 +462,10 @@ impl Cache {
     /// Bounded profile, including the total slot budget split across shards.
     pub fn options(&self) -> Options {
         self.inner.options
+    }
+    /// Authenticated cache residency contract; does not consult ownership state.
+    pub fn memory_policy(&self) -> MemoryPolicy {
+        self.inner.mapping.memory_policy
     }
     /// Number of routed shards (one for small profiles, otherwise 64).
     pub fn shard_count(&self) -> usize {
@@ -641,6 +684,8 @@ pub(super) fn compatible(mapping: &Mapping, receipt: &Readiness) -> bool {
     h.magic == MAGIC
         && h.layout == LAYOUT
         && h.options == receipt.options.into()
+        && h.memory_policy == receipt.memory_policy as u64
+        && mapping.memory_policy == receipt.memory_policy
         && h.base == receipt.mapping_address
         && h.engine_abi == ENGINE_ABI
         && receipt.engine_abi == ENGINE_ABI

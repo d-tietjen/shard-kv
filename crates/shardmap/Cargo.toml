@@ -91,7 +91,7 @@ server = [
 redis-server = ["server", "redis", "redis-functions", "redis-modules"]
 codec = ["embedded"]
 # Fixed-layout, one-owner same-host native cache handoff.
-succession = ["embedded", "dep:allocator-api2"]
+succession = ["embedded", "dep:allocator-api2", "dep:hmac", "dep:zeroize"]
 
 # Runtime and platform integrations.
 monoio = ["server", "dep:monoio", "bytes-handoff?/monoio"]
@@ -124,6 +124,8 @@ unsafe = []
 
 [dependencies]
 allocator-api2 = { version = "=0.2.21", optional = true }
+hmac = { version = "=0.12.1", optional = true }
+zeroize = { version = "=1.9.0", optional = true }
 ahash = { workspace = true }
 bytes = "1"
 bytes-handoff = { version = "1.2.0", optional = true }

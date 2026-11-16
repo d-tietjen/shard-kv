@@ -59,6 +59,7 @@ declared compatible version ranges.
 | `crc32fast`, `sha2` | Overflow integrity and TLS identity | Envelope integrity and certificate fingerprints. |
 | `tokio`, `flume` | Server and asynchronous overflow paths | Event loops, sockets, timers, bounded asynchronous lanes, and shutdown. |
 | `bytes-handoff`, `monoio` | Optional server transport | Buffer handoff and Linux transport experiments. |
+| `allocator-api2`, `hmac`, `zeroize` | `succession` | Retained native tables, authenticated handoff receipts, and credential-buffer erasure. |
 | `fast-telemetry` | `telemetry` | Metrics integration. |
 | `serde`, `serde_json`, `toml` | Configuration and persistence metadata | Structured configuration and metadata encoding. |
 | `crossbeam-channel`, `crossbeam-utils`, `parking_lot`, `rblock` | Core concurrency | Bounded channels and shard-local synchronization. |

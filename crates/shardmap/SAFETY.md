@@ -158,6 +158,22 @@ code with writable access. Credential withdrawal cannot revoke a mapping. PIDs
 come from supervisor child custody, and both services share the relevant host/PID/
 time namespaces. Never fork active handles or read backing outside its lifecycle.
 
+Format 4 requires MADV_DONTDUMP and MADV_DONTFORK on every local mapping before
+exposure; the owned mapping is constructed before these calls so failures unmap
+and close it. Close-on-exec protects created and received descriptors. DONTFORK
+does not close inherited descriptors: trusted forked helpers remain in the
+service's custody boundary until exec/close. Reject wrong kernel peers before
+closing admission, retaining authentication again at transfer/import.
+
+The full readiness receipt is HMAC-SHA256 authenticated, including the optional
+MemoryPolicy::Locked contract. Verification uses constant-time verify_slice.
+Credential storage is allocated before secret reads and zeroized by RAII on every
+success/error path; this does not promise erasure of cryptographic library state
+or unrelated application copies. Explicit Locked calls mlock for the full backing
+at creation and after authenticated import, before readiness; failure releases
+only that local mapping and permits pre-commit abort. Pageable remains default.
+The protections and residency policy add no checks to ordinary point operations.
+
 The caller must coordinate common admission and the single TLS/socket/cache/SQL
 decision. After B can advance state, lost ACKs never authorize stale A to resume.
 The API fails closed on ambiguous ownership; it does not recover torn in-place

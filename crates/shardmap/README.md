@@ -651,6 +651,8 @@ let cache = Cache::create(Options {
     default_ttl_ms: None,
 })?;
 cache.insert(b"key", b"value", None)?;
+// Check the supervisor-owned PID/UID before closing admission or preparing.
+shardmap::succession::authenticate_peer(&private_channel, successor_peer)?;
 // Workers may clone handles. First close service admission and return/drop all
 // worker handles, borrowed views and mutations. Preparation consumes the cache.
 let mut participant = match cache.prepare(operation, successor_peer, Duration::from_secs(2)) {
@@ -696,7 +698,7 @@ feature does not make the existing server or an Eden deployment handoff-capable.
 
 ### Native compatibility and address requirements
 
-Format 3 contains native Rust/hashbrown/allocator metadata and pointers. Only
+Format 4 contains native Rust/hashbrown/allocator metadata and pointers. Only
 qualified **exact engine builds** may share it. A conservative fingerprint covers
 engine Rust sources, compiler identity, target/features/build flags and locked
 inputs; native type geometry is checked too. Different executable interfaces may
@@ -710,7 +712,7 @@ overwrites another mapping. A can abort and resume its original cache after an
 import refusal. There is no relocation fallback. This candidate does **not**
 qualify different mapping bases; that remains an open requirement of EDEN-3839.
 Compare store UUID, kernel device/inode, mapped size, offsets and generation as
-well as addresses. Format 1/2 experimental backing is rejected.
+well as addresses. Format 1/2/3 experimental backing is rejected without conversion.
 
 ### Protected custody and coordinated decisions
 
@@ -722,10 +724,32 @@ and restricts debuggers/unprivileged `/proc` descriptor access; file mode 0600 a
 a transfer token alone do not isolate same-UID processes. Privileged host
 administrators and admitted native code remain trusted.
 
+Every created/imported mapping also requires `MADV_DONTDUMP` and
+`MADV_DONTFORK`; a failed protection call releases the local mapping and
+descriptor. The cache mapping is excluded from ordinary core dumps and fork
+inheritance. Descriptors are close-on-exec. Forked trusted helpers can still
+inherit a descriptor until exec/close; do not fork active Cache handles or let
+untrusted native helpers into this process. These controls do not sandbox root
+or code already admitted to the service.
+
+`Cache::create(options)` selects `MemoryPolicy::Pageable`. For caches that must
+stay out of normal swap, use
+`Cache::create_with_memory_policy(options, MemoryPolicy::Locked)`. Every owner
+must successfully `mlock` the entire mapping before creation/readiness succeeds;
+the authenticated receipt binds this policy, with no pageable fallback. Budget
+RAM and `RLIMIT_MEMLOCK` for the full reserved backing. Locking applies to this
+mapping, not input buffers, other application copies or hibernation images. No
+process-wide `mlockall` or per-operation security syscall is used.
+
 Transfer requires the memfd and a random one-use credential bound to the complete
 readiness receipt, including exact operation, recipient, generation, profile,
-engine identity and mapping address. SO_PEERCRED authenticates the supervisor-owned
-child PID/UID at both ends. Use a private supervisor-controlled Unix channel with
+engine identity, mapping address and residency policy. HMAC-SHA256 binds that
+receipt; verification uses the HMAC crate's constant-time comparison. Credential
+buffers are RAII-zeroized, including partial-frame failures; never log them.
+SO_PEERCRED authenticates the supervisor-owned child PID/UID at both ends.
+Call `authenticate_peer` on each accepted connection **before** quiescing A;
+reject/close wrong peers with a bounded accept deadline. Send/import recheck
+identity. Use a private supervisor-controlled Unix channel with
 bounded I/O. PIDs from an untrusted registration request are insufficient. A send
 right is consumed even on partial I/O. Do not log credentials. Admitted writable
 mapping holders must obey exclusive custody: `Staged::receive` is unsafe and
@@ -758,6 +782,9 @@ interface executables and an incompatible-feature artifact. It checks retained
 index/payload bytes, same pointers, B after A exit, explicit/ambiguous decisions,
 address/ABI refusal and crashes on both sides of activation. It deliberately does
 not claim different-base attachment or full TLS/SQL atomicity.
+`python3 scripts/prove-cache-security.py /path/to/evidence` separately checks
+default heap behavior, mapping flags, fork/exec inheritance, pageable behavior
+under a zero locking limit, and cleanup after required protection/locking fails.
 
 `python3 scripts/benchmark-cache-succession.py /path/to/evidence` measures the
 actual public implementation on matched physical-core affinity. Controls include

@@ -296,6 +296,18 @@ fn credentials_recipient_operation_engine_profile_and_replay_are_checked() {
         Staged::validate(p.mapping.clone(), wrong, &p.credential),
         Err(Error::Profile)
     ));
+    let mut wrong = receipt;
+    wrong.memory_policy = MemoryPolicy::Locked;
+    assert!(matches!(
+        Staged::validate(p.mapping.clone(), wrong, &p.credential),
+        Err(Error::Profile)
+    ));
+    let mut wrong = receipt;
+    wrong.operation = Operation([8; 16]);
+    assert!(matches!(
+        Staged::validate(p.mapping.clone(), wrong, &p.credential),
+        Err(Error::Unauthorized)
+    ));
     assert!(matches!(
         staged(&p).activate(Operation([9; 16])),
         Err(Error::Unauthorized)
@@ -334,7 +346,7 @@ fn format_and_descriptor_policy_refuse_import() {
     let receipt = candidate(&p);
     // SAFETY: parked cache, prefix only, no outstanding reference during write.
     unsafe {
-        std::ptr::addr_of_mut!((*p.mapping.ptr.as_ptr().cast::<Header>()).layout).write(2);
+        std::ptr::addr_of_mut!((*p.mapping.ptr.as_ptr().cast::<Header>()).layout).write(3);
     }
     assert!(matches!(
         Staged::validate(p.mapping.clone(), receipt, &p.credential),
@@ -348,6 +360,58 @@ fn format_and_descriptor_policy_refuse_import() {
         Staged::attach(file.into(), receipt, &p.credential),
         Err(Error::Profile)
     ));
+}
+
+#[test]
+fn peer_rejection_precedes_preparation_and_pageable_is_default() {
+    let a = Cache::create(options(4)).expect("create");
+    assert_eq!(a.memory_policy(), MemoryPolicy::Pageable);
+    let (stream, _other) = UnixStream::pair().expect("pair");
+    let mut wrong = Peer::current();
+    wrong.pid += 1;
+    assert!(matches!(
+        authenticate_peer(&stream, wrong),
+        Err(Error::Unauthorized)
+    ));
+    authenticate_peer(&stream, Peer::current()).expect("matching kernel credentials");
+    a.insert(b"key", b"still active", None).expect("not paused");
+    assert_eq!(
+        &*a.get(b"key").expect("get").expect("value"),
+        b"still active"
+    );
+}
+
+#[test]
+fn ttl_presence_updates_and_overflow_preserve_values() {
+    let a = Cache::create(options(2)).expect("create");
+    a.insert(b"key", b"never", None).expect("no ttl");
+    a.insert(b"key", b"expired", Some(Duration::ZERO))
+        .expect("zero ttl");
+    assert!(a.get(b"key").expect("get").is_none());
+    a.insert(b"key", b"again", None).expect("clear ttl");
+    a.insert(b"key", b"live", Some(Duration::from_secs(3600)))
+        .expect("set ttl");
+    assert!(matches!(
+        a.insert(b"key", b"bad", Some(Duration::MAX)),
+        Err(Error::Limit)
+    ));
+    assert!(matches!(
+        a.insert(b"key", b"bad", Some(Duration::from_millis(u64::MAX))),
+        Err(Error::Limit)
+    ));
+    assert_eq!(&*a.get(b"key").expect("get").expect("retained"), b"live");
+    a.insert(b"key", b"never again", None)
+        .expect("clear ttl again");
+    assert!(a.remove(b"key").expect("live remove"));
+    a.insert(b"key", b"zero", Some(Duration::ZERO))
+        .expect("expired slot");
+    assert!(!a.remove(b"key").expect("expired remove"));
+    let a = Cache::create(Options {
+        default_ttl_ms: Some(u64::MAX),
+        ..options(2)
+    })
+    .expect("profile");
+    assert!(matches!(a.insert(b"key", b"bad", None), Err(Error::Limit)));
 }
 
 #[test]

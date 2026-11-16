@@ -1,7 +1,9 @@
 //! Matched public-API throughput probe for the actual succession implementation.
 //! Aggregate wall ns/op is a throughput reciprocal, not request/tail latency.
 use serde_json::json;
-use shardmap::succession::{Cache, Operation, Options, Peer, Staged, protect_current_process};
+use shardmap::succession::{
+    Cache, Operation, Options, Peer, Staged, authenticate_peer, protect_current_process,
+};
 use shardmap::{CacheOptions, SharedCache};
 use std::error::Error;
 use std::hint::black_box;
@@ -157,7 +159,7 @@ fn resource() -> serde_json::Value {
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) } != 0 {
         return json!(null);
     }
-    json!({"max_rss_kib": usage.ru_maxrss, "cpu_us":
+    json!({"max_rss_kib": usage.ru_maxrss, "minor_faults": usage.ru_minflt, "cpu_us":
         (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1_000_000 + usage.ru_utime.tv_usec + usage.ru_stime.tv_usec})
 }
 fn report(method: &str, measurement: serde_json::Value, backing: Option<u64>, adopted: bool) {
@@ -169,7 +171,7 @@ fn report(method: &str, measurement: serde_json::Value, backing: Option<u64>, ad
     );
 }
 fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
-    if args.len() != 8 {
+    if args.len() != 9 {
         return Err("invalid receiver arguments".into());
     }
     protect_current_process()?;
@@ -182,6 +184,13 @@ fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
     // SAFETY: exact own engine binary and private supervisor-owned channel; A
     // consumed every active handle before sending. Only B can activate now.
     let staged = unsafe { Staged::receive(&mut stream, old) }?;
+    let method = &args[8];
+    let mut prefault_ns = 0;
+    if method == "native-adopted-prefault" {
+        let start = Instant::now();
+        staged.prefault()?;
+        prefault_ns = start.elapsed().as_nanos();
+    }
     stream.write_all(&[1])?;
     let mut decision = [0];
     stream.read_exact(&mut decision)?;
@@ -204,18 +213,35 @@ fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
         std::thread::sleep(Duration::from_millis(1));
     }
     let backing = cache.identity()?.bytes;
-    let measurement = run(
-        cache,
-        &args[4],
-        args[5].parse()?,
-        args[6].parse()?,
-        args[7].parse()?,
-        true,
-    );
-    report("native-adopted", measurement, Some(backing), true);
+    let measurement = if method == "native-adopted-cold" || method == "native-adopted-prefault" {
+        // No digest, warmup or cache access in B before this first batch.
+        let keys = keys(args[6].parse()?);
+        let before = resource();
+        let start = Instant::now();
+        for key in &keys {
+            assert!(cache.read(key));
+        }
+        let elapsed = start.elapsed().as_nanos();
+        let after = resource();
+        json!({"mode":"cold", "threads":1,"key_count":keys.len(),"operations":keys.len(),
+            "wall_ns":elapsed,"ns_per_op":elapsed as f64 / keys.len() as f64,
+            "prefault_ns":prefault_ns,"first_batch_minor_faults":
+                after["minor_faults"].as_i64().expect("faults") - before["minor_faults"].as_i64().expect("faults")})
+    } else {
+        run(
+            cache,
+            &args[4],
+            args[5].parse()?,
+            args[6].parse()?,
+            args[7].parse()?,
+            true,
+        )
+    };
+    report(method, measurement, Some(backing), true);
     Ok(())
 }
 fn handoff(
+    method: &str,
     mode: &str,
     threads: usize,
     count: usize,
@@ -237,19 +263,18 @@ fn handoff(
         .arg(threads.to_string())
         .arg(count.to_string())
         .arg(iterations.to_string())
+        .arg(method)
         .spawn()?;
     let result = (|| -> Result<(), Box<dyn Error>> {
-        let mut prepared = cache.prepare(
-            Operation([11; 16]),
-            Peer {
-                pid: child.id(),
-                uid: Peer::current().uid,
-            },
-            Duration::from_secs(1),
-        )?;
+        let peer = Peer {
+            pid: child.id(),
+            uid: Peer::current().uid,
+        };
         let (mut stream, _) = listener.accept()?;
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        authenticate_peer(&stream, peer)?;
+        let mut prepared = cache.prepare(Operation([11; 16]), peer, Duration::from_secs(1))?;
         prepared.send(&mut stream)?;
         let mut ready = [0];
         stream.read_exact(&mut ready)?;
@@ -291,8 +316,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("invalid benchmark bounds".into());
     }
-    if method == "native-adopted" {
-        return handoff(mode, threads, count, iterations);
+    if [
+        "native-adopted",
+        "native-adopted-cold",
+        "native-adopted-prefault",
+    ]
+    .contains(&method.as_str())
+    {
+        return handoff(method, mode, threads, count, iterations);
     }
     let measurement;
     let mut backing_bytes = None;

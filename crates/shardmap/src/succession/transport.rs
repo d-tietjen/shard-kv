@@ -1,5 +1,5 @@
 //! Bounded private Unix control transfer. No cache operations use this channel.
-use super::{Error, Peer, Readiness};
+use super::{Credential, Error, Peer, Readiness};
 use std::io::{self, Read, Write};
 use std::mem::{size_of, zeroed};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -35,8 +35,11 @@ pub(super) fn send(
     stream: &mut UnixStream,
     fd: RawFd,
     receipt: &Readiness,
-    credential: &[u8; 32],
+    credential: &[u8],
 ) -> Result<(), Error> {
+    if credential.len() != 32 {
+        return Err(Error::Unauthorized);
+    }
     let bytes = serde_json::to_vec(receipt).map_err(io::Error::other)?;
     if bytes.len() > 2048 {
         return Err(Error::Profile);
@@ -72,7 +75,7 @@ pub(super) fn send(
     Ok(())
 }
 
-pub(super) fn receive(stream: &mut UnixStream) -> Result<(OwnedFd, Readiness, [u8; 32]), Error> {
+pub(super) fn receive(stream: &mut UnixStream) -> Result<(OwnedFd, Readiness, Credential), Error> {
     let mut tag = [0u8];
     let mut iov = libc::iovec {
         iov_base: tag.as_mut_ptr().cast(),
@@ -128,7 +131,7 @@ pub(super) fn receive(stream: &mut UnixStream) -> Result<(OwnedFd, Readiness, [u
     let mut bytes = vec![0; len];
     stream.read_exact(&mut bytes)?;
     let receipt = serde_json::from_slice(&bytes).map_err(|_| Error::Profile)?;
-    let mut credential = [0; 32];
-    stream.read_exact(&mut credential)?;
+    let mut credential = Credential::new();
+    stream.read_exact(credential.bytes_mut())?;
     Ok((fd, receipt, credential))
 }

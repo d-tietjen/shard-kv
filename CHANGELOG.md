@@ -13,13 +13,17 @@
 
 - Require explicit protected process custody and private descriptor permissions
   for native cache succession; reject the earlier experimental format.
+- Require dump/fork mapping protections, authenticate peers before quiescing,
+  bind readiness with HMAC-SHA256 and erase credential buffers on drop. Optional
+  locked residency fails closed on every owner; pageable remains default
+  (EDEN-3839).
 
 ### Changed
 
 - Replace the experimental global operation gate/linear-probing cache with native
   hashbrown tables, padded reader-biased shard locks and consuming preparation.
   Ordinary operations have no handoff checks; abort returns the original cache.
-  Format 3 requires exact engine identity and the same free virtual range, and
+  Format 4 requires exact engine identity and the same free virtual range, and
   uses the ordinary cached TTL clock. Fixed shard quotas and reserved index
   headroom are explicit; different-base handoff remains unqualified (EDEN-3839).
 

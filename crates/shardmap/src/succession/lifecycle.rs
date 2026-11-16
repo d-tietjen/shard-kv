@@ -22,7 +22,7 @@ impl Cache {
         recipient: Peer,
         timeout: Duration,
     ) -> Result<Prepared, PrepareError> {
-        let prepare = || -> Result<([u8; 32], Readiness, u64), Error> {
+        let prepare = || -> Result<(Credential, Readiness, u64), Error> {
             require_protected_process()?;
             if recipient.pid == 0 || recipient.pid == std::process::id() {
                 return Err(Error::Unauthorized);
@@ -41,8 +41,8 @@ impl Cache {
                 .checked_add(5)
                 .filter(|n| n.checked_add(3).is_some())
                 .ok_or(Error::Limit)?;
-            let mut credential = [0; 32];
-            getrandom::fill(&mut credential).map_err(|e| io::Error::other(e.to_string()))?;
+            let mut credential = Credential::new();
+            getrandom::fill(credential.bytes_mut()).map_err(|e| io::Error::other(e.to_string()))?;
             let receipt = Readiness {
                 operation,
                 recipient,
@@ -51,6 +51,7 @@ impl Cache {
                 options: self.inner.options,
                 mapping_address: self.mapping_address() as u64,
                 engine_abi: engine_abi(),
+                memory_policy: self.memory_policy(),
             };
             let hash = authorization(&credential, &receipt)?;
             let header = self.inner.mapping.header();
@@ -85,7 +86,7 @@ impl Cache {
 pub struct Prepared {
     pub(super) mapping: Arc<Mapping>,
     pub(super) receipt: Readiness,
-    pub(super) credential: [u8; 32],
+    pub(super) credential: Credential,
     sent: bool,
 }
 impl std::fmt::Debug for Prepared {
@@ -143,11 +144,6 @@ impl Prepared {
         })
     }
 }
-impl Drop for Prepared {
-    fn drop(&mut self) {
-        self.credential.fill(0);
-    }
-}
 
 /// Authenticated mapping with no cache operations until an explicit activation.
 pub struct Staged {
@@ -170,15 +166,13 @@ impl Staged {
     pub unsafe fn receive(stream: &mut UnixStream, owner: Peer) -> Result<Self, Error> {
         require_protected_process()?;
         transport::authenticate(stream, owner)?;
-        let (fd, receipt, mut credential) = transport::receive(stream)?;
-        let result = Self::attach(fd, receipt, &credential);
-        credential.fill(0);
-        result
+        let (fd, receipt, credential) = transport::receive(stream)?;
+        Self::attach(fd, receipt, &credential)
     }
     pub(super) fn attach(
         fd: OwnedFd,
         receipt: Readiness,
-        credential: &[u8; 32],
+        credential: &[u8],
     ) -> Result<Self, Error> {
         require_protected_process()?;
         if receipt.recipient != Peer::current() {
@@ -206,7 +200,12 @@ impl Staged {
             return Err(Error::Profile);
         }
         Self::validate(
-            Arc::new(Mapping::map(file, geometry.len, address)?),
+            Arc::new(Mapping::map(
+                file,
+                geometry.len,
+                address,
+                receipt.memory_policy,
+            )?),
             receipt,
             credential,
         )
@@ -214,7 +213,7 @@ impl Staged {
     pub(super) fn validate(
         mapping: Arc<Mapping>,
         receipt: Readiness,
-        credential: &[u8; 32],
+        credential: &[u8],
     ) -> Result<Self, Error> {
         if !compatible(&mapping, &receipt)
             || mapping.identity(receipt.options.geometry()?.stride)? != receipt.backing
@@ -231,14 +230,20 @@ impl Staged {
         if header.state.load(Ordering::Acquire) != expected {
             return Err(Error::Inactive);
         }
-        let hash = authorization(credential, &receipt)?;
-        let mut mismatch = 0;
-        for (word, bytes) in header.authorization.iter().zip(hash.as_chunks::<8>().0) {
-            mismatch |= word.load(Ordering::Relaxed) ^ u64::from_le_bytes(*bytes);
+        let mut expected_mac = [0; 32];
+        for (word, bytes) in header
+            .authorization
+            .iter()
+            .zip(expected_mac.as_chunks_mut::<8>().0)
+        {
+            *bytes = word.load(Ordering::Relaxed).to_le_bytes();
         }
-        if mismatch != 0 {
-            return Err(Error::Unauthorized);
-        }
+        authorization_mac(credential, &receipt)?
+            .verify_slice(&expected_mac)
+            .map_err(|_| Error::Unauthorized)?;
+        // Pin only authenticated backing, and before a recipient can announce
+        // readiness. On failure the staged mapping drops; A can still abort.
+        mapping.lock_if_required()?;
         if header.state.load(Ordering::Acquire) != expected {
             return Err(Error::Inactive);
         }
@@ -251,6 +256,28 @@ impl Staged {
     /// Required local mapping base; ordinary payload and native index pointers match A.
     pub fn mapping_address(&self) -> usize {
         self.mapping.ptr.as_ptr() as usize
+    }
+    /// Populate this authenticated mapping's read page tables before readiness.
+    /// Optional control-plane preparation; never copies or rebuilds cached data.
+    /// Locked backing is already resident. Unsupported kernels or resource
+    /// failures return an I/O error; the caller may abort before global commit.
+    pub fn prefault(&self) -> Result<(), Error> {
+        if self.receipt.memory_policy == MemoryPolicy::Locked {
+            return Ok(());
+        }
+        // SAFETY: complete authenticated live mapping; read population changes
+        // only this process's page tables and never the shared payload bytes.
+        if unsafe {
+            libc::madvise(
+                self.mapping.ptr.as_ptr().cast(),
+                self.mapping.len,
+                libc::MADV_POPULATE_READ,
+            )
+        } != 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
     }
     /// Activate only after recording global COMMIT for this exact operation and
     /// all TLS/socket/cache/SQL participants. Common admission stays closed until

@@ -59,6 +59,7 @@ jobs:
           cargo test --locked -p shardmap --features succession
           cargo test --locked -p shardmap --features succession,unsafe
           python3 scripts/prove-cache-succession.py /tmp/cache-succession-evidence
+          python3 scripts/prove-cache-security.py /tmp/cache-security-evidence
       - name: test unsafe feature
         run: cargo test -p shardmap --features unsafe
       - name: test redis feature
