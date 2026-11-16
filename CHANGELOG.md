@@ -8,6 +8,9 @@
   backing, borrowed reads, authenticated descriptor transfer, bounded drain,
   explicit abort and operation-bound activation (EDEN-3839). Existing private
   heap caches cannot be adopted; TLS/SQL coordination remains caller-owned.
+- Optional `Staged::prefault` preparation to populate the successor's read page
+  tables before readiness, without copying retained data or adding point-path
+  checks (EDEN-3839).
 
 ### Security
 

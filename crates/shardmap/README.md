@@ -737,9 +737,18 @@ stay out of normal swap, use
 `Cache::create_with_memory_policy(options, MemoryPolicy::Locked)`. Every owner
 must successfully `mlock` the entire mapping before creation/readiness succeeds;
 the authenticated receipt binds this policy, with no pageable fallback. Budget
-RAM and `RLIMIT_MEMLOCK` for the full reserved backing. Locking applies to this
+RAM and `RLIMIT_MEMLOCK` for the full reserved backing rounded to kernel pages.
+Locking applies to this
 mapping, not input buffers, other application copies or hibernation images. No
 process-wide `mlockall` or per-operation security syscall is used.
+
+Before announcing readiness, B may explicitly call `staged.prefault()?` to
+populate its read page tables. This optional Linux 5.14+ preparation leaves the
+backing bytes unchanged; it is off unless called, and locked backing is already
+populated. Unsupported kernels and other failures return an I/O error so the
+caller can abort before commit. Budget its preparation time separately from the
+first read batch: it moves page-fault work into preparation and adds no logic to
+ordinary reads or writes.
 
 Transfer requires the memfd and a random one-use credential bound to the complete
 readiness receipt, including exact operation, recipient, generation, profile,
@@ -793,4 +802,10 @@ and a separately executed successor timed only after the old owner exits. Raw
 trials, source/artifact identities, reserved backing and per-process resource
 measurements are saved. Aggregate ns/op is a throughput reciprocal, not tail
 latency or the cost of a complete application request. The bounded profile is
-experimental and remains subject to final compatibility/security qualification.
+experimental; consuming services must qualify their exact engine/profile and
+coordinated cache/TLS/SQL decision.
+Use `--cold` to compare the first 8,192 reads with optional prefaulting after A
+exits, before B warms or hashes any cache entry. This records preparation cost,
+first-batch time and minor faults separately. `--binary` accepts an exact
+prebuilt artifact, allowing compilation and target-host measurement to be
+separated; preserve its source/compiler/hash manifest with the results.
