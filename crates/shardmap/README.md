@@ -710,7 +710,7 @@ A/B must map the **same available virtual range** so native index pointers and
 payload addresses remain valid. `MAP_FIXED_NOREPLACE` refuses a conflict and never
 overwrites another mapping. A can abort and resume its original cache after an
 import refusal. There is no relocation fallback. This candidate does **not**
-qualify different mapping bases; that remains an open requirement of EDEN-3839.
+support different mapping bases; EDEN-3839 qualifies this fixed-address profile.
 Compare store UUID, kernel device/inode, mapped size, offsets and generation as
 well as addresses. Format 1/2/3 experimental backing is rejected without conversion.
 
