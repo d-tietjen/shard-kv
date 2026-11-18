@@ -172,6 +172,40 @@ pub struct Options {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Operation(pub [u8; 16]);
 
+/// Exact engine-build fingerprint emitted by the succession build script.
+/// Build identities pin a deployment's prior qualification to named artifacts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EngineBuildDigest(pub [u8; 32]);
+
+impl EngineBuildDigest {
+    /// Build fingerprint of the loaded ShardMap engine.
+    pub fn current() -> Self {
+        Self(engine_abi())
+    }
+}
+
+/// Directional Format 4 qualification provisioned by a trusted supervisor.
+/// Only the named source may transfer its original backing to the named target.
+/// The supervisor must pin both executables and their qualification evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QualifiedBuildPair {
+    source: EngineBuildDigest,
+    target: EngineBuildDigest,
+}
+
+impl QualifiedBuildPair {
+    /// Select two distinct exact digests from a matching Format 4 qualification.
+    /// Compatibility must already be established for both builds and the profile
+    /// in use. Importing with this pair requires [`Staged::receive_qualified`].
+    pub fn new(source: EngineBuildDigest, target: EngineBuildDigest) -> Result<Self, Error> {
+        if source == target {
+            return Err(Error::Profile);
+        }
+        Ok(Self { source, target })
+    }
+}
+
 /// Kernel-authenticated endpoint identity. The supervisor must obtain the PID
 /// from its own child custody, not from an untrusted registration request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,7 +260,8 @@ pub struct Readiness {
     pub options: Options,
     /// Required virtual address; attachment refuses rather than replacing a mapping.
     pub mapping_address: u64,
-    /// Exact engine-build fingerprint, not a stable serialized Rust ABI.
+    /// Exact source build fingerprint, matching the backing creator.
+    /// Target qualification comes from the supervisor's local configuration.
     pub engine_abi: [u8; 32],
     /// Both owners must establish this exact residency policy before readiness.
     pub memory_policy: MemoryPolicy,

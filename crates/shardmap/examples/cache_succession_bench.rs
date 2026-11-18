@@ -13,6 +13,39 @@ use std::process::Command;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
+// The benchmark runner replaces this block only when building its predecessor driver.
+// BEGIN CANDIDATE ENGINE API
+use shardmap::succession::{EngineBuildDigest, QualifiedBuildPair};
+
+/// Report the engine identity compiled into this driver.
+fn engine_digest() -> Result<serde_json::Value, Box<dyn Error>> {
+    Ok(serde_json::to_value(EngineBuildDigest::current())?)
+}
+
+/// Receive from the exact-build default or the runner's explicit directional pair.
+fn receive_cache(stream: &mut UnixStream, peer: Peer) -> Result<Staged, Box<dyn Error>> {
+    let source = std::env::var_os("SHARDMAP_BENCH_SOURCE_DIGEST");
+    let target = std::env::var_os("SHARDMAP_BENCH_TARGET_DIGEST");
+    match (source, target) {
+        (Some(source), Some(target)) => {
+            let pair = QualifiedBuildPair::new(
+                serde_json::from_str(source.to_str().ok_or("invalid source digest")?)?,
+                serde_json::from_str(target.to_str().ok_or("invalid target digest")?)?,
+            )?;
+            // SAFETY: The fixture runner builds both engines from the selected
+            // sources, owns both launches and supplies the exact directional pair.
+            // A has consumed all active handles and the Unix peer is checked.
+            Ok(unsafe { Staged::receive_qualified(stream, peer, pair) }?)
+        }
+        (None, None) => {
+            // SAFETY: This mode uses the exact same engine for both owners.
+            Ok(unsafe { Staged::receive(stream, peer) }?)
+        }
+        _ => Err("incomplete qualified engine pair".into()),
+    }
+}
+// END CANDIDATE ENGINE API
+
 const CAPACITY: usize = 14_336;
 trait Points: Send + Sync + 'static {
     fn read(&self, key: &[u8]) -> bool;
@@ -162,12 +195,34 @@ fn resource() -> serde_json::Value {
     json!({"max_rss_kib": usage.ru_maxrss, "minor_faults": usage.ru_minflt, "cpu_us":
         (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1_000_000 + usage.ru_utime.tv_usec + usage.ru_stime.tv_usec})
 }
-fn report(method: &str, measurement: serde_json::Value, backing: Option<u64>, adopted: bool) {
+
+/// Return Linux's process-wide page-table footprint in KiB.
+fn page_table_kib() -> Result<u64, Box<dyn Error>> {
+    let status = std::fs::read_to_string("/proc/self/status")?;
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmPTE:"))
+        .ok_or("missing VmPTE")?;
+    Ok(value
+        .split_whitespace()
+        .next()
+        .ok_or("missing VmPTE value")?
+        .parse()?)
+}
+
+/// Emit one row. Only an adopted row has a handoff measurement.
+fn report(
+    method: &str,
+    measurement: serde_json::Value,
+    backing: Option<u64>,
+    adoption: Option<serde_json::Value>,
+) {
     println!(
         "{}",
         json!({"method": method, "measurement": measurement,
         "native_slot_budget": CAPACITY, "native_table_reserve_per_shard": CAPACITY / 64 * 2,
-        "backing_bytes": backing, "old_owner_exited": adopted, "process_resource": resource()})
+        "backing_bytes": backing, "old_owner_exited": adoption.is_some(),
+        "adoption": adoption, "process_resource": resource()})
     );
 }
 fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
@@ -181,9 +236,19 @@ fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
         pid: args[3].parse()?,
         uid: Peer::current().uid,
     };
-    // SAFETY: exact own engine binary and private supervisor-owned channel; A
-    // consumed every active handle before sending. Only B can activate now.
-    let staged = unsafe { Staged::receive(&mut stream, old) }?;
+    let pte_before_attach = page_table_kib()?;
+    // A sends this marker after preparing, so receive timing excludes A's
+    // drain and authorization setup. The memfd protocol follows unchanged.
+    let mut prepared = [0];
+    stream.read_exact(&mut prepared)?;
+    if prepared != [1] {
+        return Err("owner did not prepare".into());
+    }
+    let attach_started = Instant::now();
+    let staged = receive_cache(&mut stream, old)?;
+    let attach_ns = attach_started.elapsed().as_nanos();
+    let pte_after_attach = page_table_kib()?;
+    let source_engine_digest = staged.readiness().engine_abi;
     let method = &args[8];
     let mut prefault_ns = 0;
     if method == "native-adopted-prefault" {
@@ -191,6 +256,7 @@ fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
         staged.prefault()?;
         prefault_ns = start.elapsed().as_nanos();
     }
+    let pte_after_prefault = page_table_kib()?;
     stream.write_all(&[1])?;
     let mut decision = [0];
     stream.read_exact(&mut decision)?;
@@ -213,6 +279,7 @@ fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
         std::thread::sleep(Duration::from_millis(1));
     }
     let backing = cache.identity()?.bytes;
+    let pte_before_workload = page_table_kib()?;
     let measurement = if method == "native-adopted-cold" || method == "native-adopted-prefault" {
         // No digest, warmup or cache access in B before this first batch.
         let keys = keys(args[6].parse()?);
@@ -237,7 +304,19 @@ fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
             true,
         )
     };
-    report(method, measurement, Some(backing), true);
+    let pte_after_workload = page_table_kib()?;
+    let adoption = json!({
+        "source_engine_digest": source_engine_digest,
+        "target_engine_digest": engine_digest()?,
+        "attach_ns": attach_ns,
+        "prefault_ns": prefault_ns,
+        "vm_pte_kib": {
+            "before_attach": pte_before_attach, "after_attach": pte_after_attach,
+            "after_prefault": pte_after_prefault, "before_workload": pte_before_workload,
+            "after_workload": pte_after_workload,
+        },
+    });
+    report(method, measurement, Some(backing), Some(adoption));
     Ok(())
 }
 fn handoff(
@@ -255,7 +334,11 @@ fn handoff(
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("control.sock");
     let listener = UnixListener::bind(&path)?;
-    let mut child = Command::new(std::env::current_exe()?)
+    let successor = match std::env::var_os("SHARDMAP_BENCH_SUCCESSOR") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => std::env::current_exe()?,
+    };
+    let mut child = Command::new(successor)
         .arg("__receive")
         .arg(&path)
         .arg(std::process::id().to_string())
@@ -274,15 +357,25 @@ fn handoff(
         stream.set_read_timeout(Some(Duration::from_secs(10)))?;
         stream.set_write_timeout(Some(Duration::from_secs(10)))?;
         authenticate_peer(&stream, peer)?;
+        let prepare_started = Instant::now();
         let mut prepared = cache.prepare(Operation([11; 16]), peer, Duration::from_secs(1))?;
+        let prepare_ns = prepare_started.elapsed().as_nanos();
+        let source_engine_digest = prepared.readiness().engine_abi;
+        stream.write_all(&[1])?;
         prepared.send(&mut stream)?;
         let mut ready = [0];
         stream.read_exact(&mut ready)?;
         assert_eq!(ready, [1]);
+        let ready_ns = prepare_started.elapsed().as_nanos();
         stream.write_all(&[1])?;
         stream.read_exact(&mut ready)?;
         assert_eq!(ready, [2]);
         drop(prepared);
+        eprintln!(
+            "owner-metrics {}",
+            json!({"source_engine_digest": source_engine_digest, "prepare_ns": prepare_ns,
+                "ready_ns": ready_ns, "commit_ns": prepare_started.elapsed().as_nanos()})
+        );
         Ok(()) // A exits without waiting for B; B proves exit before timing.
     })();
     if result.is_err() {
@@ -294,6 +387,10 @@ fn handoff(
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "__engine_digest") {
+        println!("{}", engine_digest()?);
+        return Ok(());
+    }
     if args.get(1).is_some_and(|arg| arg == "__receive") {
         return adopted_receiver(&args);
     }
@@ -351,6 +448,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         });
         measurement = run(cache, mode, threads, count, iterations, false);
     }
-    report(method, measurement, backing_bytes, false);
+    report(method, measurement, backing_bytes, None);
     Ok(())
 }

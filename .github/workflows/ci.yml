@@ -60,6 +60,13 @@ jobs:
           cargo test --locked -p shardmap --features succession,unsafe
           python3 scripts/prove-cache-succession.py /tmp/cache-succession-evidence
           python3 scripts/prove-cache-security.py /tmp/cache-security-evidence
+      - name: qualify cache transfer from the Format 4 predecessor
+        run: |
+          predecessor=d5378b1464c6291a22fbece025f46270265a6644
+          git fetch --no-tags origin "$predecessor"
+          git worktree add --detach "$RUNNER_TEMP/shardmap-predecessor" "$predecessor"
+          python3 scripts/prove-cache-succession.py "$RUNNER_TEMP/cache-build-pair" \
+            --predecessor-root "$RUNNER_TEMP/shardmap-predecessor"
       - name: test unsafe feature
         run: cargo test -p shardmap --features unsafe
       - name: test redis feature

@@ -266,7 +266,7 @@ impl Mapping {
     }
     fn bytes(&self, ptr: NonNull<u8>, len: usize) -> &[u8] {
         // SAFETY: pointers/lengths originate in bounded API writes, imported only
-        // from a trusted exact engine. Caller retains active custody and a lock.
+        // from a trusted compatible engine. Caller retains active custody and a lock.
         unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) }
     }
 }
@@ -343,8 +343,9 @@ impl Inner {
 
 impl Cache {
     /// Create a bounded native-table cache before warming it. Protected process
-    /// custody is required. Attachment supports only the exact engine build and
-    /// the same available virtual range; private heap caches cannot be imported.
+    /// custody is required. Attachment needs the same available virtual range
+    /// and an exact or explicitly qualified engine build. Private heap caches
+    /// cannot be imported.
     pub fn create(options: Options) -> Result<Self, Error> {
         Self::create_with_memory_policy(options, MemoryPolicy::Pageable)
     }
@@ -687,8 +688,7 @@ pub(super) fn compatible(mapping: &Mapping, receipt: &Readiness) -> bool {
         && h.memory_policy == receipt.memory_policy as u64
         && mapping.memory_policy == receipt.memory_policy
         && h.base == receipt.mapping_address
-        && h.engine_abi == ENGINE_ABI
-        && receipt.engine_abi == ENGINE_ABI
+        && h.engine_abi == receipt.engine_abi
         && h.table_size == size_of::<Table>() as u64
         && h.stripe_size == size_of::<Stripe>() as u64
         && h.row_size == size_of::<Row>() as u64

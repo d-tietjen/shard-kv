@@ -8,6 +8,8 @@ impl Cache {
     /// First close service admission and return/drop all worker clones; borrowed
     /// guards must also finish. Waits at most `timeout` for existing handles.
     /// Refusal returns the original active Cache inside [`PrepareError`].
+    /// Backing inherited from a different engine build cannot be exported by
+    /// this profile. It is refused before waiting for workers or parking.
     ///
     /// ```compile_fail
     /// # use shardmap::succession::{Cache, Operation, Peer};
@@ -26,6 +28,11 @@ impl Cache {
             require_protected_process()?;
             if recipient.pid == 0 || recipient.pid == std::process::id() {
                 return Err(Error::Unauthorized);
+            }
+            let header = self.inner.mapping.header();
+            let engine_abi = engine_abi();
+            if header.engine_abi != engine_abi {
+                return Err(Error::Profile);
             }
             let started = Instant::now();
             while Arc::strong_count(&self.inner) != 1 {
@@ -50,11 +57,10 @@ impl Cache {
                 backing: self.identity()?,
                 options: self.inner.options,
                 mapping_address: self.mapping_address() as u64,
-                engine_abi: engine_abi(),
+                engine_abi,
                 memory_policy: self.memory_policy(),
             };
             let hash = authorization(&credential, &receipt)?;
-            let header = self.inner.mapping.header();
             if header.state.load(Ordering::Acquire) != active {
                 return Err(Error::Inactive);
             }
@@ -164,22 +170,55 @@ impl Staged {
     /// A crash during mutation is not recoverable by this API. Keep the service
     /// admission gate closed until all TLS/cache/SQL participants activate.
     pub unsafe fn receive(stream: &mut UnixStream, owner: Peer) -> Result<Self, Error> {
+        Self::receive_from(stream, owner, EngineBuildDigest::current())
+    }
+
+    /// Stage an older build's backing using a locally provisioned qualified pair.
+    /// The source sends its ordinary authenticated receipt. This process checks
+    /// the pinned target and checks the pinned source against both the receipt
+    /// and backing header. A different local build is refused before transfer.
+    ///
+    /// # Safety
+    /// The deployment must establish that the two exact artifacts share the
+    /// Format 4 layout and semantics for this cache profile, including the native
+    /// table, allocator and hashing. The supervisor must pin both artifacts and
+    /// bind the source's kernel peer to the pinned source. Never source the pair
+    /// from the socket or infer it from matching dimensions. The exclusive
+    /// custody and service admission rules of [`Self::receive`] also apply.
+    pub unsafe fn receive_qualified(
+        stream: &mut UnixStream,
+        owner: Peer,
+        pair: QualifiedBuildPair,
+    ) -> Result<Self, Error> {
+        if pair.target != EngineBuildDigest::current() {
+            return Err(Error::Profile);
+        }
+        Self::receive_from(stream, owner, pair.source)
+    }
+
+    /// Authenticate the source before receiving its descriptor and capability.
+    fn receive_from(
+        stream: &mut UnixStream,
+        owner: Peer,
+        source: EngineBuildDigest,
+    ) -> Result<Self, Error> {
         require_protected_process()?;
         transport::authenticate(stream, owner)?;
         let (fd, receipt, credential) = transport::receive(stream)?;
-        Self::attach(fd, receipt, &credential)
+        Self::attach(fd, receipt, &credential, source)
     }
     pub(super) fn attach(
         fd: OwnedFd,
         receipt: Readiness,
         credential: &[u8],
+        source: EngineBuildDigest,
     ) -> Result<Self, Error> {
         require_protected_process()?;
         if receipt.recipient != Peer::current() {
             return Err(Error::Unauthorized);
         }
         // Refuse incompatible builds before mapping any native structures.
-        if receipt.engine_abi != engine_abi() {
+        if receipt.engine_abi != source.0 {
             return Err(Error::Profile);
         }
         let geometry = receipt.options.geometry()?;
@@ -283,7 +322,8 @@ impl Staged {
     /// all TLS/socket/cache/SQL participants. Common admission stays closed until
     /// the entire bundle activates and A retires. This CAS commits only the cache.
     /// Lost acknowledgements never grant permission to restore stale A; reconcile
-    /// the decision or use a qualified reverse handoff of B's latest state.
+    /// the decision using B's latest state. This profile cannot export backing
+    /// inherited from a different build.
     pub fn activate(self, committed_operation: Operation) -> Result<Cache, Error> {
         require_protected_process()?;
         if self.receipt.recipient != Peer::current()
