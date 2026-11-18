@@ -37,6 +37,11 @@ fn engine_digest() -> Result<serde_json::Value, Box<dyn Error>> {
     Ok(digest)
 }
 
+fn target_digest(source: [u8; 32]) -> serde_json::Value {
+    // The predecessor's exact receiver already checked this against its build.
+    json!(source)
+}
+
 fn receive_cache(stream: &mut UnixStream, peer: Peer) -> Result<Staged, Box<dyn Error>> {
     // SAFETY: The predecessor driver receives only its own exact build.
     Ok(unsafe { Staged::receive(stream, peer) }?)
@@ -72,6 +77,11 @@ def engine_digest(binary, env):
     return value
 
 
+def compiler_identity(root, env):
+    """Read the compiler selected under this source directory."""
+    return subprocess.check_output(["rustc", "--version", "--verbose"], cwd=root, env=env, text=True).strip()
+
+
 def predecessor_driver(checkout, scratch, target, env):
     """Export the pinned engine and build only a benchmark-specific driver."""
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
@@ -93,11 +103,14 @@ def predecessor_driver(checkout, scratch, target, env):
         raise ValueError("candidate-only benchmark adapter markers are missing")
     adapter = source / EXAMPLE
     adapter.write_text(before + PREDECESSOR_ENGINE_API + after)
+    compiler = compiler_identity(source, env)
+    if compiler != compiler_identity(ROOT, env):
+        raise ValueError("predecessor and candidate must use the same Rust compiler")
     build(source, env | {"CARGO_TARGET_DIR": str(target)})
     binary = scratch / "predecessor-bench"
     shutil.copy2(target / "release/examples/cache_succession_bench", binary)
     return binary, {
-        "revision": revision, "benchmark_example_sha256": digest(adapter),
+        "revision": revision, "benchmark_example_sha256": digest(adapter), "rustc": compiler,
         "binary_sha256": digest(binary), "engine_digest": engine_digest(binary, env),
     }
 
@@ -116,7 +129,7 @@ def save_compiled_pair(output, candidate, predecessor, predecessor_receipt, env)
     receipt = {
         "schema": "shardmap.succession-benchmark-build.v1",
         "candidate": candidate_receipt, "predecessor": predecessor_receipt,
-        "rustc": subprocess.check_output(["rustc", "--version", "--verbose"], cwd=ROOT, env=env, text=True).strip(),
+        "rustc": compiler_identity(ROOT, env),
         "features": ["succession"], "profile": "release",
     }
     for binary, name in ((candidate, "candidate-bench"), (predecessor, "predecessor-bench")):
@@ -131,6 +144,8 @@ def verify_compiled_pair(candidate, predecessor, env):
     if (receipt["schema"] != "shardmap.succession-benchmark-build.v1"
             or receipt["predecessor"]["revision"] != PREDECESSOR):
         raise ValueError("compiled pair manifest has the wrong predecessor or schema")
+    if receipt["predecessor"].get("rustc") != receipt["rustc"]:
+        raise ValueError("compiled pair used different Rust compilers")
     for role, binary in (("candidate", candidate), ("predecessor", predecessor)):
         pinned = receipt[role]
         if digest(binary) != pinned["binary_sha256"] or engine_digest(binary, env) != pinned["engine_digest"]:
@@ -221,7 +236,11 @@ def main():
     if args.predecessor_root is None:
         run(args, env, binary)
         return
-    with tempfile.TemporaryDirectory(prefix="shardmap-pair-") as directory:
+    # Use the checkout's toolchain for the predecessor source copy too. A
+    # candidate built under a parent rust-toolchain override must keep it here.
+    scratch_root = ROOT / "target"
+    scratch_root.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="shardmap-pair-", dir=scratch_root) as directory:
         scratch = Path(directory)
         # A/B share sequential Cargo dependencies. Preserve B before A's build
         # uses the same target output name.

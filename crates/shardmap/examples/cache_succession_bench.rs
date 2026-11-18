@@ -22,6 +22,11 @@ fn engine_digest() -> Result<serde_json::Value, Box<dyn Error>> {
     Ok(serde_json::to_value(EngineBuildDigest::current())?)
 }
 
+/// Report the running receiver's build for the timed row.
+fn target_digest(_source: [u8; 32]) -> serde_json::Value {
+    json!(EngineBuildDigest::current())
+}
+
 /// Receive from the exact-build default or the runner's explicit directional pair.
 fn receive_cache(stream: &mut UnixStream, peer: Peer) -> Result<Staged, Box<dyn Error>> {
     let source = std::env::var_os("SHARDMAP_BENCH_SOURCE_DIGEST");
@@ -296,7 +301,7 @@ fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
                 after["minor_faults"].as_i64().expect("faults") - before["minor_faults"].as_i64().expect("faults")})
     } else {
         run(
-            cache,
+            cache.clone(),
             &args[4],
             args[5].parse()?,
             args[6].parse()?,
@@ -307,7 +312,7 @@ fn adopted_receiver(args: &[String]) -> Result<(), Box<dyn Error>> {
     let pte_after_workload = page_table_kib()?;
     let adoption = json!({
         "source_engine_digest": source_engine_digest,
-        "target_engine_digest": engine_digest()?,
+        "target_engine_digest": target_digest(source_engine_digest),
         "attach_ns": attach_ns,
         "prefault_ns": prefault_ns,
         "vm_pte_kib": {

@@ -375,6 +375,12 @@ fn successor(dir: &Path, old: Peer, mode: &str, pair: Option<QualifiedBuildPair>
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
+            assert_eq!(
+                &*cache
+                    .get(b"expires")?
+                    .ok_or("live inherited TTL after A exit")?,
+                b"ttl"
+            );
             let v = cache.get(b"key")?.ok_or("retained value")?;
             assert_eq!(&*v, &[42; 64]);
             let (slot, payload) = cache.value_offsets(&v)?;
