@@ -47,6 +47,7 @@ BENCH_ENV = (
     "SHARDMAP_BENCH_SOURCE_DIGEST",
     "SHARDMAP_BENCH_TARGET_DIGEST",
 )
+BUILD_MANIFEST = "build-manifest.json"
 
 
 def build(root, env):
@@ -101,6 +102,42 @@ def predecessor_driver(checkout, scratch, target, env):
     }
 
 
+def save_compiled_pair(output, candidate, predecessor, predecessor_receipt, env):
+    """Retain the exact binaries and source/build identities for a separate timed run."""
+    candidate_receipt = {
+        "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "working_tree": subprocess.check_output(["git", "status", "--porcelain=v1"], cwd=ROOT, text=True).splitlines(),
+        "benchmark_example_sha256": digest(ROOT / EXAMPLE),
+        "binary_sha256": digest(candidate),
+        "engine_digest": engine_digest(candidate, env),
+    }
+    if candidate_receipt["engine_digest"] == predecessor_receipt["engine_digest"]:
+        raise ValueError("compiled pair has the same engine identity")
+    receipt = {
+        "schema": "shardmap.succession-benchmark-build.v1",
+        "candidate": candidate_receipt, "predecessor": predecessor_receipt,
+        "rustc": subprocess.check_output(["rustc", "--version", "--verbose"], cwd=ROOT, env=env, text=True).strip(),
+        "features": ["succession"], "profile": "release",
+    }
+    for binary, name in ((candidate, "candidate-bench"), (predecessor, "predecessor-bench")):
+        shutil.copy2(binary, output / name)
+    (output / BUILD_MANIFEST).write_text(json.dumps(receipt, indent=2) + "\n")
+
+
+def verify_compiled_pair(candidate, predecessor, env):
+    """Recheck both exact fixture engines and ELFs before opening any timing output."""
+    receipt_path = predecessor.parent / BUILD_MANIFEST
+    receipt = json.loads(receipt_path.read_text())
+    if (receipt["schema"] != "shardmap.succession-benchmark-build.v1"
+            or receipt["predecessor"]["revision"] != PREDECESSOR):
+        raise ValueError("compiled pair manifest has the wrong predecessor or schema")
+    for role, binary in (("candidate", candidate), ("predecessor", predecessor)):
+        pinned = receipt[role]
+        if digest(binary) != pinned["binary_sha256"] or engine_digest(binary, env) != pinned["engine_digest"]:
+            raise ValueError(f"{role} artifact differs from the compiled pair manifest")
+    return receipt
+
+
 def summarize(selected):
     """Compute trial medians and process-wide page-table changes for one case."""
     samples = [row["measurement"]["ns_per_op"] for row in selected]
@@ -149,12 +186,25 @@ def main():
     parser.add_argument("--binary", type=Path, help="exact previously built artifact")
     parser.add_argument("--adopted-only", action="store_true", help="candidate comparison; omit heap controls")
     parser.add_argument("--cold", action="store_true", help="first batch after A exit, no B warmup")
-    parser.add_argument("--predecessor-root", type=Path,
-                        help="exact predecessor checkout for additional A/A and qualified A/B comparisons")
+    predecessor = parser.add_mutually_exclusive_group()
+    predecessor.add_argument("--predecessor-root", type=Path,
+                             help="exact predecessor checkout for additional A/A and qualified A/B comparisons")
+    predecessor.add_argument("--predecessor-binary", type=Path,
+                             help="exact A artifact from --compile-only, used with --binary")
+    parser.add_argument("--compile-only", action="store_true",
+                        help="build and retain both artifacts without running timed cases")
     args = parser.parse_args()
     if args.trials < 1 or args.iterations < 1:
         parser.error("trials and iterations must be positive")
+    if args.compile_only and (args.predecessor_root is None or args.skip_build or args.binary is not None):
+        parser.error("--compile-only requires --predecessor-root and builds both artifacts")
+    if args.predecessor_binary is not None and args.binary is None:
+        parser.error("--predecessor-binary requires --binary")
     args.output.mkdir(parents=True, exist_ok=True)
+    if args.compile_only and any(
+        (args.output / name).exists() for name in ("candidate-bench", "predecessor-bench", BUILD_MANIFEST)
+    ):
+        parser.error("--compile-only output already contains an artifact or manifest")
     env = os.environ.copy()
     env["CARGO_CACHE_AUTO_CLEAN_FREQUENCY"] = "never"
     for name in BENCH_ENV:
@@ -163,6 +213,11 @@ def main():
         build(ROOT, env)
     target = Path(env.get("CARGO_TARGET_DIR", str(ROOT / "target"))).resolve()
     binary = (args.binary or target / "release/examples/cache_succession_bench").resolve()
+    if args.predecessor_binary is not None:
+        predecessor = args.predecessor_binary.resolve()
+        receipt = verify_compiled_pair(binary, predecessor, env)
+        run(args, env, binary, predecessor, receipt["predecessor"], receipt)
+        return
     if args.predecessor_root is None:
         run(args, env, binary)
         return
@@ -173,10 +228,13 @@ def main():
         candidate = scratch / "candidate-bench"
         shutil.copy2(binary, candidate)
         predecessor, receipt = predecessor_driver(args.predecessor_root, scratch, target, env)
-        run(args, env, candidate, predecessor, receipt)
+        if args.compile_only:
+            save_compiled_pair(args.output, candidate, predecessor, receipt, env)
+        else:
+            run(args, env, candidate, predecessor, receipt)
 
 
-def run(args, env, binary, predecessor=None, predecessor_receipt=None):
+def run(args, env, binary, predecessor=None, predecessor_receipt=None, build_receipt=None):
     """Run exact-build controls and, when requested, the directional A/B lane."""
     all_methods = ["native-adopted"] if args.adopted_only else ["heap-default", "heap-matched", "native", "native-adopted"]
     if args.cold:
@@ -220,6 +278,8 @@ def run(args, env, binary, predecessor=None, predecessor_receipt=None):
         manifest["methods"] = [variant for variant, _, _, _ in variants]
         manifest["controls"]["predecessor-native-adopted"] = "exact predecessor A to exact predecessor A"
         manifest["controls"]["qualified-native-adopted"] = "exact predecessor A to qualified distinct engine B"
+        if build_receipt is not None:
+            manifest["compiled_artifacts"] = build_receipt
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     rng = random.Random(3839)
     with (args.output / "raw.jsonl").open("w") as output:

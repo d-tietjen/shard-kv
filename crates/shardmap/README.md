@@ -821,3 +821,10 @@ exits, before B warms or hashes any cache entry. This records preparation cost,
 first-batch time and minor faults separately. `--binary` accepts an exact
 prebuilt artifact, allowing compilation and target-host measurement to be
 separated; preserve its source/compiler/hash manifest with the results.
+
+For the distinct-build comparison, use `--compile-only --predecessor-root`
+with a checkout of the EDEN-3839 merge to preserve both benchmark binaries and
+their manifest. Run the same script with `--binary` and `--predecessor-binary`
+to compare A → A, B → B, and qualified A → B without compiling during timing.
+The report includes preparation and attachment time and changes in Linux's
+process-wide `VmPTE` readings before and after staging, prefault and workload.
