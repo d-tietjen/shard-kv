@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use shardmap::SharedCache;
 use shardmap::succession::{
-    Cache, Error as CacheError, MemoryPolicy, Operation, Options, Peer, Staged, authenticate_peer,
+    Cache, EngineBuildDigest, Error as CacheError, MemoryPolicy, Operation, Options, Peer,
+    QualifiedBuildPair, Staged, authenticate_peer,
 };
 
 const INTERFACE: &str = match option_env!("SHARDMAP_DEMO_INTERFACE") {
@@ -249,7 +250,7 @@ fn owner(dir: &Path, mode: &str) -> Result<()> {
     // A exits completely. No cache relay, worker, helper, or runtime remains.
     Ok(())
 }
-fn successor(dir: &Path, old: Peer, mode: &str) -> Result<()> {
+fn successor(dir: &Path, old: Peer, mode: &str, pair: Option<QualifiedBuildPair>) -> Result<()> {
     if mode == "lock-denied" {
         let limit = libc::rlimit {
             rlim_cur: 0,
@@ -290,8 +291,15 @@ fn successor(dir: &Path, old: Peer, mode: &str) -> Result<()> {
         libc::MAP_FAILED
     };
     let start = Instant::now();
-    // SAFETY: exact supervisor-owned builds, parked A, private channel and no raw aliases.
-    let received = unsafe { Staged::receive(&mut stream, old) };
+    // SAFETY: the fixture supervisor pins both artifacts and verifies its
+    // separately built engines retain Format 4. A is parked on a private
+    // authenticated channel with no raw aliases or competing writers.
+    let received = unsafe {
+        match pair {
+            Some(pair) => Staged::receive_qualified(&mut stream, old, pair),
+            None => Staged::receive(&mut stream, old),
+        }
+    };
     if matches!(mode, "collision" | "abi" | "lock-denied") {
         match (&received, mode) {
             (Err(CacheError::Profile), "abi") => {}
@@ -367,20 +375,57 @@ fn successor(dir: &Path, old: Peer, mode: &str) -> Result<()> {
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
+            assert_eq!(
+                &*cache
+                    .get(b"expires")?
+                    .ok_or("live inherited TTL after A exit")?,
+                b"ttl"
+            );
             let v = cache.get(b"key")?.ok_or("retained value")?;
             assert_eq!(&*v, &[42; 64]);
             let (slot, payload) = cache.value_offsets(&v)?;
             assert_eq!(v.as_ptr() as usize, base + payload as usize);
             drop(v);
+            cache.insert(b"key", &[43; 64], None)?;
+            let updated = cache.get(b"key")?.ok_or("updated inherited value")?;
+            assert_eq!(&*updated, &[43; 64]);
+            assert_eq!(cache.value_offsets(&updated)?, (slot, payload));
+            assert_eq!(updated.as_ptr() as usize, base + payload as usize);
+            drop(updated);
+            assert!(cache.remove(b"key")?);
+            assert!(cache.get(b"key")?.is_none());
+            assert!(!cache.remove(b"key")?);
+            cache.insert(b"key", &[42; 64], None)?;
+            assert_eq!(&*cache.get(b"key")?.ok_or("reinserted key")?, &[42; 64]);
             cache.insert(b"new-interface", INTERFACE.as_bytes(), None)?;
             assert_eq!(
                 &*cache.get(b"new-interface")?.ok_or("new value")?,
                 INTERFACE.as_bytes()
             );
+            cache.insert(b"new-expiry", b"ttl", Some(Duration::from_secs(1)))?;
+            assert_eq!(&*cache.get(b"new-expiry")?.ok_or("new TTL")?, b"ttl");
             std::thread::sleep(Duration::from_millis(1100));
             assert!(cache.get(b"expires")?.is_none());
+            assert!(cache.get(b"new-expiry")?.is_none());
+            let cache = if pair.is_some() {
+                let worker = cache.clone();
+                let refusal = cache
+                    .prepare(OPERATION, old, Duration::ZERO)
+                    .expect_err("foreign backing must fail before parking");
+                assert!(matches!(refusal.error, CacheError::Profile));
+                assert_eq!(refusal.cache.identity()?, receipt.backing);
+                assert_eq!(
+                    &*worker.get(b"key")?.ok_or("retained after refusal")?,
+                    &[42; 64]
+                );
+                drop(worker);
+                refusal.cache
+            } else {
+                cache
+            };
             extra = json!({"old_process_exited": true, "slot_offset": slot, "value_offset": payload,
-                "new_value": INTERFACE, "ttl_preserved": true, "operations_after_A_exit": bench(&cache)?});
+                "new_value": INTERFACE, "ttl_preserved": true, "crud_after_A_exit": true,
+                "foreign_reprepare_refused": pair.is_some(), "operations_after_A_exit": bench(&cache)?});
         }
         0 => {
             assert!(matches!(
@@ -398,13 +443,18 @@ fn successor(dir: &Path, old: Peer, mode: &str) -> Result<()> {
         serde_json::to_vec_pretty(&json!({
             "interface": INTERFACE, "peer": Peer::current(), "receipt": receipt, "mapping_base": base,
             "arena_sha256_after_attach": hash, "attach_ns": attach_ns, "overlap_rss_kib": overlap_rss,
-            "decision": decision[0], "result": extra
+            "engine_digest": EngineBuildDigest::current(), "decision": decision[0], "result": extra
         }))?,
     )?;
     Ok(())
 }
 fn main() -> Result<()> {
-    if std::env::args().nth(1).as_deref() == Some("unprotected") {
+    let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "engine-digest") {
+        println!("{}", serde_json::to_string(&EngineBuildDigest::current())?);
+        return Ok(());
+    }
+    if args.get(1).is_some_and(|arg| arg == "unprotected") {
         assert!(matches!(
             Cache::create(Options {
                 capacity: 1,
@@ -417,7 +467,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
     shardmap::succession::protect_current_process()?;
-    let args: Vec<_> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("owner") => owner(
             Path::new(args.get(2).ok_or("directory")?),
@@ -430,6 +479,12 @@ fn main() -> Result<()> {
                 uid: Peer::current().uid,
             },
             args.get(4).ok_or("mode")?,
+            args.get(5)
+                .map(|pins| -> Result<_> {
+                    let [source, target] = serde_json::from_str(pins)?;
+                    Ok(QualifiedBuildPair::new(source, target)?)
+                })
+                .transpose()?,
         ),
         _ => Err("use scripts/prove-cache-succession.py".into()),
     }

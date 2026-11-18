@@ -122,16 +122,20 @@ checked slice-copy implementation available for differential testing.
 
 The experimental `succession` feature uses mmap/munmap, memfd size seals and Unix
 peer/descriptor calls independently of the default `unsafe` performance toggle.
-It is limited to 64-bit Linux, exact qualified engine builds, a fixed available
-virtual range and one active process. Ordinary heap-backed APIs are unchanged.
+It requires 64-bit Linux, qualified engine builds, a fixed available virtual
+range and one active process. Ordinary heap-backed APIs are unchanged.
 
 The integer-only control prefix is checked for format, geometry, build identity,
 profile, backing identity and recipient/capability before native table access.
 The remaining mapping contains Rust/hashbrown tables, a single-allocation region
 allocator and bounded payload slots. Native metadata is not an untrusted-byte
-format. `Staged::receive` requires trusted exact producer/consumer builds and no
-competing raw writes or aliases. The build fingerprint is conservative refusal,
-not an ABI standard or proof that hostile native structures are valid.
+format. Both receivers require trusted producer/consumer builds and exclusive
+custody without competing raw writes or aliases. `Staged::receive` requires
+one exact build. `Staged::receive_qualified` further relies on a locally
+provisioned, directional qualification of two exact artifacts and their native
+semantics. The supervisor pins both executables and registers their kernel peers.
+The receipt authenticates the creator's build digest. The successor checks its
+own digest locally. It refuses to prepare inherited backing for another transfer.
 `MAP_FIXED_NOREPLACE` never overwrites existing mappings; there is no relocation.
 
 Each region honors hashbrown's requested allocation size/alignment. Capacity is
