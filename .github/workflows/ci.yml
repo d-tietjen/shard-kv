@@ -26,13 +26,15 @@ jobs:
 
   rust:
     runs-on: ubuntu-latest
+    env:
+      PYO3_PYTHON: /usr/bin/python3
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: install boundary scanner and Redis reference server
-        run: sudo apt-get update && sudo apt-get install -y ripgrep redis-server
+      - name: install boundary scanner, Redis reference server and Python development libraries
+        run: sudo apt-get update && sudo apt-get install -y ripgrep redis-server python3-dev
       - name: OSS/private availability boundary
         run: ./scripts/check-oss-boundary.sh
       - uses: Swatinem/rust-cache@v2
