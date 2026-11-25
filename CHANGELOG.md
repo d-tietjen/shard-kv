@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0 - Unreleased
+
+### Added
+
+- Opt-in fixed-address ShardMap handoff across one supervisor-pinned,
+  independently qualified pair of distinct engine builds (EDEN-3905).
+  The new owner operates on the same cache backing and refuses to re-export
+  inherited backing before parking. Ordinary reads and writes are unchanged.
+
 ## 0.10.0 - Unreleased
 
 ### Added

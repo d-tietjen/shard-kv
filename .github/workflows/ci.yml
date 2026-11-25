@@ -26,13 +26,15 @@ jobs:
 
   rust:
     runs-on: ubuntu-latest
+    env:
+      PYO3_PYTHON: /usr/bin/python3
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: install boundary scanner and Redis reference server
-        run: sudo apt-get update && sudo apt-get install -y ripgrep redis-server
+      - name: install boundary scanner, Redis reference server and Python development libraries
+        run: sudo apt-get update && sudo apt-get install -y ripgrep redis-server python3-dev
       - name: OSS/private availability boundary
         run: ./scripts/check-oss-boundary.sh
       - uses: Swatinem/rust-cache@v2
@@ -60,6 +62,13 @@ jobs:
           cargo test --locked -p shardmap --features succession,unsafe
           python3 scripts/prove-cache-succession.py /tmp/cache-succession-evidence
           python3 scripts/prove-cache-security.py /tmp/cache-security-evidence
+      - name: qualify cache transfer from the Format 4 predecessor
+        run: |
+          predecessor=d5378b1464c6291a22fbece025f46270265a6644
+          git fetch --no-tags origin "$predecessor"
+          git worktree add --detach "$RUNNER_TEMP/shardmap-predecessor" "$predecessor"
+          python3 scripts/prove-cache-succession.py "$RUNNER_TEMP/cache-build-pair" \
+            --predecessor-root "$RUNNER_TEMP/shardmap-predecessor"
       - name: test unsafe feature
         run: cargo test -p shardmap --features unsafe
       - name: test redis feature

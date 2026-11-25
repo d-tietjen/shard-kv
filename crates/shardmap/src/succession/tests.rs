@@ -278,16 +278,21 @@ fn credentials_recipient_operation_engine_profile_and_replay_are_checked() {
         Err(Error::Unauthorized)
     ));
     let fd = || p.mapping.file.try_clone().expect("fd").into();
+    let engine = EngineBuildDigest::current();
     let mut wrong = receipt;
     wrong.recipient.pid += 1;
     assert!(matches!(
-        Staged::attach(fd(), wrong, &p.credential),
+        Staged::attach(fd(), wrong, &p.credential, engine),
         Err(Error::Unauthorized)
     ));
     let mut wrong = receipt;
     wrong.engine_abi[0] ^= 1;
     assert!(matches!(
-        Staged::attach(fd(), wrong, &p.credential),
+        Staged::attach(fd(), wrong, &p.credential, engine),
+        Err(Error::Profile)
+    ));
+    assert!(matches!(
+        Staged::validate(p.mapping.clone(), wrong, &p.credential),
         Err(Error::Profile)
     ));
     let mut wrong = receipt;
@@ -326,15 +331,34 @@ fn credentials_recipient_operation_engine_profile_and_replay_are_checked() {
 }
 
 #[test]
+fn qualified_receive_checks_distinct_builds_and_local_target_before_transfer() {
+    let current = EngineBuildDigest::current();
+    let mut other = current;
+    other.0[0] ^= 1;
+    assert!(matches!(
+        QualifiedBuildPair::new(current, current),
+        Err(Error::Profile)
+    ));
+    let pair = QualifiedBuildPair::new(current, other).expect("distinct pair");
+    let (mut stream, companion) = UnixStream::pair().expect("socket pair");
+    drop(companion);
+    // SAFETY: this deliberately unqualified target receives no backing. The
+    // closed socket would report an I/O error if receive attempted to read it.
+    assert!(matches!(
+        unsafe { Staged::receive_qualified(&mut stream, Peer::current(), pair) },
+        Err(Error::Profile)
+    ));
+}
+
+#[test]
 fn occupied_virtual_range_is_refused_without_overwriting_it() {
     let a = Cache::create(options(4)).expect("create");
     a.insert(b"key", b"value", None).expect("write");
     let p = prepare(a);
     let receipt = candidate(&p);
     let fd = p.mapping.file.try_clone().expect("fd").into();
-    assert!(
-        matches!(Staged::attach(fd, receipt, &p.credential), Err(Error::Io(error)) if error.raw_os_error() == Some(libc::EEXIST))
-    );
+    let result = Staged::attach(fd, receipt, &p.credential, EngineBuildDigest::current());
+    assert!(matches!(result, Err(Error::Io(error)) if error.raw_os_error() == Some(libc::EEXIST)));
     let a = p.abort().expect("original mapping unchanged");
     assert_eq!(&*a.get(b"key").expect("get").expect("value"), b"value");
 }
@@ -356,10 +380,13 @@ fn format_and_descriptor_policy_refuse_import() {
     let file = tempfile::tempfile().expect("file");
     file.set_permissions(std::fs::Permissions::from_mode(0o644))
         .expect("mode");
-    assert!(matches!(
-        Staged::attach(file.into(), receipt, &p.credential),
-        Err(Error::Profile)
-    ));
+    let result = Staged::attach(
+        file.into(),
+        receipt,
+        &p.credential,
+        EngineBuildDigest::current(),
+    );
+    assert!(matches!(result, Err(Error::Profile)));
 }
 
 #[test]

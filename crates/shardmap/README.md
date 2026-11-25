@@ -698,13 +698,22 @@ feature does not make the existing server or an Eden deployment handoff-capable.
 
 ### Native compatibility and address requirements
 
-Format 4 contains native Rust/hashbrown/allocator metadata and pointers. Only
-qualified **exact engine builds** may share it. A conservative fingerprint covers
-engine Rust sources, compiler identity, target/features/build flags and locked
-inputs; native type geometry is checked too. Different executable interfaces may
-embed that same engine, as the A/B example demonstrates. This is not a stable
-serialized Rust ABI, cross-version compatibility promise or hostile-byte importer.
-A changed build/profile is refused before native-table access.
+Format 4 contains native Rust/hashbrown/allocator metadata and pointers.
+`Staged::receive` requires the exact engine build. The fingerprint covers engine
+Rust sources, compiler identity, target/features/build flags and locked inputs.
+Both receivers validate the native geometry before accessing the table.
+
+For a single A → B upgrade, `Staged::receive_qualified` accepts a locally
+provisioned `QualifiedBuildPair` whose two exact artifacts have been qualified for
+the same native layout, allocator, hashing and cache profile. The trusted
+supervisor pins both executables and obtains peer PIDs from its own child
+custody. B checks its own compiled digest before receiving a descriptor and
+matches the expected source digest to A's authenticated receipt and immutable
+backing header. A uses the original Format 4 protocol. Pair authorization must
+come from the supervisor, independent of the offered receipt. Inherited backing
+continues to serve through B after A exits. A later attempt to prepare that
+backing returns B's active cache immediately with `Error::Profile`, before
+parking it or waiting for workers.
 
 A/B must map the **same available virtual range** so native index pointers and
 payload addresses remain valid. `MAP_FIXED_NOREPLACE` refuses a conflict and never
@@ -760,10 +769,10 @@ Call `authenticate_peer` on each accepted connection **before** quiescing A;
 reject/close wrong peers with a bounded accept deadline. Send/import recheck
 identity. Use a private supervisor-controlled Unix channel with
 bounded I/O. PIDs from an untrusted registration request are insufficient. A send
-right is consumed even on partial I/O. Do not log credentials. Admitted writable
-mapping holders must obey exclusive custody: `Staged::receive` is unsafe and
-requires trusted exact builds, with no raw competing writes, forked active handles
-or untracked aliases. Withdrawing a credential cannot revoke an admitted mapping.
+right is consumed even on partial I/O. Do not log credentials. Both unsafe
+receivers require trusted builds and exclusive custody without raw competing
+writes, forked active handles or untracked aliases. Withdrawing a credential
+cannot revoke an admitted mapping.
 
 The caller owns one common request/I/O admission gate and one recorded decision
 covering the cache, **both TLS/socket legs and an embedded relational DB when
@@ -776,8 +785,7 @@ After recording global COMMIT, keep admission closed while B activates the entir
 bundle, then retire A before reporting the upgrade effective. The cache CAS
 prevents abort racing activation from exposing two owners; it is not the
 cross-resource coordinator. Lost acknowledgements never permit stale A to resume.
-Reconcile an uncertain decision; once B advances state, forward recovery or a
-qualified reverse handoff must use its latest cache/TLS/SQL state and security
+Reconcile an uncertain decision using B's latest cache/TLS/SQL state and security
 floor. Do not rewind TLS counters/SQL effects or retry ambiguous writes. In-place
 mutation crashes and recovery after losing every descriptor/mapping are not
 supported. A must not remain as a permanent cache relay.
@@ -791,6 +799,10 @@ interface executables and an incompatible-feature artifact. It checks retained
 index/payload bytes, same pointers, B after A exit, explicit/ambiguous decisions,
 address/ABI refusal and crashes on both sides of activation. It deliberately does
 not claim different-base attachment or full TLS/SQL atomicity.
+Pass `--predecessor-root /path/to/eden-3839-checkout` to build A from the exact
+EDEN-3839 merge and B from this revision. The evidence checks both engine
+digests, retained index and payload bytes, CRUD and TTL after A exits, refusal
+without a trusted pair, and continued service after B refuses to re-export.
 `python3 scripts/prove-cache-security.py /path/to/evidence` separately checks
 default heap behavior, mapping flags, fork/exec inheritance, pageable behavior
 under a zero locking limit, and cleanup after required protection/locking fails.
@@ -809,3 +821,10 @@ exits, before B warms or hashes any cache entry. This records preparation cost,
 first-batch time and minor faults separately. `--binary` accepts an exact
 prebuilt artifact, allowing compilation and target-host measurement to be
 separated; preserve its source/compiler/hash manifest with the results.
+
+For the distinct-build comparison, use `--compile-only --predecessor-root`
+with a checkout of the EDEN-3839 merge to preserve both benchmark binaries and
+their manifest. Run the same script with `--binary` and `--predecessor-binary`
+to compare A → A, B → B, and qualified A → B without compiling during timing.
+The report includes preparation and attachment time and changes in Linux's
+process-wide `VmPTE` readings before and after staging, prefault and workload.
